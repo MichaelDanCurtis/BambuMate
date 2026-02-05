@@ -36,6 +36,19 @@ struct SetPreferenceArgs {
     value: String,
 }
 
+// -- Model info matching backend struct --
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+struct ListModelsArgs {
+    provider: String,
+}
+
 // -- Health report matching backend struct --
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -108,6 +121,19 @@ pub async fn get_preference(key: &str) -> Result<Option<String>, String> {
     .map_err(|e| e.to_string())?;
 
     let result = invoke("get_preference", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+pub async fn list_models(provider: &str) -> Result<Vec<ModelInfo>, String> {
+    let args = serde_wasm_bindgen::to_value(&ListModelsArgs {
+        provider: provider.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("list_models", args)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 

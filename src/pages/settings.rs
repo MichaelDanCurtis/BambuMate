@@ -1,8 +1,9 @@
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::commands;
+use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
+use crate::theme::ThemeContext;
 
 #[component]
 pub fn SettingsPage() -> impl IntoView {
@@ -11,6 +12,12 @@ pub fn SettingsPage() -> impl IntoView {
     let (ai_model, set_ai_model) = signal(String::new());
     let (ai_provider, set_ai_provider) = signal(String::from("claude"));
     let (model_status, set_model_status) = signal::<Option<String>>(None);
+    let (models, set_models) = signal::<Vec<ModelInfo>>(vec![]);
+    let (models_loading, set_models_loading) = signal(false);
+    let (models_error, set_models_error) = signal::<Option<String>>(None);
+    let (prefs_loaded, set_prefs_loaded) = signal(false);
+
+    let theme_ctx = use_context::<ThemeContext>().expect("ThemeContext not provided");
 
     // Load existing preferences on mount
     Effect::new(move |_| {
@@ -24,6 +31,13 @@ pub fn SettingsPage() -> impl IntoView {
                     set_path_status.set(Some(format!("Failed to load preference: {}", e)));
                 }
             }
+            match commands::get_preference("ai_provider").await {
+                Ok(Some(provider)) => {
+                    set_ai_provider.set(provider);
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
             match commands::get_preference("ai_model").await {
                 Ok(Some(model)) => {
                     set_ai_model.set(model);
@@ -31,12 +45,29 @@ pub fn SettingsPage() -> impl IntoView {
                 Ok(None) => {}
                 Err(_) => {}
             }
-            match commands::get_preference("ai_provider").await {
-                Ok(Some(provider)) => {
-                    set_ai_provider.set(provider);
+            set_prefs_loaded.set(true);
+        });
+    });
+
+    // Fetch models whenever provider changes (after prefs are loaded)
+    Effect::new(move |_| {
+        let provider = ai_provider.get();
+        if !prefs_loaded.get() {
+            return;
+        }
+        set_models_loading.set(true);
+        set_models_error.set(None);
+        set_models.set(vec![]);
+        spawn_local(async move {
+            match commands::list_models(&provider).await {
+                Ok(model_list) => {
+                    set_models.set(model_list);
+                    set_models_loading.set(false);
                 }
-                Ok(None) => {}
-                Err(_) => {}
+                Err(e) => {
+                    set_models_error.set(Some(e));
+                    set_models_loading.set(false);
+                }
             }
         });
     });
@@ -72,9 +103,56 @@ pub fn SettingsPage() -> impl IntoView {
         });
     };
 
+    let refresh_models = move |_| {
+        let provider = ai_provider.get();
+        set_models_loading.set(true);
+        set_models_error.set(None);
+        spawn_local(async move {
+            match commands::list_models(&provider).await {
+                Ok(model_list) => {
+                    set_models.set(model_list);
+                    set_models_loading.set(false);
+                }
+                Err(e) => {
+                    set_models_error.set(Some(e));
+                    set_models_loading.set(false);
+                }
+            }
+        });
+    };
+
+    let on_theme_change = move |ev: leptos::ev::Event| {
+        let new_theme = event_target_value(&ev);
+        theme_ctx.set_theme.set(new_theme.clone());
+        spawn_local(async move {
+            let _ = commands::set_preference("theme", &new_theme).await;
+        });
+    };
+
     view! {
         <div class="page settings-page">
             <h2>"Settings"</h2>
+
+            <section class="settings-section">
+                <h3>"Appearance"</h3>
+                <p class="section-description">"Choose how BambuMate looks."</p>
+
+                <div class="form-group">
+                    <label for="theme-select">"Theme"</label>
+                    <div class="theme-picker">
+                        <select
+                            id="theme-select"
+                            class="input"
+                            on:change=on_theme_change
+                            prop:value=move || theme_ctx.theme.get()
+                        >
+                            <option value="system" selected=move || theme_ctx.theme.get() == "system">"System"</option>
+                            <option value="light" selected=move || theme_ctx.theme.get() == "light">"Light"</option>
+                            <option value="dark" selected=move || theme_ctx.theme.get() == "dark">"Dark"</option>
+                        </select>
+                    </div>
+                </div>
+            </section>
 
             <section class="settings-section">
                 <h3>"API Keys"</h3>
@@ -124,18 +202,60 @@ pub fn SettingsPage() -> impl IntoView {
                 </div>
 
                 <div class="form-group">
-                    <label for="ai-model">"Model Name"</label>
+                    <label for="ai-model">"Model"</label>
                     <div class="input-row">
-                        <input
-                            id="ai-model"
-                            type="text"
-                            placeholder="e.g. claude-sonnet-4-20250514, gpt-4o, kimi-k2"
-                            class="input"
-                            prop:value=move || ai_model.get()
-                            on:input=move |ev| {
-                                set_ai_model.set(event_target_value(&ev));
+                        <Show
+                            when=move || !models_loading.get() && models_error.get().is_none() && !models.get().is_empty()
+                            fallback=move || {
+                                if models_loading.get() {
+                                    view! {
+                                        <select class="input" disabled=true>
+                                            <option>"Loading models..."</option>
+                                        </select>
+                                    }.into_any()
+                                } else if let Some(err) = models_error.get() {
+                                    view! {
+                                        <select class="input" disabled=true>
+                                            <option>{err}</option>
+                                        </select>
+                                    }.into_any()
+                                } else {
+                                    view! {
+                                        <select class="input" disabled=true>
+                                            <option>"No models available"</option>
+                                        </select>
+                                    }.into_any()
+                                }
                             }
-                        />
+                        >
+                            <select
+                                id="ai-model"
+                                class="input"
+                                on:change=move |ev| {
+                                    set_ai_model.set(event_target_value(&ev));
+                                }
+                                prop:value=move || ai_model.get()
+                            >
+                                <option value="">"-- Select a model --"</option>
+                                {move || {
+                                    models.get().into_iter().map(|m| {
+                                        let id = m.id.clone();
+                                        let display = if m.name != m.id {
+                                            format!("{} ({})", m.name, m.id)
+                                        } else {
+                                            m.id.clone()
+                                        };
+                                        let is_selected = ai_model.get() == id;
+                                        view! {
+                                            <option value={id} selected=is_selected>{display}</option>
+                                        }
+                                    }).collect::<Vec<_>>()
+                                }}
+                            </select>
+                        </Show>
+                        <button class="btn btn-secondary" on:click=refresh_models title="Refresh model list">
+                            "Refresh"
+                        </button>
                         <button class="btn btn-save" on:click=save_model_config>"Save"</button>
                     </div>
                     <Show when=move || model_status.get().is_some()>

@@ -18,6 +18,7 @@ pub fn run() {
             commands::config::get_preference,
             commands::config::set_preference,
             commands::health::run_health_check,
+            commands::models::list_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

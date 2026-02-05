@@ -2,6 +2,7 @@ mod app;
 mod commands;
 mod components;
 mod pages;
+mod theme;
 
 use app::App;
 
