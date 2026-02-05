@@ -13,6 +13,9 @@ pub enum BambuMateError {
 
     #[error("Profile error: {0}")]
     Profile(String),
+
+    #[error("Scraper error: {0}")]
+    Scraper(String),
 }
 
 impl From<BambuMateError> for String {

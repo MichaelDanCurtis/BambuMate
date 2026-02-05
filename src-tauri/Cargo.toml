@@ -18,6 +18,13 @@ dirs = "6.0"
 reqwest = { version = "0.12", features = ["json"] }
 walkdir = "2.5"
 tempfile = "3.24"
+scraper = "0.18"
+html2text = "0.16"
+texting_robots = "0.2"
+rusqlite = { version = "0.38", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = "2.5"
+tokio = { version = "1", features = ["time"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
