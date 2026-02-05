@@ -5,33 +5,28 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it -- no manual settings research or guesswork.
-**Current focus:** Phase 1 - App Foundation
+**Current focus:** Phase 2 - Profile Engine
 
 ## Current Position
 
-Phase: 1 of 8 (App Foundation)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-05 -- Completed 01-01-PLAN.md (Tauri + Leptos scaffold with app shell and backend commands)
+Phase: 2 of 8 (Profile Engine)
+Plan: 0 of 2 in current phase
+Status: Planning
+Last activity: 2026-02-05 -- Completed Phase 1 (App Foundation) with all enhancements
 
-Progress: [█░░░░░░░░░░░░░░░░░░░] 5%
+Progress: [██░░░░░░░░░░░░░░░░░░] 12%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 11min
-- Total execution time: 0.2 hours
+- Total plans completed: 2
+- Total execution time: ~0.5 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-app-foundation | 1/2 | 11min | 11min |
-
-**Recent Trend:**
-- Last 5 plans: 11min
-- Trend: baseline
+| 01-app-foundation | 2/2 | ~30min | ~15min |
 
 *Updated after each plan completion*
 
@@ -51,6 +46,8 @@ Recent decisions affecting current work:
 - [01-01]: Dark theme CSS for desktop app aesthetic (#1a1a2e, #16213e, #0f3460, #e94560)
 - [01-02]: AI providers expanded to 4: Claude, OpenAI, Kimi K2 (Moonshot), OpenRouter. Keyring services: bambumate-kimi-api, bambumate-openrouter-api
 - [01-02]: Model selection via preferences: ai_provider (claude/openai/kimi/openrouter) and ai_model (freeform model name string)
+- [01-02]: Model dropdown fetches available models from provider API (reqwest in backend)
+- [01-02]: Theme system: CSS custom properties with light/dark/system modes, respects prefers-color-scheme
 
 ### Pending Todos
 
@@ -65,5 +62,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-05
-Stopped at: 01-02-PLAN.md checkpoint continuation -- added Kimi K2, OpenRouter, model selection; awaiting re-verification
+Stopped at: Phase 1 complete. Starting Phase 2 planning.
 Resume file: None
