@@ -47,11 +47,11 @@ Plans:
   2. App can write a profile JSON that Bambu Studio accepts on import -- correct `filament_id`, `setting_id`, `compatible_printers`, `inherits`, and `instantiation` fields
   3. Reading then writing a profile produces identical JSON (unknown fields preserved via `serde(flatten)`, no data loss on round-trip)
   4. Profile writes are atomic (temp file + rename) -- a crash mid-write never leaves a corrupted file
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: Profile schema types, OS path detection, reader with inheritance resolution
-- [ ] 02-02: Profile writer with atomic writes, validation, and round-trip preservation
+- [ ] 02-01-PLAN.md -- Profile types, OS path detection, reader with inheritance resolution and registry
+- [ ] 02-02-PLAN.md -- Profile writer with atomic writes, round-trip tests, and Tauri commands
 
 ### Phase 3: Filament Scraping
 **Goal**: Users can search for any filament from 10+ brands and get structured specs (temps, speeds, cooling, retraction) from manufacturer data
