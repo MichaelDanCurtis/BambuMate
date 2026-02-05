@@ -46,6 +46,8 @@ pub struct HealthReport {
     pub profile_dir_path: Option<String>,
     pub claude_api_key_set: bool,
     pub openai_api_key_set: bool,
+    pub kimi_api_key_set: bool,
+    pub openrouter_api_key_set: bool,
 }
 
 // -- Typed invoke helpers --

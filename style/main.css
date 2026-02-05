@@ -227,6 +227,22 @@ body {
     color: #4a5568;
 }
 
+/* Select dropdown */
+select.input {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238892a4' d='M1.41 0L6 4.58 10.59 0 12 1.41l-6 6-6-6z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 36px;
+    cursor: pointer;
+}
+
+select.input option {
+    background-color: #0d1b2a;
+    color: #e0e0e0;
+}
+
 .status-text {
     display: block;
     font-size: 12px;

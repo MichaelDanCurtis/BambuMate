@@ -68,6 +68,8 @@ pub fn HealthPage() -> impl IntoView {
                         r.profile_dir_accessible,
                         r.claude_api_key_set,
                         r.openai_api_key_set,
+                        r.kimi_api_key_set,
+                        r.openrouter_api_key_set,
                     ].iter().filter(|&&v| v).count();
 
                     let bs_status = if r.bambu_studio_installed { CheckStatus::Pass } else { CheckStatus::Fail };
@@ -82,7 +84,13 @@ pub fn HealthPage() -> impl IntoView {
                     let openai_status = if r.openai_api_key_set { CheckStatus::Pass } else { CheckStatus::Fail };
                     let openai_detail = if r.openai_api_key_set { "Configured".to_string() } else { "Not configured".to_string() };
 
-                    let summary_class = if passed == 4 { "summary-all-pass" } else if passed == 0 { "summary-all-fail" } else { "summary-partial" };
+                    let kimi_status = if r.kimi_api_key_set { CheckStatus::Pass } else { CheckStatus::Fail };
+                    let kimi_detail = if r.kimi_api_key_set { "Configured".to_string() } else { "Not configured".to_string() };
+
+                    let openrouter_status = if r.openrouter_api_key_set { CheckStatus::Pass } else { CheckStatus::Fail };
+                    let openrouter_detail = if r.openrouter_api_key_set { "Configured".to_string() } else { "Not configured".to_string() };
+
+                    let summary_class = if passed == 6 { "summary-all-pass" } else if passed == 0 { "summary-all-fail" } else { "summary-partial" };
 
                     view! {
                         <div class="health-results">
@@ -90,9 +98,11 @@ pub fn HealthPage() -> impl IntoView {
                             <StatusBadge label="Profile Directory" status=pd_status detail=pd_detail />
                             <StatusBadge label="Claude API Key" status=claude_status detail=claude_detail />
                             <StatusBadge label="OpenAI API Key" status=openai_status detail=openai_detail />
+                            <StatusBadge label="Kimi K2 API Key" status=kimi_status detail=kimi_detail />
+                            <StatusBadge label="OpenRouter API Key" status=openrouter_status detail=openrouter_detail />
 
                             <div class={format!("health-summary {}", summary_class)}>
-                                {format!("{} of 4 checks passed", passed)}
+                                {format!("{} of 6 checks passed", passed)}
                             </div>
                         </div>
                     }

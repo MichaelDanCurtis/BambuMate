@@ -10,6 +10,8 @@ pub struct HealthReport {
     pub profile_dir_path: Option<String>,
     pub claude_api_key_set: bool,
     pub openai_api_key_set: bool,
+    pub kimi_api_key_set: bool,
+    pub openrouter_api_key_set: bool,
 }
 
 #[tauri::command]
@@ -52,7 +54,13 @@ pub fn run_health_check() -> Result<HealthReport, String> {
     let openai_key_set = keyring::Entry::new("bambumate-openai-api", "bambumate")
         .and_then(|e| e.get_password())
         .is_ok();
-    info!("Claude API key set: {}, OpenAI API key set: {}", claude_key_set, openai_key_set);
+    let kimi_key_set = keyring::Entry::new("bambumate-kimi-api", "bambumate")
+        .and_then(|e| e.get_password())
+        .is_ok();
+    let openrouter_key_set = keyring::Entry::new("bambumate-openrouter-api", "bambumate")
+        .and_then(|e| e.get_password())
+        .is_ok();
+    info!("Claude API key set: {}, OpenAI API key set: {}, Kimi API key set: {}, OpenRouter API key set: {}", claude_key_set, openai_key_set, kimi_key_set, openrouter_key_set);
 
     Ok(HealthReport {
         bambu_studio_installed: bs_installed,
@@ -69,5 +77,7 @@ pub fn run_health_check() -> Result<HealthReport, String> {
         },
         claude_api_key_set: claude_key_set,
         openai_api_key_set: openai_key_set,
+        kimi_api_key_set: kimi_key_set,
+        openrouter_api_key_set: openrouter_key_set,
     })
 }
