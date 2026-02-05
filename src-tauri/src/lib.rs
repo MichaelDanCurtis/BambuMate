@@ -20,6 +20,9 @@ pub fn run() {
             commands::config::set_preference,
             commands::health::run_health_check,
             commands::models::list_models,
+            commands::profile::list_profiles,
+            commands::profile::read_profile_command,
+            commands::profile::get_system_profile_count,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
