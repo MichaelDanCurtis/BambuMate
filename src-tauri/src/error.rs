@@ -10,6 +10,9 @@ pub enum BambuMateError {
 
     #[error("Health check error: {0}")]
     HealthCheck(String),
+
+    #[error("Profile error: {0}")]
+    Profile(String),
 }
 
 impl From<BambuMateError> for String {
