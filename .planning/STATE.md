@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it -- no manual settings research or guesswork.
-**Current focus:** Phase 2 complete. Ready for Phase 3 (Filament Scraping) or Phase 4 (Profile Generation & Installation).
+**Current focus:** Phase 3 in progress. Plan 03-01 complete (scraper infrastructure). Next: Plan 03-02 (brand adapters, caching, Tauri commands).
 
 ## Current Position
 
-Phase: 2 of 8 (Profile Engine) -- COMPLETE
-Plan: 2 of 2 in current phase
-Status: Phase complete
-Last activity: 2026-02-05 -- Completed 02-02-PLAN.md (Profile writer, Tauri commands, integration tests)
+Phase: 3 of 8 (Filament Scraping) -- IN PROGRESS
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-05 -- Completed 03-01-PLAN.md (Scraper infrastructure: types, validation, HTTP client, LLM extraction)
 
-Progress: [█████░░░░░░░░░░░░░░░] 25%
+Progress: [██████████████░░░░░░] 83% (5/6 plans with concrete plans defined)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
-- Total execution time: ~0.7 hours
+- Total plans completed: 5
+- Total execution time: ~0.8 hours
 
 **By Phase:**
 
@@ -28,6 +28,7 @@ Progress: [█████░░░░░░░░░░░░░░░] 25%
 |-------|-------|-------|----------|
 | 01-app-foundation | 2/2 | ~30min | ~15min |
 | 02-profile-engine | 2/2 | ~8min | ~4min |
+| 03-filament-scraping | 1/2 | ~8min | ~8min |
 
 *Updated after each plan completion*
 
@@ -57,6 +58,10 @@ Recent decisions affecting current work:
 - [02-02]: Empty .info values use 'key =' format (no trailing space) matching Bambu Studio output
 - [02-02]: Profile module made pub in lib.rs for integration test access
 - [02-02]: list_profiles returns empty vec (not error) when Bambu Studio not installed
+- [03-01]: MaterialType::from_str uses priority-ordered substring matching: PC checked before ABS to correctly classify PC-ABS as PC
+- [03-01]: Rate limiter accepts optional extra_delay for crawl-delay from robots.txt (uses max of default and crawl-delay)
+- [03-01]: Kimi uses json_object mode (not json_schema) since Moonshot API structured output support is unverified
+- [03-01]: robots.txt 404 or non-success treated as "all allowed" per Google's robots.txt specification
 
 ### Pending Todos
 
@@ -70,6 +75,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-05T17:37:04Z
-Stopped at: Completed 02-02-PLAN.md (Phase 2 complete)
+Last session: 2026-02-05T18:59:10Z
+Stopped at: Completed 03-01-PLAN.md (Phase 3, Plan 1 complete)
 Resume file: None
