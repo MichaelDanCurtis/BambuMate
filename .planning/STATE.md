@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it -- no manual settings research or guesswork.
-**Current focus:** Phase 3 in progress. Plan 03-01 complete (scraper infrastructure). Next: Plan 03-02 (brand adapters, caching, Tauri commands).
+**Current focus:** Phase 3 complete. All scraper infrastructure, brand adapters, caching, and Tauri commands built. Ready for Phase 4 (Profile Generation).
 
 ## Current Position
 
-Phase: 3 of 8 (Filament Scraping) -- IN PROGRESS
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-05 -- Completed 03-01-PLAN.md (Scraper infrastructure: types, validation, HTTP client, LLM extraction)
+Phase: 3 of 8 (Filament Scraping) -- COMPLETE
+Plan: 2 of 2 in current phase
+Status: Phase complete
+Last activity: 2026-02-05 -- Completed 03-02-PLAN.md (Brand adapters, cache, pipeline, Tauri commands)
 
-Progress: [██████████████░░░░░░] 83% (5/6 plans with concrete plans defined)
+Progress: [████████████████████] 100% (6/6 plans with concrete plans defined)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
-- Total execution time: ~0.8 hours
+- Total plans completed: 6
+- Total execution time: ~0.85 hours
 
 **By Phase:**
 
@@ -28,7 +28,7 @@ Progress: [██████████████░░░░░░] 83% (5/
 |-------|-------|-------|----------|
 | 01-app-foundation | 2/2 | ~30min | ~15min |
 | 02-profile-engine | 2/2 | ~8min | ~4min |
-| 03-filament-scraping | 1/2 | ~8min | ~8min |
+| 03-filament-scraping | 2/2 | ~13min | ~6.5min |
 
 *Updated after each plan completion*
 
@@ -62,6 +62,11 @@ Recent decisions affecting current work:
 - [03-01]: Rate limiter accepts optional extra_delay for crawl-delay from robots.txt (uses max of default and crawl-delay)
 - [03-01]: Kimi uses json_object mode (not json_schema) since Moonshot API structured output support is unverified
 - [03-01]: robots.txt 404 or non-success treated as "all allowed" per Google's robots.txt specification
+- [03-02]: Pipeline uses confidence threshold of 0.3 to accept/reject extraction results and trigger fallback
+- [03-02]: Cache keys normalized (lowercase, trimmed, collapsed whitespace) for resilient lookups
+- [03-02]: SpoolScout URL always included as last fallback even when brand adapter has its own URLs
+- [03-02]: Inland uses SpoolScout as primary source since Micro Center pages have minimal specs
+- [03-02]: Non-fatal cache failures: cache errors logged but don't fail the search
 
 ### Pending Todos
 
@@ -75,6 +80,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-05T18:59:10Z
-Stopped at: Completed 03-01-PLAN.md (Phase 3, Plan 1 complete)
+Last session: 2026-02-05T19:07:24Z
+Stopped at: Completed 03-02-PLAN.md (Phase 3 complete)
 Resume file: None
