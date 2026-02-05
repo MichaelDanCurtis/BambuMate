@@ -1,7 +1,7 @@
 # Requirements: BambuMate
 
 **Defined:** 2026-02-04
-**Core Value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it — no manual settings research or guesswork.
+**Core Value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it -- no manual settings research or guesswork.
 
 ## v1 Requirements
 
@@ -79,8 +79,8 @@
 
 | Feature | Reason |
 |---------|--------|
-| Web app or SaaS | Local desktop app — no cloud dependency beyond AI APIs |
-| CLI interface | Desktop app only — simpler UX, richer interaction |
+| Web app or SaaS | Local desktop app -- no cloud dependency beyond AI APIs |
+| CLI interface | Desktop app only -- simpler UX, richer interaction |
 | MQTT printer telemetry | Obico/SimplyPrint already do this; not core value |
 | Real-time camera monitoring | Different product category |
 | Multi-printer farm management | Enterprise feature; out of scope |
@@ -93,50 +93,50 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PROF-01 | TBD | Pending |
-| PROF-02 | TBD | Pending |
-| PROF-03 | TBD | Pending |
-| PROF-04 | TBD | Pending |
-| PROF-05 | TBD | Pending |
-| PROF-06 | TBD | Pending |
-| PROF-07 | TBD | Pending |
-| PROF-08 | TBD | Pending |
-| SCRP-01 | TBD | Pending |
-| SCRP-02 | TBD | Pending |
-| SCRP-03 | TBD | Pending |
-| SCRP-04 | TBD | Pending |
-| SCRP-05 | TBD | Pending |
-| ANAL-01 | TBD | Pending |
-| ANAL-02 | TBD | Pending |
-| ANAL-03 | TBD | Pending |
-| ANAL-04 | TBD | Pending |
-| ANAL-05 | TBD | Pending |
-| ANAL-06 | TBD | Pending |
-| ANAL-07 | TBD | Pending |
-| DMAP-01 | TBD | Pending |
-| DMAP-02 | TBD | Pending |
-| DMAP-03 | TBD | Pending |
-| INTG-01 | TBD | Pending |
-| INTG-02 | TBD | Pending |
-| INTG-03 | TBD | Pending |
-| INTG-04 | TBD | Pending |
-| DESK-01 | TBD | Pending |
-| DESK-02 | TBD | Pending |
-| DESK-03 | TBD | Pending |
-| DESK-04 | TBD | Pending |
-| DESK-05 | TBD | Pending |
-| DESK-06 | TBD | Pending |
-| FNDN-01 | TBD | Pending |
-| FNDN-02 | TBD | Pending |
-| FNDN-03 | TBD | Pending |
-| FNDN-04 | TBD | Pending |
-| FNDN-05 | TBD | Pending |
+| PROF-01 | Phase 4 | Pending |
+| PROF-02 | Phase 4 | Pending |
+| PROF-03 | Phase 2 | Pending |
+| PROF-04 | Phase 4 | Pending |
+| PROF-05 | Phase 4 | Pending |
+| PROF-06 | Phase 2 | Pending |
+| PROF-07 | Phase 8 | Pending |
+| PROF-08 | Phase 2 | Pending |
+| SCRP-01 | Phase 3 | Pending |
+| SCRP-02 | Phase 3 | Pending |
+| SCRP-03 | Phase 3 | Pending |
+| SCRP-04 | Phase 3 | Pending |
+| SCRP-05 | Phase 3 | Pending |
+| ANAL-01 | Phase 6 | Pending |
+| ANAL-02 | Phase 6 | Pending |
+| ANAL-03 | Phase 6 | Pending |
+| ANAL-04 | Phase 6 | Pending |
+| ANAL-05 | Phase 7 | Pending |
+| ANAL-06 | Phase 6 | Pending |
+| ANAL-07 | Phase 7 | Pending |
+| DMAP-01 | Phase 5 | Pending |
+| DMAP-02 | Phase 5 | Pending |
+| DMAP-03 | Phase 5 | Pending |
+| INTG-01 | Phase 8 | Pending |
+| INTG-02 | Phase 8 | Pending |
+| INTG-03 | Phase 8 | Pending |
+| INTG-04 | Phase 8 | Pending |
+| DESK-01 | Phase 1 | Pending |
+| DESK-02 | Phase 6 | Pending |
+| DESK-03 | Phase 8 | Pending |
+| DESK-04 | Phase 8 | Pending |
+| DESK-05 | Phase 7 | Pending |
+| DESK-06 | Phase 1 | Pending |
+| FNDN-01 | Phase 1 | Pending |
+| FNDN-02 | Phase 1 | Pending |
+| FNDN-03 | Phase 1 | Pending |
+| FNDN-04 | Phase 1 | Pending |
+| FNDN-05 | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 38 total
-- Mapped to phases: 0
-- Unmapped: 38 (pending roadmap creation)
+- Mapped to phases: 38
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-04*
-*Last updated: 2026-02-04 after initial definition*
+*Last updated: 2026-02-04 after roadmap creation*
