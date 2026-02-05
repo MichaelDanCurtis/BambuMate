@@ -12,9 +12,9 @@ BambuMate delivers the filament-to-perfect-print workflow in eight phases, start
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: App Foundation** - Tauri 2.0 scaffold with Leptos frontend, secure config, health check, macOS build
+- [x] **Phase 1: App Foundation** - Tauri 2.0 scaffold with Leptos frontend, secure config, health check, macOS build
 - [x] **Phase 2: Profile Engine** - Read, write, validate, and round-trip Bambu Studio profile JSON with correct inheritance
-- [ ] **Phase 3: Filament Scraping** - Scrape manufacturer specs with LLM-assisted extraction, validate, and cache
+- [x] **Phase 3: Filament Scraping** - Scrape manufacturer specs with LLM-assisted extraction, validate, and cache
 - [ ] **Phase 4: Profile Generation & Installation** - Generate profiles from scraped data, install to Bambu Studio, detect running instances
 - [ ] **Phase 5: Defect Knowledge Base** - TOML-driven rule engine mapping defects to profile parameter adjustments
 - [ ] **Phase 6: AI Print Analysis** - Photo-to-defect-report pipeline with vision API integration and profile-aware recommendations
@@ -156,7 +156,7 @@ Note: Phase 3 depends only on Phase 1 and can run in parallel with Phase 2 if de
 |-------|---------------|--------|-----------|
 | 1. App Foundation | 2/2 | Complete | 2026-02-05 |
 | 2. Profile Engine | 2/2 | Complete | 2026-02-05 |
-| 3. Filament Scraping | 0/2 | Not started | - |
+| 3. Filament Scraping | 2/2 | Complete | 2026-02-05 |
 | 4. Profile Generation & Installation | 0/2 | Not started | - |
 | 5. Defect Knowledge Base | 0/1 | Not started | - |
 | 6. AI Print Analysis | 0/2 | Not started | - |
