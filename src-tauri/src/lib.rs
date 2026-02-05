@@ -1,6 +1,6 @@
 mod commands;
 mod error;
-mod profile;
+pub mod profile;
 
 pub fn run() {
     tracing_subscriber::fmt()

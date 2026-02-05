@@ -1,0 +1,196 @@
+{
+    "bed_temperature": [
+        "60",
+        "60"
+    ],
+    "bed_temperature_initial_layer": [
+        "60",
+        "60"
+    ],
+    "close_fan_the_first_x_layers": [
+        "1",
+        "1"
+    ],
+    "compatible_printers": [
+        "Bambu Lab X1 Carbon 0.4 nozzle",
+        "Bambu Lab P1S 0.4 nozzle"
+    ],
+    "compatible_prints": [],
+    "cool_plate_temp": [
+        "35",
+        "35"
+    ],
+    "cool_plate_temp_initial_layer": [
+        "35",
+        "35"
+    ],
+    "eng_plate_temp": [
+        "60",
+        "60"
+    ],
+    "eng_plate_temp_initial_layer": [
+        "60",
+        "60"
+    ],
+    "fan_cooling_layer_time": [
+        "60",
+        "60"
+    ],
+    "fan_max_speed": [
+        "80%",
+        "80%"
+    ],
+    "fan_min_speed": [
+        "60%",
+        "60%"
+    ],
+    "filament_cost": [
+        "24.99",
+        "24.99"
+    ],
+    "filament_density": [
+        "1.24",
+        "1.24"
+    ],
+    "filament_deretraction_speed": [
+        "nil",
+        "nil"
+    ],
+    "filament_end_gcode": [
+        "; filament end gcode \n",
+        "; filament end gcode \n"
+    ],
+    "filament_flow_ratio": [
+        "0.98",
+        "0.98"
+    ],
+    "filament_id": "GFL99",
+    "filament_is_support": [
+        "0",
+        "0"
+    ],
+    "filament_max_volumetric_speed": [
+        "12",
+        "12"
+    ],
+    "filament_minimal_purge_on_wipe_tower": [
+        "15",
+        "15"
+    ],
+    "filament_retraction_length": [
+        "0.8",
+        "0.8"
+    ],
+    "filament_retraction_minimum_travel": [
+        "nil",
+        "nil"
+    ],
+    "filament_retraction_speed": [
+        "30",
+        "30"
+    ],
+    "filament_retraction_wipe": [
+        "nil",
+        "nil"
+    ],
+    "filament_settings_id": [
+        "My Custom PLA @X1C",
+        "My Custom PLA @X1C"
+    ],
+    "filament_shrink": [
+        "nil",
+        "nil"
+    ],
+    "filament_soluble": [
+        "0",
+        "0"
+    ],
+    "filament_start_gcode": [
+        "; filament start gcode\n",
+        "; filament start gcode\n"
+    ],
+    "filament_type": [
+        "PLA",
+        "PLA"
+    ],
+    "filament_vendor": [
+        "Custom",
+        "Custom"
+    ],
+    "filament_wipe_distance": [
+        "nil",
+        "nil"
+    ],
+    "filament_z_hop": [
+        "nil",
+        "nil"
+    ],
+    "filament_z_hop_types": [
+        "nil",
+        "nil"
+    ],
+    "from": "User",
+    "hot_plate_temp": [
+        "60",
+        "60"
+    ],
+    "hot_plate_temp_initial_layer": [
+        "60",
+        "60"
+    ],
+    "inherits": "",
+    "name": "My Custom PLA @X1C",
+    "nozzle_temperature": [
+        "220",
+        "220"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "225",
+        "225"
+    ],
+    "nozzle_temperature_range_high": [
+        "240",
+        "240"
+    ],
+    "nozzle_temperature_range_low": [
+        "190",
+        "190"
+    ],
+    "overhang_fan_speed": [
+        "100%",
+        "100%"
+    ],
+    "overhang_fan_threshold": [
+        "25%",
+        "25%"
+    ],
+    "reduce_fan_stop_start_freq": [
+        "1",
+        "1"
+    ],
+    "required_nozzle_HRC": [
+        "nil",
+        "nil"
+    ],
+    "slow_down_for_layer_cooling": [
+        "1",
+        "1"
+    ],
+    "slow_down_layer_time": [
+        "5",
+        "5"
+    ],
+    "slow_down_min_speed": [
+        "10",
+        "10"
+    ],
+    "textured_plate_temp": [
+        "55",
+        "55"
+    ],
+    "textured_plate_temp_initial_layer": [
+        "55",
+        "55"
+    ],
+    "version": "1.9.0.0"
+}

@@ -155,27 +155,50 @@ impl Default for ProfileMetadata {
 
 impl ProfileMetadata {
     /// Serialize to INI-like format matching Bambu Studio's output.
+    ///
+    /// Empty values produce `key =` (no trailing space), matching the
+    /// actual format Bambu Studio writes to disk.
     pub fn to_info_string(&self) -> String {
+        fn fmt_field(key: &str, value: &str) -> String {
+            if value.is_empty() {
+                format!("{} =", key)
+            } else {
+                format!("{} = {}", key, value)
+            }
+        }
+
         format!(
-            "sync_info = {}\nuser_id = {}\nsetting_id = {}\nbase_id = {}\nupdated_time = {}\n",
-            self.sync_info, self.user_id, self.setting_id, self.base_id, self.updated_time
+            "{}\n{}\n{}\n{}\n{}\n",
+            fmt_field("sync_info", &self.sync_info),
+            fmt_field("user_id", &self.user_id),
+            fmt_field("setting_id", &self.setting_id),
+            fmt_field("base_id", &self.base_id),
+            fmt_field("updated_time", &self.updated_time.to_string()),
         )
     }
 
     /// Parse from INI-like format. Handles missing fields gracefully.
+    ///
+    /// Supports both `key = value` and `key =` (empty value) formats.
     pub fn from_info_string(content: &str) -> Result<Self> {
         let mut meta = ProfileMetadata::default();
         for line in content.lines() {
-            let parts: Vec<&str> = line.splitn(2, " = ").collect();
-            if parts.len() == 2 {
-                match parts[0].trim() {
-                    "sync_info" => meta.sync_info = parts[1].to_string(),
-                    "user_id" => meta.user_id = parts[1].to_string(),
-                    "setting_id" => meta.setting_id = parts[1].to_string(),
-                    "base_id" => meta.base_id = parts[1].to_string(),
-                    "updated_time" => meta.updated_time = parts[1].parse().unwrap_or(0),
-                    _ => {} // Ignore unknown fields
-                }
+            // Split on first " = " or " =" at end of line for empty values
+            let (key, value) = if let Some(idx) = line.find(" = ") {
+                (&line[..idx], &line[idx + 3..])
+            } else if line.ends_with(" =") {
+                (&line[..line.len() - 2], "")
+            } else {
+                continue;
+            };
+
+            match key.trim() {
+                "sync_info" => meta.sync_info = value.to_string(),
+                "user_id" => meta.user_id = value.to_string(),
+                "setting_id" => meta.setting_id = value.to_string(),
+                "base_id" => meta.base_id = value.to_string(),
+                "updated_time" => meta.updated_time = value.parse().unwrap_or(0),
+                _ => {} // Ignore unknown fields
             }
         }
         Ok(meta)
