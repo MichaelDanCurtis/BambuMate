@@ -1,0 +1,364 @@
+/* Filament Search Page Styles */
+
+.filament-search-page {
+    max-width: 800px;
+}
+
+/* Search Bar */
+.search-bar {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+}
+
+.search-input {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    font-size: 1rem;
+}
+
+.search-button {
+    white-space: nowrap;
+    padding: 0.75rem 1.5rem;
+}
+
+/* Loading Spinner */
+.loading-spinner {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.5rem;
+    color: var(--text-secondary);
+}
+
+.spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--border-color);
+    border-top-color: var(--accent-primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Error and Success Messages */
+.error-message {
+    background: rgba(231, 76, 60, 0.1);
+    border: 1px solid rgba(231, 76, 60, 0.3);
+    color: #e74c3c;
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+}
+
+.success-message {
+    background: rgba(46, 204, 113, 0.1);
+    border: 1px solid rgba(46, 204, 113, 0.3);
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+}
+
+.success-header {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #2ecc71;
+    margin-bottom: 1rem;
+}
+
+.success-details {
+    margin-bottom: 1rem;
+}
+
+.success-details p {
+    margin: 0.5rem 0;
+}
+
+.success-details code {
+    background: var(--bg-secondary);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.9em;
+    word-break: break-all;
+}
+
+.warning-text {
+    color: #f39c12;
+}
+
+/* Filament Card */
+.filament-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+.filament-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.filament-card-title {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.filament-brand {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.filament-name {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.filament-material {
+    background: var(--accent-primary);
+    color: white;
+    padding: 0.25rem 0.75rem;
+    border-radius: 4px;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.filament-card-specs {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.spec-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem;
+    background: var(--bg-primary);
+    border-radius: 4px;
+}
+
+.spec-label {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+.spec-value {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.filament-card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.confidence-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.confidence-label {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+.confidence-value {
+    font-weight: 600;
+    padding: 0.125rem 0.5rem;
+    border-radius: 4px;
+}
+
+.confidence-high {
+    background: rgba(46, 204, 113, 0.2);
+    color: #2ecc71;
+}
+
+.confidence-medium {
+    background: rgba(243, 156, 18, 0.2);
+    color: #f39c12;
+}
+
+.confidence-low {
+    background: rgba(231, 76, 60, 0.2);
+    color: #e74c3c;
+}
+
+.source-link {
+    color: var(--accent-primary);
+    text-decoration: none;
+    font-size: 0.875rem;
+}
+
+.source-link:hover {
+    text-decoration: underline;
+}
+
+.filament-card-generate-btn {
+    width: 100%;
+    margin-top: 0.5rem;
+}
+
+/* Profile Preview */
+.profile-preview {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+.profile-preview-title {
+    margin: 0 0 1rem 0;
+    font-size: 1.25rem;
+    color: var(--text-primary);
+}
+
+.warning-banner {
+    background: rgba(243, 156, 18, 0.15);
+    border: 1px solid rgba(243, 156, 18, 0.3);
+    color: #f39c12;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+}
+
+.warning-banner.warning-bs-running {
+    background: rgba(231, 76, 60, 0.15);
+    border-color: rgba(231, 76, 60, 0.3);
+    color: #e74c3c;
+}
+
+.warning-list {
+    margin: 0;
+    padding-left: 1.25rem;
+}
+
+.warning-list li {
+    margin: 0.25rem 0;
+}
+
+.profile-preview-info {
+    margin-bottom: 1.5rem;
+}
+
+.preview-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.preview-row:last-child {
+    border-bottom: none;
+}
+
+.preview-label {
+    color: var(--text-secondary);
+}
+
+.preview-value {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.preview-value.profile-name {
+    color: var(--accent-primary);
+}
+
+.preview-value.filename {
+    font-family: monospace;
+    font-size: 0.9em;
+}
+
+.profile-preview-specs {
+    background: var(--bg-primary);
+    border-radius: 6px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.profile-preview-specs h4 {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+
+.preview-specs-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem;
+}
+
+.spec-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.spec-item .spec-label {
+    font-size: 0.8rem;
+}
+
+.spec-item .spec-value {
+    font-size: 1rem;
+}
+
+.profile-preview-actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: flex-end;
+}
+
+.profile-preview-actions .btn {
+    min-width: 120px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 600px) {
+    .filament-card-specs {
+        grid-template-columns: 1fr;
+    }
+
+    .preview-specs-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .search-bar {
+        flex-direction: column;
+    }
+
+    .search-button {
+        width: 100%;
+    }
+
+    .profile-preview-actions {
+        flex-direction: column-reverse;
+    }
+
+    .profile-preview-actions .btn {
+        width: 100%;
+    }
+}
