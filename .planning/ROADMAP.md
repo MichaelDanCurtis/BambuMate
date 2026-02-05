@@ -32,11 +32,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. User can enter and save API keys (Claude, OpenAI) via a settings page, and keys persist across app restarts via OS keychain
   3. User can run a health check that reports Bambu Studio installation status, profile directory accessibility, and API key configuration
   4. App builds to a distributable macOS `.dmg` that installs and runs on a clean machine
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 01-01: Tauri 2.0 + Leptos scaffold with app shell and navigation
-- [ ] 01-02: Secure config system with OS keychain and health check
+- [ ] 01-01-PLAN.md -- Tauri 2.0 + Leptos scaffold with app shell, navigation, and backend command layer
+- [ ] 01-02-PLAN.md -- Wire settings to OS keychain, health check with live data, and macOS DMG build
 
 ### Phase 2: Profile Engine
 **Goal**: Users can read, inspect, and write Bambu Studio filament profiles with correct inheritance resolution and zero data loss
@@ -154,7 +154,7 @@ Note: Phase 3 depends only on Phase 1 and can run in parallel with Phase 2 if de
 
 | Phase | Plans Complete | Status | Completed |
 |-------|---------------|--------|-----------|
-| 1. App Foundation | 0/2 | Not started | - |
+| 1. App Foundation | 0/2 | Planned | - |
 | 2. Profile Engine | 0/2 | Not started | - |
 | 3. Filament Scraping | 0/2 | Not started | - |
 | 4. Profile Generation & Installation | 0/2 | Not started | - |
