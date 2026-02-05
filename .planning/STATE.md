@@ -10,23 +10,24 @@ See: .planning/PROJECT.md (updated 2026-02-04)
 ## Current Position
 
 Phase: 2 of 8 (Profile Engine)
-Plan: 0 of 2 in current phase
-Status: Planning
-Last activity: 2026-02-05 -- Completed Phase 1 (App Foundation) with all enhancements
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-05 -- Completed 02-01-PLAN.md (Profile types, paths, reader, registry, inheritance)
 
-Progress: [██░░░░░░░░░░░░░░░░░░] 12%
+Progress: [███░░░░░░░░░░░░░░░░░] 19%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Total execution time: ~0.5 hours
+- Total plans completed: 3
+- Total execution time: ~0.6 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-app-foundation | 2/2 | ~30min | ~15min |
+| 02-profile-engine | 1/2 | ~4min | ~4min |
 
 *Updated after each plan completion*
 
@@ -48,6 +49,11 @@ Recent decisions affecting current work:
 - [01-02]: Model selection via preferences: ai_provider (claude/openai/kimi/openrouter) and ai_model (freeform model name string)
 - [01-02]: Model dropdown fetches available models from provider API (reqwest in backend)
 - [01-02]: Theme system: CSS custom properties with light/dark/system modes, respects prefers-color-scheme
+- [02-01]: FilamentProfile wraps Map<String, Value> not typed struct -- zero data loss for 139+ evolving fields
+- [02-01]: serde_json preserve_order enables IndexMap-backed Map for key ordering preservation
+- [02-01]: 4-space JSON indentation via PrettyFormatter matches Bambu Studio format
+- [02-01]: nil values skipped during inheritance merge (string "nil" and all-nil arrays)
+- [02-01]: include field logged but not resolved -- deferred to future plan
 
 ### Pending Todos
 
@@ -61,6 +67,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-05
-Stopped at: Phase 1 complete. Starting Phase 2 planning.
+Last session: 2026-02-05T17:30:29Z
+Stopped at: Completed 02-01-PLAN.md
 Resume file: None
