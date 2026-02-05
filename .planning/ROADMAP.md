@@ -63,11 +63,11 @@ Plans:
   3. Extracted data is validated against physical constraints -- out-of-range values (PLA at 350C) are rejected and flagged
   4. Second lookup for the same filament returns instantly from local cache (30-day TTL)
   5. Scraper respects `robots.txt` and enforces max 1 request/second per domain
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: HTTP client, LLM-assisted extraction engine, physical constraint validation
-- [ ] 03-02: Manufacturer adapters for 10+ brands, caching with TTL, rate limiting
+- [ ] 03-01-PLAN.md -- Core scraper infrastructure: types, validation, HTTP client, LLM extraction engine
+- [ ] 03-02-PLAN.md -- Brand adapters (10+), SQLite cache with TTL, pipeline orchestrator, Tauri commands
 
 ### Phase 4: Profile Generation & Installation
 **Goal**: Users can go from a filament name to an installed Bambu Studio profile in one action
