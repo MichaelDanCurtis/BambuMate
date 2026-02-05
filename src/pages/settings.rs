@@ -1,27 +1,41 @@
 use leptos::prelude::*;
+use wasm_bindgen_futures::spawn_local;
+
+use crate::commands;
+use crate::components::api_key_form::ApiKeyForm;
 
 #[component]
 pub fn SettingsPage() -> impl IntoView {
-    // Signals for API key fields
-    let (claude_key, set_claude_key) = signal(String::new());
-    let (openai_key, set_openai_key) = signal(String::new());
-    let (claude_status, set_claude_status) = signal("Not set".to_string());
-    let (openai_status, set_openai_status) = signal("Not set".to_string());
     let (bambu_path, set_bambu_path) = signal(String::new());
+    let (path_status, set_path_status) = signal::<Option<String>>(None);
 
-    // Placeholder save handlers -- will be wired to backend in Plan 02
-    let save_claude_key = move |_| {
-        let _key = claude_key.get();
-        set_claude_status.set("Save not yet wired".to_string());
-    };
-
-    let save_openai_key = move |_| {
-        let _key = openai_key.get();
-        set_openai_status.set("Save not yet wired".to_string());
-    };
+    // Load existing Bambu Studio path preference on mount
+    Effect::new(move |_| {
+        spawn_local(async move {
+            match commands::get_preference("bambu_studio_path").await {
+                Ok(Some(path)) => {
+                    set_bambu_path.set(path);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    set_path_status.set(Some(format!("Failed to load preference: {}", e)));
+                }
+            }
+        });
+    });
 
     let save_bambu_path = move |_| {
-        let _path = bambu_path.get();
+        let path = bambu_path.get();
+        spawn_local(async move {
+            match commands::set_preference("bambu_studio_path", &path).await {
+                Ok(()) => {
+                    set_path_status.set(Some("Path saved".to_string()));
+                }
+                Err(e) => {
+                    set_path_status.set(Some(format!("Failed to save: {}", e)));
+                }
+            }
+        });
     };
 
     view! {
@@ -30,47 +44,23 @@ pub fn SettingsPage() -> impl IntoView {
 
             <section class="settings-section">
                 <h3>"API Keys"</h3>
-                <p class="section-description">"API keys are stored securely in your system keychain."</p>
+                <p class="section-description">"API keys are stored securely in your macOS Keychain."</p>
 
-                <div class="form-group">
-                    <label for="claude-key">"Claude API Key"</label>
-                    <div class="input-row">
-                        <input
-                            id="claude-key"
-                            type="password"
-                            placeholder="sk-ant-..."
-                            class="input"
-                            prop:value=move || claude_key.get()
-                            on:input=move |ev| {
-                                set_claude_key.set(event_target_value(&ev));
-                            }
-                        />
-                        <button class="btn btn-primary" on:click=save_claude_key>"Save"</button>
-                    </div>
-                    <span class="status-text">{move || claude_status.get()}</span>
-                </div>
-
-                <div class="form-group">
-                    <label for="openai-key">"OpenAI API Key"</label>
-                    <div class="input-row">
-                        <input
-                            id="openai-key"
-                            type="password"
-                            placeholder="sk-..."
-                            class="input"
-                            prop:value=move || openai_key.get()
-                            on:input=move |ev| {
-                                set_openai_key.set(event_target_value(&ev));
-                            }
-                        />
-                        <button class="btn btn-primary" on:click=save_openai_key>"Save"</button>
-                    </div>
-                    <span class="status-text">{move || openai_status.get()}</span>
-                </div>
+                <ApiKeyForm
+                    service_name="Claude API Key"
+                    service_id="bambumate-claude-api"
+                    placeholder="sk-ant-..."
+                />
+                <ApiKeyForm
+                    service_name="OpenAI API Key"
+                    service_id="bambumate-openai-api"
+                    placeholder="sk-..."
+                />
             </section>
 
             <section class="settings-section">
-                <h3>"Preferences"</h3>
+                <h3>"Application"</h3>
+                <p class="section-description">"Configure application paths and preferences."</p>
 
                 <div class="form-group">
                     <label for="bambu-path">"Bambu Studio Path"</label>
@@ -85,8 +75,11 @@ pub fn SettingsPage() -> impl IntoView {
                                 set_bambu_path.set(event_target_value(&ev));
                             }
                         />
-                        <button class="btn btn-secondary" on:click=save_bambu_path>"Save"</button>
+                        <button class="btn btn-save" on:click=save_bambu_path>"Save"</button>
                     </div>
+                    <Show when=move || path_status.get().is_some()>
+                        <span class="status-text">{move || path_status.get().unwrap_or_default()}</span>
+                    </Show>
                 </div>
             </section>
         </div>

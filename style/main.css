@@ -234,6 +234,60 @@ body {
     margin-top: 4px;
 }
 
+.status-saved {
+    color: #52b788;
+}
+
+.status-not-set {
+    color: #8892a4;
+}
+
+.status-error {
+    color: #e94560;
+}
+
+/* API Key Form */
+.api-key-form {
+    padding: 16px;
+    background-color: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    margin-bottom: 16px;
+}
+
+.api-key-form label {
+    font-size: 14px;
+    font-weight: 600;
+    color: #ffffff;
+}
+
+.key-status-row {
+    margin-top: 6px;
+}
+
+.input-password {
+    font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+}
+
+/* Save/Delete buttons */
+.btn-save {
+    background-color: #0f3460;
+    color: #e0e0e0;
+}
+
+.btn-save:hover:not(:disabled) {
+    background-color: #1a4478;
+}
+
+.btn-delete {
+    background-color: #3d0f0f;
+    color: #e94560;
+}
+
+.btn-delete:hover:not(:disabled) {
+    background-color: #5a1a1a;
+}
+
 /* Health check */
 .health-results {
     margin-top: 24px;
