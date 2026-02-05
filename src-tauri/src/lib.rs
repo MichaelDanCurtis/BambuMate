@@ -24,6 +24,8 @@ pub fn run() {
             commands::profile::list_profiles,
             commands::profile::read_profile_command,
             commands::profile::get_system_profile_count,
+            commands::profile::generate_profile_from_specs,
+            commands::profile::install_generated_profile,
             commands::scraper::search_filament,
             commands::scraper::get_cached_filament,
             commands::scraper::clear_filament_cache,

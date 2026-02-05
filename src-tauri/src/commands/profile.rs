@@ -2,8 +2,12 @@ use serde::Serialize;
 use tracing::info;
 use walkdir::WalkDir;
 
+use crate::profile::generator;
 use crate::profile::paths::BambuPaths;
 use crate::profile::reader::{read_profile, read_profile_metadata};
+use crate::profile::registry::ProfileRegistry;
+use crate::profile::types::{FilamentProfile, ProfileMetadata};
+use crate::profile::writer::write_profile_with_metadata;
 
 /// Summary information for a filament profile (used in list views).
 #[derive(Debug, Clone, Serialize)]
@@ -177,4 +181,225 @@ pub fn get_system_profile_count() -> Result<usize, String> {
 
     info!("Found {} system profiles", count);
     Ok(count)
+}
+
+/// Result from profile generation (preview step, no files written).
+#[derive(Debug, Clone, Serialize)]
+pub struct GenerateResult {
+    pub profile_name: String,
+    pub profile_json: String,
+    pub metadata_info: String,
+    pub filename: String,
+    pub field_count: usize,
+    pub base_profile_used: String,
+    pub specs_applied: GeneratedSpecs,
+    pub warnings: Vec<String>,
+    pub bambu_studio_running: bool,
+}
+
+/// Summary of which scraped specs were applied to the profile.
+#[derive(Debug, Clone, Serialize)]
+pub struct GeneratedSpecs {
+    pub nozzle_temp: Option<String>,
+    pub bed_temp: Option<String>,
+    pub fan_speed: Option<String>,
+    pub retraction: Option<String>,
+}
+
+/// Result from profile installation (files written to disk).
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallResult {
+    pub installed_path: String,
+    pub profile_name: String,
+    pub bambu_studio_was_running: bool,
+}
+
+/// Generate a filament profile from scraped specifications (preview only).
+///
+/// This command does NOT write any files. It returns the generated profile
+/// data for UI preview. Call `install_generated_profile` to actually write
+/// the profile to disk.
+///
+/// Two-step flow: generate (preview) -> install (write) lets the UI show
+/// a preview before committing.
+#[tauri::command]
+pub async fn generate_profile_from_specs(
+    specs: crate::scraper::types::FilamentSpecs,
+    target_printer: Option<String>,
+) -> Result<GenerateResult, String> {
+    info!(
+        "generate_profile_from_specs called for: {} {}",
+        specs.brand, specs.name
+    );
+
+    // Detect Bambu Studio paths
+    let paths = BambuPaths::detect().map_err(|e| {
+        format!(
+            "Bambu Studio not found: {}. Please install Bambu Studio first.",
+            e
+        )
+    })?;
+
+    // Build registry from system filament profiles
+    let system_dir = paths.system_filament_dir();
+    if !system_dir.exists() {
+        return Err(format!(
+            "System filament directory not found at {:?}. Is Bambu Studio installed correctly?",
+            system_dir
+        ));
+    }
+
+    let registry = ProfileRegistry::discover_system_profiles(&system_dir)
+        .map_err(|e| format!("Failed to load system profiles: {}", e))?;
+
+    // Determine the base profile name for reporting
+    let material = crate::scraper::types::MaterialType::from_str(&specs.material);
+    let base_name = generator::base_profile_name(&material).to_string();
+
+    // Generate the profile
+    let (profile, metadata, filename) =
+        generator::generate_profile(&specs, &registry, target_printer.as_deref())
+            .map_err(|e| format!("Failed to generate profile: {}", e))?;
+
+    // Serialize for transport
+    let profile_json = profile
+        .to_json_4space()
+        .map_err(|e| format!("Failed to serialize profile: {}", e))?;
+    let metadata_info = metadata.to_info_string();
+
+    // Check if Bambu Studio is running
+    let bs_running = generator::is_bambu_studio_running();
+
+    // Build warnings
+    let mut warnings = Vec::new();
+    if bs_running {
+        warnings.push(
+            "Bambu Studio is running. Profile changes may not take effect until BS is restarted."
+                .to_string(),
+        );
+    }
+
+    // Build specs summary for UI display
+    let specs_applied = GeneratedSpecs {
+        nozzle_temp: specs.nozzle_temp_max.map(|max| {
+            if let Some(min) = specs.nozzle_temp_min {
+                format!("{}-{}C", min, max)
+            } else {
+                format!("{}C", max)
+            }
+        }),
+        bed_temp: specs.bed_temp_max.map(|max| {
+            if let Some(min) = specs.bed_temp_min {
+                format!("{}-{}C", min, max)
+            } else {
+                format!("{}C", max)
+            }
+        }),
+        fan_speed: specs.fan_speed_percent.map(|f| format!("{}%", f)),
+        retraction: specs.retraction_distance_mm.map(|d| {
+            if let Some(s) = specs.retraction_speed_mm_s {
+                format!("{:.1}mm @ {}mm/s", d, s)
+            } else {
+                format!("{:.1}mm", d)
+            }
+        }),
+    };
+
+    let profile_name = profile
+        .name()
+        .unwrap_or("<unnamed>")
+        .to_string();
+
+    info!(
+        "Generated profile '{}' with {} fields (base: {})",
+        profile_name,
+        profile.field_count(),
+        base_name
+    );
+
+    Ok(GenerateResult {
+        profile_name,
+        profile_json,
+        metadata_info,
+        filename,
+        field_count: profile.field_count(),
+        base_profile_used: base_name,
+        specs_applied,
+        warnings,
+        bambu_studio_running: bs_running,
+    })
+}
+
+/// Install a previously generated profile to the Bambu Studio user directory.
+///
+/// Takes the profile JSON and metadata from `generate_profile_from_specs`
+/// and writes them atomically to disk. Checks if Bambu Studio is running
+/// and requires `force=true` to proceed if it is.
+#[tauri::command]
+pub async fn install_generated_profile(
+    profile_json: String,
+    metadata_info: String,
+    filename: String,
+    force: bool,
+) -> Result<InstallResult, String> {
+    info!("install_generated_profile called for: {}", filename);
+
+    // Parse the profile and metadata back from serialized form
+    let profile =
+        FilamentProfile::from_json(&profile_json).map_err(|e| format!("Invalid profile JSON: {}", e))?;
+    let metadata = ProfileMetadata::from_info_string(&metadata_info)
+        .map_err(|e| format!("Invalid metadata: {}", e))?;
+
+    // Check if Bambu Studio is running
+    let bs_running = generator::is_bambu_studio_running();
+    if bs_running && !force {
+        return Err(
+            "Bambu Studio is running. Use force=true to install anyway, but restart BS to see changes."
+                .to_string(),
+        );
+    }
+
+    // Detect paths and get user filament directory
+    let paths = BambuPaths::detect().map_err(|e| {
+        format!(
+            "Bambu Studio not found: {}. Please install Bambu Studio first.",
+            e
+        )
+    })?;
+
+    let user_dir = paths.user_filament_dir().ok_or_else(|| {
+        "User filament directory not found. Have you logged into Bambu Studio at least once?"
+            .to_string()
+    })?;
+
+    // Build target path
+    let target_path = user_dir.join(&filename);
+
+    // Check for existing file
+    if target_path.exists() {
+        info!(
+            "Overwriting existing profile at {:?}",
+            target_path
+        );
+    }
+
+    // Write profile + metadata atomically
+    write_profile_with_metadata(&profile, &target_path, &metadata)
+        .map_err(|e| format!("Failed to write profile: {}", e))?;
+
+    let profile_name = profile
+        .name()
+        .unwrap_or("<unnamed>")
+        .to_string();
+
+    info!(
+        "Installed profile '{}' to {:?}",
+        profile_name, target_path
+    );
+
+    Ok(InstallResult {
+        installed_path: target_path.to_string_lossy().to_string(),
+        profile_name,
+        bambu_studio_was_running: bs_running,
+    })
 }
