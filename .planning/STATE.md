@@ -49,6 +49,8 @@ Recent decisions affecting current work:
 - [01-01]: wasm-bindgen-futures required for async extern invoke functions in the WASM bridge
 - [01-01]: Keyring service names: bambumate-claude-api and bambumate-openai-api (namespaced)
 - [01-01]: Dark theme CSS for desktop app aesthetic (#1a1a2e, #16213e, #0f3460, #e94560)
+- [01-02]: AI providers expanded to 4: Claude, OpenAI, Kimi K2 (Moonshot), OpenRouter. Keyring services: bambumate-kimi-api, bambumate-openrouter-api
+- [01-02]: Model selection via preferences: ai_provider (claude/openai/kimi/openrouter) and ai_model (freeform model name string)
 
 ### Pending Todos
 
@@ -63,5 +65,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-05
-Stopped at: Completed 01-01-PLAN.md, ready to execute 01-02-PLAN.md
+Stopped at: 01-02-PLAN.md checkpoint continuation -- added Kimi K2, OpenRouter, model selection; awaiting re-verification
 Resume file: None
