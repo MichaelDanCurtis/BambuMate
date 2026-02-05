@@ -25,6 +25,7 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
 tokio = { version = "1", features = ["time"] }
+rand = "0.9"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
