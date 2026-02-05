@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it -- no manual settings research or guesswork.
-**Current focus:** Phase 3 complete. All scraper infrastructure, brand adapters, caching, and Tauri commands built. Ready for Phase 4 (Profile Generation).
+**Current focus:** Phase 4 in progress. Profile generation backend complete. Ready for 04-02 (Leptos filament search UI).
 
 ## Current Position
 
-Phase: 3 of 8 (Filament Scraping) -- COMPLETE
-Plan: 2 of 2 in current phase
-Status: Phase complete
-Last activity: 2026-02-05 -- Completed 03-02-PLAN.md (Brand adapters, cache, pipeline, Tauri commands)
+Phase: 4 of 8 (Profile Generation & Installation)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-05 -- Completed 04-01-PLAN.md (Profile generator engine, Tauri commands)
 
-Progress: [████████████████████] 100% (6/6 plans with concrete plans defined)
+Progress: [███████████████████░] 87.5% (7/8 plans with concrete plans defined)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
-- Total execution time: ~0.85 hours
+- Total plans completed: 7
+- Total execution time: ~0.9 hours
 
 **By Phase:**
 
@@ -29,6 +29,7 @@ Progress: [████████████████████] 100% (6
 | 01-app-foundation | 2/2 | ~30min | ~15min |
 | 02-profile-engine | 2/2 | ~8min | ~4min |
 | 03-filament-scraping | 2/2 | ~13min | ~6.5min |
+| 04-profile-generation | 1/2 | ~3min | ~3min |
 
 *Updated after each plan completion*
 
@@ -67,6 +68,10 @@ Recent decisions affecting current work:
 - [03-02]: SpoolScout URL always included as last fallback even when brand adapter has its own URLs
 - [03-02]: Inland uses SpoolScout as primary source since Micro Center pages have minimal specs
 - [03-02]: Non-fatal cache failures: cache errors logged but don't fail the search
+- [04-01]: Two-step generate/install command flow: generate returns preview data without writing, install commits to disk
+- [04-01]: rand 0.9 for ID generation: filament_id (P + 7 hex), setting_id (PFUS + 14 hex) matching BS conventions
+- [04-01]: pgrep for BS detection (not sysinfo): zero-dependency, macOS-native, sufficient for boolean check
+- [04-01]: Empty compatible_printers array for universal printer compatibility
 
 ### Pending Todos
 
@@ -75,11 +80,11 @@ None.
 ### Blockers/Concerns
 
 - [Research]: Bambu Studio profile JSON format is undocumented and changes across versions -- Phase 2 must validate against actual local installation
-- [Research]: Cloud sync can overwrite locally-written profiles -- Phase 4 installation strategy must account for this
+- [Research]: Cloud sync can overwrite locally-written profiles -- Phase 4 installation strategy accounts for this (updated_time set, clean arrays, no mixed nil values)
 - [Research]: AI vision defect analysis is inherently ambiguous (same symptom, multiple causes) -- Phase 5 rule engine must produce ranked alternatives, not single-point fixes
 
 ## Session Continuity
 
-Last session: 2026-02-05T19:07:24Z
-Stopped at: Completed 03-02-PLAN.md (Phase 3 complete)
+Last session: 2026-02-05T20:30:56Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None
