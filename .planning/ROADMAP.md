@@ -78,11 +78,11 @@ Plans:
   2. Generated profile appears correctly in Bambu Studio's filament list after restart (not "unsupported", not missing)
   3. User can install a profile to the correct Bambu Studio config directory for macOS (with Windows/Linux paths architecturally supported)
   4. If Bambu Studio is running during installation, the user sees a warning before any file is written
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: Profile generation from scraped specs with base profile inheritance
-- [ ] 04-02: Profile installation with BS detection and user-facing filament search UI
+- [ ] 04-01-PLAN.md -- Backend profile generator (FilamentSpecs to fully-flattened profile), ID generation, process detection, Tauri commands
+- [ ] 04-02-PLAN.md -- Filament search UI page with specs display, profile preview, install flow, and sidebar navigation
 
 ### Phase 5: Defect Knowledge Base
 **Goal**: A data-driven rule engine translates detected print defects into ranked, conflict-aware profile parameter recommendations
