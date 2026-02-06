@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it -- no manual settings research or guesswork.
-**Current focus:** Phase 7 in progress. Apply Flow UI complete.
+**Current focus:** Phase 7 in progress. History Panel UI tasks 1-2 complete, awaiting checkpoint.
 
 ## Current Position
 
 Phase: 7 of 8 (Auto-Tuning & Refinement)
-Plan: 3 of 4 in current phase
-Status: In progress
-Last activity: 2026-02-06 -- Completed 07-03-PLAN.md (Apply Flow UI)
+Plan: 4 of 4 in current phase (tasks 1-2 of 3 complete)
+Status: In progress - awaiting checkpoint verification
+Last activity: 2026-02-06 -- Executing 07-04-PLAN.md (History Panel UI) tasks 1-2
 
 Progress: [██████████████████████░░] 93% (14/15 plans completed)
 
@@ -97,6 +97,9 @@ Recent decisions affecting current work:
 - [07-03]: Use #[prop(default = None)] for optional Leptos props with Option<T> type
 - [07-03]: Session ID stored in page-level signal for async callback access in apply flow
 - [07-03]: Apply feedback shown inline above defect report for immediate visibility
+- [07-04]: HistoryPanel uses spawn_local for async session fetch on mount (no Resource/Suspense)
+- [07-04]: History refresh via history_key signal counter increment triggering reactive re-render
+- [07-04]: Revert message styling mirrors apply message pattern (success/error CSS classes)
 
 ### Pending Todos
 
@@ -111,5 +114,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-06
-Stopped at: Completed 07-03-PLAN.md (Apply Flow UI)
+Stopped at: 07-04-PLAN.md tasks 1-2 complete, awaiting Task 3 checkpoint
 Resume file: None
