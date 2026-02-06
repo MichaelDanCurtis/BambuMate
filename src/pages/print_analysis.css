@@ -145,3 +145,52 @@
 .analysis-results {
     width: 100%;
 }
+
+/* Profile Path Input */
+.profile-path-input {
+    margin-bottom: 1.5rem;
+    width: 100%;
+    max-width: 500px;
+}
+
+.profile-path-input label {
+    display: block;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: 0.5rem;
+}
+
+.profile-path-input input {
+    width: 100%;
+}
+
+.input-hint {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+
+/* History Sidebar */
+.history-sidebar {
+    margin-top: 2rem;
+    width: 100%;
+}
+
+.revert-message {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+}
+
+.revert-message.success {
+    background: var(--bg-success);
+    color: var(--color-success);
+    border: 1px solid var(--border-success);
+}
+
+.revert-message.error {
+    background: var(--bg-danger);
+    color: var(--color-danger);
+    border: 1px solid var(--border-danger);
+}

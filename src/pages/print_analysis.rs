@@ -10,6 +10,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands;
+use crate::components::change_preview::ChangePreview;
 use crate::components::defect_report::DefectReportDisplay;
 
 /// Request payload for print analysis.
@@ -92,6 +93,14 @@ pub fn PrintAnalysisPage() -> impl IntoView {
     let (state, set_state) = signal(AnalysisState::Idle);
     let (image_preview, set_image_preview) = signal::<Option<String>>(None);
     let (material_override, set_material_override) = signal::<Option<String>>(None);
+    let (profile_path, set_profile_path) = signal::<Option<String>>(None);
+    // Apply flow state
+    let (show_apply_dialog, set_show_apply_dialog) = signal(false);
+    let (current_session_id, set_current_session_id) = signal::<Option<i64>>(None);
+    let (apply_message, set_apply_message) = signal::<Option<String>>(None);
+    // History/revert state
+    let (revert_message, set_revert_message) = signal::<Option<String>>(None);
+    let (history_key, set_history_key) = signal(0u32);
 
     // Handle analyze button click
     let on_analyze = move |_| {
@@ -100,9 +109,12 @@ pub fn PrintAnalysisPage() -> impl IntoView {
             set_state.set(AnalysisState::Analyzing);
 
             let material = material_override.get();
+            let path = profile_path.get();
             spawn_local(async move {
-                match commands::analyze_print(base64, None, material).await {
+                match commands::analyze_print(base64, path, material).await {
                     Ok(response) => {
+                        // Store session ID for apply flow
+                        set_current_session_id.set(response.session_id);
                         set_state.set(AnalysisState::Complete(response));
                     }
                     Err(e) => {
@@ -117,6 +129,10 @@ pub fn PrintAnalysisPage() -> impl IntoView {
     let on_reset = move |_| {
         set_state.set(AnalysisState::Idle);
         set_image_preview.set(None);
+        set_show_apply_dialog.set(false);
+        set_current_session_id.set(None);
+        set_apply_message.set(None);
+        set_revert_message.set(None);
     };
 
     view! {
@@ -162,6 +178,24 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                 </select>
                             </div>
 
+                            <div class="profile-path-input">
+                                <label>"Profile path (optional):"</label>
+                                <input
+                                    type="text"
+                                    class="input"
+                                    placeholder="/path/to/filament/profile.json"
+                                    on:input=move |ev| {
+                                        let value = event_target_value_input(&ev);
+                                        if value.is_empty() {
+                                            set_profile_path.set(None);
+                                        } else {
+                                            set_profile_path.set(Some(value));
+                                        }
+                                    }
+                                />
+                                <p class="input-hint">"Enter a Bambu Studio profile path to get current values and enable history tracking."</p>
+                            </div>
+
                             <div class="action-buttons">
                                 <button class="btn btn-primary" on:click=on_analyze>
                                     "Analyze Print"
@@ -188,10 +222,23 @@ pub fn PrintAnalysisPage() -> impl IntoView {
 
                     AnalysisState::Complete(ref response) => {
                         let response = response.clone();
+                        let path_for_display = profile_path.get();
+                        let recs_for_dialog = response.recommendations.clone();
+                        let path_for_dialog = profile_path.get().unwrap_or_default();
                         view! {
                             <div class="analysis-results">
                                 {move || image_preview.get().map(|src| view! {
                                     <img src=src class="preview-image small" alt="Analyzed print" />
+                                })}
+
+                                // Show apply success/error message
+                                {move || apply_message.get().map(|msg| {
+                                    let is_error = msg.starts_with("Apply failed:");
+                                    view! {
+                                        <div class=format!("apply-message {}", if is_error { "error" } else { "success" })>
+                                            {msg}
+                                        </div>
+                                    }
                                 })}
 
                                 <DefectReportDisplay
@@ -199,6 +246,10 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                     recommendations=response.recommendations.clone()
                                     conflicts=response.conflicts.clone()
                                     material_type=response.material_type.clone()
+                                    profile_path=path_for_display.clone()
+                                    on_apply_click=Some(Callback::new(move |_| {
+                                        set_show_apply_dialog.set(true);
+                                    }))
                                 />
 
                                 <div class="action-buttons">
@@ -206,6 +257,44 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                         "Analyze Another Photo"
                                     </button>
                                 </div>
+
+                                // Change preview dialog
+                                {move || show_apply_dialog.get().then(|| {
+                                    let recs = recs_for_dialog.clone();
+                                    let path = path_for_dialog.clone();
+                                    view! {
+                                        <ChangePreview
+                                            recommendations=recs
+                                            profile_path=path.clone()
+                                            on_apply=Callback::new(move |selected: Vec<String>| {
+                                                let session = current_session_id.get();
+                                                let p = path.clone();
+                                                spawn_local(async move {
+                                                    if let Some(sid) = session {
+                                                        match commands::apply_recommendations(p.clone(), sid, selected).await {
+                                                            Ok(result) => {
+                                                                set_apply_message.set(Some(format!(
+                                                                    "Applied {} changes. Backup: {}",
+                                                                    result.changes_applied.len(),
+                                                                    result.backup_path
+                                                                )));
+                                                            }
+                                                            Err(e) => {
+                                                                set_apply_message.set(Some(format!("Apply failed: {}", e)));
+                                                            }
+                                                        }
+                                                    } else {
+                                                        set_apply_message.set(Some("Apply failed: No session ID available".to_string()));
+                                                    }
+                                                });
+                                                set_show_apply_dialog.set(false);
+                                            })
+                                            on_cancel=Callback::new(move |_| {
+                                                set_show_apply_dialog.set(false);
+                                            })
+                                        />
+                                    }
+                                })}
                             </div>
                         }.into_any()
                     },
@@ -384,10 +473,18 @@ fn base64_encode(bytes: &[u8]) -> String {
     result
 }
 
-/// Helper to get event target value
+/// Helper to get event target value from select element
 fn event_target_value(ev: &web_sys::Event) -> String {
     ev.target()
         .and_then(|t| t.dyn_into::<web_sys::HtmlSelectElement>().ok())
+        .map(|el| el.value())
+        .unwrap_or_default()
+}
+
+/// Helper to get event target value from input element
+fn event_target_value_input(ev: &web_sys::Event) -> String {
+    ev.target()
+        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
         .map(|el| el.value())
         .unwrap_or_default()
 }
