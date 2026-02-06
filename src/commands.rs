@@ -470,6 +470,19 @@ pub async fn analyze_print(
         })
 }
 
+// -- Apply Recommendations Types --
+
+/// Result of applying recommendations to a profile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApplyResult {
+    /// Path to the backup created before modification
+    pub backup_path: String,
+    /// Changes that were applied
+    pub changes_applied: Vec<AppliedChange>,
+    /// Path to the modified profile
+    pub profile_path: String,
+}
+
 // -- History Types --
 
 /// Summary of a refinement session for list views.
@@ -557,4 +570,46 @@ pub async fn revert_to_backup(session_id: i64) -> Result<String, String> {
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Apply Recommendations --
+
+/// Request to apply recommendations from a session.
+#[derive(Serialize)]
+struct ApplyRequest {
+    profile_path: String,
+    session_id: i64,
+    selected_parameters: Vec<String>,
+}
+
+/// Wrapper to provide the `request` key expected by the Tauri command.
+#[derive(Serialize)]
+struct ApplyRecommendationsArgs {
+    request: ApplyRequest,
+}
+
+/// Apply recommended changes to a profile.
+///
+/// Creates a backup before modification, then applies the selected parameter
+/// changes based on the analysis stored in the given session.
+pub async fn apply_recommendations(
+    profile_path: String,
+    session_id: i64,
+    selected_parameters: Vec<String>,
+) -> Result<ApplyResult, String> {
+    let args = ApplyRecommendationsArgs {
+        request: ApplyRequest {
+            profile_path,
+            session_id,
+            selected_parameters,
+        },
+    };
+
+    invoke("apply_recommendations", serde_wasm_bindgen::to_value(&args).unwrap())
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
+        .and_then(|v| {
+            serde_wasm_bindgen::from_value(v)
+                .map_err(|e| format!("Failed to parse response: {}", e))
+        })
 }

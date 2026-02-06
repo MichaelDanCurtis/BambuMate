@@ -67,6 +67,8 @@ pub struct AnalyzeResponse {
     pub conflicts: Vec<Conflict>,
     pub current_values: HashMap<String, f32>,
     pub material_type: String,
+    /// Session ID for apply flow (None if history recording failed)
+    pub session_id: Option<i64>,
 }
 
 /// Analysis state enum.
