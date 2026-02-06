@@ -7,7 +7,7 @@ use crate::profile::paths::BambuPaths;
 use crate::profile::reader::{read_profile, read_profile_metadata};
 use crate::profile::registry::ProfileRegistry;
 use crate::profile::types::{FilamentProfile, ProfileMetadata};
-use crate::profile::writer::write_profile_with_metadata;
+use crate::profile::writer::{write_profile_atomic, write_profile_with_metadata};
 
 /// Summary information for a filament profile (used in list views).
 #[derive(Debug, Clone, Serialize)]
@@ -402,4 +402,123 @@ pub async fn install_generated_profile(
         profile_name,
         bambu_studio_was_running: bs_running,
     })
+}
+
+/// Delete a user filament profile and its companion .info file.
+///
+/// Safety: Validates that the path is within the user filament directory
+/// to prevent deletion of arbitrary files.
+#[tauri::command]
+pub fn delete_profile(path: String) -> Result<(), String> {
+    let file_path = std::path::Path::new(&path);
+
+    // Safety check: path must be within user filament directory
+    let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
+    let user_dir = paths
+        .user_filament_dir()
+        .ok_or_else(|| "User filament directory not found".to_string())?;
+
+    let canonical_path = file_path
+        .canonicalize()
+        .map_err(|e| format!("Invalid path: {}", e))?;
+    let canonical_user_dir = user_dir
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve user directory: {}", e))?;
+
+    if !canonical_path.starts_with(&canonical_user_dir) {
+        return Err("Cannot delete profiles outside the user filament directory".to_string());
+    }
+
+    // Delete the JSON file
+    std::fs::remove_file(&file_path).map_err(|e| format!("Failed to delete profile: {}", e))?;
+
+    // Delete companion .info file if it exists
+    let info_path = file_path.with_extension("info");
+    if info_path.exists() {
+        if let Err(e) = std::fs::remove_file(&info_path) {
+            info!("Could not delete companion .info file: {}", e);
+        }
+    }
+
+    info!("Deleted profile at {:?}", file_path);
+    Ok(())
+}
+
+/// Update a single field in a profile and write it back atomically.
+///
+/// The value is a JSON string that will be parsed as a serde_json::Value.
+/// Returns the updated ProfileDetail.
+#[tauri::command]
+pub fn update_profile_field(
+    path: String,
+    key: String,
+    value: String,
+) -> Result<ProfileDetail, String> {
+    let file_path = std::path::Path::new(&path);
+
+    let mut profile = read_profile(file_path).map_err(|e| e.to_string())?;
+
+    // Parse value as JSON to support arrays, strings, numbers, etc.
+    let json_value: serde_json::Value =
+        serde_json::from_str(&value).map_err(|e| format!("Invalid JSON value: {}", e))?;
+
+    profile
+        .raw_mut()
+        .insert(key.clone(), json_value);
+
+    write_profile_atomic(&profile, file_path)
+        .map_err(|e| format!("Failed to write profile: {}", e))?;
+
+    info!("Updated field '{}' in {:?}", key, file_path);
+
+    // Return updated detail
+    read_profile_command(path)
+}
+
+/// Duplicate a profile with a new name and IDs.
+///
+/// Copies the profile, assigns new filament_id and name, and writes it
+/// to the user filament directory.
+#[tauri::command]
+pub fn duplicate_profile(path: String, new_name: String) -> Result<ProfileDetail, String> {
+    let file_path = std::path::Path::new(&path);
+
+    let mut profile = read_profile(file_path).map_err(|e| e.to_string())?;
+
+    // Generate a new unique filament_id
+    let new_id = format!(
+        "BambuMate_{}_{:x}",
+        new_name.replace(' ', "_"),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+
+    // Update name and ID
+    profile.set_string("name", new_name.clone());
+    profile.set_string("filament_id", new_id.clone());
+    profile.set_string_array("filament_settings_id", vec![new_id.clone()]);
+
+    // Determine output path
+    let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
+    let user_dir = paths
+        .user_filament_dir()
+        .ok_or_else(|| "User filament directory not found".to_string())?;
+
+    let filename = format!("{}.json", new_id);
+    let target_path = user_dir.join(&filename);
+
+    // Create metadata
+    let metadata = ProfileMetadata {
+        setting_id: new_id.clone(),
+        ..ProfileMetadata::default()
+    };
+
+    write_profile_with_metadata(&profile, &target_path, &metadata)
+        .map_err(|e| format!("Failed to write duplicated profile: {}", e))?;
+
+    info!("Duplicated profile to {:?} as '{}'", target_path, new_name);
+
+    read_profile_command(target_path.to_string_lossy().to_string())
 }

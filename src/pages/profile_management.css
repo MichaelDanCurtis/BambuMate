@@ -1,0 +1,313 @@
+/* Profile Management Page Styles */
+
+.profile-management-page {
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.profile-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 1.5rem;
+}
+
+.profile-filter-input {
+    flex: 1;
+    padding: 8px 14px;
+    font-size: 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.profile-filter-input:focus {
+    border-color: var(--accent-primary);
+}
+
+.profile-filter-input::placeholder {
+    color: var(--text-secondary);
+}
+
+.profile-count {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+/* Layout: list + detail panel side by side */
+.profile-layout {
+    display: flex;
+    gap: 1.5rem;
+    min-height: 500px;
+}
+
+/* Profile list (left side) */
+.profile-list-panel {
+    flex: 0 0 320px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    overflow-y: auto;
+    max-height: 600px;
+}
+
+.profile-list-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border-color);
+    transition: background 0.1s;
+}
+
+.profile-list-item:last-child {
+    border-bottom: none;
+}
+
+.profile-list-item:hover {
+    background: var(--bg-primary);
+}
+
+.profile-list-item.selected {
+    background: rgba(233, 69, 96, 0.1);
+    border-left: 3px solid var(--accent-primary);
+}
+
+.profile-item-info {
+    overflow: hidden;
+}
+
+.profile-item-name {
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.profile-item-type {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.profile-item-badge {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+}
+
+/* Detail panel (right side) */
+.profile-detail-panel {
+    flex: 1;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    padding: 1.5rem;
+    overflow-y: auto;
+    max-height: 600px;
+}
+
+.profile-detail-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.profile-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1.25rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.profile-detail-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.profile-detail-subtitle {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
+.profile-detail-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.btn-icon {
+    padding: 6px 10px;
+    font-size: 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.1s, color 0.1s;
+}
+
+.btn-icon:hover {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.btn-icon.btn-danger {
+    color: #e74c3c;
+}
+
+.btn-icon.btn-danger:hover {
+    background: rgba(231, 76, 60, 0.1);
+}
+
+/* Profile fields table */
+.profile-fields {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.profile-fields tr {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.profile-fields tr:last-child {
+    border-bottom: none;
+}
+
+.field-key {
+    padding: 8px 12px 8px 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    width: 180px;
+    vertical-align: top;
+    font-family: "SF Mono", "Menlo", monospace;
+}
+
+.field-value {
+    padding: 8px 0;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    word-break: break-word;
+    cursor: pointer;
+}
+
+.field-value:hover {
+    color: var(--accent-primary);
+}
+
+/* Inline edit input */
+.field-edit-input {
+    width: 100%;
+    padding: 4px 8px;
+    font-size: 0.85rem;
+    border: 1px solid var(--accent-primary);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    outline: none;
+    font-family: "SF Mono", "Menlo", monospace;
+}
+
+/* Confirmation modal */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1.5rem;
+    max-width: 400px;
+    width: 90%;
+}
+
+.modal-content h3 {
+    margin: 0 0 0.5rem 0;
+    color: var(--text-primary);
+}
+
+.modal-content p {
+    color: var(--text-secondary);
+    margin-bottom: 1.25rem;
+}
+
+.modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+/* Error/success states */
+.profile-error {
+    background: rgba(231, 76, 60, 0.1);
+    border: 1px solid rgba(231, 76, 60, 0.3);
+    color: #e74c3c;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+}
+
+.profile-success {
+    background: rgba(46, 204, 113, 0.1);
+    border: 1px solid rgba(46, 204, 113, 0.3);
+    color: #2ecc71;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+}
+
+/* Loading state */
+.profile-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 2rem;
+    color: var(--text-secondary);
+}
+
+/* Duplicate input */
+.duplicate-input-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.duplicate-input-row input {
+    flex: 1;
+    padding: 6px 10px;
+    font-size: 13px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    outline: none;
+}
+
+.duplicate-input-row input:focus {
+    border-color: var(--accent-primary);
+}

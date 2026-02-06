@@ -9,6 +9,7 @@ use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
 use crate::pages::home::HomePage;
 use crate::pages::print_analysis::PrintAnalysisPage;
+use crate::pages::profile_management::ProfileManagementPage;
 use crate::pages::settings::SettingsPage;
 use crate::theme::{apply_theme, ThemeContext};
 
@@ -41,6 +42,7 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("/") view=HomePage />
                         <Route path=path!("/filament") view=FilamentSearchPage />
                         <Route path=path!("/analysis") view=PrintAnalysisPage />
+                        <Route path=path!("/profiles") view=ProfileManagementPage />
                         <Route path=path!("/settings") view=SettingsPage />
                         <Route path=path!("/health") view=HealthPage />
                     </Routes>

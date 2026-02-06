@@ -518,3 +518,64 @@ select.input option {
     color: var(--color-warning);
     border: 1px solid var(--border-unknown);
 }
+
+/* ===== Home page ===== */
+
+.card .btn {
+    text-decoration: none;
+    text-align: center;
+}
+
+.how-it-works {
+    margin-top: 40px;
+}
+
+.how-it-works h3 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin-bottom: 16px;
+}
+
+.steps {
+    display: flex;
+    gap: 16px;
+}
+
+.step {
+    flex: 1;
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    box-shadow: var(--shadow-card);
+}
+
+.step-number {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    border-radius: 50%;
+    background-color: var(--accent);
+    color: var(--text-on-accent);
+    font-weight: 700;
+    font-size: 14px;
+}
+
+.step-content strong {
+    display: block;
+    font-size: 14px;
+    color: var(--text-bright);
+    margin-bottom: 4px;
+}
+
+.step-content p {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0;
+}

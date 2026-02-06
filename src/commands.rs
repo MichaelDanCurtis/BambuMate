@@ -455,6 +455,126 @@ pub async fn generate_specs_from_ai(filament_name: &str) -> Result<FilamentSpecs
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
 
+// -- Profile detail types matching backend --
+
+/// Detailed info for a single profile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileDetail {
+    pub name: Option<String>,
+    pub filament_type: Option<String>,
+    pub filament_id: Option<String>,
+    pub inherits: Option<String>,
+    pub field_count: usize,
+    pub nozzle_temperature: Option<Vec<String>>,
+    pub bed_temperature: Option<Vec<String>>,
+    pub compatible_printers: Option<Vec<String>>,
+    pub metadata: Option<ProfileMetadataInfo>,
+    pub raw_json: String,
+}
+
+/// Metadata from a .info companion file.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileMetadataInfo {
+    pub sync_info: String,
+    pub user_id: String,
+    pub setting_id: String,
+    pub base_id: String,
+    pub updated_time: u64,
+}
+
+// -- Profile CRUD arg structs --
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadProfileArgs {
+    path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteProfileArgs {
+    path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProfileFieldArgs {
+    path: String,
+    key: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DuplicateProfileArgs {
+    path: String,
+    new_name: String,
+}
+
+// -- Profile CRUD invoke wrappers --
+
+/// Read a single profile with full detail.
+pub async fn read_profile(path: &str) -> Result<ProfileDetail, String> {
+    let args = serde_wasm_bindgen::to_value(&ReadProfileArgs {
+        path: path.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("read_profile_command", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Delete a profile and its companion .info file.
+pub async fn delete_profile(path: &str) -> Result<(), String> {
+    let args = serde_wasm_bindgen::to_value(&DeleteProfileArgs {
+        path: path.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    invoke("delete_profile", args)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
+}
+
+/// Update a single field in a profile.
+pub async fn update_profile_field(
+    path: &str,
+    key: &str,
+    value: &str,
+) -> Result<ProfileDetail, String> {
+    let args = serde_wasm_bindgen::to_value(&UpdateProfileFieldArgs {
+        path: path.to_string(),
+        key: key.to_string(),
+        value: value.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("update_profile_field", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Duplicate a profile with a new name.
+pub async fn duplicate_profile(path: &str, new_name: &str) -> Result<ProfileDetail, String> {
+    let args = serde_wasm_bindgen::to_value(&DuplicateProfileArgs {
+        path: path.to_string(),
+        new_name: new_name.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("duplicate_profile", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
 // -- Print Analysis --
 
 /// Inner request matching the backend AnalyzeRequest struct.

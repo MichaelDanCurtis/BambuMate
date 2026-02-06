@@ -132,7 +132,8 @@ pub fn FilamentSearchPage() -> impl IntoView {
     // Handle AI knowledge generation (asks AI directly without web scraping)
     let do_ai_generate = move || {
         let query = search_query.get();
-        if query.len() < 3 {
+        if query.len() < 5 {
+            set_fetch_error.set(Some("Please enter a more specific filament name (at least 5 characters) for AI search.".to_string()));
             return;
         }
 
@@ -161,7 +162,8 @@ pub fn FilamentSearchPage() -> impl IntoView {
     // Handle web search fallback (uses original search_filament with web scraping)
     let do_web_search = move || {
         let query = search_query.get();
-        if query.len() < 3 {
+        if query.len() < 5 {
+            set_fetch_error.set(Some("Please enter a more specific filament name (at least 5 characters) for web search.".to_string()));
             return;
         }
 
@@ -386,31 +388,45 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             }
                         />
 
-                        // Ask AI directly (primary fallback)
-                        <div
-                            class="ai-fallback-item"
-                            on:mousedown=move |_| do_ai_generate()
-                        >
-                            <span class="ai-fallback-icon">"🤖"</span>
-                            <span class="ai-fallback-text">
-                                "Ask AI about \""
-                                {move || search_query.get()}
-                                "\""
-                            </span>
-                            <span class="ai-fallback-hint">"Recommended"</span>
-                        </div>
+                        // AI/Web search options (require >= 5 chars when catalog matches exist)
+                        {move || {
+                            let query_len = search_query.get().len();
+                            let has_catalog_matches = !suggestions.get().is_empty();
+                            let show_ai_web = query_len >= 5 || !has_catalog_matches;
 
-                        // Web search option
-                        <div
-                            class="ai-fallback-item"
-                            on:mousedown=move |_| do_web_search()
-                        >
-                            <span class="ai-fallback-icon">"🌐"</span>
-                            <span class="ai-fallback-text">
-                                "Search web for specs"
-                            </span>
-                            <span class="ai-fallback-hint">"Scrape pages"</span>
-                        </div>
+                            if show_ai_web {
+                                view! {
+                                    <div
+                                        class="ai-fallback-item"
+                                        on:mousedown=move |_| do_ai_generate()
+                                    >
+                                        <span class="ai-fallback-icon">"🤖"</span>
+                                        <span class="ai-fallback-text">
+                                            "Ask AI about \""
+                                            {move || search_query.get()}
+                                            "\""
+                                        </span>
+                                        <span class="ai-fallback-hint">"Recommended"</span>
+                                    </div>
+                                    <div
+                                        class="ai-fallback-item"
+                                        on:mousedown=move |_| do_web_search()
+                                    >
+                                        <span class="ai-fallback-icon">"🌐"</span>
+                                        <span class="ai-fallback-text">
+                                            "Search web for specs"
+                                        </span>
+                                        <span class="ai-fallback-hint">"Scrape pages"</span>
+                                    </div>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <div class="specificity-hint">
+                                        "Select from above or type more to search AI/web"
+                                    </div>
+                                }.into_any()
+                            }
+                        }}
 
                         // Paste URL option
                         <div
@@ -468,12 +484,15 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 </div>
             </Show>
 
-            // Fetch error
-            {move || fetch_error.get().map(|e| view! {
-                <div class="error-message">
-                    <strong>"Error: "</strong>{e}
-                </div>
-            })}
+            // Fetch error (hidden when dropdown is visible)
+            {move || {
+                if show_suggestions.get() { return None; }
+                fetch_error.get().map(|e| view! {
+                    <div class="error-message">
+                        <strong>"Error: "</strong>{e}
+                    </div>
+                })
+            }}
 
             // Specs display
             {move || {

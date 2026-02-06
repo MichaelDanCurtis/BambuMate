@@ -220,15 +220,11 @@ impl ScraperHttpClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            let truncated = if body.len() > 1024 {
-                format!("{}...", &body[..1024])
-            } else {
-                body
-            };
             return Err(format!(
-                "HTTP error fetching '{}': {} - {}",
-                url, status, truncated
+                "HTTP error fetching '{}': {} {}",
+                url,
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown")
             ));
         }
 
