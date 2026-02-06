@@ -92,10 +92,10 @@ Plans:
   1. Defect-to-setting rules are loaded from a TOML config file, not hardcoded -- adding a new defect mapping requires editing TOML, not Rust code
   2. Given a defect type and severity, the engine produces a ranked list of parameter adjustments (most likely fix first, alternatives listed)
   3. When multiple defect fixes conflict (e.g., stringing wants more retraction, but that risks under-extrusion), the engine identifies the conflict and presents it to the user
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 05-01: TOML-based rule engine with ranked recommendations and conflict detection
+- [ ] 05-01-PLAN.md -- TOML-based rule engine with types, evaluation, ranking, and conflict detection
 
 ### Phase 6: AI Print Analysis
 **Goal**: Users can photograph a test print and receive AI-powered defect analysis with specific, profile-aware setting change recommendations
