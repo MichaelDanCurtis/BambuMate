@@ -417,3 +417,164 @@ mod tests {
         assert_eq!(detect_material_type(&profile), "PLA");
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::mapper::DetectedDefect;
+
+    #[test]
+    fn test_format_recommendations_from_evaluation() {
+        let defects = vec![DetectedDefect {
+            defect_type: "stringing".to_string(),
+            severity: 0.6,
+            confidence: 0.85,
+        }];
+
+        let mut current_values = HashMap::new();
+        current_values.insert("filament_retraction_length".to_string(), 0.8);
+        current_values.insert("nozzle_temperature".to_string(), 210.0);
+
+        let engine = RuleEngine::new(default_rules());
+        let evaluation = engine.evaluate(&defects, &current_values, &MaterialType::PLA);
+
+        let recommendations = format_recommendations(&evaluation, &current_values);
+
+        // Should have retraction recommendation for stringing
+        assert!(!recommendations.is_empty(), "Should produce recommendations");
+
+        let retraction_rec = recommendations
+            .iter()
+            .find(|r| r.parameter == "filament_retraction_length");
+        assert!(
+            retraction_rec.is_some(),
+            "Should have retraction recommendation"
+        );
+
+        let rec = retraction_rec.unwrap();
+        assert!(rec.change_display.contains("->"), "Should show change");
+        assert_eq!(rec.unit, "mm");
+    }
+
+    #[test]
+    fn test_extract_profile_values_with_arrays() {
+        use serde_json::json;
+
+        // Bambu Studio stores many values as string arrays
+        let json_str = serde_json::to_string(&json!({
+            "nozzle_temperature": ["215"],
+            "cool_plate_temp": ["55"],
+            "filament_retraction_length": ["0.8"],
+            "filament_type": ["PLA"]
+        }))
+        .unwrap();
+
+        let profile = FilamentProfile::from_json(&json_str).unwrap();
+
+        let values = extract_profile_values(&profile);
+        assert_eq!(values.get("nozzle_temperature"), Some(&215.0));
+        assert_eq!(values.get("cool_plate_temp"), Some(&55.0));
+        assert_eq!(values.get("filament_retraction_length"), Some(&0.8));
+    }
+
+    #[test]
+    fn test_detect_material_type_from_inherits() {
+        use serde_json::json;
+
+        let json_str = serde_json::to_string(&json!({
+            "inherits": "Generic PETG @BBL"
+        }))
+        .unwrap();
+
+        let profile = FilamentProfile::from_json(&json_str).unwrap();
+
+        assert_eq!(detect_material_type(&profile), "PETG");
+    }
+
+    #[test]
+    fn test_detect_material_type_from_filament_type() {
+        use serde_json::json;
+
+        let json_str = serde_json::to_string(&json!({
+            "filament_type": ["ABS"]
+        }))
+        .unwrap();
+
+        let profile = FilamentProfile::from_json(&json_str).unwrap();
+
+        assert_eq!(detect_material_type(&profile), "ABS");
+    }
+
+    #[test]
+    fn test_full_pipeline_with_mock_defects() {
+        // Test the full format_recommendations pipeline
+        let mut current_values = HashMap::new();
+        current_values.insert("nozzle_temperature".to_string(), 220.0);
+        current_values.insert("filament_retraction_length".to_string(), 0.5);
+        current_values.insert("cool_plate_temp".to_string(), 65.0);
+
+        let defects = vec![
+            DetectedDefect {
+                defect_type: "stringing".to_string(),
+                severity: 0.7,
+                confidence: 0.9,
+            },
+            DetectedDefect {
+                defect_type: "warping".to_string(),
+                severity: 0.4,
+                confidence: 0.75,
+            },
+        ];
+
+        let engine = RuleEngine::new(default_rules());
+        let evaluation = engine.evaluate(&defects, &current_values, &MaterialType::PLA);
+        let recommendations = format_recommendations(&evaluation, &current_values);
+
+        // Should have recommendations for both defects
+        let stringing_recs: Vec<_> = recommendations
+            .iter()
+            .filter(|r| r.defect == "stringing")
+            .collect();
+        let warping_recs: Vec<_> = recommendations
+            .iter()
+            .filter(|r| r.defect == "warping")
+            .collect();
+
+        assert!(
+            !stringing_recs.is_empty(),
+            "Should have stringing recommendations"
+        );
+        assert!(
+            !warping_recs.is_empty(),
+            "Should have warping recommendations"
+        );
+    }
+
+    #[test]
+    fn test_recommendation_display_fields() {
+        let mut current_values = HashMap::new();
+        current_values.insert("nozzle_temperature".to_string(), 215.0);
+
+        let defects = vec![DetectedDefect {
+            defect_type: "stringing".to_string(),
+            severity: 0.5,
+            confidence: 0.8,
+        }];
+
+        let engine = RuleEngine::new(default_rules());
+        let evaluation = engine.evaluate(&defects, &current_values, &MaterialType::PLA);
+        let recommendations = format_recommendations(&evaluation, &current_values);
+
+        // Check that all display fields are populated
+        for rec in &recommendations {
+            assert!(!rec.defect.is_empty(), "Defect should be set");
+            assert!(!rec.parameter.is_empty(), "Parameter should be set");
+            assert!(!rec.parameter_label.is_empty(), "Label should be set");
+            assert!(
+                rec.change_display.contains("->"),
+                "Change display should show arrow"
+            );
+            assert!(!rec.rationale.is_empty(), "Rationale should be set");
+        }
+    }
+}
