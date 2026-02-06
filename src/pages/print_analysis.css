@@ -194,3 +194,25 @@
     color: var(--color-danger);
     border: 1px solid var(--border-danger);
 }
+
+/* Apply Message */
+.apply-message {
+    width: 100%;
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    text-align: center;
+}
+
+.apply-message.success {
+    background: var(--bg-success);
+    color: var(--color-success);
+    border: 1px solid var(--border-success);
+}
+
+.apply-message.error {
+    background: var(--bg-danger);
+    color: var(--color-danger);
+    border: 1px solid var(--border-danger);
+}

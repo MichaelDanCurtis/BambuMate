@@ -12,6 +12,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::commands;
 use crate::components::change_preview::ChangePreview;
 use crate::components::defect_report::DefectReportDisplay;
+use crate::components::history_panel::HistoryPanel;
 
 /// Request payload for print analysis.
 #[derive(Debug, Clone, Serialize)]
@@ -278,6 +279,8 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                                                     result.changes_applied.len(),
                                                                     result.backup_path
                                                                 )));
+                                                                // Refresh history panel
+                                                                set_history_key.update(|k| *k += 1);
                                                             }
                                                             Err(e) => {
                                                                 set_apply_message.set(Some(format!("Apply failed: {}", e)));
@@ -293,6 +296,46 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                                 set_show_apply_dialog.set(false);
                                             })
                                         />
+                                    }
+                                })}
+
+                                // History panel - shows past sessions and revert option
+                                {path_for_display.clone().map(|path| {
+                                    let on_revert = Callback::new(move |session_id: i64| {
+                                        spawn_local(async move {
+                                            match commands::revert_to_backup(session_id).await {
+                                                Ok(msg) => {
+                                                    set_revert_message.set(Some(format!("Success: {}", msg)));
+                                                    set_history_key.update(|k| *k += 1);
+                                                }
+                                                Err(e) => {
+                                                    set_revert_message.set(Some(format!("Error: {}", e)));
+                                                }
+                                            }
+                                        });
+                                    });
+
+                                    view! {
+                                        <div class="history-sidebar">
+                                            {move || {
+                                                let _key = history_key.get();
+                                                let p = path.clone();
+                                                view! {
+                                                    <HistoryPanel
+                                                        profile_path=p
+                                                        on_revert=on_revert.clone()
+                                                    />
+                                                }
+                                            }}
+                                            {move || revert_message.get().map(|msg| {
+                                                let is_error = msg.starts_with("Error:");
+                                                view! {
+                                                    <p class=format!("revert-message {}", if is_error { "error" } else { "success" })>
+                                                        {msg}
+                                                    </p>
+                                                }
+                                            })}
+                                        </div>
                                     }
                                 })}
                             </div>
