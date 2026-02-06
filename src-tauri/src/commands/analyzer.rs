@@ -4,6 +4,8 @@
 //! 1. Loads the current profile for context
 //! 2. Calls the vision API for defect detection
 //! 3. Runs defects through the rule engine for recommendations
+//!
+//! Also provides apply_recommendations for applying changes to profiles.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,10 +13,12 @@ use std::path::Path;
 use base64::Engine;
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use tauri_plugin_store::StoreExt;
 use tracing::{info, warn};
 
 use crate::analyzer::{analyze_image, DefectReport};
+use crate::history::{AppliedChange, RefinementHistory};
 use crate::mapper::{default_rules, Conflict, RuleEngine};
 use crate::profile::FilamentProfile;
 use crate::scraper::types::MaterialType;
@@ -30,8 +34,30 @@ pub struct AnalyzeRequest {
     pub material_type: Option<String>,
 }
 
-/// Full analysis response including defects, recommendations, and conflicts.
+/// Request payload for applying recommendations.
+#[derive(Debug, Deserialize)]
+pub struct ApplyRequest {
+    /// Path to the profile to modify
+    pub profile_path: String,
+    /// Session ID from analyze_print response
+    pub session_id: i64,
+    /// Parameters to apply (user can deselect some)
+    pub selected_parameters: Vec<String>,
+}
+
+/// Result of applying recommendations.
 #[derive(Debug, Serialize)]
+pub struct ApplyResult {
+    /// Path to the backup created before modification
+    pub backup_path: String,
+    /// Changes that were applied
+    pub changes_applied: Vec<AppliedChange>,
+    /// Path to the modified profile
+    pub profile_path: String,
+}
+
+/// Full analysis response including defects, recommendations, and conflicts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyzeResponse {
     /// AI-detected defects with severity and confidence
     pub defect_report: DefectReport,
@@ -43,10 +69,13 @@ pub struct AnalyzeResponse {
     pub current_values: HashMap<String, f32>,
     /// Material type used for safe-range enforcement
     pub material_type: String,
+    /// Session ID for apply flow (None if history recording failed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
 }
 
 /// Recommendation with display-friendly formatting.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecommendationDisplay {
     /// Which defect triggered this
     pub defect: String,
@@ -130,13 +159,165 @@ pub async fn analyze_print(
         evaluation.conflicts.len()
     );
 
+    // Record analysis session in history
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let db_path = data_dir.join("refinement_history.db");
+
+    let mut session_id: Option<i64> = None;
+
+    if let Ok(history) = RefinementHistory::new(&db_path) {
+        // Profile path or "no_profile" for material-only analysis
+        let profile_for_history = request
+            .profile_path
+            .clone()
+            .unwrap_or_else(|| "no_profile".to_string());
+
+        // Build response JSON for storage (without session_id to avoid recursion)
+        let analysis_for_storage = serde_json::json!({
+            "defect_report": defect_report,
+            "recommendations": recommendations,
+            "conflicts": evaluation.conflicts,
+            "current_values": current_values,
+            "material_type": material_type,
+        });
+        let analysis_json = serde_json::to_string(&analysis_for_storage).unwrap_or_default();
+
+        // Store image only if profile was provided (for profile-specific history)
+        let image_for_history = if request.profile_path.is_some() {
+            Some(request.image_base64.as_str())
+        } else {
+            None // Skip image storage for profile-less analysis
+        };
+
+        match history.record_analysis(&profile_for_history, image_for_history, &analysis_json) {
+            Ok(id) => {
+                session_id = Some(id);
+                info!("Recorded analysis session {}", id);
+            }
+            Err(e) => {
+                warn!("Failed to record analysis history: {}", e);
+                // Non-fatal - don't fail the analysis
+            }
+        }
+    }
+
     Ok(AnalyzeResponse {
         defect_report,
         recommendations,
         conflicts: evaluation.conflicts,
         current_values,
         material_type,
+        session_id,
     })
+}
+
+/// Apply selected recommendations to a profile.
+///
+/// Creates a backup before modification, applies the selected parameter changes,
+/// and records the application in the refinement history.
+#[tauri::command]
+pub async fn apply_recommendations(
+    app: tauri::AppHandle,
+    request: ApplyRequest,
+) -> Result<ApplyResult, String> {
+    info!(
+        "Applying recommendations from session {} to {}",
+        request.session_id, request.profile_path
+    );
+
+    // 1. Get history store to retrieve analysis results
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let db_path = data_dir.join("refinement_history.db");
+    let history =
+        RefinementHistory::new(&db_path).map_err(|e| format!("Failed to open history: {}", e))?;
+
+    // 2. Get the session to retrieve analysis results
+    let session = history.get_session(request.session_id)?;
+    let analysis: AnalyzeResponse = serde_json::from_str(&session.analysis_json)
+        .map_err(|e| format!("Failed to parse analysis: {}", e))?;
+
+    // 3. Create backup BEFORE any modification
+    let profile_path = Path::new(&request.profile_path);
+    let backup_path = crate::profile::writer::backup_profile(profile_path)
+        .map_err(|e| format!("Failed to create backup: {}", e))?;
+
+    // 4. Load current profile
+    let profile = crate::profile::reader::read_profile(profile_path)
+        .map_err(|e| format!("Failed to read profile: {}", e))?;
+
+    // 5. Apply selected recommendations
+    let mut data = profile.raw().clone();
+    let mut changes: Vec<AppliedChange> = Vec::new();
+
+    for rec in &analysis.recommendations {
+        if !request.selected_parameters.contains(&rec.parameter) {
+            continue;
+        }
+
+        // Format value for Bambu Studio (string in array)
+        let formatted = format_value_for_profile(rec.recommended_value, &rec.parameter);
+        data.insert(rec.parameter.clone(), serde_json::json!([formatted]));
+
+        changes.push(AppliedChange {
+            parameter: rec.parameter.clone(),
+            old_value: rec.current_value,
+            new_value: rec.recommended_value,
+        });
+    }
+
+    let modified = FilamentProfile::from_map(data);
+
+    // 6. Write modified profile atomically
+    crate::profile::writer::write_profile_atomic(&modified, profile_path)
+        .map_err(|e| format!("Failed to write profile: {}", e))?;
+
+    // 7. Record apply in history
+    history.record_apply(
+        request.session_id,
+        &changes,
+        backup_path.to_string_lossy().as_ref(),
+    )?;
+
+    info!(
+        "Applied {} changes to profile, backup at {:?}",
+        changes.len(),
+        backup_path
+    );
+
+    Ok(ApplyResult {
+        backup_path: backup_path.to_string_lossy().to_string(),
+        changes_applied: changes,
+        profile_path: request.profile_path,
+    })
+}
+
+/// Format a value for Bambu Studio profile format.
+/// Different parameters need different precision.
+fn format_value_for_profile(value: f32, parameter: &str) -> String {
+    match parameter {
+        // Temperatures: integers
+        "nozzle_temperature" | "cool_plate_temp" | "hot_plate_temp" | "textured_plate_temp"
+        | "nozzle_temperature_initial_layer" => {
+            format!("{:.0}", value)
+        }
+        // Percentages: integers
+        "fan_min_speed" | "fan_max_speed" | "overhang_fan_speed" => {
+            format!("{:.0}", value)
+        }
+        // Retraction length: 1 decimal
+        "filament_retraction_length" => format!("{:.1}", value),
+        // Speed: integers
+        "filament_retraction_speed" => format!("{:.0}", value),
+        // Flow/pressure: 2 decimals
+        "filament_flow_ratio" | "pressure_advance" => format!("{:.2}", value),
+        _ => format!("{}", value),
+    }
 }
 
 /// Get AI provider settings from preferences and keychain.
