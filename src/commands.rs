@@ -341,6 +341,30 @@ pub async fn install_profile(
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
 
+// -- Profile listing --
+
+/// Info about an installed profile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileInfo {
+    pub name: String,
+    pub filament_type: Option<String>,
+    pub filament_id: Option<String>,
+    pub path: String,
+    pub is_user_profile: bool,
+}
+
+/// List all user filament profiles from Bambu Studio.
+pub async fn list_profiles() -> Result<Vec<ProfileInfo>, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("list_profiles", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
 // -- Catalog commands for autocomplete-style search --
 
 /// Get the status of the local filament catalog.

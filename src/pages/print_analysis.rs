@@ -95,6 +95,9 @@ pub fn PrintAnalysisPage() -> impl IntoView {
     let (image_preview, set_image_preview) = signal::<Option<String>>(None);
     let (material_override, set_material_override) = signal::<Option<String>>(None);
     let (profile_path, set_profile_path) = signal::<Option<String>>(None);
+    // Profile list for dropdown
+    let (profiles, set_profiles) = signal::<Vec<commands::ProfileInfo>>(Vec::new());
+    let (profiles_loading, set_profiles_loading) = signal(true);
     // Apply flow state
     let (show_apply_dialog, set_show_apply_dialog) = signal(false);
     let (current_session_id, set_current_session_id) = signal::<Option<i64>>(None);
@@ -102,6 +105,15 @@ pub fn PrintAnalysisPage() -> impl IntoView {
     // History/revert state
     let (revert_message, set_revert_message) = signal::<Option<String>>(None);
     let (history_key, set_history_key) = signal(0u32);
+
+    // Load profiles on mount
+    spawn_local(async move {
+        match commands::list_profiles().await {
+            Ok(p) => set_profiles.set(p),
+            Err(e) => web_sys::console::error_1(&format!("Failed to load profiles: {}", e).into()),
+        }
+        set_profiles_loading.set(false);
+    });
 
     // Handle analyze button click
     let on_analyze = move |_| {
@@ -179,22 +191,44 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                 </select>
                             </div>
 
-                            <div class="profile-path-input">
-                                <label>"Profile path (optional):"</label>
-                                <input
-                                    type="text"
-                                    class="input"
-                                    placeholder="/path/to/filament/profile.json"
-                                    on:input=move |ev| {
-                                        let value = event_target_value_input(&ev);
-                                        if value.is_empty() {
-                                            set_profile_path.set(None);
+                            <div class="profile-selector">
+                                <label>"Profile to update (optional):"</label>
+                                {move || {
+                                    if profiles_loading.get() {
+                                        view! { <p class="loading-hint">"Loading profiles..."</p> }.into_any()
+                                    } else {
+                                        let profile_list = profiles.get();
+                                        if profile_list.is_empty() {
+                                            view! {
+                                                <p class="no-profiles-hint">"No Bambu Studio profiles found. Install Bambu Studio first."</p>
+                                            }.into_any()
                                         } else {
-                                            set_profile_path.set(Some(value));
+                                            view! {
+                                                <select
+                                                    class="input profile-select"
+                                                    on:change=move |ev| {
+                                                        let value = event_target_value(&ev);
+                                                        if value.is_empty() {
+                                                            set_profile_path.set(None);
+                                                        } else {
+                                                            set_profile_path.set(Some(value));
+                                                        }
+                                                    }
+                                                >
+                                                    <option value="">"-- Select a profile --"</option>
+                                                    {profile_list.iter().map(|p| {
+                                                        let path = p.path.clone();
+                                                        let display = format!("{} ({})", p.name, p.filament_type.clone().unwrap_or_else(|| "Unknown".to_string()));
+                                                        view! {
+                                                            <option value=path.clone()>{display}</option>
+                                                        }
+                                                    }).collect::<Vec<_>>()}
+                                                </select>
+                                            }.into_any()
                                         }
                                     }
-                                />
-                                <p class="input-hint">"Enter a Bambu Studio profile path to get current values and enable history tracking."</p>
+                                }}
+                                <p class="input-hint">"Select a profile to enable Apply and track refinement history."</p>
                             </div>
 
                             <div class="action-buttons">

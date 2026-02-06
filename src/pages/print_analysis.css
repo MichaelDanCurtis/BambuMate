@@ -146,22 +146,40 @@
     width: 100%;
 }
 
-/* Profile Path Input */
-.profile-path-input {
+/* Profile Selector */
+.profile-selector {
     margin-bottom: 1.5rem;
     width: 100%;
     max-width: 500px;
 }
 
-.profile-path-input label {
+.profile-selector label {
     display: block;
     font-weight: 500;
     color: var(--text-secondary);
     margin-bottom: 0.5rem;
 }
 
-.profile-path-input input {
+.profile-select {
     width: 100%;
+    padding: 0.5rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+
+.profile-select option {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.loading-hint,
+.no-profiles-hint {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    font-style: italic;
 }
 
 .input-hint {
