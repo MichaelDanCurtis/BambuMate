@@ -1,5 +1,6 @@
 mod commands;
 mod error;
+pub mod mapper;
 pub mod profile;
 pub mod scraper;
 
@@ -29,6 +30,12 @@ pub fn run() {
             commands::scraper::search_filament,
             commands::scraper::get_cached_filament,
             commands::scraper::clear_filament_cache,
+            commands::scraper::extract_specs_from_url,
+            commands::scraper::get_catalog_status,
+            commands::scraper::refresh_catalog,
+            commands::scraper::search_catalog,
+            commands::scraper::fetch_filament_from_catalog,
+            commands::scraper::generate_specs_from_ai,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

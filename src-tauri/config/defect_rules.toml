@@ -1,0 +1,168 @@
+# Defect-to-Parameter Mapping Rules for BambuMate
+#
+# This file defines the knowledge base for translating detected print defects
+# into actionable profile parameter adjustments.
+#
+# Structure:
+# - [defects.*] - Defect type definitions with display names and severity ranges
+# - [[rules]] - Adjustment rules triggered by defect detection
+# - [[conflicts]] - Known parameter interaction conflicts
+
+# =============================================================================
+# DEFECT TYPE DEFINITIONS
+# =============================================================================
+
+[defects.stringing]
+display_name = "Stringing/Oozing"
+description = "Fine threads or wisps of filament between printed parts"
+severity_range = [0.0, 1.0]
+
+[defects.warping]
+display_name = "Warping/Lifting"
+description = "Corners or edges lifting from the build plate during print"
+severity_range = [0.0, 1.0]
+
+[defects.layer_adhesion]
+display_name = "Poor Layer Adhesion"
+description = "Weak bonds between layers, may delaminate under stress"
+severity_range = [0.0, 1.0]
+
+[defects.elephants_foot]
+display_name = "Elephant's Foot"
+description = "First layer bulges outward, wider than intended dimensions"
+severity_range = [0.0, 1.0]
+
+[defects.under_extrusion]
+display_name = "Under-Extrusion"
+description = "Gaps in layers, missing material, weak/thin walls"
+severity_range = [0.0, 1.0]
+
+[defects.over_extrusion]
+display_name = "Over-Extrusion"
+description = "Excess material causing blobs, rough surfaces, dimensional inaccuracy"
+severity_range = [0.0, 1.0]
+
+[defects.z_banding]
+display_name = "Z-Banding/Layer Lines"
+description = "Visible horizontal lines at regular intervals (often mechanical)"
+severity_range = [0.0, 1.0]
+
+# =============================================================================
+# STRINGING RULES
+# =============================================================================
+
+[[rules]]
+defect = "stringing"
+adjustments = [
+    { parameter = "filament_retraction_length", operation = "increase", amount = 0.5, unit = "mm", priority = 1, rationale = "Increase retraction to pull filament back during travel moves" },
+    { parameter = "nozzle_temperature", operation = "decrease", amount = 5.0, unit = "C", priority = 2, rationale = "Lower temp reduces filament viscosity and oozing" },
+    { parameter = "filament_retraction_speed", operation = "increase", amount = 5.0, unit = "mm/s", priority = 3, rationale = "Faster retraction reduces stringing on travel moves" },
+]
+
+# Severe stringing - more aggressive adjustments
+[[rules]]
+defect = "stringing"
+severity_min = 0.7
+adjustments = [
+    { parameter = "filament_retraction_length", operation = "increase", amount = 1.0, unit = "mm", priority = 1, rationale = "Severe stringing requires longer retraction" },
+    { parameter = "nozzle_temperature", operation = "decrease", amount = 10.0, unit = "C", priority = 2, rationale = "Significantly reduce temp for severe stringing" },
+]
+
+# =============================================================================
+# WARPING RULES
+# =============================================================================
+
+[[rules]]
+defect = "warping"
+adjustments = [
+    { parameter = "cool_plate_temp", operation = "increase", amount = 5.0, unit = "C", priority = 1, rationale = "Higher bed temp improves first layer adhesion" },
+    { parameter = "hot_plate_temp", operation = "increase", amount = 5.0, unit = "C", priority = 1, rationale = "Higher bed temp improves first layer adhesion" },
+    { parameter = "textured_plate_temp", operation = "increase", amount = 5.0, unit = "C", priority = 1, rationale = "Higher bed temp improves first layer adhesion" },
+    { parameter = "fan_min_speed", operation = "decrease", amount = 15.0, unit = "%", priority = 2, rationale = "Reduce cooling to prevent thermal stress" },
+    { parameter = "fan_max_speed", operation = "decrease", amount = 15.0, unit = "%", priority = 2, rationale = "Reduce cooling to prevent thermal stress" },
+    { parameter = "nozzle_temperature_initial_layer", operation = "increase", amount = 5.0, unit = "C", priority = 3, rationale = "Hotter first layer bonds better to bed" },
+]
+
+# =============================================================================
+# LAYER ADHESION RULES
+# =============================================================================
+
+[[rules]]
+defect = "layer_adhesion"
+adjustments = [
+    { parameter = "nozzle_temperature", operation = "increase", amount = 5.0, unit = "C", priority = 1, rationale = "Higher temp allows layers to bond better" },
+    { parameter = "fan_min_speed", operation = "decrease", amount = 10.0, unit = "%", priority = 2, rationale = "Less cooling gives more time for layer bonding" },
+    { parameter = "fan_max_speed", operation = "decrease", amount = 10.0, unit = "%", priority = 2, rationale = "Less cooling gives more time for layer bonding" },
+    { parameter = "filament_flow_ratio", operation = "increase", amount = 0.02, unit = "ratio", priority = 3, rationale = "Slight over-extrusion improves layer contact" },
+]
+
+# =============================================================================
+# ELEPHANT'S FOOT RULES
+# =============================================================================
+
+[[rules]]
+defect = "elephants_foot"
+adjustments = [
+    { parameter = "cool_plate_temp", operation = "decrease", amount = 5.0, unit = "C", priority = 1, rationale = "Lower bed temp makes first layer solidify faster" },
+    { parameter = "hot_plate_temp", operation = "decrease", amount = 5.0, unit = "C", priority = 1, rationale = "Lower bed temp makes first layer solidify faster" },
+    { parameter = "textured_plate_temp", operation = "decrease", amount = 5.0, unit = "C", priority = 1, rationale = "Lower bed temp makes first layer solidify faster" },
+    { parameter = "nozzle_temperature_initial_layer", operation = "decrease", amount = 5.0, unit = "C", priority = 2, rationale = "Lower initial layer temp prevents spreading" },
+]
+
+# =============================================================================
+# UNDER-EXTRUSION RULES
+# =============================================================================
+
+[[rules]]
+defect = "under_extrusion"
+adjustments = [
+    { parameter = "filament_flow_ratio", operation = "increase", amount = 0.03, unit = "ratio", priority = 1, rationale = "Increase flow to compensate for under-extrusion" },
+    { parameter = "nozzle_temperature", operation = "increase", amount = 5.0, unit = "C", priority = 2, rationale = "Higher temp ensures consistent filament flow" },
+    { parameter = "filament_retraction_length", operation = "decrease", amount = 0.3, unit = "mm", priority = 3, rationale = "Less retraction prevents filament starvation after travel" },
+]
+
+# =============================================================================
+# OVER-EXTRUSION RULES
+# =============================================================================
+
+[[rules]]
+defect = "over_extrusion"
+adjustments = [
+    { parameter = "filament_flow_ratio", operation = "decrease", amount = 0.03, unit = "ratio", priority = 1, rationale = "Reduce flow to fix over-extrusion" },
+    { parameter = "nozzle_temperature", operation = "decrease", amount = 5.0, unit = "C", priority = 2, rationale = "Lower temp reduces filament flow rate" },
+]
+
+# =============================================================================
+# Z-BANDING RULES
+# Note: Z-banding is primarily mechanical, but some software adjustments can help
+# =============================================================================
+
+[[rules]]
+defect = "z_banding"
+adjustments = [
+    { parameter = "pressure_advance", operation = "set", amount = 0.04, unit = "s", priority = 1, rationale = "Pressure advance calibration can reduce visible layer artifacts" },
+]
+
+# =============================================================================
+# KNOWN CONFLICTS
+# =============================================================================
+
+[[conflicts]]
+name = "retraction_extrusion_tradeoff"
+description = "Increasing retraction helps stringing but can cause under-extrusion gaps"
+parameters = ["filament_retraction_length", "filament_flow_ratio"]
+
+[[conflicts]]
+name = "temperature_stringing_adhesion"
+description = "Lower temps reduce stringing but hurt layer adhesion"
+parameters = ["nozzle_temperature"]
+
+[[conflicts]]
+name = "cooling_warping_stringing"
+description = "More cooling helps stringing but can cause warping; less cooling helps warping but increases stringing"
+parameters = ["fan_min_speed", "fan_max_speed"]
+
+[[conflicts]]
+name = "bed_temp_warping_elephants_foot"
+description = "Higher bed temp prevents warping but can cause elephant's foot"
+parameters = ["cool_plate_temp", "hot_plate_temp", "textured_plate_temp"]

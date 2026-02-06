@@ -26,6 +26,8 @@ chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
 tokio = { version = "1", features = ["time"] }
 rand = "0.9"
+urlencoding = "2.1"
+toml = "0.8"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
