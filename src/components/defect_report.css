@@ -301,3 +301,35 @@
     font-size: 0.85rem;
     color: var(--color-warning);
 }
+
+/* Apply Section */
+.apply-section {
+    margin-top: 1.5rem;
+    padding: 1.25rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    text-align: center;
+}
+
+.apply-btn {
+    padding: 0.75rem 1.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.apply-btn:hover {
+    background: var(--accent-hover);
+}
+
+.apply-hint {
+    margin: 0.75rem 0 0 0;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}

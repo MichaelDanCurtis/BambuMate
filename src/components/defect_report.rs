@@ -13,7 +13,14 @@ pub fn DefectReportDisplay(
     recommendations: Vec<RecommendationDisplay>,
     conflicts: Vec<Conflict>,
     material_type: String,
+    /// Optional profile path for apply functionality
+    #[prop(default = None)] profile_path: Option<String>,
+    /// Callback when user clicks Apply Changes button
+    #[prop(default = None)] on_apply_click: Option<Callback<()>>,
 ) -> impl IntoView {
+    // Clone for use in apply section
+    let has_profile = profile_path.is_some();
+    let has_recs = !recommendations.is_empty();
     view! {
         <div class="defect-report">
             <style>{include_str!("defect_report.css")}</style>
@@ -63,6 +70,26 @@ pub fn DefectReportDisplay(
                                 <RecommendationCard recommendation=rec.clone() />
                             }).collect::<Vec<_>>()}
                         </div>
+                    </div>
+                }
+            })}
+
+            // Apply button (only if profile_path provided and recommendations exist)
+            {(has_recs && has_profile).then(|| {
+                let on_click = on_apply_click.clone();
+                view! {
+                    <div class="apply-section">
+                        <button
+                            class="btn btn-primary apply-btn"
+                            on:click=move |_| {
+                                if let Some(ref cb) = on_click {
+                                    cb.run(());
+                                }
+                            }
+                        >
+                            "Apply Changes to Profile"
+                        </button>
+                        <p class="apply-hint">"A backup will be created before any changes are made."</p>
                     </div>
                 }
             })}
