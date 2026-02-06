@@ -109,7 +109,7 @@ pub struct Recommendation {
 }
 
 /// A detected conflict between recommendations.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conflict {
     /// Parameter(s) involved in the conflict
     pub parameter: String,

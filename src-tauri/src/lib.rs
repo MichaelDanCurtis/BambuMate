@@ -41,6 +41,10 @@ pub fn run() {
             commands::scraper::fetch_filament_from_catalog,
             commands::scraper::generate_specs_from_ai,
             commands::analyzer::analyze_print,
+            commands::analyzer::apply_recommendations,
+            commands::history::list_history_sessions,
+            commands::history::get_history_session,
+            commands::history::revert_to_backup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
