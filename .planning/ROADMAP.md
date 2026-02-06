@@ -15,8 +15,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: App Foundation** - Tauri 2.0 scaffold with Leptos frontend, secure config, health check, macOS build
 - [x] **Phase 2: Profile Engine** - Read, write, validate, and round-trip Bambu Studio profile JSON with correct inheritance
 - [x] **Phase 3: Filament Scraping** - Scrape manufacturer specs with LLM-assisted extraction, validate, and cache
-- [ ] **Phase 4: Profile Generation & Installation** - Generate profiles from scraped data, install to Bambu Studio, detect running instances
-- [ ] **Phase 5: Defect Knowledge Base** - TOML-driven rule engine mapping defects to profile parameter adjustments
+- [x] **Phase 4: Profile Generation & Installation** - Generate profiles from scraped data, install to Bambu Studio, detect running instances
+- [x] **Phase 5: Defect Knowledge Base** - TOML-driven rule engine mapping defects to profile parameter adjustments
 - [ ] **Phase 6: AI Print Analysis** - Photo-to-defect-report pipeline with vision API integration and profile-aware recommendations
 - [ ] **Phase 7: Auto-Tuning & Refinement** - Apply AI recommendations to profiles with backup, iterative print-analyze-fix loop
 - [ ] **Phase 8: Integration & Power Features** - Bambu Studio launcher, OpenSCAD Studio bridge, batch operations, visual diff
@@ -95,7 +95,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 05-01-PLAN.md -- TOML-based rule engine with types, evaluation, ranking, and conflict detection
+- [x] 05-01-PLAN.md -- TOML-based rule engine with types, evaluation, ranking, and conflict detection
 
 ### Phase 6: AI Print Analysis
 **Goal**: Users can photograph a test print and receive AI-powered defect analysis with specific, profile-aware setting change recommendations
@@ -107,11 +107,12 @@ Plans:
   3. Recommendations reference specific Bambu Studio parameter names with current value -> suggested value shown visually (e.g., "nozzle_temperature: 215 -> 210")
   4. No recommendation exceeds safe operating ranges for the filament type (no PLA at 300C, no ABS with 0% fan)
   5. Photos are resized to max 1024px before being sent to AI APIs to control cost
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 06-01: AI vision client (Claude/OpenAI), photo resize, drag-drop UI
-- [ ] 06-02: Structured defect analysis with profile context and safe-range enforcement
+- [ ] 06-01-PLAN.md -- Analyzer module with image prep (resize/base64) and vision API calls for all 4 providers
+- [ ] 06-02-PLAN.md -- Tauri command layer wiring vision, profile reading, and rule engine for full analysis pipeline
+- [ ] 06-03-PLAN.md -- Frontend UI with drag-drop photo upload, defect report display, and recommendations visualization
 
 ### Phase 7: Auto-Tuning & Refinement
 **Goal**: Users can apply AI recommendations directly to profiles and iterate through print-analyze-fix cycles with full history
@@ -157,8 +158,8 @@ Note: Phase 3 depends only on Phase 1 and can run in parallel with Phase 2 if de
 | 1. App Foundation | 2/2 | Complete | 2026-02-05 |
 | 2. Profile Engine | 2/2 | Complete | 2026-02-05 |
 | 3. Filament Scraping | 2/2 | Complete | 2026-02-05 |
-| 4. Profile Generation & Installation | 0/2 | Not started | - |
-| 5. Defect Knowledge Base | 0/1 | Not started | - |
-| 6. AI Print Analysis | 0/2 | Not started | - |
+| 4. Profile Generation & Installation | 2/2 | Complete | 2026-02-05 |
+| 5. Defect Knowledge Base | 1/1 | Complete | 2026-02-06 |
+| 6. AI Print Analysis | 0/3 | Not started | - |
 | 7. Auto-Tuning & Refinement | 0/1 | Not started | - |
 | 8. Integration & Power Features | 0/3 | Not started | - |
