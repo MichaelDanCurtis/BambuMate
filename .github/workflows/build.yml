@@ -65,9 +65,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: BambuMate-${{ matrix.target }}
-          path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
       - name: Upload Windows artifacts
@@ -98,4 +96,7 @@ jobs:
         with:
           draft: true
           generate_release_notes: true
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.msi
+            artifacts/**/*.exe
