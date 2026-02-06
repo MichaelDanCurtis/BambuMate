@@ -52,7 +52,7 @@ impl RuleEngine {
                 .rules
                 .iter()
                 .filter(|r| r.defect == defect.defect_type)
-                .filter(|r| r.severity_min.map_or(true, |min| defect.severity >= min))
+                .filter(|r| r.severity_min.is_none_or(|min| defect.severity >= min))
                 .collect();
 
             for rule in applicable_rules {
