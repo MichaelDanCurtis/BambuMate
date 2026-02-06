@@ -206,25 +206,80 @@ pub struct InstallResult {
     pub bambu_studio_was_running: bool,
 }
 
+// -- Catalog types for autocomplete search --
+
+/// A single entry in the filament catalog.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CatalogEntry {
+    pub brand: String,
+    pub name: String,
+    pub material: String,
+    pub url_slug: String,
+    pub full_url: String,
+}
+
+/// A catalog search result with match score.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CatalogMatch {
+    pub entry: CatalogEntry,
+    pub score: f32,
+}
+
+/// Status of the local filament catalog.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CatalogStatus {
+    pub entry_count: usize,
+    pub needs_refresh: bool,
+}
+
 // -- Arg structs for filament/profile commands --
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchFilamentArgs {
     filament_name: String,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GenerateProfileArgs {
     specs: FilamentSpecs,
     target_printer: Option<String>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct InstallProfileArgs {
     profile_json: String,
     metadata_info: String,
     filename: String,
     force: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchCatalogArgs {
+    query: String,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FetchFromCatalogArgs {
+    entry: CatalogEntry,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtractFromUrlArgs {
+    url: String,
+    filament_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateFromAiArgs {
+    filament_name: String,
 }
 
 // -- Filament search and profile generation invoke wrappers --
@@ -284,4 +339,125 @@ pub async fn install_profile(
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Catalog commands for autocomplete-style search --
+
+/// Get the status of the local filament catalog.
+pub async fn get_catalog_status() -> Result<CatalogStatus, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("get_catalog_status", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Refresh the catalog by fetching all filaments from SpoolScout.
+/// This may take a few seconds as it fetches ~200 filaments.
+pub async fn refresh_catalog() -> Result<CatalogStatus, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("refresh_catalog", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Search the local catalog for filaments matching the query.
+/// Returns matches sorted by relevance (best first).
+pub async fn search_catalog(query: &str, limit: Option<usize>) -> Result<Vec<CatalogMatch>, String> {
+    let args = serde_wasm_bindgen::to_value(&SearchCatalogArgs {
+        query: query.to_string(),
+        limit,
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("search_catalog", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Fetch full specifications for a catalog entry.
+/// Uses the entry's URL to fetch specs via LLM extraction.
+pub async fn fetch_filament_from_catalog(entry: &CatalogEntry) -> Result<FilamentSpecs, String> {
+    let args = serde_wasm_bindgen::to_value(&FetchFromCatalogArgs {
+        entry: entry.clone(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("fetch_filament_from_catalog", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Extract specs from a user-provided URL.
+/// Useful for filaments not in the catalog.
+pub async fn extract_specs_from_url(url: &str, filament_name: &str) -> Result<FilamentSpecs, String> {
+    let args = serde_wasm_bindgen::to_value(&ExtractFromUrlArgs {
+        url: url.to_string(),
+        filament_name: filament_name.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("extract_specs_from_url", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Generate specs from AI knowledge (no web scraping needed).
+/// The AI uses its training knowledge to recommend settings for the filament.
+/// This is the ultimate fallback when catalog and web search fail.
+pub async fn generate_specs_from_ai(filament_name: &str) -> Result<FilamentSpecs, String> {
+    let args = serde_wasm_bindgen::to_value(&GenerateFromAiArgs {
+        filament_name: filament_name.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("generate_specs_from_ai", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Print Analysis --
+
+/// Analyze a print photo for defects.
+pub async fn analyze_print(
+    image_base64: String,
+    profile_path: Option<String>,
+    material_type: Option<String>,
+) -> Result<crate::pages::print_analysis::AnalyzeResponse, String> {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Request {
+        image_base64: String,
+        profile_path: Option<String>,
+        material_type: Option<String>,
+    }
+
+    let request = Request {
+        image_base64,
+        profile_path,
+        material_type,
+    };
+
+    invoke("analyze_print", serde_wasm_bindgen::to_value(&request).unwrap())
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
+        .and_then(|v| {
+            serde_wasm_bindgen::from_value(v)
+                .map_err(|e| format!("Failed to parse response: {}", e))
+        })
 }
