@@ -1,0 +1,96 @@
+/* History Panel Styles */
+
+.history-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.history-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin: 0 0 1rem 0;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border-primary);
+}
+
+/* Loading and Empty States */
+.history-loading,
+.history-empty {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    text-align: center;
+    padding: 1rem;
+}
+
+.history-error {
+    color: var(--color-danger);
+    font-size: 0.9rem;
+    text-align: center;
+    padding: 1rem;
+    background: var(--bg-danger);
+    border-radius: 6px;
+}
+
+/* Session List */
+.history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.history-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem;
+    background: var(--bg-hover);
+    border-radius: 6px;
+    border: 1px solid transparent;
+    transition: border-color 0.15s ease;
+}
+
+.history-item:hover {
+    border-color: var(--border-primary);
+}
+
+.history-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.history-date {
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+}
+
+/* Status Badges */
+.history-status {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    display: inline-block;
+    width: fit-content;
+}
+
+.status-applied {
+    background: var(--bg-success);
+    color: var(--color-success);
+}
+
+.status-analyzed {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+}
+
+/* Small Button Variant */
+.btn-small {
+    padding: 0.35rem 0.75rem;
+    font-size: 0.8rem;
+}

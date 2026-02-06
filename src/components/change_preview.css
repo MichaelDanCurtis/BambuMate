@@ -1,0 +1,188 @@
+/* Change Preview Dialog Styles */
+
+.change-preview-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(4px);
+}
+
+.change-preview-dialog {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 12px;
+    padding: 1.5rem;
+    max-width: 600px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+}
+
+.change-preview-dialog h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-bright);
+}
+
+.dialog-subtitle {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+.dialog-profile {
+    margin: 0 0 1.25rem 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.dialog-profile code {
+    background: var(--bg-hover);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    word-break: break-all;
+}
+
+/* Changes List */
+.changes-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+    max-height: 400px;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+}
+
+.change-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    padding: 1rem;
+    transition: border-color 0.15s ease;
+}
+
+.change-item:has(input:checked) {
+    border-color: var(--accent);
+}
+
+.change-checkbox {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    cursor: pointer;
+}
+
+.change-checkbox input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.change-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    flex: 1;
+}
+
+.param-label {
+    font-weight: 600;
+    color: var(--text-bright);
+    font-size: 0.95rem;
+}
+
+.change-arrow {
+    font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.change-rationale {
+    margin: 0.75rem 0 0 1.75rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-hover);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+/* Dialog Actions */
+.dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-primary);
+}
+
+.dialog-actions .btn {
+    padding: 0.6rem 1.25rem;
+    font-size: 0.9rem;
+    font-weight: 500;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.dialog-actions .btn-secondary {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border: 1px solid var(--border-primary);
+}
+
+.dialog-actions .btn-secondary:hover {
+    background: var(--bg-card);
+    border-color: var(--text-muted);
+}
+
+.dialog-actions .btn-primary {
+    background: var(--accent);
+    color: white;
+    border: 1px solid var(--accent);
+}
+
+.dialog-actions .btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+}
+
+.dialog-actions .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Scrollbar Styling */
+.changes-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.changes-list::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+    border-radius: 3px;
+}
+
+.changes-list::-webkit-scrollbar-thumb {
+    background: var(--border-primary);
+    border-radius: 3px;
+}
+
+.changes-list::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
