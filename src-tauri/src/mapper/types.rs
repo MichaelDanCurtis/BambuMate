@@ -133,7 +133,7 @@ pub struct EvaluationResult {
 // =============================================================================
 
 /// A defect detected by AI vision analysis.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectedDefect {
     /// Defect type identifier (must match key in defects map)
     pub defect_type: String,

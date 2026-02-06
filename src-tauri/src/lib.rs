@@ -1,3 +1,4 @@
+pub mod analyzer;
 mod commands;
 mod error;
 pub mod mapper;
