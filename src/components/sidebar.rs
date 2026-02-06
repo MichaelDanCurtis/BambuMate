@@ -16,6 +16,9 @@ pub fn Sidebar() -> impl IntoView {
                     <a href="/filament" class="nav-link">"Filament Search"</a>
                 </li>
                 <li class="nav-item">
+                    <a href="/analysis" class="nav-link">"Print Analysis"</a>
+                </li>
+                <li class="nav-item">
                     <a href="/settings" class="nav-link">"Settings"</a>
                 </li>
                 <li class="nav-item">
