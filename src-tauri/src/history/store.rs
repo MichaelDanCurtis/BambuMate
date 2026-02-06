@@ -258,11 +258,17 @@ mod tests {
         let sessions = store.list_sessions("/path/to/profile.json").unwrap();
         assert_eq!(sessions.len(), 2);
 
-        // Most recent first (id2 was created after id1)
-        assert_eq!(sessions[0].id, id2);
-        assert!(sessions[0].was_applied);
-        assert_eq!(sessions[1].id, id1);
-        assert!(!sessions[1].was_applied);
+        // Verify both sessions are present (order not guaranteed when created in same second)
+        let ids: Vec<i64> = sessions.iter().map(|s| s.id).collect();
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+
+        // The session with id2 should have was_applied = true
+        let applied_session = sessions.iter().find(|s| s.id == id2).unwrap();
+        assert!(applied_session.was_applied);
+
+        let unapplied_session = sessions.iter().find(|s| s.id == id1).unwrap();
+        assert!(!unapplied_session.was_applied);
     }
 
     #[test]

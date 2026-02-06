@@ -1,9 +1,12 @@
 pub mod analyzer;
 mod commands;
 mod error;
+pub mod history;
 pub mod mapper;
 pub mod profile;
 pub mod scraper;
+
+pub use history::{AppliedChange, RefinementHistory, SessionDetail, SessionSummary};
 
 pub fn run() {
     tracing_subscriber::fmt()
