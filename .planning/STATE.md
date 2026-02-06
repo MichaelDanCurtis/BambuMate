@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it -- no manual settings research or guesswork.
-**Current focus:** Phase 6 in progress. Analyzer module with vision API complete. Ready for Tauri command integration.
+**Current focus:** Phase 6 in progress. Tauri command layer complete. Ready for frontend integration.
 
 ## Current Position
 
 Phase: 6 of 8 (AI Print Analysis)
-Plan: 1 of 4 in current phase
+Plan: 2 of 4 in current phase
 Status: In progress
-Last activity: 2026-02-06 -- Completed 06-01-PLAN.md (Analyzer module with vision API)
+Last activity: 2026-02-06 -- Completed 06-02-PLAN.md (Tauri command layer)
 
-Progress: [██████████████████░░] 90% (9/10 plans completed)
+Progress: [███████████████████░] 95% (10/11 plans completed)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9
-- Total execution time: ~1.05 hours
+- Total plans completed: 10
+- Total execution time: ~1.1 hours
 
 **By Phase:**
 
@@ -31,7 +31,7 @@ Progress: [██████████████████░░] 90% (9/
 | 03-filament-scraping | 2/2 | ~13min | ~6.5min |
 | 04-profile-generation | 1/2 | ~3min | ~3min |
 | 05-defect-knowledge-base | 1/1 | ~5min | ~5min |
-| 06-ai-print-analysis | 1/4 | ~6min | ~6min |
+| 06-ai-print-analysis | 2/4 | ~9min | ~4.5min |
 
 *Updated after each plan completion*
 
@@ -83,6 +83,10 @@ Recent decisions affecting current work:
 - [06-01]: 90-second timeout for vision API calls (vs 60s for text extraction)
 - [06-01]: OpenAI detail:low for cost-efficient defect detection
 - [06-01]: Added Serialize derive to DetectedDefect for JSON output
+- [06-02]: Use AppHandle.store() pattern for preferences (matches scraper commands)
+- [06-02]: Direct keyring access via Entry::new() rather than calling get_api_key command
+- [06-02]: Profile loading via reader::read_profile() not ProfileRegistry state
+- [06-02]: Profile value extraction via raw().get() with string array parsing
 
 ### Pending Todos
 
@@ -95,6 +99,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-06T01:38:57Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-02-06T01:44:20Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None
