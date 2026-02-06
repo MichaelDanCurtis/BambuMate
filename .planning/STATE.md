@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it -- no manual settings research or guesswork.
-**Current focus:** Phase 7 in progress. Refinement History Backend Foundation complete.
+**Current focus:** Phase 7 in progress. Apply & History Commands complete.
 
 ## Current Position
 
 Phase: 7 of 8 (Auto-Tuning & Refinement)
-Plan: 1 of 4 in current phase
+Plan: 2 of 4 in current phase
 Status: In progress
-Last activity: 2026-02-06 -- Completed 07-01-PLAN.md (Refinement History Backend Foundation)
+Last activity: 2026-02-06 -- Completed 07-02-PLAN.md (Apply & History Commands)
 
-Progress: [████████████████████░░░░] 80% (12/15 plans completed)
+Progress: [█████████████████████░░░] 87% (13/15 plans completed)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 12
-- Total execution time: ~1.2 hours
+- Total plans completed: 13
+- Total execution time: ~1.3 hours
 
 **By Phase:**
 
@@ -32,7 +32,7 @@ Progress: [████████████████████░░░
 | 04-profile-generation | 2/2 | ~6min | ~3min |
 | 05-defect-knowledge-base | 1/1 | ~5min | ~5min |
 | 06-ai-print-analysis | 3/3 | ~15min | ~5min |
-| 07-auto-tuning-refinement | 1/4 | ~5min | ~5min |
+| 07-auto-tuning-refinement | 2/4 | ~9min | ~4.5min |
 
 *Updated after each plan completion*
 
@@ -91,6 +91,9 @@ Recent decisions affecting current work:
 - [06-03]: Tauri command args must wrap in key matching parameter name (e.g., `{ request: {...} }` for `fn cmd(request: T)`)
 - [07-01]: Session lifecycle: record_analysis creates session, record_apply updates with changes (separates analysis from application)
 - [07-01]: Backup location: .backups/ subdirectory alongside profile (organized, easy to find)
+- [07-02]: Session-based apply flow: analyze_print returns session_id, apply_recommendations uses it to fetch analysis
+- [07-02]: Image storage optimization: only store image_base64 when profile_path provided (profile-specific history)
+- [07-02]: Non-fatal history errors: history recording failures logged but don't fail analyze_print
 
 ### Pending Todos
 
@@ -105,5 +108,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-06
-Stopped at: Completed 07-01-PLAN.md (Refinement History Backend Foundation)
+Stopped at: Completed 07-02-PLAN.md (Apply & History Commands)
 Resume file: None
