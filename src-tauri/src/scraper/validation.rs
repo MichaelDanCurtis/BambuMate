@@ -3,10 +3,14 @@ use super::types::{FilamentSpecs, MaterialType, ValidationWarning};
 /// Physical constraints for a filament material type.
 /// Values outside these ranges indicate likely extraction errors or LLM hallucination.
 pub struct MaterialConstraints {
-    nozzle_temp_min: u16,
-    nozzle_temp_max: u16,
-    bed_temp_min: u16,
-    bed_temp_max: u16,
+    /// Minimum safe nozzle temperature for this material (Celsius)
+    pub nozzle_temp_min: u16,
+    /// Maximum safe nozzle temperature for this material (Celsius)
+    pub nozzle_temp_max: u16,
+    /// Minimum safe bed temperature for this material (Celsius)
+    pub bed_temp_min: u16,
+    /// Maximum safe bed temperature for this material (Celsius)
+    pub bed_temp_max: u16,
 }
 
 /// Return the physical constraint ranges for a given material type.
