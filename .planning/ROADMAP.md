@@ -123,10 +123,12 @@ Plans:
   2. Analysis results are displayed with visual annotations showing defects and before/after parameter comparisons
   3. System tracks iterative refinement history: user can see previous analysis results and what changes were applied at each step
   4. User can revert to any previous profile version from the refinement history
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 07-01: Auto-apply with backup, analysis results display, iterative refinement loop
+- [ ] 07-01-PLAN.md -- History store (SQLite) and backup_profile function for pre-modification snapshots
+- [ ] 07-02-PLAN.md -- apply_recommendations Tauri command and history commands (list, get, revert)
+- [ ] 07-03-PLAN.md -- Frontend UI with ChangePreview dialog, Apply button, and HistoryPanel component
 
 ### Phase 8: Integration & Power Features
 **Goal**: Complete workflow integration -- launch Bambu Studio with profiles, bridge OpenSCAD Studio, batch operations, and visual profile tools
@@ -161,5 +163,5 @@ Note: Phase 3 depends only on Phase 1 and can run in parallel with Phase 2 if de
 | 4. Profile Generation & Installation | 2/2 | Complete | 2026-02-05 |
 | 5. Defect Knowledge Base | 1/1 | Complete | 2026-02-06 |
 | 6. AI Print Analysis | 3/3 | Complete | 2026-02-06 |
-| 7. Auto-Tuning & Refinement | 0/1 | Not started | - |
+| 7. Auto-Tuning & Refinement | 0/3 | Not started | - |
 | 8. Integration & Power Features | 0/3 | Not started | - |
