@@ -22,7 +22,7 @@
 }
 
 .status-refreshing {
-    color: var(--accent-primary);
+    color: var(--accent);
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -31,8 +31,8 @@
 .mini-spinner {
     width: 12px;
     height: 12px;
-    border: 2px solid var(--border-color);
-    border-top-color: var(--accent-primary);
+    border: 2px solid var(--border-primary);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 1s linear infinite;
     display: inline-block;
@@ -42,14 +42,14 @@
     padding: 0.25rem 0.5rem;
     font-size: 0.75rem;
     background: transparent;
-    border: 1px solid var(--border-color);
+    border: 1px solid var(--border-primary);
     color: var(--text-secondary);
     cursor: pointer;
     border-radius: 4px;
 }
 
 .btn-small:hover {
-    background: var(--bg-secondary);
+    background: var(--bg-card);
 }
 
 /* Search Container - Google Style */
@@ -67,16 +67,17 @@
     width: 100%;
     padding: 12px 16px;
     font-size: 16px;
-    border: 1px solid var(--border-color);
+    border: 2px solid var(--border-primary);
     border-radius: 24px;
-    background: var(--bg-secondary);
+    background: var(--bg-card);
     color: var(--text-primary);
     outline: none;
     transition: box-shadow 0.2s, border-color 0.2s;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
 }
 
 .search-input:focus {
-    border-color: var(--accent-primary);
+    border-color: var(--accent);
     box-shadow: 0 1px 6px rgba(233, 69, 96, 0.2);
 }
 
@@ -90,8 +91,8 @@
     top: calc(100% + 4px);
     left: 0;
     right: 0;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
     border-radius: 12px;
     overflow: hidden;
     z-index: 100;
@@ -104,7 +105,7 @@
     padding: 10px 16px;
     cursor: pointer;
     transition: background 0.1s;
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-primary);
 }
 
 .suggestion-item:last-child {
@@ -161,7 +162,7 @@
     padding: 12px 16px;
     cursor: pointer;
     background: linear-gradient(90deg, rgba(233, 69, 96, 0.05) 0%, transparent 100%);
-    border-top: 1px solid var(--border-color);
+    border-top: 1px solid var(--border-primary);
     transition: background 0.1s;
 }
 
@@ -173,11 +174,11 @@
     width: 20px;
     height: 20px;
     margin-right: 12px;
-    color: var(--accent-primary);
+    color: var(--accent);
 }
 
 .ai-fallback-text {
-    color: var(--accent-primary);
+    color: var(--accent);
     font-weight: 500;
 }
 
@@ -188,13 +189,13 @@
 }
 
 .ai-fallback-hint:has-text("Recommended") {
-    color: var(--accent-primary);
+    color: var(--accent);
     font-weight: 500;
 }
 
 /* First ai-fallback-item (Ask AI) should be highlighted */
 .ai-fallback-item:first-of-type .ai-fallback-hint {
-    color: var(--accent-primary);
+    color: var(--accent);
     font-weight: 500;
 }
 
@@ -204,14 +205,14 @@
     color: var(--text-secondary);
     font-size: 0.85rem;
     text-align: center;
-    border-top: 1px solid var(--border-color);
+    border-top: 1px solid var(--border-primary);
     font-style: italic;
 }
 
 /* URL Input Section */
 .url-input-section {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
     border-radius: 12px;
     padding: 1rem;
     margin-bottom: 1.5rem;
@@ -253,8 +254,8 @@
 .spinner {
     width: 24px;
     height: 24px;
-    border: 3px solid var(--border-color);
-    border-top-color: var(--accent-primary);
+    border: 3px solid var(--border-primary);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 1s linear infinite;
 }
@@ -296,7 +297,7 @@
 }
 
 .success-details code {
-    background: var(--bg-secondary);
+    background: var(--bg-card);
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
     font-size: 0.9em;
@@ -309,8 +310,8 @@
 
 /* Filament Card - Clean Design */
 .filament-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
     border-radius: 12px;
     padding: 1.5rem;
     margin-bottom: 1.5rem;
@@ -322,7 +323,7 @@
     align-items: flex-start;
     margin-bottom: 1.25rem;
     padding-bottom: 1rem;
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-primary);
 }
 
 .filament-card-title {
@@ -345,7 +346,7 @@
 }
 
 .filament-material {
-    background: var(--accent-primary);
+    background: var(--accent);
     color: white;
     padding: 0.25rem 0.75rem;
     border-radius: 4px;
@@ -384,7 +385,7 @@
     justify-content: space-between;
     align-items: center;
     padding-top: 1rem;
-    border-top: 1px solid var(--border-color);
+    border-top: 1px solid var(--border-primary);
 }
 
 .confidence-wrapper {
@@ -416,7 +417,7 @@
 }
 
 .source-link:hover {
-    color: var(--accent-primary);
+    color: var(--accent);
     text-decoration: underline;
 }
 
@@ -427,8 +428,8 @@
 
 /* Profile Preview */
 .profile-preview {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
     border-radius: 12px;
     padding: 1.5rem;
     margin-bottom: 1.5rem;
@@ -464,7 +465,7 @@
     display: flex;
     justify-content: space-between;
     padding: 0.5rem 0;
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-primary);
 }
 
 .preview-row:last-child {
@@ -482,7 +483,7 @@
 }
 
 .preview-value.profile-name {
-    color: var(--accent-primary);
+    color: var(--accent);
 }
 
 .preview-value.filename {
