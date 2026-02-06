@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde_json;
 use tracing::{error, info, warn};
 
-use super::prompts::{build_extraction_prompt, filament_specs_json_schema};
+use super::prompts::{build_extraction_prompt, build_knowledge_prompt, filament_specs_json_schema};
 use super::types::FilamentSpecs;
 use super::validation::validate_specs;
 
@@ -93,6 +93,96 @@ pub async fn extract_specs(
 
     info!(
         "Extracted specs for '{}': confidence={}, warnings={}",
+        filament_name,
+        specs.extraction_confidence,
+        warnings.len()
+    );
+
+    Ok(specs)
+}
+
+/// Generate filament specifications from AI knowledge (no web scraping needed).
+///
+/// This is the ultimate fallback when:
+/// - The filament is not in the catalog
+/// - Web scraping fails or returns no useful content
+/// - The user just wants quick recommendations
+///
+/// The AI uses its training knowledge about 3D printing filaments to provide
+/// reasonable settings based on the material type and any brand-specific
+/// knowledge it may have.
+///
+/// # Arguments
+/// * `filament_name` - The filament name (e.g., "Sunlu PLA 2.0", "eSUN PETG")
+/// * `provider` - AI provider: "claude", "openai", "kimi", or "openrouter"
+/// * `model` - Model identifier
+/// * `api_key` - API key for the provider
+pub async fn generate_specs_from_knowledge(
+    filament_name: &str,
+    provider: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<FilamentSpecs, String> {
+    let prompt = build_knowledge_prompt(filament_name);
+    let schema = filament_specs_json_schema();
+
+    info!(
+        "Generating specs from AI knowledge for '{}' using provider '{}' model '{}'",
+        filament_name, provider, model
+    );
+
+    // Call the appropriate provider API
+    let response_text = match provider {
+        "claude" => call_claude(api_key, model, &prompt, &schema).await?,
+        "openai" => call_openai(api_key, model, &prompt, &schema).await?,
+        "kimi" => call_kimi(api_key, model, &prompt).await?,
+        "openrouter" => call_openrouter(api_key, model, &prompt, &schema).await?,
+        _ => {
+            let msg = format!(
+                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter",
+                provider
+            );
+            error!("{}", msg);
+            return Err(msg);
+        }
+    };
+
+    // Parse LLM response into intermediate JSON
+    let response_json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
+        let truncated = if response_text.len() > 500 {
+            format!("{}...", &response_text[..500])
+        } else {
+            response_text.clone()
+        };
+        let msg = format!(
+            "Failed to parse LLM response as JSON: {}. Raw response: {}",
+            e, truncated
+        );
+        error!("{}", msg);
+        msg
+    })?;
+
+    // Map the LLM response JSON to our FilamentSpecs struct
+    let mut specs = map_response_to_specs(&response_json, filament_name).map_err(|e| {
+        let msg = format!("LLM response JSON does not match FilamentSpecs schema: {}", e);
+        error!("{}", msg);
+        msg
+    })?;
+
+    // Mark as AI-generated (no source URL)
+    specs.source_url = "ai-knowledge".to_string();
+
+    // Validate against physical constraints
+    let warnings = validate_specs(&specs);
+    for w in &warnings {
+        warn!(
+            "Validation warning for '{}': {} (field: {}, value: {})",
+            filament_name, w.message, w.field, w.value
+        );
+    }
+
+    info!(
+        "Generated specs from knowledge for '{}': confidence={}, warnings={}",
         filament_name,
         specs.extraction_confidence,
         warnings.len()

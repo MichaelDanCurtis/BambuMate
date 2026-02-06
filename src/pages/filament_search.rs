@@ -1,58 +1,234 @@
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::commands::{self, FilamentSpecs, GenerateResult, InstallResult};
+use crate::commands::{
+    self, CatalogEntry, CatalogMatch, CatalogStatus, FilamentSpecs, GenerateResult, InstallResult,
+};
 use crate::components::filament_card::FilamentCard;
 use crate::components::profile_preview::ProfilePreview;
 
 #[component]
 pub fn FilamentSearchPage() -> impl IntoView {
-    // Search state
+    // Catalog state
+    let (catalog_status, set_catalog_status) = signal::<Option<CatalogStatus>>(None);
+    let (is_refreshing_catalog, set_is_refreshing_catalog) = signal(false);
+
+    // Autocomplete state
     let (search_query, set_search_query) = signal(String::new());
-    let (search_result, set_search_result) =
-        signal::<Option<Result<FilamentSpecs, String>>>(None);
-    let (is_searching, set_is_searching) = signal(false);
+    let (suggestions, set_suggestions) = signal::<Vec<CatalogMatch>>(vec![]);
+    let (show_suggestions, set_show_suggestions) = signal(false);
+
+    // Fetch state (when user selects a suggestion or uses AI fallback)
+    let (is_fetching, set_is_fetching) = signal(false);
+    let (fetch_error, set_fetch_error) = signal::<Option<String>>(None);
+
+    // URL input mode (for pasting product URLs directly)
+    let (show_url_input, set_show_url_input) = signal(false);
+    let (url_input, set_url_input) = signal(String::new());
+
+    // Specs state (after fetching)
+    let (current_specs, set_current_specs) = signal::<Option<FilamentSpecs>>(None);
 
     // Generate state
     let (generate_result, set_generate_result) =
         signal::<Option<Result<GenerateResult, String>>>(None);
     let (is_generating, set_is_generating) = signal(false);
+    let (current_generate, set_current_generate) = signal::<Option<GenerateResult>>(None);
 
     // Install state
     let (install_result, set_install_result) =
         signal::<Option<Result<InstallResult, String>>>(None);
     let (is_installing, set_is_installing) = signal(false);
 
-    // Track current specs for generate flow
-    let (current_specs, set_current_specs) = signal::<Option<FilamentSpecs>>(None);
-    // Track current generate result for install flow
-    let (current_generate, set_current_generate) = signal::<Option<GenerateResult>>(None);
+    // Check catalog status on mount
+    Effect::new(move |_| {
+        spawn_local(async move {
+            match commands::get_catalog_status().await {
+                Ok(status) => {
+                    set_catalog_status.set(Some(status.clone()));
+                    if status.needs_refresh || status.entry_count == 0 {
+                        set_is_refreshing_catalog.set(true);
+                        if let Ok(new_status) = commands::refresh_catalog().await {
+                            set_catalog_status.set(Some(new_status));
+                        }
+                        set_is_refreshing_catalog.set(false);
+                    }
+                }
+                Err(_) => {
+                    set_is_refreshing_catalog.set(true);
+                    if let Ok(status) = commands::refresh_catalog().await {
+                        set_catalog_status.set(Some(status));
+                    }
+                    set_is_refreshing_catalog.set(false);
+                }
+            }
+        });
+    });
 
-    // Search handler
-    let do_search = move || {
+    // Debounced autocomplete search
+    let search_timeout = StoredValue::new(None::<i32>);
+
+    let do_autocomplete = move |query: String| {
+        if let Some(id) = search_timeout.get_value() {
+            let _ = web_sys::window().unwrap().clear_timeout_with_handle(id);
+        }
+
+        if query.len() < 2 {
+            set_suggestions.set(vec![]);
+            set_show_suggestions.set(false);
+            return;
+        }
+
+        let callback = wasm_bindgen::closure::Closure::once(move || {
+            spawn_local(async move {
+                if let Ok(matches) = commands::search_catalog(&query, Some(6)).await {
+                    set_suggestions.set(matches);
+                    set_show_suggestions.set(true);
+                }
+            });
+        });
+
+        let id = web_sys::window()
+            .unwrap()
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                150,
+            )
+            .unwrap();
+        callback.forget();
+        search_timeout.set_value(Some(id));
+    };
+
+    // Handle catalog suggestion selection
+    let select_suggestion = move |entry: CatalogEntry| {
+        let display_name = format!("{} {}", entry.brand, entry.name);
+        set_search_query.set(display_name);
+        set_show_suggestions.set(false);
+
+        // Clear previous results
+        set_current_specs.set(None);
+        set_generate_result.set(None);
+        set_install_result.set(None);
+        set_current_generate.set(None);
+        set_fetch_error.set(None);
+
+        // Fetch full specs from catalog entry
+        set_is_fetching.set(true);
+        spawn_local(async move {
+            match commands::fetch_filament_from_catalog(&entry).await {
+                Ok(specs) => {
+                    set_current_specs.set(Some(specs));
+                    set_fetch_error.set(None);
+                }
+                Err(e) => {
+                    set_fetch_error.set(Some(e));
+                }
+            }
+            set_is_fetching.set(false);
+        });
+    };
+
+    // Handle AI knowledge generation (asks AI directly without web scraping)
+    let do_ai_generate = move || {
         let query = search_query.get();
         if query.len() < 3 {
             return;
         }
 
-        // Clear previous results
-        set_search_result.set(None);
+        set_show_suggestions.set(false);
+        set_current_specs.set(None);
         set_generate_result.set(None);
         set_install_result.set(None);
-        set_current_specs.set(None);
         set_current_generate.set(None);
+        set_fetch_error.set(None);
 
-        set_is_searching.set(true);
+        set_is_fetching.set(true);
         spawn_local(async move {
-            let result = commands::search_filament(&query).await;
-            match &result {
+            match commands::generate_specs_from_ai(&query).await {
                 Ok(specs) => {
-                    set_current_specs.set(Some(specs.clone()));
+                    set_current_specs.set(Some(specs));
+                    set_fetch_error.set(None);
                 }
-                Err(_) => {}
+                Err(e) => {
+                    set_fetch_error.set(Some(e));
+                }
             }
-            set_search_result.set(Some(result));
-            set_is_searching.set(false);
+            set_is_fetching.set(false);
+        });
+    };
+
+    // Handle web search fallback (uses original search_filament with web scraping)
+    let do_web_search = move || {
+        let query = search_query.get();
+        if query.len() < 3 {
+            return;
+        }
+
+        set_show_suggestions.set(false);
+        set_current_specs.set(None);
+        set_generate_result.set(None);
+        set_install_result.set(None);
+        set_current_generate.set(None);
+        set_fetch_error.set(None);
+
+        set_is_fetching.set(true);
+        spawn_local(async move {
+            match commands::search_filament(&query).await {
+                Ok(specs) => {
+                    set_current_specs.set(Some(specs));
+                    set_fetch_error.set(None);
+                }
+                Err(e) => {
+                    set_fetch_error.set(Some(e));
+                }
+            }
+            set_is_fetching.set(false);
+        });
+    };
+
+    // Manual refresh catalog
+    let refresh_catalog = move || {
+        set_is_refreshing_catalog.set(true);
+        spawn_local(async move {
+            if let Ok(status) = commands::refresh_catalog().await {
+                set_catalog_status.set(Some(status));
+            }
+            set_is_refreshing_catalog.set(false);
+        });
+    };
+
+    // Extract from pasted URL
+    let do_extract_from_url = move || {
+        let url = url_input.get();
+        let name = search_query.get();
+
+        if url.is_empty() || !url.starts_with("http") {
+            set_fetch_error.set(Some("Please enter a valid URL starting with http:// or https://".to_string()));
+            return;
+        }
+
+        let filament_name = if name.len() >= 3 { name } else { "Unknown Filament".to_string() };
+
+        set_show_url_input.set(false);
+        set_current_specs.set(None);
+        set_generate_result.set(None);
+        set_install_result.set(None);
+        set_current_generate.set(None);
+        set_fetch_error.set(None);
+
+        set_is_fetching.set(true);
+        spawn_local(async move {
+            match commands::extract_specs_from_url(&url, &filament_name).await {
+                Ok(specs) => {
+                    set_current_specs.set(Some(specs));
+                    set_fetch_error.set(None);
+                }
+                Err(e) => {
+                    set_fetch_error.set(Some(e));
+                }
+            }
+            set_is_fetching.set(false);
         });
     };
 
@@ -70,11 +246,8 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_is_generating.set(true);
         spawn_local(async move {
             let result = commands::generate_profile(&specs, None).await;
-            match &result {
-                Ok(gen) => {
-                    set_current_generate.set(Some(gen.clone()));
-                }
-                Err(_) => {}
+            if let Ok(ref gen) = result {
+                set_current_generate.set(Some(gen.clone()));
             }
             set_generate_result.set(Some(result));
             set_is_generating.set(false);
@@ -101,76 +274,210 @@ pub fn FilamentSearchPage() -> impl IntoView {
         });
     };
 
-    // Cancel generate preview
     let cancel_generate = move || {
         set_generate_result.set(None);
         set_current_generate.set(None);
     };
 
-    // Handle Enter key in search input
-    let on_search_keydown = move |ev: leptos::ev::KeyboardEvent| {
-        if ev.key() == "Enter" {
-            do_search();
-        }
+    let reset_search = move || {
+        set_search_query.set(String::new());
+        set_suggestions.set(vec![]);
+        set_show_suggestions.set(false);
+        set_show_url_input.set(false);
+        set_url_input.set(String::new());
+        set_current_specs.set(None);
+        set_generate_result.set(None);
+        set_install_result.set(None);
+        set_current_generate.set(None);
+        set_fetch_error.set(None);
     };
 
     view! {
         <div class="page filament-search-page">
-            <style>
-                {include_str!("filament_search.css")}
-            </style>
+            <style>{include_str!("filament_search.css")}</style>
 
             <h2>"Filament Search"</h2>
             <p class="page-description">
-                "Search for a filament by name to view specifications and generate a Bambu Studio profile."
+                "Type to search from our catalog, or use AI to find any filament."
             </p>
 
-            <div class="search-bar">
-                <input
-                    type="text"
-                    class="input search-input"
-                    placeholder="e.g., Polymaker PLA Pro"
-                    prop:value=move || search_query.get()
-                    on:input=move |ev| {
-                        set_search_query.set(event_target_value(&ev));
+            // Catalog status
+            <div class="catalog-status">
+                {move || {
+                    if is_refreshing_catalog.get() {
+                        view! {
+                            <span class="status-refreshing">
+                                <span class="mini-spinner"></span>
+                                " Updating catalog..."
+                            </span>
+                        }.into_any()
+                    } else if let Some(status) = catalog_status.get() {
+                        view! {
+                            <span>{format!("{} filaments", status.entry_count)}</span>
+                            <button class="btn-small" on:click=move |_| refresh_catalog()>
+                                "Refresh"
+                            </button>
+                        }.into_any()
+                    } else {
+                        view! { <span>"Loading..."</span> }.into_any()
                     }
-                    on:keydown=on_search_keydown
-                    disabled=move || is_searching.get()
-                />
-                <button
-                    class="btn btn-primary search-button"
-                    on:click=move |_| do_search()
-                    disabled=move || search_query.get().len() < 3 || is_searching.get()
-                >
-                    {move || if is_searching.get() { "Searching..." } else { "Search" }}
-                </button>
+                }}
             </div>
 
-            // Loading indicator
-            <Show when=move || is_searching.get()>
-                <div class="loading-spinner">
-                    <div class="spinner"></div>
-                    <span>"Searching for filament specifications..."</span>
+            // Search input with autocomplete
+            <div class="search-container">
+                <div class="search-bar">
+                    <input
+                        type="text"
+                        class="search-input"
+                        placeholder="Search filaments..."
+                        prop:value=move || search_query.get()
+                        on:input=move |ev| {
+                            let value = event_target_value(&ev);
+                            set_search_query.set(value.clone());
+                            do_autocomplete(value);
+                        }
+                        on:focus=move |_| {
+                            if !suggestions.get().is_empty() {
+                                set_show_suggestions.set(true);
+                            }
+                        }
+                        on:blur=move |_| {
+                            let callback = wasm_bindgen::closure::Closure::once(move || {
+                                set_show_suggestions.set(false);
+                            });
+                            let _ = web_sys::window()
+                                .unwrap()
+                                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                                    callback.as_ref().unchecked_ref(),
+                                    200,
+                                );
+                            callback.forget();
+                        }
+                        disabled=move || is_refreshing_catalog.get() || is_fetching.get()
+                    />
+                </div>
+
+                // Dropdown
+                <Show when=move || {
+                        show_suggestions.get() && search_query.get().len() > 1
+                    }>
+                    <div class="suggestions-dropdown">
+                        // Catalog results
+                        <For
+                            each=move || suggestions.get()
+                            key=|m| format!("{}-{}", m.entry.brand, m.entry.url_slug)
+                            children=move |m| {
+                                let entry = m.entry.clone();
+                                let entry_click = entry.clone();
+                                view! {
+                                    <div
+                                        class="suggestion-item"
+                                        on:mousedown=move |_| select_suggestion(entry_click.clone())
+                                    >
+                                        <span class="suggestion-icon">"🔍"</span>
+                                        <span class="suggestion-text">
+                                            <span class="suggestion-brand">{entry.brand.clone()}</span>
+                                            <span class="suggestion-name">{entry.name.clone()}</span>
+                                        </span>
+                                        <span class="suggestion-material">{entry.material.clone()}</span>
+                                    </div>
+                                }
+                            }
+                        />
+
+                        // Ask AI directly (primary fallback)
+                        <div
+                            class="ai-fallback-item"
+                            on:mousedown=move |_| do_ai_generate()
+                        >
+                            <span class="ai-fallback-icon">"🤖"</span>
+                            <span class="ai-fallback-text">
+                                "Ask AI about \""
+                                {move || search_query.get()}
+                                "\""
+                            </span>
+                            <span class="ai-fallback-hint">"Recommended"</span>
+                        </div>
+
+                        // Web search option
+                        <div
+                            class="ai-fallback-item"
+                            on:mousedown=move |_| do_web_search()
+                        >
+                            <span class="ai-fallback-icon">"🌐"</span>
+                            <span class="ai-fallback-text">
+                                "Search web for specs"
+                            </span>
+                            <span class="ai-fallback-hint">"Scrape pages"</span>
+                        </div>
+
+                        // Paste URL option
+                        <div
+                            class="ai-fallback-item"
+                            on:mousedown=move |_| {
+                                set_show_suggestions.set(false);
+                                set_show_url_input.set(true);
+                            }
+                        >
+                            <span class="ai-fallback-icon">"🔗"</span>
+                            <span class="ai-fallback-text">"Paste a product URL"</span>
+                            <span class="ai-fallback-hint">"Direct extraction"</span>
+                        </div>
+                    </div>
+                </Show>
+            </div>
+
+            // URL input section
+            <Show when=move || show_url_input.get()>
+                <div class="url-input-section">
+                    <p class="url-input-label">"Paste a product page URL:"</p>
+                    <div class="url-input-row">
+                        <input
+                            type="text"
+                            class="search-input"
+                            placeholder="https://..."
+                            prop:value=move || url_input.get()
+                            on:input=move |ev| set_url_input.set(event_target_value(&ev))
+                        />
+                        <button
+                            class="btn btn-primary"
+                            on:click=move |_| do_extract_from_url()
+                            disabled=move || url_input.get().is_empty()
+                        >
+                            "Extract"
+                        </button>
+                        <button
+                            class="btn btn-secondary"
+                            on:click=move |_| set_show_url_input.set(false)
+                        >
+                            "Cancel"
+                        </button>
+                    </div>
+                    <p class="url-input-hint">
+                        "Note: Some e-commerce sites (Shopify, etc.) may not work due to JavaScript rendering."
+                    </p>
                 </div>
             </Show>
 
-            // Search error
-            {move || {
-                if let Some(Err(e)) = search_result.get() {
-                    Some(view! {
-                        <div class="error-message">
-                            <strong>"Search failed: "</strong>{e}
-                        </div>
-                    })
-                } else {
-                    None
-                }
-            }}
+            // Fetching indicator
+            <Show when=move || is_fetching.get()>
+                <div class="loading-spinner">
+                    <div class="spinner"></div>
+                    <span>"Fetching specifications..."</span>
+                </div>
+            </Show>
 
-            // Search results - FilamentCard
+            // Fetch error
+            {move || fetch_error.get().map(|e| view! {
+                <div class="error-message">
+                    <strong>"Error: "</strong>{e}
+                </div>
+            })}
+
+            // Specs display
             {move || {
-                if let Some(Ok(specs)) = search_result.get() {
-                    // Don't show card if we have a generate result (preview takes over)
+                if let Some(specs) = current_specs.get() {
                     if generate_result.get().is_some() {
                         return None;
                     }
@@ -201,11 +508,10 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 }
             }}
 
-            // Generate result - ProfilePreview
+            // Profile preview
             {move || {
                 if let Some(Ok(gen)) = generate_result.get() {
-                    // Don't show preview if install succeeded
-                    if let Some(Ok(_)) = install_result.get() {
+                    if install_result.get().is_some_and(|r| r.is_ok()) {
                         return None;
                     }
                     Some(view! {
@@ -241,33 +547,18 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 if let Some(Ok(result)) = install_result.get() {
                     Some(view! {
                         <div class="success-message">
-                            <div class="success-header">"Profile Installed Successfully!"</div>
+                            <div class="success-header">"✓ Profile Installed"</div>
                             <div class="success-details">
                                 <p><strong>"Profile: "</strong>{result.profile_name}</p>
                                 <p><strong>"Location: "</strong><code>{result.installed_path}</code></p>
-                                {if result.bambu_studio_was_running {
-                                    Some(view! {
-                                        <p class="warning-text">
-                                            "Bambu Studio was running during installation. Restart it to see the new profile."
-                                        </p>
-                                    })
-                                } else {
-                                    None
-                                }}
+                                {result.bambu_studio_was_running.then(|| view! {
+                                    <p class="warning-text">
+                                        "Restart Bambu Studio to see the new profile."
+                                    </p>
+                                })}
                             </div>
-                            <button
-                                class="btn btn-secondary"
-                                on:click=move |_| {
-                                    // Reset to search another
-                                    set_search_query.set(String::new());
-                                    set_search_result.set(None);
-                                    set_generate_result.set(None);
-                                    set_install_result.set(None);
-                                    set_current_specs.set(None);
-                                    set_current_generate.set(None);
-                                }
-                            >
-                                "Search Another Filament"
+                            <button class="btn btn-secondary" on:click=move |_| reset_search()>
+                                "Search Another"
                             </button>
                         </div>
                     })

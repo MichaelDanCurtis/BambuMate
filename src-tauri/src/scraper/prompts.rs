@@ -98,6 +98,35 @@ SOURCE TEXT:
     )
 }
 
+/// Build a prompt for generating filament specs from AI knowledge.
+/// This is the OPPOSITE of extraction - we WANT the AI to use its training knowledge.
+/// Used as a fallback when catalog search and web scraping fail.
+pub fn build_knowledge_prompt(filament_name: &str) -> String {
+    format!(
+        r#"Provide recommended 3D printing specifications for the filament "{filament_name}".
+
+Use your training knowledge about this filament brand and material type. If you know specific recommended settings for this exact filament from manufacturer documentation or community experience, use those. If you don't know this specific filament, provide reasonable defaults based on the material type (PLA, PETG, ABS, etc.) that you can infer from the name.
+
+RULES:
+- Parse the filament name to identify the brand (first word typically) and material type.
+- Provide your best recommendation for each parameter based on your knowledge.
+- Temperature values must be in Celsius.
+- Speed values must be in mm/s.
+- Set confidence based on how well you know this specific filament:
+  - 0.8-1.0 if you have specific knowledge of this exact filament
+  - 0.5-0.7 if you're using general knowledge of the material type
+  - 0.3-0.4 if you're mostly guessing based on the name
+
+Common material defaults if unknown:
+- PLA: nozzle 190-220°C, bed 50-60°C, fan 100%
+- PETG: nozzle 230-250°C, bed 70-85°C, fan 30-50%
+- ABS: nozzle 230-260°C, bed 90-110°C, fan 0-30%
+- TPU: nozzle 220-240°C, bed 40-60°C, fan 50%
+
+Provide all values - do not return null unless you truly cannot determine even a reasonable default."#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

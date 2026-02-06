@@ -5,6 +5,8 @@ pub mod extraction;
 pub mod prompts;
 pub mod cache;
 pub mod adapters;
+pub mod catalog;
+pub mod web_search;
 
 use std::path::Path;
 
@@ -171,13 +173,49 @@ pub async fn search_filament(
         }
     }
 
-    // Step 5: Return result or error
+    // Step 5: If no good result yet, try web search fallback
+    if best_specs.as_ref().map_or(true, |s| s.extraction_confidence <= MIN_CONFIDENCE) {
+        info!("Trying web search fallback for '{}'", name);
+        match web_search::search_for_filament_urls(name, &http_client).await {
+            Ok(search_urls) => {
+                for url in search_urls {
+                    if urls.contains(&url) {
+                        continue; // Already tried this URL
+                    }
+                    info!("Trying search result URL: {}", url);
+
+                    if let Ok(html) = http_client.fetch_page(&url).await {
+                        let text = ScraperHttpClient::html_to_text(&html);
+                        if !text.trim().is_empty() {
+                            if let Ok(mut specs) = extraction::extract_specs(&text, name, provider, model, api_key).await {
+                                specs.source_url = url.clone();
+                                if specs.extraction_confidence > MIN_CONFIDENCE
+                                    || best_specs.as_ref().map_or(true, |s| specs.extraction_confidence > s.extraction_confidence)
+                                {
+                                    info!("Found specs from search result '{}' with confidence {:.2}", url, specs.extraction_confidence);
+                                    best_specs = Some(specs);
+                                    if best_specs.as_ref().map_or(false, |s| s.extraction_confidence > MIN_CONFIDENCE) {
+                                        break; // Good enough result
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Web search fallback failed: {}", e);
+            }
+        }
+    }
+
+    // Step 6: Return result or error
     let specs = match best_specs {
         Some(specs) => specs,
         None => {
             let detail = last_error.unwrap_or_else(|| "No URLs to try.".to_string());
             return Err(format!(
-                "No specs found for '{}'. Try checking the filament name spelling. Detail: {}",
+                "No specs found for '{}'. Try checking the filament name spelling or select from the catalog. Detail: {}",
                 name, detail
             ));
         }

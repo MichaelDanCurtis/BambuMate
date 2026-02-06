@@ -433,27 +433,35 @@ pub async fn generate_specs_from_ai(filament_name: &str) -> Result<FilamentSpecs
 
 // -- Print Analysis --
 
+/// Inner request matching the backend AnalyzeRequest struct.
+#[derive(serde::Serialize)]
+struct AnalyzeRequest {
+    image_base64: String,
+    profile_path: Option<String>,
+    material_type: Option<String>,
+}
+
+/// Wrapper to provide the `request` key expected by the Tauri command.
+#[derive(serde::Serialize)]
+struct AnalyzePrintArgs {
+    request: AnalyzeRequest,
+}
+
 /// Analyze a print photo for defects.
 pub async fn analyze_print(
     image_base64: String,
     profile_path: Option<String>,
     material_type: Option<String>,
 ) -> Result<crate::pages::print_analysis::AnalyzeResponse, String> {
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Request {
-        image_base64: String,
-        profile_path: Option<String>,
-        material_type: Option<String>,
-    }
-
-    let request = Request {
-        image_base64,
-        profile_path,
-        material_type,
+    let args = AnalyzePrintArgs {
+        request: AnalyzeRequest {
+            image_base64,
+            profile_path,
+            material_type,
+        },
     };
 
-    invoke("analyze_print", serde_wasm_bindgen::to_value(&request).unwrap())
+    invoke("analyze_print", serde_wasm_bindgen::to_value(&args).unwrap())
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
         .and_then(|v| {
