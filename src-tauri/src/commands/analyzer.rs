@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::analyzer::{analyze_image, DefectReport};
 use crate::mapper::{default_rules, Conflict, RuleEngine};
-use crate::profile::{FilamentProfile, ProfileRegistry};
+use crate::profile::FilamentProfile;
 use crate::scraper::types::MaterialType;
 
 /// Request payload for print analysis.
