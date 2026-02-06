@@ -469,3 +469,92 @@ pub async fn analyze_print(
                 .map_err(|e| format!("Failed to parse response: {}", e))
         })
 }
+
+// -- History Types --
+
+/// Summary of a refinement session for list views.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionSummary {
+    pub id: i64,
+    pub created_at: String,
+    pub was_applied: bool,
+}
+
+/// Full details of a refinement session.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionDetail {
+    pub id: i64,
+    pub profile_path: String,
+    pub created_at: String,
+    pub analysis_json: String,
+    pub applied_changes: Option<Vec<AppliedChange>>,
+    pub backup_path: Option<String>,
+}
+
+/// A recorded change to a profile parameter.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppliedChange {
+    pub parameter: String,
+    pub old_value: f32,
+    pub new_value: f32,
+}
+
+// -- History Commands Args --
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListHistorySessionsArgs {
+    profile_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GetHistorySessionArgs {
+    session_id: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevertToBackupArgs {
+    session_id: i64,
+}
+
+// -- History Commands --
+
+/// List all refinement sessions for a profile.
+pub async fn list_history_sessions(profile_path: &str) -> Result<Vec<SessionSummary>, String> {
+    let args = serde_wasm_bindgen::to_value(&ListHistorySessionsArgs {
+        profile_path: profile_path.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("list_history_sessions", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Get full details of a refinement session.
+pub async fn get_history_session(session_id: i64) -> Result<SessionDetail, String> {
+    let args = serde_wasm_bindgen::to_value(&GetHistorySessionArgs { session_id })
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("get_history_session", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Revert a profile to its state before a session's apply.
+pub async fn revert_to_backup(session_id: i64) -> Result<String, String> {
+    let args = serde_wasm_bindgen::to_value(&RevertToBackupArgs { session_id })
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("revert_to_backup", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
