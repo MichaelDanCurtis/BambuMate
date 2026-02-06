@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-04)
 
 **Core value:** Given a filament name and a photo of a test print, BambuMate produces an optimized Bambu Studio profile and applies it -- no manual settings research or guesswork.
-**Current focus:** Phase 6 complete. Ready for Phase 7 (Auto-Tuning & Refinement).
+**Current focus:** Phase 7 in progress. Refinement History Backend Foundation complete.
 
 ## Current Position
 
-Phase: 6 of 8 (AI Print Analysis) - COMPLETE
-Plan: 3 of 3 in current phase
-Status: Complete
-Last activity: 2026-02-06 -- Completed 06-03-PLAN.md (Frontend UI)
+Phase: 7 of 8 (Auto-Tuning & Refinement)
+Plan: 1 of 4 in current phase
+Status: In progress
+Last activity: 2026-02-06 -- Completed 07-01-PLAN.md (Refinement History Backend Foundation)
 
-Progress: [████████████████████] 100% (11/11 plans completed)
+Progress: [████████████████████░░░░] 80% (12/15 plans completed)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10
-- Total execution time: ~1.1 hours
+- Total plans completed: 12
+- Total execution time: ~1.2 hours
 
 **By Phase:**
 
@@ -32,6 +32,7 @@ Progress: [████████████████████] 100% (1
 | 04-profile-generation | 2/2 | ~6min | ~3min |
 | 05-defect-knowledge-base | 1/1 | ~5min | ~5min |
 | 06-ai-print-analysis | 3/3 | ~15min | ~5min |
+| 07-auto-tuning-refinement | 1/4 | ~5min | ~5min |
 
 *Updated after each plan completion*
 
@@ -88,6 +89,8 @@ Recent decisions affecting current work:
 - [06-02]: Profile loading via reader::read_profile() not ProfileRegistry state
 - [06-02]: Profile value extraction via raw().get() with string array parsing
 - [06-03]: Tauri command args must wrap in key matching parameter name (e.g., `{ request: {...} }` for `fn cmd(request: T)`)
+- [07-01]: Session lifecycle: record_analysis creates session, record_apply updates with changes (separates analysis from application)
+- [07-01]: Backup location: .backups/ subdirectory alongside profile (organized, easy to find)
 
 ### Pending Todos
 
@@ -97,9 +100,10 @@ None.
 
 - [Research]: Bambu Studio profile JSON format is undocumented and changes across versions -- Phase 2 must validate against actual local installation
 - [Research]: Cloud sync can overwrite locally-written profiles -- Phase 4 installation strategy accounts for this (updated_time set, clean arrays, no mixed nil values)
+- [Pre-existing]: scraper::catalog::tests::test_compute_match_score test failing (unrelated to current work)
 
 ## Session Continuity
 
 Last session: 2026-02-06
-Stopped at: Completed Phase 6 (AI Print Analysis)
+Stopped at: Completed 07-01-PLAN.md (Refinement History Backend Foundation)
 Resume file: None
