@@ -3,6 +3,7 @@ use tracing::info;
 use walkdir::WalkDir;
 
 use crate::profile::generator;
+use crate::profile::inheritance::resolve_inheritance;
 use crate::profile::paths::BambuPaths;
 use crate::profile::reader::{read_profile, read_profile_metadata};
 use crate::profile::registry::ProfileRegistry;
@@ -193,6 +194,7 @@ pub struct GenerateResult {
     pub field_count: usize,
     pub base_profile_used: String,
     pub specs_applied: GeneratedSpecs,
+    pub diffs: Vec<ProfileDiff>,
     pub warnings: Vec<String>,
     pub bambu_studio_running: bool,
 }
@@ -204,6 +206,15 @@ pub struct GeneratedSpecs {
     pub bed_temp: Option<String>,
     pub fan_speed: Option<String>,
     pub retraction: Option<String>,
+}
+
+/// A single field difference between the base profile and the generated profile.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileDiff {
+    pub key: String,
+    pub label: String,
+    pub base_value: String,
+    pub new_value: String,
 }
 
 /// Result from profile installation (files written to disk).
@@ -256,10 +267,20 @@ pub async fn generate_profile_from_specs(
     let material = crate::scraper::types::MaterialType::from_str(&specs.material);
     let base_name = generator::base_profile_name(&material).to_string();
 
+    // Resolve the base profile to compare against later
+    let base_resolved = resolve_inheritance(
+        registry.get_by_name(&base_name).unwrap(),
+        &registry,
+    )
+    .map_err(|e| format!("Failed to resolve base profile: {}", e))?;
+
     // Generate the profile
     let (profile, metadata, filename) =
         generator::generate_profile(&specs, &registry, target_printer.as_deref())
             .map_err(|e| format!("Failed to generate profile: {}", e))?;
+
+    // Compute diffs between base and generated profile
+    let diffs = compute_profile_diffs(&base_resolved, &profile);
 
     // Serialize for transport
     let profile_json = profile
@@ -311,9 +332,10 @@ pub async fn generate_profile_from_specs(
         .to_string();
 
     info!(
-        "Generated profile '{}' with {} fields (base: {})",
+        "Generated profile '{}' with {} fields, {} diffs from base (base: {})",
         profile_name,
         profile.field_count(),
+        diffs.len(),
         base_name
     );
 
@@ -325,6 +347,7 @@ pub async fn generate_profile_from_specs(
         field_count: profile.field_count(),
         base_profile_used: base_name,
         specs_applied,
+        diffs,
         warnings,
         bambu_studio_running: bs_running,
     })
@@ -521,4 +544,131 @@ pub fn duplicate_profile(path: String, new_name: String) -> Result<ProfileDetail
     info!("Duplicated profile to {:?} as '{}'", target_path, new_name);
 
     read_profile_command(target_path.to_string_lossy().to_string())
+}
+
+/// Extract FilamentSpecs from an existing profile for editing.
+///
+/// Reads the profile and maps BS profile fields back to the FilamentSpecs struct,
+/// so the SpecsEditor UI can display and edit them.
+#[tauri::command]
+pub fn extract_specs_from_profile(path: String) -> Result<crate::scraper::types::FilamentSpecs, String> {
+    let file_path = std::path::Path::new(&path);
+    let profile = read_profile(file_path).map_err(|e| e.to_string())?;
+    Ok(generator::extract_specs_from_profile(&profile))
+}
+
+/// Save edited FilamentSpecs back to an existing profile.
+///
+/// Reads the profile, applies the specs overrides (same mapping as generate),
+/// and writes it back atomically. Returns the updated ProfileDetail.
+#[tauri::command]
+pub fn save_profile_specs(
+    path: String,
+    specs: crate::scraper::types::FilamentSpecs,
+) -> Result<ProfileDetail, String> {
+    let file_path = std::path::Path::new(&path);
+
+    let mut profile = read_profile(file_path).map_err(|e| e.to_string())?;
+
+    // Apply specs to the existing profile (overwrites only the mapped fields)
+    generator::apply_specs_to_profile(&mut profile, &specs);
+
+    // Also update the profile name if provided
+    if !specs.name.is_empty() {
+        profile.set_string("name", specs.name.clone());
+    }
+
+    write_profile_atomic(&profile, file_path)
+        .map_err(|e| format!("Failed to write profile: {}", e))?;
+
+    info!("Saved edited specs to {:?}", file_path);
+
+    // Return updated detail
+    read_profile_command(path)
+}
+
+/// Compare two profiles field-by-field and return a list of differences.
+///
+/// Skips identity/metadata fields that always differ (name, filament_id, etc.)
+/// and only reports printing-relevant setting changes.
+fn compute_profile_diffs(base: &FilamentProfile, generated: &FilamentProfile) -> Vec<ProfileDiff> {
+    // Fields to skip — these are identity/metadata, not actual settings
+    let skip_fields: &[&str] = &[
+        "name",
+        "filament_id",
+        "filament_settings_id",
+        "setting_id",
+        "from",
+        "inherits",
+        "instantiation",
+        "compatible_printers",
+        "compatible_printers_condition",
+        "filament_vendor",
+        "filament_type",
+        "version",
+    ];
+
+    let mut diffs = Vec::new();
+    let base_raw = base.raw();
+    let gen_raw = generated.raw();
+
+    for (key, gen_value) in gen_raw.iter() {
+        if skip_fields.contains(&key.as_str()) {
+            continue;
+        }
+
+        let base_value = base_raw.get(key);
+        let base_str = value_to_display(base_value);
+        let gen_str = value_to_display(Some(gen_value));
+
+        if base_str != gen_str {
+            diffs.push(ProfileDiff {
+                key: key.clone(),
+                label: key_to_label(key),
+                base_value: base_str,
+                new_value: gen_str,
+            });
+        }
+    }
+
+    // Sort by label for consistent display
+    diffs.sort_by(|a, b| a.label.cmp(&b.label));
+    diffs
+}
+
+/// Convert a JSON value to a human-readable display string.
+/// For arrays, shows the first element (since dual-extruder arrays repeat the same value).
+fn value_to_display(value: Option<&serde_json::Value>) -> String {
+    match value {
+        None => "--".to_string(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        Some(serde_json::Value::Null) => "--".to_string(),
+        Some(serde_json::Value::Array(arr)) => {
+            // Show first element for dual-extruder arrays
+            arr.first()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_else(|| "[]".to_string())
+        }
+        Some(serde_json::Value::Object(_)) => "{...}".to_string(),
+    }
+}
+
+/// Convert a snake_case profile key to a human-readable label.
+fn key_to_label(key: &str) -> String {
+    key.replace('_', " ")
+        .split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }

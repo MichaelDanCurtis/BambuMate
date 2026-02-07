@@ -37,10 +37,15 @@ pub fn FilamentCard(
         .map(|s| format!("{} mm/s", s))
         .unwrap_or_else(|| "--".to_string());
 
-    let fan_speed = specs
-        .fan_speed_percent
-        .map(|f| format!("{}%", f))
-        .unwrap_or_else(|| "--".to_string());
+    let fan_speed = match (specs.fan_min_speed, specs.fan_max_speed) {
+        (Some(min), Some(max)) if min != max => format!("{}-{}%", min, max),
+        (_, Some(max)) => format!("{}%", max),
+        (Some(min), None) => format!("{}%", min),
+        (None, None) => specs
+            .fan_speed_percent
+            .map(|f| format!("{}%", f))
+            .unwrap_or_else(|| "--".to_string()),
+    };
 
     let retraction = match (specs.retraction_distance_mm, specs.retraction_speed_mm_s) {
         (Some(dist), Some(spd)) => format!("{:.1}mm @ {}mm/s", dist, spd),
@@ -60,6 +65,14 @@ pub fn FilamentCard(
         .unwrap_or_else(|| "--".to_string());
 
     let source_url = specs.source_url.clone();
+    let is_http_source = source_url.starts_with("http");
+    let source_label = if source_url == "ai-knowledge" {
+        "AI Knowledge".to_string()
+    } else if !is_http_source {
+        source_url.clone()
+    } else {
+        String::new()
+    };
 
     view! {
         <div class="filament-card">
@@ -109,7 +122,15 @@ pub fn FilamentCard(
                         {format!("{}%", confidence_pct)}
                     </span>
                 </div>
-                <a href={source_url} target="_blank" class="source-link">"View Source"</a>
+                {if is_http_source {
+                    view! {
+                        <a href={source_url} target="_blank" class="source-link">"View Source"</a>
+                    }.into_any()
+                } else {
+                    view! {
+                        <span class="source-link">{source_label}</span>
+                    }.into_any()
+                }}
             </div>
 
             <button

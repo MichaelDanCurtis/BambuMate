@@ -536,6 +536,250 @@
     min-width: 120px;
 }
 
+/* Specs Editor */
+.specs-editor {
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.specs-editor-title {
+    margin: 0 0 0.25rem 0;
+    font-size: 1.1rem;
+    color: var(--text-primary);
+}
+
+.specs-editor-subtitle {
+    margin: 0 0 1.25rem 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.specs-section {
+    margin-bottom: 1.25rem;
+}
+
+.specs-section-title {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid var(--border-primary);
+}
+
+.spec-fields-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+}
+
+.spec-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+}
+
+.spec-field.full-width {
+    grid-column: 1 / -1;
+}
+
+.spec-field-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.spec-field-input-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.spec-field-input {
+    flex: 1;
+    padding: 0.375rem 0.5rem;
+    font-size: 0.85rem;
+    border: 1px solid var(--border-primary);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    outline: none;
+    min-width: 0;
+}
+
+.spec-field-input:focus {
+    border-color: var(--accent);
+}
+
+.spec-field-input::placeholder {
+    color: var(--text-secondary);
+    opacity: 0.5;
+}
+
+.spec-field-unit {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    min-width: 2rem;
+    flex-shrink: 0;
+}
+
+.spec-field-select {
+    width: 100%;
+    padding: 0.5rem;
+    font-size: 0.9rem;
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    outline: none;
+    cursor: pointer;
+}
+
+.spec-field-select:focus {
+    border-color: var(--accent);
+}
+
+.specs-editor-actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: flex-end;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-primary);
+}
+
+.specs-editor-actions .btn {
+    min-width: 100px;
+}
+
+/* Profile Diff Table */
+.profile-diff-section {
+    background: var(--bg-primary);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.25rem;
+}
+
+.profile-diff-section h4 {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+
+.diff-count {
+    font-weight: normal;
+    font-size: 0.75rem;
+    color: var(--accent);
+    margin-left: 0.5rem;
+}
+
+.diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.diff-table th {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 2px solid var(--border-primary);
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.diff-table td {
+    padding: 0.375rem 0.75rem;
+    border-bottom: 1px solid var(--border-primary);
+}
+
+.diff-table tr:last-child td {
+    border-bottom: none;
+}
+
+.diff-label {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.diff-base {
+    color: var(--text-secondary);
+    font-family: monospace;
+    font-size: 0.85em;
+}
+
+.diff-new {
+    color: var(--accent);
+    font-weight: 500;
+    font-family: monospace;
+    font-size: 0.85em;
+}
+
+/* Tooltip */
+.spec-field-label-row {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.tooltip-wrapper {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.tooltip-icon,
+.tooltip-icon-inline {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--border-primary);
+    color: var(--text-secondary);
+    font-size: 0.6rem;
+    font-weight: 700;
+    cursor: help;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.tooltip-icon-inline {
+    vertical-align: middle;
+    margin: 0 2px;
+}
+
+.tooltip-content {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    color: var(--text-primary);
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    white-space: normal;
+    width: 240px;
+    max-width: 90vw;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    z-index: 500;
+    pointer-events: none;
+}
+
+.tooltip-wrapper:hover .tooltip-content {
+    display: block;
+}
+
 /* Responsive */
 @media (max-width: 600px) {
     .filament-card-specs,

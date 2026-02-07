@@ -265,9 +265,14 @@ fn compute_match_score(query_words: &[&str], search_text: &str) -> f32 {
         total_score += word_score;
     }
 
-    // If any query word didn't match at all, severely penalize
-    if !all_matched {
+    // If no query words matched, return 0
+    if total_score == 0.0 {
         return 0.0;
+    }
+
+    // If not all query words matched, penalize but don't zero out
+    if !all_matched {
+        total_score *= 0.3;
     }
 
     // Bonus for matching brand at start

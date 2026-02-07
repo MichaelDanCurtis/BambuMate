@@ -111,7 +111,8 @@ pub async fn clear_filament_cache(app: tauri::AppHandle) -> Result<usize, String
 }
 
 /// Extract filament specs from a user-provided URL.
-/// Useful when the filament isn't in the catalog or web search can't find it.
+/// Sends raw HTML directly to the LLM for better extraction accuracy —
+/// preserves tables, structured data, and meta tags that get lost in text conversion.
 #[tauri::command]
 pub async fn extract_specs_from_url(
     app: tauri::AppHandle,
@@ -125,30 +126,39 @@ pub async fn extract_specs_from_url(
     let api_key = get_api_key_for_provider(&provider)?;
     let cache_dir = get_cache_dir(&app)?;
 
-    // Fetch the page
+    // Fetch the raw HTML
     let http_client = crate::scraper::http_client::ScraperHttpClient::new();
     let html = http_client.fetch_page(&url).await?;
-    let text = crate::scraper::http_client::ScraperHttpClient::html_to_text(&html);
 
-    if text.trim().is_empty() || text.len() < 100 {
+    if html.trim().is_empty() || html.len() < 100 {
         return Err(format!(
-            "The page at '{}' appears to be JavaScript-rendered and couldn't be scraped. \
-             Try finding a static spec sheet or datasheet PDF instead.",
+            "The page at '{}' returned no content. The site may require JavaScript \
+             or authentication. Try a different URL or use AI Knowledge mode instead.",
             url
         ));
     }
 
-    // Extract via LLM
-    let mut specs = crate::scraper::extraction::extract_specs(&text, &filament_name, &provider, &model, &api_key).await?;
-    specs.source_url = url;
+    // Send raw HTML directly to LLM — much better at extracting structured data
+    // from tables, meta tags, JSON-LD, etc. than from stripped plain text
+    let mut specs = crate::scraper::extraction::extract_specs_from_html(
+        &html, &filament_name, &provider, &model, &api_key
+    ).await?;
+    specs.source_url = url.clone();
 
-    // Validate
-    let warnings = crate::scraper::validation::validate_specs(&specs);
-    for w in &warnings {
-        warn!(
-            "Validation warning for '{}': {} (field: {}, value: {})",
-            filament_name, w.message, w.field, w.value
-        );
+    // If HTML extraction got low confidence, fall back to text extraction as backup
+    if specs.extraction_confidence < 0.3 {
+        info!("HTML extraction got low confidence ({:.2}), trying text extraction fallback", specs.extraction_confidence);
+        let text = crate::scraper::http_client::ScraperHttpClient::html_to_text(&html);
+        if !text.trim().is_empty() && text.len() >= 100 {
+            if let Ok(text_specs) = crate::scraper::extraction::extract_specs(
+                &text, &filament_name, &provider, &model, &api_key
+            ).await {
+                if text_specs.extraction_confidence > specs.extraction_confidence {
+                    specs = text_specs;
+                    specs.source_url = url.clone();
+                }
+            }
+        }
     }
 
     // Cache the result

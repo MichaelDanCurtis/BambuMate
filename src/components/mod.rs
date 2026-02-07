@@ -5,4 +5,5 @@ pub mod filament_card;
 pub mod history_panel;
 pub mod profile_preview;
 pub mod sidebar;
+pub mod specs_editor;
 pub mod status_badge;

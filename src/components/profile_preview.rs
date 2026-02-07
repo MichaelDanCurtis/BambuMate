@@ -12,27 +12,9 @@ pub fn ProfilePreview(
     let has_warnings = !result.warnings.is_empty();
     let bs_running = result.bambu_studio_running;
     let warnings = result.warnings.clone();
-
-    let nozzle_temp = result
-        .specs_applied
-        .nozzle_temp
-        .clone()
-        .unwrap_or_else(|| "--".to_string());
-    let bed_temp = result
-        .specs_applied
-        .bed_temp
-        .clone()
-        .unwrap_or_else(|| "--".to_string());
-    let fan_speed = result
-        .specs_applied
-        .fan_speed
-        .clone()
-        .unwrap_or_else(|| "--".to_string());
-    let retraction = result
-        .specs_applied
-        .retraction
-        .clone()
-        .unwrap_or_else(|| "--".to_string());
+    let diffs = result.diffs.clone();
+    let diff_count = diffs.len();
+    let base_name = result.base_profile_used.clone();
 
     view! {
         <div class="profile-preview">
@@ -73,26 +55,42 @@ pub fn ProfilePreview(
                 </div>
             </div>
 
-            <div class="profile-preview-specs">
-                <h4>"Applied Settings"</h4>
-                <div class="preview-specs-grid">
-                    <div class="spec-item">
-                        <span class="spec-label">"Nozzle Temp"</span>
-                        <span class="spec-value">{nozzle_temp}</span>
-                    </div>
-                    <div class="spec-item">
-                        <span class="spec-label">"Bed Temp"</span>
-                        <span class="spec-value">{bed_temp}</span>
-                    </div>
-                    <div class="spec-item">
-                        <span class="spec-label">"Fan Speed"</span>
-                        <span class="spec-value">{fan_speed}</span>
-                    </div>
-                    <div class="spec-item">
-                        <span class="spec-label">"Retraction"</span>
-                        <span class="spec-value">{retraction}</span>
-                    </div>
-                </div>
+            // Profile diff table
+            <div class="profile-diff-section">
+                <h4>
+                    "Changes from Base"
+                    <span class="diff-count">
+                        {format!("{} settings changed from {}", diff_count, base_name)}
+                    </span>
+                </h4>
+                {if diffs.is_empty() {
+                    view! {
+                        <p class="no-diffs">"No differences from base profile."</p>
+                    }.into_any()
+                } else {
+                    view! {
+                        <table class="diff-table">
+                            <thead>
+                                <tr>
+                                    <th>"Setting"</th>
+                                    <th>"Base Value"</th>
+                                    <th>"New Value"</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {diffs.into_iter().map(|d| {
+                                    view! {
+                                        <tr>
+                                            <td class="diff-label">{d.label}</td>
+                                            <td class="diff-base">{d.base_value}</td>
+                                            <td class="diff-new">{d.new_value}</td>
+                                        </tr>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </tbody>
+                        </table>
+                    }.into_any()
+                }}
             </div>
 
             <div class="profile-preview-actions">

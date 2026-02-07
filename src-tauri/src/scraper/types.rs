@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 /// Structured filament specifications extracted from manufacturer data.
 /// All temperature fields are in Celsius. Speed fields in mm/s.
 /// Optional fields represent data that may not be available for all filaments.
+///
+/// This struct captures the key parameters needed to generate a working
+/// Bambu Studio filament profile. A real profile has ~120 fields, but most
+/// can be derived from material-type defaults. These ~35 fields cover the
+/// parameters that vary meaningfully between filaments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FilamentSpecs {
     /// Filament name as provided by manufacturer
@@ -12,27 +17,83 @@ pub struct FilamentSpecs {
     /// Material type (PLA, PETG, ABS, TPU, etc.)
     pub material: String,
 
-    // Temperature ranges
+    // === Temperature ranges (for nozzle slider bounds) ===
     pub nozzle_temp_min: Option<u16>,
     pub nozzle_temp_max: Option<u16>,
     pub bed_temp_min: Option<u16>,
     pub bed_temp_max: Option<u16>,
 
-    // Speed
-    pub max_speed_mm_s: Option<u16>,
+    // === Actual printing temperatures ===
+    /// Default nozzle temperature for printing (maps to nozzle_temperature)
+    pub nozzle_temperature: Option<u16>,
+    /// Nozzle temp for the first layer (often 5-10C higher)
+    pub nozzle_temperature_initial_layer: Option<u16>,
 
-    // Cooling
+    // === Per-plate bed temperatures ===
+    /// Heated/hot plate bed temperature
+    pub hot_plate_temp: Option<u16>,
+    pub hot_plate_temp_initial_layer: Option<u16>,
+    /// Cool plate (PEI smooth) bed temperature
+    pub cool_plate_temp: Option<u16>,
+    pub cool_plate_temp_initial_layer: Option<u16>,
+    /// Engineering plate bed temperature
+    pub eng_plate_temp: Option<u16>,
+    pub eng_plate_temp_initial_layer: Option<u16>,
+    /// Textured plate bed temperature
+    pub textured_plate_temp: Option<u16>,
+    pub textured_plate_temp_initial_layer: Option<u16>,
+
+    // === Flow & volumetric speed ===
+    /// Maximum volumetric speed in mm³/s (THE key speed parameter in Bambu Studio)
+    pub max_volumetric_speed: Option<f32>,
+    /// Extrusion multiplier / flow ratio (typically 0.95-1.0)
+    pub filament_flow_ratio: Option<f32>,
+    /// Linear/pressure advance value
+    pub pressure_advance: Option<f32>,
+
+    // === Fan/cooling curve ===
+    /// Minimum part cooling fan speed (0-100%)
+    pub fan_min_speed: Option<u8>,
+    /// Maximum part cooling fan speed (0-100%)
+    pub fan_max_speed: Option<u8>,
+    /// Fan speed for overhangs (0-100%)
+    pub overhang_fan_speed: Option<u8>,
+    /// Number of initial layers with fan off
+    pub close_fan_the_first_x_layers: Option<u8>,
+    /// Auxiliary/additional cooling fan speed (0-100%)
+    pub additional_cooling_fan_speed: Option<u8>,
+
+    // === Legacy fan field (kept for backward compat) ===
     pub fan_speed_percent: Option<u8>,
 
-    // Retraction
+    // === Cooling slowdown ===
+    /// Minimum layer time before speed reduction (seconds)
+    pub slow_down_layer_time: Option<u8>,
+    /// Minimum speed when slowing down for cooling (mm/s)
+    pub slow_down_min_speed: Option<u16>,
+
+    // === Retraction ===
     pub retraction_distance_mm: Option<f32>,
     pub retraction_speed_mm_s: Option<u16>,
+    /// De-retraction speed (mm/s), often different from retraction speed
+    pub deretraction_speed_mm_s: Option<u16>,
 
-    // Physical properties
+    // === Overhang/bridge ===
+    /// Bridge print speed (mm/s)
+    pub bridge_speed: Option<u16>,
+
+    // === Physical properties ===
     pub density_g_cm3: Option<f32>,
     pub diameter_mm: Option<f32>,
+    /// Glass transition temperature (°C) — important for drying and AMS limits
+    pub temperature_vitrification: Option<u16>,
+    /// Filament cost per unit (typically per kg)
+    pub filament_cost: Option<f32>,
 
-    // Metadata
+    // === Speed (legacy) ===
+    pub max_speed_mm_s: Option<u16>,
+
+    // === Metadata ===
     pub source_url: String,
     pub extraction_confidence: f32,
 }
@@ -116,12 +177,36 @@ mod tests {
             nozzle_temp_max: Some(220),
             bed_temp_min: Some(25),
             bed_temp_max: Some(60),
-            max_speed_mm_s: Some(200),
+            nozzle_temperature: Some(210),
+            nozzle_temperature_initial_layer: Some(215),
+            hot_plate_temp: Some(55),
+            hot_plate_temp_initial_layer: Some(55),
+            cool_plate_temp: Some(50),
+            cool_plate_temp_initial_layer: Some(50),
+            eng_plate_temp: Some(55),
+            eng_plate_temp_initial_layer: Some(55),
+            textured_plate_temp: Some(55),
+            textured_plate_temp_initial_layer: Some(55),
+            max_volumetric_speed: Some(21.0),
+            filament_flow_ratio: Some(0.98),
+            pressure_advance: Some(0.04),
+            fan_min_speed: Some(100),
+            fan_max_speed: Some(100),
+            overhang_fan_speed: Some(100),
+            close_fan_the_first_x_layers: Some(1),
+            additional_cooling_fan_speed: Some(80),
             fan_speed_percent: Some(100),
+            slow_down_layer_time: Some(8),
+            slow_down_min_speed: Some(20),
+            max_speed_mm_s: Some(200),
             retraction_distance_mm: Some(0.8),
             retraction_speed_mm_s: Some(30),
+            deretraction_speed_mm_s: None,
+            bridge_speed: Some(25),
             density_g_cm3: Some(1.24),
             diameter_mm: Some(1.75),
+            temperature_vitrification: Some(55),
+            filament_cost: Some(24.99),
             source_url: "https://polymaker.com/products/polylite-pla-pro".to_string(),
             extraction_confidence: 0.85,
         };
@@ -141,12 +226,36 @@ mod tests {
             "nozzle_temp_max": 210,
             "bed_temp_min": null,
             "bed_temp_max": null,
-            "max_speed_mm_s": null,
+            "nozzle_temperature": null,
+            "nozzle_temperature_initial_layer": null,
+            "hot_plate_temp": null,
+            "hot_plate_temp_initial_layer": null,
+            "cool_plate_temp": null,
+            "cool_plate_temp_initial_layer": null,
+            "eng_plate_temp": null,
+            "eng_plate_temp_initial_layer": null,
+            "textured_plate_temp": null,
+            "textured_plate_temp_initial_layer": null,
+            "max_volumetric_speed": null,
+            "filament_flow_ratio": null,
+            "pressure_advance": null,
+            "fan_min_speed": null,
+            "fan_max_speed": null,
+            "overhang_fan_speed": null,
+            "close_fan_the_first_x_layers": null,
+            "additional_cooling_fan_speed": null,
             "fan_speed_percent": null,
+            "slow_down_layer_time": null,
+            "slow_down_min_speed": null,
+            "max_speed_mm_s": null,
             "retraction_distance_mm": null,
             "retraction_speed_mm_s": null,
+            "deretraction_speed_mm_s": null,
+            "bridge_speed": null,
             "density_g_cm3": null,
             "diameter_mm": 1.75,
+            "temperature_vitrification": null,
+            "filament_cost": null,
             "source_url": "https://example.com",
             "extraction_confidence": 0.3
         }"#;

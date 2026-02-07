@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod analyzer;
 mod commands;
 mod error;
@@ -34,6 +36,8 @@ pub fn run() {
             commands::profile::delete_profile,
             commands::profile::update_profile_field,
             commands::profile::duplicate_profile,
+            commands::profile::extract_specs_from_profile,
+            commands::profile::save_profile_specs,
             commands::scraper::search_filament,
             commands::scraper::get_cached_filament,
             commands::scraper::clear_filament_cache,

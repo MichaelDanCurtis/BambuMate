@@ -7,6 +7,7 @@ use crate::commands::{
 };
 use crate::components::filament_card::FilamentCard;
 use crate::components::profile_preview::ProfilePreview;
+use crate::components::specs_editor::SpecsEditor;
 
 #[component]
 pub fn FilamentSearchPage() -> impl IntoView {
@@ -29,6 +30,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
     // Specs state (after fetching)
     let (current_specs, set_current_specs) = signal::<Option<FilamentSpecs>>(None);
+
+    // Editor state (between FilamentCard and ProfilePreview)
+    let (show_editor, set_show_editor) = signal(false);
 
     // Generate state
     let (generate_result, set_generate_result) =
@@ -112,6 +116,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_install_result.set(None);
         set_current_generate.set(None);
         set_fetch_error.set(None);
+        set_show_editor.set(false);
 
         // Fetch full specs from catalog entry
         set_is_fetching.set(true);
@@ -143,6 +148,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_install_result.set(None);
         set_current_generate.set(None);
         set_fetch_error.set(None);
+        set_show_editor.set(false);
 
         set_is_fetching.set(true);
         spawn_local(async move {
@@ -173,6 +179,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_install_result.set(None);
         set_current_generate.set(None);
         set_fetch_error.set(None);
+        set_show_editor.set(false);
 
         set_is_fetching.set(true);
         spawn_local(async move {
@@ -218,6 +225,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_install_result.set(None);
         set_current_generate.set(None);
         set_fetch_error.set(None);
+        set_show_editor.set(false);
 
         set_is_fetching.set(true);
         spawn_local(async move {
@@ -234,20 +242,20 @@ pub fn FilamentSearchPage() -> impl IntoView {
         });
     };
 
-    // Generate handler
-    let do_generate = move || {
-        let specs = match current_specs.get() {
-            Some(s) => s,
-            None => return,
-        };
+    // Show editor when user clicks "Generate Profile" on FilamentCard
+    let show_specs_editor = move || {
+        set_show_editor.set(true);
+    };
 
+    // Generate handler — now takes edited specs and printer from SpecsEditor
+    let do_generate_with_specs = move |(edited_specs, printer): (FilamentSpecs, String)| {
         set_generate_result.set(None);
         set_install_result.set(None);
         set_current_generate.set(None);
 
         set_is_generating.set(true);
         spawn_local(async move {
-            let result = commands::generate_profile(&specs, None).await;
+            let result = commands::generate_profile(&edited_specs, Some(printer)).await;
             if let Ok(ref gen) = result {
                 set_current_generate.set(Some(gen.clone()));
             }
@@ -281,6 +289,10 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_current_generate.set(None);
     };
 
+    let cancel_editor = move || {
+        set_show_editor.set(false);
+    };
+
     let reset_search = move || {
         set_search_query.set(String::new());
         set_suggestions.set(vec![]);
@@ -292,6 +304,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_install_result.set(None);
         set_current_generate.set(None);
         set_fetch_error.set(None);
+        set_show_editor.set(false);
     };
 
     view! {
@@ -494,17 +507,17 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 })
             }}
 
-            // Specs display
+            // Specs display (FilamentCard) — shown when specs exist and editor is not shown
             {move || {
                 if let Some(specs) = current_specs.get() {
-                    if generate_result.get().is_some() {
+                    if show_editor.get() || generate_result.get().is_some() {
                         return None;
                     }
                     Some(view! {
                         <div class="search-results">
                             <FilamentCard
                                 specs=specs
-                                on_generate=move |_| do_generate()
+                                on_generate=move |_| show_specs_editor()
                                 generating=is_generating.get()
                             />
                         </div>
@@ -513,6 +526,32 @@ pub fn FilamentSearchPage() -> impl IntoView {
                     None
                 }
             }}
+
+            // Specs Editor — shown between FilamentCard and ProfilePreview
+            {move || {
+                if let Some(specs) = current_specs.get() {
+                    if show_editor.get() && generate_result.get().is_none() {
+                        return Some(view! {
+                            <div class="editor-section">
+                                <SpecsEditor
+                                    specs=specs
+                                    on_generate=move |data: (FilamentSpecs, String)| do_generate_with_specs(data)
+                                    on_cancel=move |_| cancel_editor()
+                                />
+                            </div>
+                        });
+                    }
+                }
+                None
+            }}
+
+            // Generating indicator
+            <Show when=move || is_generating.get()>
+                <div class="loading-spinner">
+                    <div class="spinner"></div>
+                    <span>"Generating profile..."</span>
+                </div>
+            </Show>
 
             // Generate error
             {move || {

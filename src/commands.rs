@@ -161,18 +161,235 @@ pub struct FilamentSpecs {
     pub name: String,
     pub brand: String,
     pub material: String,
+
+    // Temperature ranges
     pub nozzle_temp_min: Option<u16>,
     pub nozzle_temp_max: Option<u16>,
     pub bed_temp_min: Option<u16>,
     pub bed_temp_max: Option<u16>,
-    pub max_speed_mm_s: Option<u16>,
+
+    // Actual printing temperatures
+    pub nozzle_temperature: Option<u16>,
+    pub nozzle_temperature_initial_layer: Option<u16>,
+
+    // Per-plate bed temperatures
+    pub hot_plate_temp: Option<u16>,
+    pub hot_plate_temp_initial_layer: Option<u16>,
+    pub cool_plate_temp: Option<u16>,
+    pub cool_plate_temp_initial_layer: Option<u16>,
+    pub eng_plate_temp: Option<u16>,
+    pub eng_plate_temp_initial_layer: Option<u16>,
+    pub textured_plate_temp: Option<u16>,
+    pub textured_plate_temp_initial_layer: Option<u16>,
+
+    // Flow & volumetric speed
+    pub max_volumetric_speed: Option<f32>,
+    pub filament_flow_ratio: Option<f32>,
+    pub pressure_advance: Option<f32>,
+
+    // Fan/cooling curve
+    pub fan_min_speed: Option<u8>,
+    pub fan_max_speed: Option<u8>,
+    pub overhang_fan_speed: Option<u8>,
+    pub close_fan_the_first_x_layers: Option<u8>,
+    pub additional_cooling_fan_speed: Option<u8>,
+
+    // Legacy fan field
     pub fan_speed_percent: Option<u8>,
+
+    // Cooling slowdown
+    pub slow_down_layer_time: Option<u8>,
+    pub slow_down_min_speed: Option<u16>,
+
+    // Retraction
     pub retraction_distance_mm: Option<f32>,
     pub retraction_speed_mm_s: Option<u16>,
+    pub deretraction_speed_mm_s: Option<u16>,
+
+    // Overhang/bridge
+    pub bridge_speed: Option<u16>,
+
+    // Physical properties
     pub density_g_cm3: Option<f32>,
     pub diameter_mm: Option<f32>,
+    pub temperature_vitrification: Option<u16>,
+    pub filament_cost: Option<f32>,
+
+    // Legacy speed
+    pub max_speed_mm_s: Option<u16>,
+
+    // Metadata
     pub source_url: String,
     pub extraction_confidence: f32,
+}
+
+/// Material-type defaults for fields that can't be derived from other spec values.
+/// These match the well-known Bambu Studio community defaults.
+struct MaterialDefaults {
+    fan_min: u8,
+    fan_max: u8,
+    overhang_fan: u8,
+    close_fan_layers: u8,
+    additional_cooling_fan: u8,
+    slow_down_layer_time: u8,
+    slow_down_min_speed: u16,
+    max_volumetric_speed: f32,
+    flow_ratio: f32,
+    pressure_advance: f32,
+}
+
+fn material_defaults(material: &str) -> MaterialDefaults {
+    let m = material.to_uppercase();
+    if m.contains("PLA") {
+        MaterialDefaults {
+            fan_min: 100, fan_max: 100, overhang_fan: 100,
+            close_fan_layers: 1, additional_cooling_fan: 80,
+            slow_down_layer_time: 8, slow_down_min_speed: 20,
+            max_volumetric_speed: 21.0, flow_ratio: 0.98, pressure_advance: 0.04,
+        }
+    } else if m.contains("PETG") {
+        MaterialDefaults {
+            fan_min: 20, fan_max: 40, overhang_fan: 100,
+            close_fan_layers: 3, additional_cooling_fan: 50,
+            slow_down_layer_time: 10, slow_down_min_speed: 20,
+            max_volumetric_speed: 18.0, flow_ratio: 0.97, pressure_advance: 0.02,
+        }
+    } else if m.contains("ASA") {
+        MaterialDefaults {
+            fan_min: 0, fan_max: 30, overhang_fan: 80,
+            close_fan_layers: 3, additional_cooling_fan: 0,
+            slow_down_layer_time: 10, slow_down_min_speed: 20,
+            max_volumetric_speed: 16.0, flow_ratio: 0.98, pressure_advance: 0.02,
+        }
+    } else if m.contains("ABS") {
+        MaterialDefaults {
+            fan_min: 0, fan_max: 30, overhang_fan: 80,
+            close_fan_layers: 3, additional_cooling_fan: 0,
+            slow_down_layer_time: 10, slow_down_min_speed: 20,
+            max_volumetric_speed: 16.0, flow_ratio: 0.98, pressure_advance: 0.02,
+        }
+    } else if m.contains("TPU") || m.contains("TPE") {
+        MaterialDefaults {
+            fan_min: 50, fan_max: 80, overhang_fan: 100,
+            close_fan_layers: 3, additional_cooling_fan: 0,
+            slow_down_layer_time: 12, slow_down_min_speed: 15,
+            max_volumetric_speed: 8.0, flow_ratio: 1.0, pressure_advance: 0.04,
+        }
+    } else if m.contains("PA") || m.contains("NYLON") {
+        MaterialDefaults {
+            fan_min: 0, fan_max: 30, overhang_fan: 80,
+            close_fan_layers: 3, additional_cooling_fan: 0,
+            slow_down_layer_time: 10, slow_down_min_speed: 20,
+            max_volumetric_speed: 12.0, flow_ratio: 0.98, pressure_advance: 0.02,
+        }
+    } else if m.contains("PC") {
+        MaterialDefaults {
+            fan_min: 0, fan_max: 30, overhang_fan: 80,
+            close_fan_layers: 3, additional_cooling_fan: 0,
+            slow_down_layer_time: 10, slow_down_min_speed: 20,
+            max_volumetric_speed: 14.0, flow_ratio: 0.98, pressure_advance: 0.02,
+        }
+    } else {
+        // Safe PLA-like defaults for unknown materials
+        MaterialDefaults {
+            fan_min: 80, fan_max: 100, overhang_fan: 100,
+            close_fan_layers: 1, additional_cooling_fan: 80,
+            slow_down_layer_time: 8, slow_down_min_speed: 20,
+            max_volumetric_speed: 18.0, flow_ratio: 0.98, pressure_advance: 0.04,
+        }
+    }
+}
+
+impl FilamentSpecs {
+    /// Fill in derived defaults from basic fields and material-type defaults
+    /// so the editor shows what the profile generator will actually use.
+    /// Mirrors the fallback chains in `apply_specs_to_profile` on the backend,
+    /// then fills remaining gaps with well-known material defaults.
+    pub fn fill_derived_defaults(&mut self) {
+        // === Phase 1: Derive from other spec fields ===
+
+        // Nozzle temperature: fall back to range max
+        if self.nozzle_temperature.is_none() {
+            self.nozzle_temperature = self.nozzle_temp_max;
+        }
+        // Initial layer: nozzle_temp + 5
+        if self.nozzle_temperature_initial_layer.is_none() {
+            self.nozzle_temperature_initial_layer = self.nozzle_temperature.map(|t| t + 5);
+        }
+
+        // Per-plate bed temps from bed range
+        if self.hot_plate_temp.is_none() {
+            self.hot_plate_temp = self.bed_temp_max;
+        }
+        if self.hot_plate_temp_initial_layer.is_none() {
+            self.hot_plate_temp_initial_layer = self.hot_plate_temp;
+        }
+        if self.cool_plate_temp.is_none() {
+            self.cool_plate_temp = self.bed_temp_min;
+        }
+        if self.cool_plate_temp_initial_layer.is_none() {
+            self.cool_plate_temp_initial_layer = self.cool_plate_temp;
+        }
+        if self.eng_plate_temp.is_none() {
+            self.eng_plate_temp = self.bed_temp_max;
+        }
+        if self.eng_plate_temp_initial_layer.is_none() {
+            self.eng_plate_temp_initial_layer = self.eng_plate_temp;
+        }
+        if self.textured_plate_temp.is_none() {
+            self.textured_plate_temp = self.bed_temp_min.map(|t| t.saturating_sub(5));
+        }
+        if self.textured_plate_temp_initial_layer.is_none() {
+            self.textured_plate_temp_initial_layer = self.textured_plate_temp;
+        }
+
+        // Fan speeds from legacy fan_speed_percent
+        if self.fan_max_speed.is_none() {
+            self.fan_max_speed = self.fan_speed_percent;
+        }
+        if self.fan_min_speed.is_none() {
+            self.fan_min_speed = self.fan_speed_percent.map(|f| ((f as f32) * 0.6) as u8);
+        }
+
+        // Deretraction speed defaults to retraction speed
+        if self.deretraction_speed_mm_s.is_none() {
+            self.deretraction_speed_mm_s = self.retraction_speed_mm_s;
+        }
+
+        // === Phase 2: Fill remaining gaps from material-type defaults ===
+        let defaults = material_defaults(&self.material);
+
+        if self.fan_min_speed.is_none() {
+            self.fan_min_speed = Some(defaults.fan_min);
+        }
+        if self.fan_max_speed.is_none() {
+            self.fan_max_speed = Some(defaults.fan_max);
+        }
+        if self.overhang_fan_speed.is_none() {
+            self.overhang_fan_speed = Some(defaults.overhang_fan);
+        }
+        if self.close_fan_the_first_x_layers.is_none() {
+            self.close_fan_the_first_x_layers = Some(defaults.close_fan_layers);
+        }
+        if self.additional_cooling_fan_speed.is_none() {
+            self.additional_cooling_fan_speed = Some(defaults.additional_cooling_fan);
+        }
+        if self.slow_down_layer_time.is_none() {
+            self.slow_down_layer_time = Some(defaults.slow_down_layer_time);
+        }
+        if self.slow_down_min_speed.is_none() {
+            self.slow_down_min_speed = Some(defaults.slow_down_min_speed);
+        }
+        if self.max_volumetric_speed.is_none() {
+            self.max_volumetric_speed = Some(defaults.max_volumetric_speed);
+        }
+        if self.filament_flow_ratio.is_none() {
+            self.filament_flow_ratio = Some(defaults.flow_ratio);
+        }
+        if self.pressure_advance.is_none() {
+            self.pressure_advance = Some(defaults.pressure_advance);
+        }
+    }
 }
 
 /// Summary of which specs were applied to the generated profile.
@@ -182,6 +399,15 @@ pub struct GeneratedSpecs {
     pub bed_temp: Option<String>,
     pub fan_speed: Option<String>,
     pub retraction: Option<String>,
+}
+
+/// A single field difference between the base profile and the generated profile.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProfileDiff {
+    pub key: String,
+    pub label: String,
+    pub base_value: String,
+    pub new_value: String,
 }
 
 /// Result from profile generation (preview step, no files written).
@@ -194,6 +420,7 @@ pub struct GenerateResult {
     pub field_count: usize,
     pub base_profile_used: String,
     pub specs_applied: GeneratedSpecs,
+    pub diffs: Vec<ProfileDiff>,
     pub warnings: Vec<String>,
     pub bambu_studio_running: bool,
 }
@@ -569,6 +796,50 @@ pub async fn duplicate_profile(path: &str, new_name: &str) -> Result<ProfileDeta
     .map_err(|e| e.to_string())?;
 
     let result = invoke("duplicate_profile", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Profile Specs Extraction/Save --
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtractSpecsArgs {
+    path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveProfileSpecsArgs {
+    path: String,
+    specs: FilamentSpecs,
+}
+
+/// Extract FilamentSpecs from an existing profile for editing.
+pub async fn extract_specs_from_profile(path: &str) -> Result<FilamentSpecs, String> {
+    let args = serde_wasm_bindgen::to_value(&ExtractSpecsArgs {
+        path: path.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("extract_specs_from_profile", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Save edited FilamentSpecs back to an existing profile.
+pub async fn save_profile_specs(path: &str, specs: &FilamentSpecs) -> Result<ProfileDetail, String> {
+    let args = serde_wasm_bindgen::to_value(&SaveProfileSpecsArgs {
+        path: path.to_string(),
+        specs: specs.clone(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("save_profile_specs", args)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 

@@ -21,19 +21,24 @@ use self::validation::validate_specs;
 
 /// Default cache TTL in days.
 const CACHE_TTL_DAYS: i64 = 30;
-/// Minimum extraction confidence to accept results from a URL.
-const MIN_CONFIDENCE: f32 = 0.3;
+/// Minimum confidence to accept without trying web enrichment.
+const HIGH_CONFIDENCE: f32 = 0.7;
 
-/// Search for filament specifications using the full pipeline:
-/// 1. Check SQLite cache (instant if cached and not expired)
-/// 2. Resolve brand adapter and candidate URLs
-/// 3. Fetch each URL, convert HTML to text, extract specs via LLM
-/// 4. Accept first result with confidence > 0.3; fall back to SpoolScout
-/// 5. Validate against physical constraints (warnings only)
-/// 6. Store in cache with 30-day TTL
+/// Search for filament specifications using a knowledge-first pipeline:
 ///
-/// All SQLite operations are wrapped in `spawn_blocking` to avoid
-/// blocking the async runtime.
+/// 1. Check SQLite cache (instant if cached and not expired)
+/// 2. Ask AI for specs from training knowledge (fast, reliable for known filaments)
+/// 3. If confidence >= 0.7, accept the result
+/// 4. If confidence < 0.7, try web enrichment:
+///    a. Resolve brand adapter URLs
+///    b. Fetch raw HTML and extract via LLM (preserves tables/structured data)
+///    c. Fall back to SpoolScout and web search
+/// 5. Return the highest-confidence result
+/// 6. Cache with 30-day TTL
+///
+/// This "knowledge-first" approach is faster and more reliable than web scraping
+/// for well-known filaments, while still using web data to enrich results for
+/// lesser-known brands or when higher confidence is needed.
 pub async fn search_filament(
     name: &str,
     provider: &str,
@@ -70,158 +75,170 @@ pub async fn search_filament(
         }
     }
 
-    // Step 2: Resolve brand adapter and URLs
-    let adapter = adapters::find_adapter(name);
-    let mut urls: Vec<String> = if let Some(ref a) = adapter {
-        info!("Found adapter '{}' for '{}'", a.brand_name(), name);
-        a.resolve_urls(name)
-    } else {
-        info!("No brand adapter found for '{}', using SpoolScout fallback", name);
-        vec![]
-    };
-
-    // Ensure SpoolScout fallback is included if not already present
-    if adapter.is_none() {
-        // No brand match: use SpoolScout generic URL
-        let scout = adapters::spoolscout::SpoolScout;
-        urls = scout.resolve_urls(name);
-    }
-
-    // Step 3: Fetch and extract from each URL
-    let http_client = ScraperHttpClient::new();
+    // Step 2: AI Knowledge first — fast and reliable for known filaments
+    info!("Trying AI knowledge for '{}'", name);
     let mut best_specs: Option<FilamentSpecs> = None;
-    let mut last_error: Option<String> = None;
 
-    for url in &urls {
-        info!("Trying URL: {}", url);
-
-        // Fetch the page
-        let html = match http_client.fetch_page(url).await {
-            Ok(html) => html,
-            Err(e) => {
-                warn!("Failed to fetch '{}': {}", url, e);
-                last_error = Some(e);
-                continue;
-            }
-        };
-
-        // Convert HTML to text
-        let text = ScraperHttpClient::html_to_text(&html);
-        if text.trim().is_empty() {
-            warn!("Page text is empty after conversion for '{}'", url);
-            last_error = Some(format!("Empty page content from {}", url));
-            continue;
-        }
-
-        // Extract specs via LLM
-        let mut specs = match extraction::extract_specs(&text, name, provider, model, api_key).await {
-            Ok(specs) => specs,
-            Err(e) => {
-                warn!("LLM extraction failed for '{}': {}", url, e);
-                last_error = Some(e);
-                continue;
-            }
-        };
-
-        // Set source URL on extracted specs
-        specs.source_url = url.clone();
-
-        // Check confidence
-        if specs.extraction_confidence > MIN_CONFIDENCE {
+    match extraction::generate_specs_from_knowledge(name, provider, model, api_key).await {
+        Ok(specs) => {
             info!(
-                "Accepted extraction from '{}' with confidence {:.2}",
-                url, specs.extraction_confidence
+                "AI knowledge returned specs for '{}' with confidence {:.2}",
+                name, specs.extraction_confidence
             );
-            best_specs = Some(specs);
-            break;
-        } else {
-            info!(
-                "Low confidence ({:.2}) from '{}', trying next URL",
-                specs.extraction_confidence, url
-            );
-            // Keep as fallback if nothing better found
-            if best_specs.is_none() {
+            if specs.extraction_confidence >= HIGH_CONFIDENCE {
+                // High confidence from AI knowledge — accept directly
+                info!("High confidence from AI knowledge, accepting result");
+                best_specs = Some(specs);
+            } else {
+                // Keep as fallback, try web enrichment
                 best_specs = Some(specs);
             }
         }
-    }
-
-    // Step 4: If no good result yet, and we had a brand adapter, try SpoolScout
-    if best_specs.as_ref().map_or(true, |s| s.extraction_confidence <= MIN_CONFIDENCE) {
-        if adapter.is_some() {
-            // Try SpoolScout as last resort
-            let brand = adapter.as_ref().unwrap().brand_name();
-            let scout_url = spoolscout::fallback_url(brand, name);
-
-            // Only try if not already in urls list
-            if !urls.contains(&scout_url) {
-                info!("Trying SpoolScout fallback: {}", scout_url);
-                if let Ok(html) = http_client.fetch_page(&scout_url).await {
-                    let text = ScraperHttpClient::html_to_text(&html);
-                    if !text.trim().is_empty() {
-                        if let Ok(mut specs) = extraction::extract_specs(&text, name, provider, model, api_key).await {
-                            specs.source_url = scout_url;
-                            if specs.extraction_confidence > MIN_CONFIDENCE
-                                || best_specs.as_ref().map_or(true, |s| specs.extraction_confidence > s.extraction_confidence)
-                            {
-                                best_specs = Some(specs);
-                            }
-                        }
-                    }
-                }
-            }
+        Err(e) => {
+            warn!("AI knowledge generation failed for '{}': {}", name, e);
         }
     }
 
-    // Step 5: If no good result yet, try web search fallback
-    if best_specs.as_ref().map_or(true, |s| s.extraction_confidence <= MIN_CONFIDENCE) {
-        info!("Trying web search fallback for '{}'", name);
-        match web_search::search_for_filament_urls(name, &http_client).await {
-            Ok(search_urls) => {
-                for url in search_urls {
-                    if urls.contains(&url) {
-                        continue; // Already tried this URL
-                    }
-                    info!("Trying search result URL: {}", url);
+    // Step 3: If confidence < 0.7, try web enrichment with raw HTML
+    if best_specs.as_ref().map_or(true, |s| s.extraction_confidence < HIGH_CONFIDENCE) {
+        info!("Trying web enrichment for '{}'", name);
 
-                    if let Ok(html) = http_client.fetch_page(&url).await {
-                        let text = ScraperHttpClient::html_to_text(&html);
-                        if !text.trim().is_empty() {
-                            if let Ok(mut specs) = extraction::extract_specs(&text, name, provider, model, api_key).await {
-                                specs.source_url = url.clone();
-                                if specs.extraction_confidence > MIN_CONFIDENCE
-                                    || best_specs.as_ref().map_or(true, |s| specs.extraction_confidence > s.extraction_confidence)
-                                {
-                                    info!("Found specs from search result '{}' with confidence {:.2}", url, specs.extraction_confidence);
+        // Resolve brand adapter and URLs
+        let adapter = adapters::find_adapter(name);
+        let urls: Vec<String> = if let Some(ref a) = adapter {
+            info!("Found adapter '{}' for '{}'", a.brand_name(), name);
+            a.resolve_urls(name)
+        } else {
+            info!("No brand adapter found for '{}', using SpoolScout fallback", name);
+            let scout = adapters::spoolscout::SpoolScout;
+            scout.resolve_urls(name)
+        };
+
+        let http_client = ScraperHttpClient::new();
+
+        // Try each URL with raw HTML extraction
+        for url in &urls {
+            info!("Trying URL: {}", url);
+
+            let html = match http_client.fetch_page(url).await {
+                Ok(html) => html,
+                Err(e) => {
+                    warn!("Failed to fetch '{}': {}", url, e);
+                    continue;
+                }
+            };
+
+            if html.trim().is_empty() || html.len() < 100 {
+                warn!("Page content too short for '{}'", url);
+                continue;
+            }
+
+            // Try raw HTML extraction first (preserves tables/structured data)
+            let mut specs = match extraction::extract_specs_from_html(&html, name, provider, model, api_key).await {
+                Ok(specs) => specs,
+                Err(e) => {
+                    warn!("HTML extraction failed for '{}': {}", url, e);
+                    // Fall back to text extraction
+                    let text = ScraperHttpClient::html_to_text(&html);
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    match extraction::extract_specs(&text, name, provider, model, api_key).await {
+                        Ok(specs) => specs,
+                        Err(e2) => {
+                            warn!("Text extraction also failed for '{}': {}", url, e2);
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            specs.source_url = url.clone();
+
+            // Accept if better than what we have
+            if specs.extraction_confidence > best_specs.as_ref().map_or(0.0, |s| s.extraction_confidence) {
+                info!(
+                    "Accepted web extraction from '{}' with confidence {:.2}",
+                    url, specs.extraction_confidence
+                );
+                best_specs = Some(specs);
+                if best_specs.as_ref().map_or(false, |s| s.extraction_confidence >= HIGH_CONFIDENCE) {
+                    break; // Good enough
+                }
+            }
+        }
+
+        // Try SpoolScout fallback if we had a brand adapter
+        if best_specs.as_ref().map_or(true, |s| s.extraction_confidence < HIGH_CONFIDENCE) {
+            if let Some(ref a) = adapter {
+                let scout_url = spoolscout::fallback_url(a.brand_name(), name);
+                if !urls.contains(&scout_url) {
+                    info!("Trying SpoolScout fallback: {}", scout_url);
+                    if let Ok(html) = http_client.fetch_page(&scout_url).await {
+                        if html.len() >= 100 {
+                            if let Ok(mut specs) = extraction::extract_specs_from_html(&html, name, provider, model, api_key).await {
+                                specs.source_url = scout_url;
+                                if specs.extraction_confidence > best_specs.as_ref().map_or(0.0, |s| s.extraction_confidence) {
                                     best_specs = Some(specs);
-                                    if best_specs.as_ref().map_or(false, |s| s.extraction_confidence > MIN_CONFIDENCE) {
-                                        break; // Good enough result
-                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-            Err(e) => {
-                warn!("Web search fallback failed: {}", e);
+        }
+
+        // Try web search fallback
+        if best_specs.as_ref().map_or(true, |s| s.extraction_confidence < HIGH_CONFIDENCE) {
+            info!("Trying web search fallback for '{}'", name);
+            match web_search::search_for_filament_urls(name, &http_client).await {
+                Ok(search_urls) => {
+                    for url in search_urls {
+                        if urls.contains(&url) {
+                            continue;
+                        }
+                        info!("Trying search result URL: {}", url);
+
+                        if let Ok(html) = http_client.fetch_page(&url).await {
+                            if html.len() >= 100 {
+                                if let Ok(mut specs) = extraction::extract_specs_from_html(&html, name, provider, model, api_key).await {
+                                    specs.source_url = url.clone();
+                                    let confidence = specs.extraction_confidence;
+                                    if confidence > best_specs.as_ref().map_or(0.0, |s| s.extraction_confidence) {
+                                        info!("Found specs from search '{}' with confidence {:.2}", url, confidence);
+                                        best_specs = Some(specs);
+                                        if confidence >= 0.7 {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Web search fallback failed: {}", e);
+                }
             }
         }
+
+        // Track URLs for dedup (used by web search above)
+        let _ = urls;
     }
 
-    // Step 6: Return result or error
+    // Step 4: Return result or error
     let specs = match best_specs {
         Some(specs) => specs,
         None => {
-            let detail = last_error.unwrap_or_else(|| "No URLs to try.".to_string());
             return Err(format!(
-                "No specs found for '{}'. Try checking the filament name spelling or select from the catalog. Detail: {}",
-                name, detail
+                "No specs found for '{}'. Try checking the filament name spelling, \
+                 select from the catalog, or paste a direct URL to the product page.",
+                name
             ));
         }
     };
 
-    // Step 6: Validate
+    // Validate
     let warnings = validate_specs(&specs);
     for w in &warnings {
         warn!(
@@ -230,7 +247,7 @@ pub async fn search_filament(
         );
     }
 
-    // Step 7: Cache store
+    // Step 5: Cache store
     let store_name = name.to_string();
     let store_specs = specs.clone();
     let db_path_store = db_path.clone();
@@ -243,7 +260,6 @@ pub async fn search_filament(
 
     if let Err(e) = cache_result {
         warn!("Failed to cache specs for '{}': {}", name, e);
-        // Don't fail the whole search just because caching failed
     }
 
     Ok(specs)

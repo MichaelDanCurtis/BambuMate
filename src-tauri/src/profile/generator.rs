@@ -55,88 +55,202 @@ pub fn apply_specs_to_profile(profile: &mut FilamentProfile, specs: &FilamentSpe
         p.set_string_array(key, vec![val.clone(), val]);
     };
 
-    // Nozzle temperature: use max as primary, min for range_low
+    // === Nozzle temperatures ===
+    // Prefer explicit nozzle_temperature if available, fall back to range max
+    if let Some(temp) = specs.nozzle_temperature.or(specs.nozzle_temp_max) {
+        set_dual(profile, "nozzle_temperature", temp.to_string());
+    }
+    if let Some(temp) = specs.nozzle_temperature_initial_layer.or(
+        specs.nozzle_temperature.map(|t| t + 5).or(specs.nozzle_temp_max.map(|t| t + 5))
+    ) {
+        set_dual(profile, "nozzle_temperature_initial_layer", temp.to_string());
+    }
+    // Range bounds for BS temperature slider
     if let Some(temp_max) = specs.nozzle_temp_max {
-        set_dual(profile, "nozzle_temperature", temp_max.to_string());
-        // Initial layer: +5C is common convention for better first-layer adhesion
-        set_dual(
-            profile,
-            "nozzle_temperature_initial_layer",
-            (temp_max + 5).to_string(),
-        );
-        // Range high: max + 20 for safety margin in BS temperature slider
-        set_dual(
-            profile,
-            "nozzle_temperature_range_high",
-            (temp_max + 20).to_string(),
-        );
+        set_dual(profile, "nozzle_temperature_range_high", (temp_max + 20).to_string());
     }
     if let Some(temp_min) = specs.nozzle_temp_min {
-        set_dual(
-            profile,
-            "nozzle_temperature_range_low",
-            temp_min.to_string(),
-        );
+        set_dual(profile, "nozzle_temperature_range_low", temp_min.to_string());
     }
 
-    // Bed temperature: max for primary surfaces, min for cool plate
-    if let Some(bed_max) = specs.bed_temp_max {
-        set_dual(profile, "bed_temperature", bed_max.to_string());
-        set_dual(
-            profile,
-            "bed_temperature_initial_layer",
-            bed_max.to_string(),
-        );
-        set_dual(profile, "hot_plate_temp", bed_max.to_string());
-        set_dual(profile, "hot_plate_temp_initial_layer", bed_max.to_string());
-        set_dual(profile, "eng_plate_temp", bed_max.to_string());
-        set_dual(profile, "eng_plate_temp_initial_layer", bed_max.to_string());
+    // === Per-plate bed temperatures ===
+    // Prefer explicit plate temps, fall back to bed_temp range
+    if let Some(temp) = specs.hot_plate_temp.or(specs.bed_temp_max) {
+        set_dual(profile, "hot_plate_temp", temp.to_string());
     }
-    if let Some(bed_min) = specs.bed_temp_min {
-        set_dual(profile, "cool_plate_temp", bed_min.to_string());
-        set_dual(
-            profile,
-            "cool_plate_temp_initial_layer",
-            bed_min.to_string(),
-        );
-        // Textured plate: slightly lower than min, floored at 0
-        let textured = bed_min.saturating_sub(5);
-        set_dual(profile, "textured_plate_temp", textured.to_string());
-        set_dual(
-            profile,
-            "textured_plate_temp_initial_layer",
-            textured.to_string(),
-        );
+    if let Some(temp) = specs.hot_plate_temp_initial_layer.or(specs.hot_plate_temp).or(specs.bed_temp_max) {
+        set_dual(profile, "hot_plate_temp_initial_layer", temp.to_string());
+    }
+    if let Some(temp) = specs.cool_plate_temp.or(specs.bed_temp_min) {
+        set_dual(profile, "cool_plate_temp", temp.to_string());
+    }
+    if let Some(temp) = specs.cool_plate_temp_initial_layer.or(specs.cool_plate_temp).or(specs.bed_temp_min) {
+        set_dual(profile, "cool_plate_temp_initial_layer", temp.to_string());
+    }
+    if let Some(temp) = specs.eng_plate_temp.or(specs.bed_temp_max) {
+        set_dual(profile, "eng_plate_temp", temp.to_string());
+    }
+    if let Some(temp) = specs.eng_plate_temp_initial_layer.or(specs.eng_plate_temp).or(specs.bed_temp_max) {
+        set_dual(profile, "eng_plate_temp_initial_layer", temp.to_string());
+    }
+    if let Some(temp) = specs.textured_plate_temp.or(specs.bed_temp_min.map(|t| t.saturating_sub(5))) {
+        set_dual(profile, "textured_plate_temp", temp.to_string());
+    }
+    if let Some(temp) = specs.textured_plate_temp_initial_layer.or(specs.textured_plate_temp).or(specs.bed_temp_min.map(|t| t.saturating_sub(5))) {
+        set_dual(profile, "textured_plate_temp_initial_layer", temp.to_string());
     }
 
-    // Fan speed: convert percentage to Bambu Studio format
-    if let Some(fan) = specs.fan_speed_percent {
-        set_dual(profile, "fan_max_speed", format!("{}%", fan));
-        // Min speed: 60% of max is a reasonable default
-        let fan_min = (fan as f32 * 0.6) as u8;
-        set_dual(profile, "fan_min_speed", format!("{}%", fan_min));
+    // === Flow & volumetric speed ===
+    if let Some(mvs) = specs.max_volumetric_speed {
+        set_dual(profile, "filament_max_volumetric_speed", format!("{:.0}", mvs));
+    }
+    if let Some(ratio) = specs.filament_flow_ratio {
+        set_dual(profile, "filament_flow_ratio", format!("{:.2}", ratio));
+    }
+    if let Some(pa) = specs.pressure_advance {
+        set_dual(profile, "pressure_advance", format!("{:.3}", pa));
     }
 
-    // Retraction
+    // === Fan/cooling ===
+    // Prefer explicit fan_min/max, fall back to legacy fan_speed_percent
+    if let Some(fan_max) = specs.fan_max_speed.or(specs.fan_speed_percent) {
+        set_dual(profile, "fan_max_speed", fan_max.to_string());
+    }
+    if let Some(fan_min) = specs.fan_min_speed.or(specs.fan_speed_percent.map(|f| (f as f32 * 0.6) as u8)) {
+        set_dual(profile, "fan_min_speed", fan_min.to_string());
+    }
+    if let Some(overhang) = specs.overhang_fan_speed {
+        set_dual(profile, "overhang_fan_speed", overhang.to_string());
+    }
+    if let Some(layers) = specs.close_fan_the_first_x_layers {
+        set_dual(profile, "close_fan_the_first_x_layers", layers.to_string());
+    }
+    if let Some(aux) = specs.additional_cooling_fan_speed {
+        set_dual(profile, "additional_cooling_fan_speed", aux.to_string());
+    }
+
+    // === Cooling slowdown ===
+    if let Some(time) = specs.slow_down_layer_time {
+        set_dual(profile, "slow_down_layer_time", time.to_string());
+    }
+    if let Some(speed) = specs.slow_down_min_speed {
+        set_dual(profile, "slow_down_min_speed", speed.to_string());
+    }
+
+    // === Retraction ===
     if let Some(dist) = specs.retraction_distance_mm {
-        set_dual(
-            profile,
-            "filament_retraction_length",
-            format!("{:.1}", dist),
-        );
+        set_dual(profile, "filament_retraction_length", format!("{:.1}", dist));
     }
     if let Some(speed) = specs.retraction_speed_mm_s {
         set_dual(profile, "filament_retraction_speed", speed.to_string());
     }
+    if let Some(speed) = specs.deretraction_speed_mm_s {
+        set_dual(profile, "filament_deretraction_speed", speed.to_string());
+    }
 
-    // Density
+    // === Bridge ===
+    if let Some(speed) = specs.bridge_speed {
+        set_dual(profile, "filament_bridge_speed", speed.to_string());
+    }
+
+    // === Physical properties ===
     if let Some(density) = specs.density_g_cm3 {
         set_dual(profile, "filament_density", format!("{:.2}", density));
+    }
+    if let Some(vitrification) = specs.temperature_vitrification {
+        set_dual(profile, "temperature_vitrification", vitrification.to_string());
+    }
+    if let Some(cost) = specs.filament_cost {
+        set_dual(profile, "filament_cost", format!("{:.2}", cost));
     }
 
     // Material identity (always set, not optional)
     set_dual(profile, "filament_type", specs.material.clone());
     set_dual(profile, "filament_vendor", specs.brand.clone());
+}
+
+/// Extract FilamentSpecs from an existing Bambu Studio profile.
+///
+/// This is the reverse of `apply_specs_to_profile`: it reads BS profile fields
+/// and maps them back into a `FilamentSpecs` struct so the user can view/edit
+/// them through the SpecsEditor UI.
+pub fn extract_specs_from_profile(profile: &FilamentProfile) -> FilamentSpecs {
+    // Helper: get first element of a dual-extruder string array and parse it
+    let get_u16 = |key: &str| -> Option<u16> {
+        profile
+            .get_string_array(key)
+            .and_then(|arr| arr.first().and_then(|s| s.parse().ok()))
+    };
+    let get_u8 = |key: &str| -> Option<u8> {
+        profile
+            .get_string_array(key)
+            .and_then(|arr| arr.first().and_then(|s| s.parse().ok()))
+    };
+    let get_f32 = |key: &str| -> Option<f32> {
+        profile
+            .get_string_array(key)
+            .and_then(|arr| arr.first().and_then(|s| s.parse().ok()))
+    };
+    let get_str = |key: &str| -> String {
+        profile
+            .get_string_array(key)
+            .and_then(|arr| arr.first().map(|s| s.to_string()))
+            .or_else(|| profile.raw().get(key).and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .unwrap_or_default()
+    };
+
+    FilamentSpecs {
+        name: profile.name().unwrap_or("").to_string(),
+        brand: get_str("filament_vendor"),
+        material: get_str("filament_type"),
+
+        nozzle_temp_min: get_u16("nozzle_temperature_range_low"),
+        nozzle_temp_max: get_u16("nozzle_temperature_range_high").map(|v| v.saturating_sub(20)),
+        bed_temp_min: get_u16("cool_plate_temp"),
+        bed_temp_max: get_u16("hot_plate_temp"),
+
+        nozzle_temperature: get_u16("nozzle_temperature"),
+        nozzle_temperature_initial_layer: get_u16("nozzle_temperature_initial_layer"),
+
+        hot_plate_temp: get_u16("hot_plate_temp"),
+        hot_plate_temp_initial_layer: get_u16("hot_plate_temp_initial_layer"),
+        cool_plate_temp: get_u16("cool_plate_temp"),
+        cool_plate_temp_initial_layer: get_u16("cool_plate_temp_initial_layer"),
+        eng_plate_temp: get_u16("eng_plate_temp"),
+        eng_plate_temp_initial_layer: get_u16("eng_plate_temp_initial_layer"),
+        textured_plate_temp: get_u16("textured_plate_temp"),
+        textured_plate_temp_initial_layer: get_u16("textured_plate_temp_initial_layer"),
+
+        max_volumetric_speed: get_f32("filament_max_volumetric_speed"),
+        filament_flow_ratio: get_f32("filament_flow_ratio"),
+        pressure_advance: get_f32("pressure_advance"),
+
+        fan_min_speed: get_u8("fan_min_speed"),
+        fan_max_speed: get_u8("fan_max_speed"),
+        overhang_fan_speed: get_u8("overhang_fan_speed"),
+        close_fan_the_first_x_layers: get_u8("close_fan_the_first_x_layers"),
+        additional_cooling_fan_speed: get_u8("additional_cooling_fan_speed"),
+        fan_speed_percent: None,
+
+        slow_down_layer_time: get_u8("slow_down_layer_time"),
+        slow_down_min_speed: get_u16("slow_down_min_speed"),
+
+        retraction_distance_mm: get_f32("filament_retraction_length"),
+        retraction_speed_mm_s: get_u16("filament_retraction_speed"),
+        deretraction_speed_mm_s: get_u16("filament_deretraction_speed"),
+
+        bridge_speed: get_u16("filament_bridge_speed"),
+
+        density_g_cm3: get_f32("filament_density"),
+        diameter_mm: get_f32("filament_diameter"),
+        temperature_vitrification: get_u16("temperature_vitrification"),
+        filament_cost: get_f32("filament_cost"),
+
+        max_speed_mm_s: None,
+
+        source_url: "profile".to_string(),
+        extraction_confidence: 1.0,
+    }
 }
 
 /// Generate a fully-flattened filament profile from scraped specifications.

@@ -1,7 +1,8 @@
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::commands::{self, ProfileDetail, ProfileInfo};
+use crate::commands::{self, FilamentSpecs, ProfileDetail, ProfileInfo};
+use crate::components::specs_editor::SpecsEditor;
 
 /// Key profile fields to display in the detail panel.
 const KEY_FIELDS: &[&str] = &[
@@ -79,6 +80,11 @@ pub fn ProfileManagementPage() -> impl IntoView {
     let (editing_field, set_editing_field) = signal::<Option<String>>(None);
     let (edit_value, set_edit_value) = signal(String::new());
 
+    // Specs editor state
+    let (show_specs_editor, set_show_specs_editor) = signal(false);
+    let (editor_specs, set_editor_specs) = signal::<Option<FilamentSpecs>>(None);
+    let (specs_loading, set_specs_loading) = signal(false);
+
     // Load profiles on mount
     let load_profiles = move || {
         set_is_loading.set(true);
@@ -109,6 +115,8 @@ pub fn ProfileManagementPage() -> impl IntoView {
         set_editing_field.set(None);
         set_show_delete_confirm.set(false);
         set_show_duplicate_input.set(false);
+        set_show_specs_editor.set(false);
+        set_editor_specs.set(None);
 
         spawn_local(async move {
             match commands::read_profile(&path).await {
@@ -211,6 +219,58 @@ pub fn ProfileManagementPage() -> impl IntoView {
                 Err(e) => set_action_error.set(Some(e)),
             }
         });
+    };
+
+    // Open specs editor for current profile
+    let open_specs_editor = move || {
+        let path = match selected_path.get() {
+            Some(p) => p,
+            None => return,
+        };
+        set_specs_loading.set(true);
+        set_action_error.set(None);
+        set_action_success.set(None);
+
+        spawn_local(async move {
+            match commands::extract_specs_from_profile(&path).await {
+                Ok(specs) => {
+                    set_editor_specs.set(Some(specs));
+                    set_show_specs_editor.set(true);
+                }
+                Err(e) => set_action_error.set(Some(format!("Failed to load specs: {}", e))),
+            }
+            set_specs_loading.set(false);
+        });
+    };
+
+    // Save edited specs back to profile
+    let save_specs = move |(specs, _printer): (FilamentSpecs, String)| {
+        let path = match selected_path.get() {
+            Some(p) => p,
+            None => return,
+        };
+        set_action_error.set(None);
+
+        spawn_local(async move {
+            match commands::save_profile_specs(&path, &specs).await {
+                Ok(detail) => {
+                    set_selected_detail.set(Some(detail));
+                    set_show_specs_editor.set(false);
+                    set_editor_specs.set(None);
+                    set_action_success.set(Some("Profile specs saved".to_string()));
+                    // Refresh list in case name changed
+                    if let Ok(list) = commands::list_profiles().await {
+                        set_profiles.set(list);
+                    }
+                }
+                Err(e) => set_action_error.set(Some(format!("Failed to save: {}", e))),
+            }
+        });
+    };
+
+    let cancel_specs_editor = move || {
+        set_show_specs_editor.set(false);
+        set_editor_specs.set(None);
     };
 
     // Filtered profiles
@@ -356,8 +416,6 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                             </div>
                                         }.into_any(),
                                         Some(detail) => {
-                                            let rows = build_display_rows(&detail.raw_json);
-
                                             view! {
                                                 <div>
                                                     <div class="profile-detail-header">
@@ -372,6 +430,14 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                                             </div>
                                                         </div>
                                                         <div class="profile-detail-actions">
+                                                            <button
+                                                                class="btn-icon btn-edit-specs"
+                                                                title="Edit Specs"
+                                                                disabled=move || specs_loading.get()
+                                                                on:click=move |_| open_specs_editor()
+                                                            >
+                                                                {move || if specs_loading.get() { "Loading..." } else { "Edit Specs" }}
+                                                            </button>
                                                             <button
                                                                 class="btn-icon"
                                                                 title="Duplicate"
@@ -423,57 +489,82 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                                         </div>
                                                     </Show>
 
-                                                    // Fields table
-                                                    <table class="profile-fields">
-                                                        <tbody>
-                                                            {rows.into_iter().map(|(key, value)| {
-                                                                let key_edit = key.clone();
-                                                                let key_display = key.clone();
-                                                                let value_display = value.clone();
-                                                                let value_for_edit = value.clone();
-                                                                view! {
-                                                                    <tr>
-                                                                        <td class="field-key">{key_display}</td>
-                                                                        <td class="field-value">
-                                                                            {move || {
-                                                                                let is_editing = editing_field.get().as_deref() == Some(&key_edit);
-                                                                                if is_editing {
-                                                                                    view! {
-                                                                                        <input
-                                                                                            class="field-edit-input"
-                                                                                            prop:value=move || edit_value.get()
-                                                                                            on:input=move |ev| set_edit_value.set(event_target_value(&ev))
-                                                                                            on:blur=move |_| save_field()
-                                                                                            on:keydown=move |ev| {
-                                                                                                if ev.key() == "Enter" { save_field(); }
-                                                                                                if ev.key() == "Escape" { set_editing_field.set(None); }
-                                                                                            }
-                                                                                        />
-                                                                                    }.into_any()
-                                                                                } else {
-                                                                                    let key_click = key_edit.clone();
-                                                                                    let val_click = value_for_edit.clone();
-                                                                                    view! {
-                                                                                        <span
-                                                                                            on:click=move |_| {
-                                                                                                set_editing_field.set(Some(key_click.clone()));
-                                                                                                set_edit_value.set(val_click.clone());
-                                                                                                set_action_error.set(None);
-                                                                                                set_action_success.set(None);
-                                                                                            }
-                                                                                            title="Click to edit"
-                                                                                        >
-                                                                                            {value_display.clone()}
-                                                                                        </span>
-                                                                                    }.into_any()
-                                                                                }
-                                                                            }}
-                                                                        </td>
-                                                                    </tr>
-                                                                }
-                                                            }).collect::<Vec<_>>()}
-                                                        </tbody>
-                                                    </table>
+                                                    // Specs editor or fields table
+                                                    {move || {
+                                                        if show_specs_editor.get() {
+                                                            if let Some(specs) = editor_specs.get() {
+                                                                return view! {
+                                                                    <SpecsEditor
+                                                                        specs=specs
+                                                                        on_generate=save_specs
+                                                                        on_cancel=move |_| cancel_specs_editor()
+                                                                        action_label="Save Changes"
+                                                                        cancel_label="Cancel"
+                                                                        show_printer=false
+                                                                        fill_defaults=false
+                                                                    />
+                                                                }.into_any();
+                                                            }
+                                                        }
+
+                                                        let detail = selected_detail.get();
+                                                        let rows = detail
+                                                            .map(|d| build_display_rows(&d.raw_json))
+                                                            .unwrap_or_default();
+
+                                                        view! {
+                                                            <table class="profile-fields">
+                                                                <tbody>
+                                                                    {rows.into_iter().map(|(key, value)| {
+                                                                        let key_edit = key.clone();
+                                                                        let key_display = key.clone();
+                                                                        let value_display = value.clone();
+                                                                        let value_for_edit = value.clone();
+                                                                        view! {
+                                                                            <tr>
+                                                                                <td class="field-key">{key_display}</td>
+                                                                                <td class="field-value">
+                                                                                    {move || {
+                                                                                        let is_editing = editing_field.get().as_deref() == Some(&key_edit);
+                                                                                        if is_editing {
+                                                                                            view! {
+                                                                                                <input
+                                                                                                    class="field-edit-input"
+                                                                                                    prop:value=move || edit_value.get()
+                                                                                                    on:input=move |ev| set_edit_value.set(event_target_value(&ev))
+                                                                                                    on:blur=move |_| save_field()
+                                                                                                    on:keydown=move |ev| {
+                                                                                                        if ev.key() == "Enter" { save_field(); }
+                                                                                                        if ev.key() == "Escape" { set_editing_field.set(None); }
+                                                                                                    }
+                                                                                                />
+                                                                                            }.into_any()
+                                                                                        } else {
+                                                                                            let key_click = key_edit.clone();
+                                                                                            let val_click = value_for_edit.clone();
+                                                                                            view! {
+                                                                                                <span
+                                                                                                    on:click=move |_| {
+                                                                                                        set_editing_field.set(Some(key_click.clone()));
+                                                                                                        set_edit_value.set(val_click.clone());
+                                                                                                        set_action_error.set(None);
+                                                                                                        set_action_success.set(None);
+                                                                                                    }
+                                                                                                    title="Click to edit"
+                                                                                                >
+                                                                                                    {value_display.clone()}
+                                                                                                </span>
+                                                                                            }.into_any()
+                                                                                        }
+                                                                                    }}
+                                                                                </td>
+                                                                            </tr>
+                                                                        }
+                                                                    }).collect::<Vec<_>>()}
+                                                                </tbody>
+                                                            </table>
+                                                        }.into_any()
+                                                    }}
                                                 </div>
                                             }.into_any()
                                         }
