@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 4: Profile Generation & Installation** - Generate profiles from scraped data, install to Bambu Studio, detect running instances
 - [x] **Phase 5: Defect Knowledge Base** - TOML-driven rule engine mapping defects to profile parameter adjustments
 - [x] **Phase 6: AI Print Analysis** - Photo-to-defect-report pipeline with vision API integration and profile-aware recommendations
-- [ ] **Phase 7: Auto-Tuning & Refinement** - Apply AI recommendations to profiles with backup, iterative print-analyze-fix loop
+- [x] **Phase 7: Auto-Tuning & Refinement** - Apply AI recommendations to profiles with backup, iterative print-analyze-fix loop
 - [ ] **Phase 8: Integration & Power Features** - Bambu Studio launcher, OpenSCAD Studio bridge, batch operations, visual diff
 
 ## Phase Details
@@ -126,9 +126,10 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 07-01-PLAN.md -- History store (SQLite) and backup_profile function for pre-modification snapshots
-- [ ] 07-02-PLAN.md -- apply_recommendations Tauri command and history commands (list, get, revert)
-- [ ] 07-03-PLAN.md -- Frontend UI with ChangePreview dialog, Apply button, and HistoryPanel component
+- [x] 07-01-PLAN.md -- History store (SQLite) and backup_profile function for pre-modification snapshots
+- [x] 07-02-PLAN.md -- apply_recommendations Tauri command and history commands (list, get, revert)
+- [x] 07-03-PLAN.md -- Frontend UI with ChangePreview dialog, Apply button, and HistoryPanel component
+- [x] 07-04-PLAN.md -- HistoryPanel component with session list and revert capability
 
 ### Phase 8: Integration & Power Features
 **Goal**: Complete workflow integration -- launch Bambu Studio with profiles, bridge OpenSCAD Studio, batch operations, and visual profile tools
@@ -163,5 +164,5 @@ Note: Phase 3 depends only on Phase 1 and can run in parallel with Phase 2 if de
 | 4. Profile Generation & Installation | 2/2 | Complete | 2026-02-05 |
 | 5. Defect Knowledge Base | 1/1 | Complete | 2026-02-06 |
 | 6. AI Print Analysis | 3/3 | Complete | 2026-02-06 |
-| 7. Auto-Tuning & Refinement | 0/3 | Not started | - |
+| 7. Auto-Tuning & Refinement | 4/4 | Complete | 2026-02-06 |
 | 8. Integration & Power Features | 0/3 | Not started | - |
