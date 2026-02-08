@@ -2,7 +2,7 @@ use leptos::prelude::*;
 
 use crate::commands::FilamentSpecs;
 
-const PRINTER_OPTIONS: &[&str] = &[
+pub const PRINTER_OPTIONS: &[&str] = &[
     "Bambu Lab H2C 0.4 nozzle",
     "Bambu Lab H2D 0.4 nozzle",
     "Bambu Lab X1C 0.4 nozzle",

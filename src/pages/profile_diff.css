@@ -1,0 +1,192 @@
+.profile-diff-page {
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+/* --- Config panel --- */
+.diff-config {
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.diff-pickers {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+.diff-pickers .form-group {
+    margin-bottom: 0;
+}
+
+.diff-pickers select.input {
+    width: 100%;
+}
+
+.diff-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+.diff-error {
+    background: var(--bg-danger);
+    border: 1px solid var(--border-danger);
+    color: var(--color-danger);
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+}
+
+/* --- Results --- */
+.diff-results {
+    margin-top: 0.5rem;
+}
+
+.diff-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 1rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    margin-bottom: 1rem;
+}
+
+.diff-summary-text {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+}
+
+/* --- Table --- */
+.diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.diff-table thead th {
+    padding: 0.65rem 0.75rem;
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    background: var(--bg-card);
+    border-bottom: 2px solid var(--border-primary);
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.diff-table thead th.diff-col-setting {
+    width: 36%;
+}
+
+.diff-table thead th.diff-col-value {
+    width: 32%;
+    max-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* --- Category row --- */
+.diff-category-row td {
+    padding: 0;
+}
+
+.diff-category-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.55rem 0.75rem;
+    background: var(--bg-hover);
+    cursor: pointer;
+    user-select: none;
+    border-top: 1px solid var(--border-primary);
+}
+
+.diff-category-header:hover {
+    background: var(--bg-active);
+}
+
+.diff-category-arrow {
+    width: 1rem;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    transition: transform 0.15s ease;
+}
+
+.diff-category-arrow.open {
+    transform: rotate(90deg);
+}
+
+.diff-category-name {
+    font-weight: 600;
+    font-size: 0.85rem;
+    flex: 1;
+    color: var(--text-primary);
+}
+
+.diff-category-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+/* --- Data rows --- */
+.diff-row td {
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid var(--border-primary);
+    font-size: 0.84rem;
+    vertical-align: top;
+    word-break: break-word;
+}
+
+.diff-row .diff-key {
+    color: var(--text-secondary);
+}
+
+.diff-row .diff-val {
+    font-family: "SF Mono", "Menlo", "Monaco", monospace;
+    font-size: 0.8rem;
+}
+
+.diff-row.changed .diff-val {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.diff-row.changed .diff-val-b {
+    color: var(--accent);
+}
+
+.diff-row.identical td {
+    opacity: 0.45;
+}
+
+/* Last row in a category group */
+.diff-category-group tr:last-child td {
+    border-bottom: none;
+}

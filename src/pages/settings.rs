@@ -9,6 +9,8 @@ use crate::theme::ThemeContext;
 pub fn SettingsPage() -> impl IntoView {
     let (bambu_path, set_bambu_path) = signal(String::new());
     let (path_status, set_path_status) = signal::<Option<String>>(None);
+    let (stl_watch_dir, set_stl_watch_dir) = signal(String::new());
+    let (stl_status, set_stl_status) = signal::<Option<String>>(None);
     let (ai_model, set_ai_model) = signal(String::new());
     let (ai_provider, set_ai_provider) = signal(String::from("claude"));
     let (model_status, set_model_status) = signal::<Option<String>>(None);
@@ -37,6 +39,9 @@ pub fn SettingsPage() -> impl IntoView {
                 }
                 Ok(None) => {}
                 Err(_) => {}
+            }
+            if let Ok(Some(dir)) = commands::get_stl_watch_dir().await {
+                set_stl_watch_dir.set(dir);
             }
             match commands::get_preference("ai_model").await {
                 Ok(Some(model)) => {
@@ -71,6 +76,16 @@ pub fn SettingsPage() -> impl IntoView {
             }
         });
     });
+
+    let save_stl_watch_dir = move |_: leptos::ev::MouseEvent| {
+        let dir = stl_watch_dir.get();
+        spawn_local(async move {
+            match commands::set_stl_watch_dir(&dir).await {
+                Ok(()) => set_stl_status.set(Some("STL watch directory saved".to_string())),
+                Err(e) => set_stl_status.set(Some(format!("Failed: {}", e))),
+            }
+        });
+    };
 
     let save_bambu_path = move |_| {
         let path = bambu_path.get();
@@ -285,6 +300,27 @@ pub fn SettingsPage() -> impl IntoView {
                     </div>
                     <Show when=move || path_status.get().is_some()>
                         <span class="status-text">{move || path_status.get().unwrap_or_default()}</span>
+                    </Show>
+                </div>
+
+                <div class="form-group">
+                    <label for="stl-watch-dir">"STL Watch Directory"</label>
+                    <p class="section-description">"Watch a folder for incoming .stl files from OpenSCAD Studio."</p>
+                    <div class="input-row">
+                        <input
+                            id="stl-watch-dir"
+                            type="text"
+                            placeholder="/path/to/stl/output"
+                            class="input"
+                            prop:value=move || stl_watch_dir.get()
+                            on:input=move |ev| {
+                                set_stl_watch_dir.set(event_target_value(&ev));
+                            }
+                        />
+                        <button class="btn btn-save" on:click=save_stl_watch_dir>"Save"</button>
+                    </div>
+                    <Show when=move || stl_status.get().is_some()>
+                        <span class="status-text">{move || stl_status.get().unwrap_or_default()}</span>
                     </Show>
                 </div>
             </section>

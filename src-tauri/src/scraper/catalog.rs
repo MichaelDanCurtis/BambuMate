@@ -196,6 +196,20 @@ impl FilamentCatalog {
         Ok(matches)
     }
 
+    /// Get all distinct brand names in the catalog.
+    pub fn list_brands(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT brand FROM catalog ORDER BY brand")
+            .map_err(|e| format!("Failed to query brands: {}", e))?;
+
+        let brands = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("Brand query failed: {}", e))?;
+
+        brands.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
     /// Get all entries for a specific brand.
     pub fn get_brand(&self, brand: &str) -> Result<Vec<CatalogEntry>, String> {
         let brand_lower = brand.to_lowercase();

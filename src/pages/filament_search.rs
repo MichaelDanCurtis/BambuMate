@@ -615,9 +615,21 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                     </p>
                                 })}
                             </div>
-                            <button class="btn btn-secondary" on:click=move |_| reset_search()>
-                                "Search Another"
-                            </button>
+                            <div class="success-actions">
+                                <button
+                                    class="btn btn-primary"
+                                    on:click=move |_| {
+                                        spawn_local(async move {
+                                            let _ = commands::launch_bambu_studio(None, None).await;
+                                        });
+                                    }
+                                >
+                                    "Open Bambu Studio"
+                                </button>
+                                <button class="btn btn-secondary" on:click=move |_| reset_search()>
+                                    "Search Another"
+                                </button>
+                            </div>
                         </div>
                     })
                 } else {

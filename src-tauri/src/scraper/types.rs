@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Bambu Studio filament profile. A real profile has ~120 fields, but most
 /// can be derived from material-type defaults. These ~35 fields cover the
 /// parameters that vary meaningfully between filaments.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct FilamentSpecs {
     /// Filament name as provided by manufacturer
     pub name: String,

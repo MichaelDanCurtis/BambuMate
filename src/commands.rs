@@ -592,6 +592,18 @@ pub async fn list_profiles() -> Result<Vec<ProfileInfo>, String> {
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
 
+/// List all system/factory filament profiles from Bambu Studio.
+pub async fn list_system_profiles() -> Result<Vec<ProfileInfo>, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("list_system_profiles", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
 // -- Catalog commands for autocomplete-style search --
 
 /// Get the status of the local filament catalog.
@@ -1027,4 +1039,242 @@ pub async fn apply_recommendations(
             serde_wasm_bindgen::from_value(v)
                 .map_err(|e| format!("Failed to parse response: {}", e))
         })
+}
+
+// -- Bambu Studio Launcher --
+
+/// Result from launching Bambu Studio.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LaunchResult {
+    pub launched: bool,
+    pub app_path: String,
+    pub was_already_running: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchBambuStudioArgs {
+    stl_path: Option<String>,
+    profile_path: Option<String>,
+}
+
+/// Detect the Bambu Studio application path.
+pub async fn detect_bambu_studio_path() -> Result<String, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("detect_bambu_studio_path", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Launch Bambu Studio with optional STL and profile file arguments.
+pub async fn launch_bambu_studio(
+    stl_path: Option<String>,
+    profile_path: Option<String>,
+) -> Result<LaunchResult, String> {
+    let args = serde_wasm_bindgen::to_value(&LaunchBambuStudioArgs {
+        stl_path,
+        profile_path,
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("launch_bambu_studio", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Batch Profile Generation --
+
+/// A single entry in batch generation results.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchEntry {
+    pub filament_name: String,
+    pub brand: String,
+    pub material: String,
+    pub success: bool,
+    pub profile_name: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Result from batch profile generation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchProgress {
+    pub total: usize,
+    pub completed: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub results: Vec<BatchEntry>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchGenerateBrandArgs {
+    brand: String,
+    target_printer: Option<String>,
+    install: bool,
+}
+
+/// List all distinct brands from the filament catalog.
+pub async fn list_catalog_brands() -> Result<Vec<String>, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("list_catalog_brands", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Batch-generate profiles for all filaments from a brand.
+pub async fn batch_generate_brand(
+    brand: &str,
+    target_printer: Option<String>,
+    install: bool,
+) -> Result<BatchProgress, String> {
+    let args = serde_wasm_bindgen::to_value(&BatchGenerateBrandArgs {
+        brand: brand.to_string(),
+        target_printer,
+        install,
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("batch_generate_brand", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- STL Bridge --
+
+/// An STL file received from the watch directory.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StlFile {
+    pub path: String,
+    pub filename: String,
+    pub received_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetStlWatchDirArgs {
+    path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DismissStlArgs {
+    path: String,
+}
+
+/// Set the STL watch directory.
+pub async fn set_stl_watch_dir(path: &str) -> Result<(), String> {
+    let args = serde_wasm_bindgen::to_value(&SetStlWatchDirArgs {
+        path: path.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    invoke("set_stl_watch_dir", args)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
+}
+
+/// Get the current STL watch directory.
+pub async fn get_stl_watch_dir() -> Result<Option<String>, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("get_stl_watch_dir", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// List all received STL files.
+pub async fn list_received_stls() -> Result<Vec<StlFile>, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("list_received_stls", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Dismiss a single STL file from the received list.
+pub async fn dismiss_stl(path: &str) -> Result<(), String> {
+    let args = serde_wasm_bindgen::to_value(&DismissStlArgs {
+        path: path.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    invoke("dismiss_stl", args)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
+}
+
+// -- Profile Comparison --
+
+/// A single field difference between two profiles.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CompareProfileDiff {
+    pub key: String,
+    pub label: String,
+    pub base_value: String,
+    pub new_value: String,
+}
+
+/// A group of diffs for a single category.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiffCategory {
+    pub category: String,
+    pub diffs: Vec<CompareProfileDiff>,
+}
+
+/// Result from comparing two profiles.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompareResult {
+    pub profile_a_name: String,
+    pub profile_b_name: String,
+    pub categories: Vec<DiffCategory>,
+    pub total_fields: usize,
+    pub changed_fields: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompareProfilesArgs {
+    path_a: String,
+    path_b: String,
+    show_identical: bool,
+}
+
+/// Compare two profiles side-by-side.
+pub async fn compare_profiles(
+    path_a: &str,
+    path_b: &str,
+    show_identical: bool,
+) -> Result<CompareResult, String> {
+    let args = serde_wasm_bindgen::to_value(&CompareProfilesArgs {
+        path_a: path_a.to_string(),
+        path_b: path_b.to_string(),
+        show_identical,
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("compare_profiles", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }

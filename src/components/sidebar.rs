@@ -1,5 +1,7 @@
 use leptos::prelude::*;
 
+use crate::components::stl_indicator::StlIndicator;
+
 #[component]
 pub fn Sidebar() -> impl IntoView {
     view! {
@@ -22,12 +24,21 @@ pub fn Sidebar() -> impl IntoView {
                     <a href="/profiles" class="nav-link">"Profiles"</a>
                 </li>
                 <li class="nav-item">
+                    <a href="/batch" class="nav-link">"Batch Generate"</a>
+                </li>
+                <li class="nav-item">
+                    <a href="/compare" class="nav-link">"Compare Profiles"</a>
+                </li>
+                <li class="nav-item">
                     <a href="/settings" class="nav-link">"Settings"</a>
                 </li>
                 <li class="nav-item">
                     <a href="/health" class="nav-link">"Health Check"</a>
                 </li>
             </ul>
+            <div class="sidebar-footer">
+                <StlIndicator />
+            </div>
         </nav>
     }
 }

@@ -184,6 +184,67 @@ pub fn get_system_profile_count() -> Result<usize, String> {
     Ok(count)
 }
 
+/// List all system/factory filament profiles bundled with Bambu Studio.
+///
+/// Scans the system filament directory and returns summary info for each profile.
+/// These are the built-in profiles like "Generic PLA", "Bambu PLA Basic", etc.
+#[tauri::command]
+pub fn list_system_profiles() -> Result<Vec<ProfileInfo>, String> {
+    let paths = match BambuPaths::detect() {
+        Ok(p) => p,
+        Err(_) => {
+            info!("Bambu Studio not detected, returning empty system profile list");
+            return Ok(Vec::new());
+        }
+    };
+
+    let system_dir = paths.system_filament_dir();
+    if !system_dir.exists() {
+        info!("System filament directory does not exist: {:?}", system_dir);
+        return Ok(Vec::new());
+    }
+
+    let mut profiles: Vec<ProfileInfo> = Vec::new();
+
+    for entry in WalkDir::new(&system_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+
+        match read_profile(path) {
+            Ok(profile) => {
+                let name = match profile.name() {
+                    Some(n) => n.to_string(),
+                    None => continue, // Skip registry files like BBL.json
+                };
+
+                profiles.push(ProfileInfo {
+                    name,
+                    filament_type: profile.filament_type().map(|s| s.to_string()),
+                    filament_id: profile.filament_id().map(|s| s.to_string()),
+                    path: path.to_string_lossy().to_string(),
+                    is_user_profile: false,
+                });
+            }
+            Err(e) => {
+                info!("Skipping unreadable system profile at {:?}: {}", path, e);
+            }
+        }
+    }
+
+    profiles.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    info!("Found {} system profiles", profiles.len());
+    Ok(profiles)
+}
+
 /// Result from profile generation (preview step, no files written).
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerateResult {
@@ -585,6 +646,113 @@ pub fn save_profile_specs(
 
     // Return updated detail
     read_profile_command(path)
+}
+
+/// A group of diffs for a single category.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffCategory {
+    pub category: String,
+    pub diffs: Vec<ProfileDiff>,
+}
+
+/// Result from comparing two profiles.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompareResult {
+    pub profile_a_name: String,
+    pub profile_b_name: String,
+    pub categories: Vec<DiffCategory>,
+    pub total_fields: usize,
+    pub changed_fields: usize,
+}
+
+/// Map a BS profile key to a display category.
+fn key_to_category(key: &str) -> &'static str {
+    match key {
+        k if k.contains("temperature") || k.contains("temp") => "Temperature",
+        k if k.contains("speed") || k.contains("flow") || k.contains("volumetric")
+            || k.contains("acceleration") || k.contains("jerk") => "Speed & Flow",
+        k if k.contains("fan") || k.contains("cool") || k.contains("slow_down") => "Cooling & Fan",
+        k if k.contains("retract") || k.contains("wipe") || k.contains("z_hop") => "Retraction",
+        k if k.contains("density") || k.contains("diameter") || k.contains("cost")
+            || k.contains("vitrification") || k.contains("shrinkage") => "Physical Properties",
+        k if k.contains("name") || k.contains("id") || k.contains("version")
+            || k.contains("inherits") || k.contains("from") || k.contains("vendor")
+            || k.contains("type") || k.contains("compatible") || k.contains("setting")
+            || k.contains("instantiation") => "Identity & Metadata",
+        _ => "Other",
+    }
+}
+
+/// Compare two profiles side-by-side, returning differences grouped by category.
+#[tauri::command]
+pub fn compare_profiles(
+    path_a: String,
+    path_b: String,
+    show_identical: bool,
+) -> Result<CompareResult, String> {
+    let profile_a = read_profile(std::path::Path::new(&path_a)).map_err(|e| e.to_string())?;
+    let profile_b = read_profile(std::path::Path::new(&path_b)).map_err(|e| e.to_string())?;
+
+    let raw_a = profile_a.raw();
+    let raw_b = profile_b.raw();
+
+    // Collect all keys from both profiles
+    let mut all_keys: Vec<String> = raw_a
+        .keys()
+        .chain(raw_b.keys())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    all_keys.sort();
+
+    let total_fields = all_keys.len();
+    let mut changed_fields = 0;
+
+    // Build diffs grouped by category
+    let mut category_map: std::collections::BTreeMap<&str, Vec<ProfileDiff>> =
+        std::collections::BTreeMap::new();
+
+    for key in &all_keys {
+        let val_a = raw_a.get(key);
+        let val_b = raw_b.get(key);
+        let display_a = value_to_display(val_a);
+        let display_b = value_to_display(val_b);
+
+        let is_different = display_a != display_b;
+        if is_different {
+            changed_fields += 1;
+        }
+
+        if is_different || show_identical {
+            let cat = key_to_category(key);
+            category_map
+                .entry(cat)
+                .or_default()
+                .push(ProfileDiff {
+                    key: key.clone(),
+                    label: key_to_label(key),
+                    base_value: display_a,
+                    new_value: display_b,
+                });
+        }
+    }
+
+    let categories: Vec<DiffCategory> = category_map
+        .into_iter()
+        .map(|(cat, diffs)| DiffCategory {
+            category: cat.to_string(),
+            diffs,
+        })
+        .collect();
+
+    Ok(CompareResult {
+        profile_a_name: profile_a.name().unwrap_or("<unnamed>").to_string(),
+        profile_b_name: profile_b.name().unwrap_or("<unnamed>").to_string(),
+        categories,
+        total_fields,
+        changed_fields,
+    })
 }
 
 /// Compare two profiles field-by-field and return a list of differences.

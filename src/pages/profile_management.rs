@@ -431,6 +431,22 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                                         </div>
                                                         <div class="profile-detail-actions">
                                                             <button
+                                                                class="btn-icon"
+                                                                title="Open in Bambu Studio"
+                                                                on:click=move |_| {
+                                                                    let path = selected_path.get();
+                                                                    spawn_local(async move {
+                                                                        let profile = path;
+                                                                        match commands::launch_bambu_studio(None, profile).await {
+                                                                            Ok(_) => set_action_success.set(Some("Bambu Studio launched".to_string())),
+                                                                            Err(e) => set_action_error.set(Some(e)),
+                                                                        }
+                                                                    });
+                                                                }
+                                                            >
+                                                                "Open in BS"
+                                                            </button>
+                                                            <button
                                                                 class="btn-icon btn-edit-specs"
                                                                 title="Edit Specs"
                                                                 disabled=move || specs_loading.get()
