@@ -7,4 +7,5 @@ pub mod profile_preview;
 pub mod sidebar;
 pub mod specs_editor;
 pub mod status_badge;
+pub mod searchable_select;
 pub mod stl_indicator;

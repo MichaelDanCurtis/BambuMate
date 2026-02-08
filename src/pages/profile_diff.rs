@@ -2,41 +2,32 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, CompareResult, ProfileInfo};
+use crate::components::searchable_select::{SearchableSelect, SelectOption};
 
-/// Render profile options grouped by source (user vs system).
-fn render_profile_options(
+/// Convert user + system profile lists into SelectOption vec.
+fn build_select_options(
     user_profiles: &[ProfileInfo],
     system_profiles: &[ProfileInfo],
-) -> Vec<leptos::tachys::view::any_view::AnyView> {
-    let mut views = Vec::new();
+) -> Vec<SelectOption> {
+    let mut options = Vec::new();
 
-    if !user_profiles.is_empty() {
-        let user_opts: Vec<_> = user_profiles.iter().map(|p| {
-            let val = p.path.clone();
-            let label = format!("{} ({})", p.name, p.filament_type.clone().unwrap_or_default());
-            view! { <option value={val}>{label}</option> }
-        }).collect();
-        views.push(view! {
-            <optgroup label="My Profiles">
-                {user_opts}
-            </optgroup>
-        }.into_any());
+    for p in user_profiles {
+        options.push(SelectOption {
+            value: p.path.clone(),
+            label: format!("{} ({})", p.name, p.filament_type.clone().unwrap_or_default()),
+            group: "My Profiles".to_string(),
+        });
     }
 
-    if !system_profiles.is_empty() {
-        let sys_opts: Vec<_> = system_profiles.iter().map(|p| {
-            let val = p.path.clone();
-            let label = format!("{} ({})", p.name, p.filament_type.clone().unwrap_or_default());
-            view! { <option value={val}>{label}</option> }
-        }).collect();
-        views.push(view! {
-            <optgroup label="Bambu Lab Factory Profiles">
-                {sys_opts}
-            </optgroup>
-        }.into_any());
+    for p in system_profiles {
+        options.push(SelectOption {
+            value: p.path.clone(),
+            label: format!("{} ({})", p.name, p.filament_type.clone().unwrap_or_default()),
+            group: "Bambu Lab Factory Profiles".to_string(),
+        });
     }
 
-    views
+    options
 }
 
 #[component]
@@ -54,6 +45,11 @@ pub fn ProfileDiffPage() -> impl IntoView {
     let (compare_error, set_compare_error) = signal::<Option<String>>(None);
 
     let (collapsed, set_collapsed) = signal::<Vec<String>>(vec![]);
+
+    // Build options signal from both profile lists
+    let all_options = Signal::derive(move || {
+        build_select_options(&user_profiles.get(), &system_profiles.get())
+    });
 
     // Load both user and system profiles on mount
     Effect::new(move |_| {
@@ -118,36 +114,24 @@ pub fn ProfileDiffPage() -> impl IntoView {
             <div class="diff-config">
                 <div class="diff-pickers">
                     <div class="form-group">
-                        <label for="profile-a">"Profile A"</label>
-                        <select
+                        <label>"Profile A"</label>
+                        <SearchableSelect
                             id="profile-a"
-                            class="input"
-                            on:change=move |ev| set_path_a.set(event_target_value(&ev))
-                            prop:value=move || path_a.get()
-                            disabled=move || is_loading.get()
-                        >
-                            <option value="">"-- Select profile --"</option>
-                            {move || render_profile_options(
-                                &user_profiles.get(),
-                                &system_profiles.get(),
-                            )}
-                        </select>
+                            placeholder="Search profiles..."
+                            options=all_options
+                            value=path_a
+                            on_select=move |v| set_path_a.set(v)
+                        />
                     </div>
                     <div class="form-group">
-                        <label for="profile-b">"Profile B"</label>
-                        <select
+                        <label>"Profile B"</label>
+                        <SearchableSelect
                             id="profile-b"
-                            class="input"
-                            on:change=move |ev| set_path_b.set(event_target_value(&ev))
-                            prop:value=move || path_b.get()
-                            disabled=move || is_loading.get()
-                        >
-                            <option value="">"-- Select profile --"</option>
-                            {move || render_profile_options(
-                                &user_profiles.get(),
-                                &system_profiles.get(),
-                            )}
-                        </select>
+                            placeholder="Search profiles..."
+                            options=all_options
+                            value=path_b
+                            on_select=move |v| set_path_b.set(v)
+                        />
                     </div>
                 </div>
 
@@ -167,6 +151,9 @@ pub fn ProfileDiffPage() -> impl IntoView {
                         />
                         " Show identical fields"
                     </label>
+                    <Show when=move || is_loading.get()>
+                        <span class="status-text">"Loading profiles..."</span>
+                    </Show>
                     <button
                         class="btn btn-primary"
                         on:click=do_compare

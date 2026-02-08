@@ -1,0 +1,146 @@
+.searchable-select {
+    position: relative;
+    width: 100%;
+}
+
+.searchable-select.disabled {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+/* --- Display (closed state) --- */
+.ss-display {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 8px 12px;
+    font-size: 13px;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    color: var(--text-placeholder);
+    cursor: pointer;
+    transition: border-color 0.15s;
+    min-height: 36px;
+}
+
+.ss-display:hover {
+    border-color: var(--accent);
+}
+
+.ss-display.has-value {
+    color: var(--text-primary);
+}
+
+.ss-display-text {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ss-chevron {
+    color: var(--text-muted);
+    font-size: 10px;
+    flex-shrink: 0;
+}
+
+.ss-clear {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 4px;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.ss-clear:hover {
+    color: var(--accent);
+}
+
+/* --- Search input (open state) --- */
+.ss-search {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* --- Dropdown --- */
+.ss-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    margin-top: 4px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    max-height: 360px;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.ss-options {
+    padding: 4px 0;
+}
+
+/* --- Group --- */
+.ss-group {
+    padding: 0;
+}
+
+.ss-group + .ss-group {
+    border-top: 1px solid var(--border-primary);
+    margin-top: 2px;
+    padding-top: 2px;
+}
+
+.ss-group-label {
+    padding: 6px 12px 4px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    user-select: none;
+}
+
+/* --- Option --- */
+.ss-option {
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ss-option:hover {
+    background: var(--bg-hover);
+}
+
+.ss-option.selected {
+    background: var(--bg-active);
+    font-weight: 600;
+}
+
+/* --- Empty & Count --- */
+.ss-empty {
+    padding: 16px 12px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.ss-count {
+    padding: 6px 12px;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-align: right;
+    border-top: 1px solid var(--border-primary);
+    margin-top: 2px;
+}
