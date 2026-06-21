@@ -43,27 +43,20 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            .
+            src-tauri
 
       - name: Install Trunk
         uses: jetli/trunk-action@v0.5.0
         with:
           version: latest
 
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
-        run: echo "macOS has all required deps pre-installed"
-
-      - name: Install Windows dependencies
-        if: runner.os == 'Windows'
-        run: echo "Windows has all required deps pre-installed"
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          args: --target ${{ matrix.target }}
+        run: cargo tauri build --target ${{ matrix.target }}
 
       - name: Upload macOS artifacts
         if: runner.os == 'macOS'
