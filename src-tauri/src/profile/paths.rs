@@ -18,6 +18,7 @@ impl BambuPaths {
     /// Detect Bambu Studio paths on the current platform.
     ///
     /// On macOS, looks for `~/Library/Application Support/BambuStudio/`.
+    /// On Windows, looks for `%APPDATA%\BambuStudio\`.
     /// Reads `preset_folder` from `BambuStudio.conf` if available.
     pub fn detect() -> Result<Self> {
         let config_root = Self::find_config_root()?;
@@ -66,10 +67,48 @@ impl BambuPaths {
         bail!("Bambu Studio config directory not found. Is Bambu Studio installed?")
     }
 
-    /// Windows stub -- not yet supported.
+    /// Find Bambu Studio config root on Windows.
+    ///
+    /// Searches in order:
+    /// 1. `%APPDATA%\BambuStudio\` (primary location)
+    /// 2. `%LOCALAPPDATA%\BambuStudio\` (alternate location)
+    /// 3. Explicit `%APPDATA%` env var fallback
     #[cfg(target_os = "windows")]
     fn find_config_root() -> Result<PathBuf> {
-        bail!("Windows support is not yet implemented")
+        // Primary: dirs::data_dir() maps to %APPDATA% on Windows
+        if let Some(data_dir) = dirs::data_dir() {
+            let bs_dir = data_dir.join("BambuStudio");
+            if bs_dir.exists() {
+                debug!("Found Bambu Studio config at {:?} (via dirs::data_dir)", bs_dir);
+                return Ok(bs_dir);
+            }
+        }
+
+        // Fallback: check %LOCALAPPDATA% (some versions may use this)
+        if let Some(local_data) = dirs::data_local_dir() {
+            let bs_dir = local_data.join("BambuStudio");
+            if bs_dir.exists() {
+                debug!(
+                    "Found Bambu Studio config at {:?} (via dirs::data_local_dir)",
+                    bs_dir
+                );
+                return Ok(bs_dir);
+            }
+        }
+
+        // Second fallback: explicit %APPDATA% path construction
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let bs_dir = PathBuf::from(&appdata).join("BambuStudio");
+            if bs_dir.exists() {
+                debug!(
+                    "Found Bambu Studio config at {:?} (via APPDATA env var)",
+                    bs_dir
+                );
+                return Ok(bs_dir);
+            }
+        }
+
+        bail!("Bambu Studio config directory not found. Is Bambu Studio installed?")
     }
 
     /// Linux stub -- not yet supported.

@@ -342,7 +342,7 @@ pub fn generate_profile(
 ///
 /// Uses platform-specific process detection:
 /// - macOS/Linux: `pgrep -f BambuStudio`
-/// - Windows: stub (returns false)
+/// - Windows: `tasklist /FI` filtering for BambuStudio.exe
 ///
 /// This is a lightweight check using std::process::Command to avoid
 /// adding the heavyweight sysinfo dependency.
@@ -358,9 +358,19 @@ pub fn is_bambu_studio_running() -> bool {
         .unwrap_or(false)
 }
 
+/// Check if Bambu Studio is currently running on Windows.
+///
+/// Uses `tasklist` to search for the BambuStudio.exe process.
 #[cfg(target_os = "windows")]
 pub fn is_bambu_studio_running() -> bool {
-    false // Windows stub
+    std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq BambuStudio.exe", "/NH"])
+        .output()
+        .map(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.contains("BambuStudio.exe")
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "linux")]
