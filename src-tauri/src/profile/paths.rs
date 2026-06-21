@@ -69,8 +69,10 @@ impl BambuPaths {
 
     /// Find Bambu Studio config root on Windows.
     ///
-    /// Bambu Studio stores its configuration under `%APPDATA%\BambuStudio\`
-    /// (e.g., `C:\Users\<user>\AppData\Roaming\BambuStudio\`).
+    /// Searches in order:
+    /// 1. `%APPDATA%\BambuStudio\` (primary location)
+    /// 2. `%LOCALAPPDATA%\BambuStudio\` (alternate location)
+    /// 3. Explicit `%APPDATA%` env var fallback
     #[cfg(target_os = "windows")]
     fn find_config_root() -> Result<PathBuf> {
         // Primary: dirs::data_dir() maps to %APPDATA% on Windows

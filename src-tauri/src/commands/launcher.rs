@@ -263,34 +263,7 @@ fn launch_platform(
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn launch_platform(
-    bs_path: &str,
-    stl_path: Option<&str>,
-    profile_path: Option<&str>,
-) -> Result<(), String> {
-    let mut cmd = std::process::Command::new(bs_path);
-
-    if let Some(stl) = stl_path {
-        if std::path::Path::new(stl).exists() {
-            cmd.arg(stl);
-            info!("  with STL: {}", stl);
-        }
-    }
-
-    if let Some(profile) = profile_path {
-        if std::path::Path::new(profile).exists() {
-            cmd.arg("--load-filaments").arg(profile);
-            info!("  with profile: {}", profile);
-        }
-    }
-
-    cmd.spawn()
-        .map_err(|e| format!("Failed to launch Bambu Studio: {}", e))?;
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn launch_platform(
     bs_path: &str,
     stl_path: Option<&str>,
