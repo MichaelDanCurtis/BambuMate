@@ -3,7 +3,7 @@ use leptos_router::components::*;
 use leptos_router::path;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::commands;
+use crate::commands::{self, FeatureFlags};
 use crate::components::sidebar::Sidebar;
 use crate::pages::batch_generate::BatchGeneratePage;
 use crate::pages::filament_search::FilamentSearchPage;
@@ -15,16 +15,33 @@ use crate::pages::profile_management::ProfileManagementPage;
 use crate::pages::settings::SettingsPage;
 use crate::theme::{apply_theme, ThemeContext};
 
+/// Shared context for feature flags, reactive so UI updates on toggle.
+#[derive(Clone)]
+pub struct FeatureFlagsContext {
+    pub flags: ReadSignal<FeatureFlags>,
+    pub set_flags: WriteSignal<FeatureFlags>,
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let (theme, set_theme) = signal(String::from("system"));
     provide_context(ThemeContext { theme, set_theme });
 
-    // Load saved theme preference on mount
+    // Feature flags with both enabled by default
+    let (flags, set_flags) = signal(FeatureFlags {
+        profiles_enabled: true,
+        analysis_enabled: true,
+    });
+    provide_context(FeatureFlagsContext { flags, set_flags });
+
+    // Load saved theme and feature flags on mount
     Effect::new(move |_| {
         spawn_local(async move {
             if let Ok(Some(saved)) = commands::get_preference("theme").await {
                 set_theme.set(saved);
+            }
+            if let Ok(loaded_flags) = commands::get_feature_flags().await {
+                set_flags.set(loaded_flags);
             }
         });
     });

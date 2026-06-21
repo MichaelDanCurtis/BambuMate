@@ -28,6 +28,7 @@ pub fn run() {
             commands::keychain::delete_api_key,
             commands::config::get_preference,
             commands::config::set_preference,
+            commands::config::get_feature_flags,
             commands::health::run_health_check,
             commands::models::list_models,
             commands::profile::list_profiles,

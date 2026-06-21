@@ -679,3 +679,41 @@ select.input option {
 .stl-item-actions .btn-dismiss {
     color: var(--text-muted);
 }
+
+/* ===== Feature Toggles ===== */
+
+.feature-toggle {
+    padding: 12px 16px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-primary);
+    border-radius: 8px;
+    margin-bottom: 12px;
+}
+
+.feature-toggle .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    margin-bottom: 4px;
+}
+
+.toggle-input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.toggle-text {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-bright);
+}
+
+.toggle-description {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0;
+    padding-left: 28px;
+}

@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::app::FeatureFlagsContext;
 use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
 use crate::theme::ThemeContext;
@@ -20,6 +21,7 @@ pub fn SettingsPage() -> impl IntoView {
     let (prefs_loaded, set_prefs_loaded) = signal(false);
 
     let theme_ctx = use_context::<ThemeContext>().expect("ThemeContext not provided");
+    let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
 
     // Load existing preferences on mount
     Effect::new(move |_| {
@@ -144,9 +146,62 @@ pub fn SettingsPage() -> impl IntoView {
         });
     };
 
+    let on_toggle_profiles = move |ev: leptos::ev::Event| {
+        let checked = event_target_checked(&ev);
+        let value = if checked { "true" } else { "false" };
+        let mut new_flags = ff_ctx.flags.get();
+        new_flags.profiles_enabled = checked;
+        ff_ctx.set_flags.set(new_flags);
+        spawn_local(async move {
+            let _ = commands::set_preference("feature_profiles_enabled", value).await;
+        });
+    };
+
+    let on_toggle_analysis = move |ev: leptos::ev::Event| {
+        let checked = event_target_checked(&ev);
+        let value = if checked { "true" } else { "false" };
+        let mut new_flags = ff_ctx.flags.get();
+        new_flags.analysis_enabled = checked;
+        ff_ctx.set_flags.set(new_flags);
+        spawn_local(async move {
+            let _ = commands::set_preference("feature_analysis_enabled", value).await;
+        });
+    };
+
     view! {
         <div class="page settings-page">
             <h2>"Settings"</h2>
+
+            <section class="settings-section">
+                <h3>"Feature Modules"</h3>
+                <p class="section-description">"Enable or disable application features. You can use either feature independently."</p>
+
+                <div class="form-group feature-toggle">
+                    <label class="toggle-label">
+                        <input
+                            type="checkbox"
+                            class="toggle-input"
+                            prop:checked=move || ff_ctx.flags.get().profiles_enabled
+                            on:change=on_toggle_profiles
+                        />
+                        <span class="toggle-text">"Filament Profiles"</span>
+                    </label>
+                    <p class="toggle-description">"Search filament specs from manufacturers, generate optimized Bambu Studio profiles, and manage installed profiles."</p>
+                </div>
+
+                <div class="form-group feature-toggle">
+                    <label class="toggle-label">
+                        <input
+                            type="checkbox"
+                            class="toggle-input"
+                            prop:checked=move || ff_ctx.flags.get().analysis_enabled
+                            on:change=on_toggle_analysis
+                        />
+                        <span class="toggle-text">"Print Analysis (AI/MCP)"</span>
+                    </label>
+                    <p class="toggle-description">"Upload photos of prints for AI-powered defect detection and profile tuning recommendations. Requires an AI API key."</p>
+                </div>
+            </section>
 
             <section class="settings-section">
                 <h3>"Appearance"</h3>
@@ -169,9 +224,10 @@ pub fn SettingsPage() -> impl IntoView {
                 </div>
             </section>
 
+            <Show when=move || ff_ctx.flags.get().analysis_enabled>
             <section class="settings-section">
                 <h3>"API Keys"</h3>
-                <p class="section-description">"API keys are stored securely in your macOS Keychain."</p>
+                <p class="section-description">"API keys are stored securely in your system keychain."</p>
 
                 <ApiKeyForm
                     service_name="Claude API Key"
@@ -278,6 +334,7 @@ pub fn SettingsPage() -> impl IntoView {
                     </Show>
                 </div>
             </section>
+            </Show>
 
             <section class="settings-section">
                 <h3>"Application"</h3>
@@ -326,4 +383,13 @@ pub fn SettingsPage() -> impl IntoView {
             </section>
         </div>
     }
+}
+
+/// Helper to extract checked state from a checkbox change event.
+fn event_target_checked(ev: &leptos::ev::Event) -> bool {
+    use wasm_bindgen::JsCast;
+    ev.target()
+        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .map(|el| el.checked())
+        .unwrap_or(false)
 }

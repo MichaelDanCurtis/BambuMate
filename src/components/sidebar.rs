@@ -1,9 +1,12 @@
 use leptos::prelude::*;
 
+use crate::app::FeatureFlagsContext;
 use crate::components::stl_indicator::StlIndicator;
 
 #[component]
 pub fn Sidebar() -> impl IntoView {
+    let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
+
     view! {
         <nav class="sidebar">
             <div class="sidebar-header">
@@ -14,21 +17,27 @@ pub fn Sidebar() -> impl IntoView {
                 <li class="nav-item">
                     <a href="/" class="nav-link">"Home"</a>
                 </li>
-                <li class="nav-item">
-                    <a href="/filament" class="nav-link">"Filament Search"</a>
-                </li>
-                <li class="nav-item">
-                    <a href="/analysis" class="nav-link">"Print Analysis"</a>
-                </li>
-                <li class="nav-item">
-                    <a href="/profiles" class="nav-link">"Profiles"</a>
-                </li>
-                <li class="nav-item">
-                    <a href="/batch" class="nav-link">"Batch Generate"</a>
-                </li>
-                <li class="nav-item">
-                    <a href="/compare" class="nav-link">"Compare Profiles"</a>
-                </li>
+                <Show when=move || ff_ctx.flags.get().profiles_enabled>
+                    <li class="nav-item">
+                        <a href="/filament" class="nav-link">"Filament Search"</a>
+                    </li>
+                </Show>
+                <Show when=move || ff_ctx.flags.get().analysis_enabled>
+                    <li class="nav-item">
+                        <a href="/analysis" class="nav-link">"Print Analysis"</a>
+                    </li>
+                </Show>
+                <Show when=move || ff_ctx.flags.get().profiles_enabled>
+                    <li class="nav-item">
+                        <a href="/profiles" class="nav-link">"Profiles"</a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="/batch" class="nav-link">"Batch Generate"</a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="/compare" class="nav-link">"Compare Profiles"</a>
+                    </li>
+                </Show>
                 <li class="nav-item">
                     <a href="/settings" class="nav-link">"Settings"</a>
                 </li>

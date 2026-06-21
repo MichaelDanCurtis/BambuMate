@@ -7,6 +7,27 @@ extern "C" {
     async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 }
 
+// -- Feature Flags --
+
+/// Feature flags indicating which app modules are enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+pub struct FeatureFlags {
+    pub profiles_enabled: bool,
+    pub analysis_enabled: bool,
+}
+
+/// Get current feature flags from preferences.
+pub async fn get_feature_flags() -> Result<FeatureFlags, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("get_feature_flags", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
 // -- Arg structs for serialization --
 
 #[derive(Serialize)]
