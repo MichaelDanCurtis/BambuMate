@@ -52,8 +52,11 @@ jobs:
         with:
           version: latest
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+        run: cargo binstall tauri-cli --version "^2" --no-confirm
 
       - name: Build Tauri app
         run: cargo tauri build --target ${{ matrix.target }}
