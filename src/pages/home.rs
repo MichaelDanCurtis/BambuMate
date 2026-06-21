@@ -58,7 +58,10 @@ pub fn HomePage() -> impl IntoView {
                     </Show>
                     <Show when=move || ff_ctx.flags.get().analysis_enabled>
                         <div class="step">
-                            <span class="step-number">{move || if ff_ctx.flags.get().profiles_enabled { "3" } else { "1" }}</span>
+                            <span class="step-number">{move || {
+                                let profile_steps = if ff_ctx.flags.get().profiles_enabled { 2 } else { 0 };
+                                format!("{}", profile_steps + 1)
+                            }}</span>
                             <div class="step-content">
                                 <strong>"Refine"</strong>
                                 <p>"Print a test, photograph it, and get AI-powered tuning suggestions"</p>

@@ -10,7 +10,7 @@ extern "C" {
 // -- Feature Flags --
 
 /// Feature flags indicating which app modules are enabled.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct FeatureFlags {
     pub profiles_enabled: bool,
     pub analysis_enabled: bool,
