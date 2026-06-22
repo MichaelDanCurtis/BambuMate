@@ -926,14 +926,11 @@ fn search_profiles_in_dir(
             Err(_) => continue,
         }
 
-        // Limit results
-        if matches.len() >= 20 {
-            break;
-        }
     }
 
-    // Sort by name
+    // Sort by name and truncate to 20 results
     matches.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    matches.truncate(20);
     info!("Found {} matching system profiles", matches.len());
     Ok(matches)
 }

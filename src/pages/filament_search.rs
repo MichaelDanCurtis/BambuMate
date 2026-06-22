@@ -606,7 +606,6 @@ pub fn FilamentSearchPage() -> impl IntoView {
                         </Show>
                         <div class="base-profiles-list">
                             {matches.iter().map(|m| {
-                                let profile = m.clone();
                                 let profile_click = m.clone();
                                 let name = m.name.clone();
                                 let ftype = m.filament_type.clone().unwrap_or_default();
