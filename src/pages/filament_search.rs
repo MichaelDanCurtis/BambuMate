@@ -91,7 +91,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
             set_base_profile_specs.set(None);
             set_show_merge_screen.set(false);
             spawn_local(async move {
-                if let Ok(matches) = commands::search_base_profiles(&query, material.as_deref()).await {
+                if let Ok(matches) = commands::search_base_profiles(&query, Some(material.as_str())).await {
                     set_base_profile_matches.set(matches);
                 }
                 set_is_searching_base.set(false);

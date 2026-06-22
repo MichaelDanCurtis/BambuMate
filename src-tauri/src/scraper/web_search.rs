@@ -2,7 +2,7 @@
 //! Uses DuckDuckGo HTML search (no API key required).
 
 use scraper::{Html, Selector};
-use tracing::{info, warn};
+use tracing::info;
 
 use super::http_client::ScraperHttpClient;
 

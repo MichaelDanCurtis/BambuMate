@@ -154,9 +154,8 @@ fn build_mergeable_settings(ai: &FilamentSpecs, base: &FilamentSpecs) -> Vec<Mer
     add_opt_i32!("Close Fan Below Layer", close_fan_the_first_x_layers, "close_fan_the_first_x_layers");
 
     // Retraction
-    add_opt_f64!("Retraction Length", retraction_length, "retraction_length");
-    add_opt_i32!("Retraction Speed", retraction_speed, "retraction_speed");
-    add_opt_i32!("Z Hop", z_hop, "z_hop");
+    add_opt_f64!("Retraction Distance (mm)", retraction_distance_mm, "retraction_distance_mm");
+    add_opt_i32!("Retraction Speed (mm/s)", retraction_speed_mm_s, "retraction_speed_mm_s");
 
     settings
 }
@@ -190,9 +189,8 @@ fn apply_merge(
                 "fan_max_speed" => merged.fan_max_speed = base.fan_max_speed,
                 "overhang_fan_speed" => merged.overhang_fan_speed = base.overhang_fan_speed,
                 "close_fan_the_first_x_layers" => merged.close_fan_the_first_x_layers = base.close_fan_the_first_x_layers,
-                "retraction_length" => merged.retraction_length = base.retraction_length,
-                "retraction_speed" => merged.retraction_speed = base.retraction_speed,
-                "z_hop" => merged.z_hop = base.z_hop,
+                "retraction_distance_mm" => merged.retraction_distance_mm = base.retraction_distance_mm,
+                "retraction_speed_mm_s" => merged.retraction_speed_mm_s = base.retraction_speed_mm_s,
                 _ => {}
             }
         }
