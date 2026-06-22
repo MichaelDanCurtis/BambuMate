@@ -3,10 +3,12 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{
-    self, CatalogEntry, CatalogMatch, CatalogStatus, FilamentSpecs, GenerateResult, InstallResult,
+    self, BaseProfileMatch, CatalogEntry, CatalogMatch, CatalogStatus, FilamentSpecs,
+    GenerateResult, InstallResult,
 };
 use crate::components::filament_card::FilamentCard;
 use crate::components::profile_preview::ProfilePreview;
+use crate::components::settings_merge::SettingsMerge;
 use crate::components::specs_editor::SpecsEditor;
 
 #[component]
@@ -45,6 +47,13 @@ pub fn FilamentSearchPage() -> impl IntoView {
         signal::<Option<Result<InstallResult, String>>>(None);
     let (is_installing, set_is_installing) = signal(false);
 
+    // Base profile reference state
+    let (base_profile_matches, set_base_profile_matches) = signal::<Vec<BaseProfileMatch>>(vec![]);
+    let (is_searching_base, set_is_searching_base) = signal(false);
+    let (selected_base_profile, set_selected_base_profile) = signal::<Option<BaseProfileMatch>>(None);
+    let (base_profile_specs, set_base_profile_specs) = signal::<Option<FilamentSpecs>>(None);
+    let (show_merge_screen, set_show_merge_screen) = signal(false);
+
     // Check catalog status on mount
     Effect::new(move |_| {
         spawn_local(async move {
@@ -68,6 +77,26 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 }
             }
         });
+    });
+
+    // Auto-search for base profiles when specs are fetched
+    Effect::new(move |_| {
+        let specs = current_specs.get();
+        if let Some(ref s) = specs {
+            let query = s.name.clone();
+            let material = s.material.clone();
+            set_is_searching_base.set(true);
+            set_base_profile_matches.set(vec![]);
+            set_selected_base_profile.set(None);
+            set_base_profile_specs.set(None);
+            set_show_merge_screen.set(false);
+            spawn_local(async move {
+                if let Ok(matches) = commands::search_base_profiles(&query, Some(material.as_str())).await {
+                    set_base_profile_matches.set(matches);
+                }
+                set_is_searching_base.set(false);
+            });
+        }
     });
 
     // Debounced autocomplete search
@@ -305,6 +334,35 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_current_generate.set(None);
         set_fetch_error.set(None);
         set_show_editor.set(false);
+        set_base_profile_matches.set(vec![]);
+        set_selected_base_profile.set(None);
+        set_base_profile_specs.set(None);
+        set_show_merge_screen.set(false);
+    };
+
+    // Handler for selecting a base profile to use as reference
+    let on_select_base_profile = move |profile: BaseProfileMatch| {
+        let path = profile.path.clone();
+        set_selected_base_profile.set(Some(profile));
+        spawn_local(async move {
+            // Extract specs from the selected base profile
+            if let Ok(specs) = commands::extract_specs_from_profile(&path).await {
+                set_base_profile_specs.set(Some(specs));
+                set_show_merge_screen.set(true);
+            }
+        });
+    };
+
+    // Handler for completing the merge (user selected which settings to use)
+    let on_merge_complete = move |merged_specs: FilamentSpecs| {
+        set_current_specs.set(Some(merged_specs));
+        set_show_merge_screen.set(false);
+        set_show_editor.set(true);
+    };
+
+    let on_skip_merge = move || {
+        set_show_merge_screen.set(false);
+        set_show_editor.set(true);
     };
 
     view! {
@@ -510,7 +568,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
             // Specs display (FilamentCard) — shown when specs exist and editor is not shown
             {move || {
                 if let Some(specs) = current_specs.get() {
-                    if show_editor.get() || generate_result.get().is_some() {
+                    if show_editor.get() || generate_result.get().is_some() || show_merge_screen.get() {
                         return None;
                     }
                     Some(view! {
@@ -525,6 +583,73 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 } else {
                     None
                 }
+            }}
+
+            // Base profile reference matches — shown after specs are fetched
+            {move || {
+                if current_specs.get().is_none() || show_editor.get() || generate_result.get().is_some() || show_merge_screen.get() {
+                    return None;
+                }
+                let matches = base_profile_matches.get();
+                if matches.is_empty() && !is_searching_base.get() {
+                    return None;
+                }
+                Some(view! {
+                    <div class="base-profiles-section">
+                        <h4>"Similar Profiles in Bambu Studio"</h4>
+                        <p class="section-description">
+                            "Found existing profiles that may be similar. Select one to compare and merge settings before generating."
+                        </p>
+                        <Show when=move || is_searching_base.get()>
+                            <span class="mini-spinner"></span>
+                            " Searching system profiles..."
+                        </Show>
+                        <div class="base-profiles-list">
+                            {matches.iter().map(|m| {
+                                let profile_click = m.clone();
+                                let name = m.name.clone();
+                                let ftype = m.filament_type.clone().unwrap_or_default();
+                                view! {
+                                    <div
+                                        class="base-profile-item"
+                                        on:click=move |_| on_select_base_profile(profile_click.clone())
+                                    >
+                                        <span class="base-profile-name">{name}</span>
+                                        <span class="base-profile-type">{ftype}</span>
+                                        <span class="base-profile-action">"Use as reference"</span>
+                                    </div>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </div>
+                    </div>
+                })
+            }}
+
+            // Settings merge screen — shown when user selects a base profile
+            {move || {
+                if !show_merge_screen.get() {
+                    return None;
+                }
+                let ai_specs = current_specs.get()?;
+                let base_specs = base_profile_specs.get()?;
+                let base_name = selected_base_profile.get().map(|p| p.name).unwrap_or_default();
+
+                Some(view! {
+                    <div class="merge-screen">
+                        <h3>"Compare & Merge Settings"</h3>
+                        <p class="section-description">
+                            "Choose which settings to use from each source. AI-recommended values are on the left, "
+                            "values from \""{base_name.clone()}"\" are on the right."
+                        </p>
+                        <SettingsMerge
+                            ai_specs=ai_specs
+                            base_specs=base_specs
+                            base_name=base_name
+                            on_apply=move |merged| on_merge_complete(merged)
+                            on_skip=move |_| on_skip_merge()
+                        />
+                    </div>
+                })
             }}
 
             // Specs Editor — shown between FilamentCard and ProfilePreview

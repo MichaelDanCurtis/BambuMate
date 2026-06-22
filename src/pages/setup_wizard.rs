@@ -57,33 +57,173 @@ pub fn SetupWizard(
     let step = RwSignal::new(0u8);
     let bambu_path = RwSignal::new(String::new());
     let bambu_detected = RwSignal::new(false);
+    let path_validation_msg = RwSignal::new(String::new());
+    let path_valid = RwSignal::new(false);
+    let is_searching_path = RwSignal::new(false);
     let selected_provider = RwSignal::new(String::new());
     let api_key_input = RwSignal::new(String::new());
     let local_url_input = RwSignal::new("http://localhost:1234".to_string());
+    let selected_model = RwSignal::new(String::new());
+    let available_models = RwSignal::new(Vec::<commands::ModelInfo>::new());
+    let is_loading_models = RwSignal::new(false);
+    let model_error = RwSignal::new(String::new());
     let saving = RwSignal::new(false);
     let error_msg = RwSignal::new(String::new());
 
-    // Step 0: Auto-detect Bambu Studio on mount
+    // Step 0: Auto-detect Bambu Studio config path on mount
     Effect::new(move || {
         spawn_local(async move {
-            match commands::run_health_check().await {
-                Ok(report) => {
-                    if report.bambu_studio_installed {
-                        if let Some(path) = report.bambu_studio_path {
-                            bambu_path.set(path);
+            is_searching_path.set(true);
+            match commands::search_bambu_studio_config().await {
+                Ok(path) => {
+                    bambu_path.set(path.clone());
+                    bambu_detected.set(true);
+                    // Validate the detected path
+                    if let Ok(validation) = commands::validate_bambu_studio_path(&path).await {
+                        path_valid.set(validation.valid);
+                        path_validation_msg.set(validation.message);
+                    }
+                }
+                Err(_) => {
+                    // Fallback: try health check for the installed app path
+                    if let Ok(report) = commands::run_health_check().await {
+                        if let Some(ref profile_path) = report.profile_dir_path {
+                            bambu_path.set(profile_path.clone());
                             bambu_detected.set(true);
+                            if let Ok(validation) = commands::validate_bambu_studio_path(profile_path).await {
+                                path_valid.set(validation.valid);
+                                path_validation_msg.set(validation.message);
+                            }
                         }
                     }
                 }
-                Err(_) => {}
             }
+            is_searching_path.set(false);
         });
     });
 
+    // Handler for the "Search" button
+    let on_search_path = move |_| {
+        is_searching_path.set(true);
+        error_msg.set(String::new());
+        path_validation_msg.set(String::new());
+        spawn_local(async move {
+            match commands::search_bambu_studio_config().await {
+                Ok(path) => {
+                    bambu_path.set(path.clone());
+                    bambu_detected.set(true);
+                    if let Ok(validation) = commands::validate_bambu_studio_path(&path).await {
+                        path_valid.set(validation.valid);
+                        path_validation_msg.set(validation.message);
+                    }
+                }
+                Err(e) => {
+                    path_validation_msg.set(e);
+                    path_valid.set(false);
+                }
+            }
+            is_searching_path.set(false);
+        });
+    };
+
+    // Handler for the "Browse" button using Tauri dialog
+    let on_browse_path = move |_| {
+        spawn_local(async move {
+            // Call the Tauri dialog plugin to open a folder picker
+            #[allow(unused_imports)]
+            use wasm_bindgen::prelude::*;
+            let args = serde_wasm_bindgen::to_value(&serde_json::json!({
+                "title": "Select Bambu Studio Configuration Folder",
+                "directory": true
+            })).unwrap();
+
+            #[wasm_bindgen]
+            extern "C" {
+                #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], catch)]
+                async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+            }
+
+            match invoke("plugin:dialog|open", args).await {
+                Ok(result) => {
+                    if let Some(path_str) = result.as_string() {
+                        bambu_path.set(path_str.clone());
+                        bambu_detected.set(true);
+                        // Validate the selected path
+                        if let Ok(validation) = commands::validate_bambu_studio_path(&path_str).await {
+                            path_valid.set(validation.valid);
+                            path_validation_msg.set(validation.message);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // User cancelled or error - do nothing
+                }
+            }
+        });
+    };
+
+    // Validate path when input changes
+    let on_path_input = move |ev: web_sys::Event| {
+        use wasm_bindgen::JsCast;
+        let target = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>();
+        let path = target.value();
+        bambu_path.set(path.clone());
+        if path.is_empty() {
+            path_validation_msg.set(String::new());
+            path_valid.set(false);
+            return;
+        }
+        spawn_local(async move {
+            if let Ok(validation) = commands::validate_bambu_studio_path(&path).await {
+                path_valid.set(validation.valid);
+                path_validation_msg.set(validation.message);
+            }
+        });
+    };
+
+    // Open external URL handler
+    let open_url = |url: &'static str| {
+        move |ev: web_sys::MouseEvent| {
+            ev.prevent_default();
+            ev.stop_propagation();
+            let url = url.to_string();
+            spawn_local(async move {
+                let _ = commands::open_external_url(&url).await;
+            });
+        }
+    };
+
+    // Load models when entering step 3
+    let load_models = move || {
+        let provider = selected_provider.get();
+        if provider.is_empty() {
+            return;
+        }
+        is_loading_models.set(true);
+        model_error.set(String::new());
+        available_models.set(vec![]);
+        selected_model.set(String::new());
+        spawn_local(async move {
+            match commands::list_models(&provider).await {
+                Ok(models) => {
+                    available_models.set(models);
+                }
+                Err(e) => {
+                    model_error.set(e);
+                }
+            }
+            is_loading_models.set(false);
+        });
+    };
+
     let on_next = move |_| {
         let current = step.get();
-        if current < 2 {
+        if current < 3 {
             error_msg.set(String::new());
+            // When moving to step 3 (model selection), load models
+            if current == 2 {
+                load_models();
+            }
             step.set(current + 1);
         }
     };
@@ -104,11 +244,17 @@ pub fn SetupWizard(
         let key = api_key_input.get();
         let path = bambu_path.get();
         let local_url = local_url_input.get();
+        let model = selected_model.get();
         let on_complete = on_complete.clone();
 
         spawn_local(async move {
-            // Save Bambu Studio path
+            // Save Bambu Studio path (validate first)
             if !path.is_empty() {
+                if let Ok(validation) = commands::validate_bambu_studio_path(&path).await {
+                    if !validation.valid {
+                        error_msg.set(format!("Warning: {}", validation.message));
+                    }
+                }
                 if let Err(e) = commands::set_preference("bambu_studio_path", &path).await {
                     error_msg.set(format!("Failed to save Bambu Studio path: {}", e));
                     saving.set(false);
@@ -147,6 +293,15 @@ pub fn SetupWizard(
                 }
             }
 
+            // Save selected model
+            if !model.is_empty() {
+                if let Err(e) = commands::set_preference("ai_model", &model).await {
+                    error_msg.set(format!("Failed to save model selection: {}", e));
+                    saving.set(false);
+                    return;
+                }
+            }
+
             // Mark setup as complete
             if let Err(e) = commands::set_preference("setup_complete", "true").await {
                 error_msg.set(format!("Failed to mark setup complete: {}", e));
@@ -162,6 +317,10 @@ pub fn SetupWizard(
     let can_finish = move || {
         let provider = selected_provider.get();
         if provider.is_empty() {
+            return false;
+        }
+        // Must have a model selected
+        if selected_model.get().is_empty() {
             return false;
         }
         if provider == "local" {
@@ -180,7 +339,9 @@ pub fn SetupWizard(
                         <span class="wizard-dot-line"></span>
                         <span class={move || if step.get() == 1 { "wizard-dot active" } else if step.get() > 1 { "wizard-dot completed" } else { "wizard-dot" }}></span>
                         <span class="wizard-dot-line"></span>
-                        <span class={move || if step.get() == 2 { "wizard-dot active" } else { "wizard-dot" }}></span>
+                        <span class={move || if step.get() == 2 { "wizard-dot active" } else if step.get() > 2 { "wizard-dot completed" } else { "wizard-dot" }}></span>
+                        <span class="wizard-dot-line"></span>
+                        <span class={move || if step.get() == 3 { "wizard-dot active" } else { "wizard-dot" }}></span>
                     </div>
                 </div>
 
@@ -195,31 +356,59 @@ pub fn SetupWizard(
                             </p>
 
                             <div class="wizard-section">
-                                <h4>"Bambu Studio Location"</h4>
-                                <Show when=move || bambu_detected.get()>
+                                <h4>"Bambu Studio Configuration Folder"</h4>
+                                <p class="wizard-description">
+                                    "This is the folder where Bambu Studio stores its profiles and settings. "
+                                    "On Windows this is usually %APPDATA%\\BambuStudio, on macOS ~/Library/Application Support/BambuStudio."
+                                </p>
+                                <Show when=move || bambu_detected.get() && path_valid.get()>
                                     <div class="wizard-status wizard-status-success">
-                                        "Bambu Studio detected automatically"
+                                        "Bambu Studio configuration detected and validated"
                                     </div>
                                 </Show>
-                                <Show when=move || !bambu_detected.get()>
+                                <Show when=move || bambu_detected.get() && !path_valid.get()>
                                     <div class="wizard-status wizard-status-warning">
-                                        "Bambu Studio was not detected in the default location. You can enter the path manually, or skip this step if it is not installed yet."
+                                        {move || path_validation_msg.get()}
+                                    </div>
+                                </Show>
+                                <Show when=move || !bambu_detected.get() && !is_searching_path.get()>
+                                    <div class="wizard-status wizard-status-warning">
+                                        "Bambu Studio was not detected automatically. Use Search to find it, or Browse to select manually."
+                                    </div>
+                                </Show>
+                                <Show when=move || is_searching_path.get()>
+                                    <div class="wizard-status">
+                                        "Searching for Bambu Studio..."
                                     </div>
                                 </Show>
                                 <div class="form-group">
-                                    <label>"Application Path"</label>
-                                    <input
-                                        type="text"
-                                        class="input"
-                                        placeholder="/Applications/BambuStudio.app"
-                                        prop:value=move || bambu_path.get()
-                                        on:input=move |ev| {
-                                            use wasm_bindgen::JsCast;
-                                            let target = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>();
-                                            bambu_path.set(target.value());
-                                        }
-                                    />
+                                    <label>"Configuration Path"</label>
+                                    <div class="input-with-buttons">
+                                        <input
+                                            type="text"
+                                            class="input"
+                                            placeholder="e.g. C:\\Users\\You\\AppData\\Roaming\\BambuStudio"
+                                            prop:value=move || bambu_path.get()
+                                            on:input=on_path_input
+                                        />
+                                        <button
+                                            class="btn btn-secondary btn-sm"
+                                            on:click=on_search_path
+                                            disabled=move || is_searching_path.get()
+                                        >
+                                            {move || if is_searching_path.get() { "..." } else { "Search" }}
+                                        </button>
+                                        <button
+                                            class="btn btn-secondary btn-sm"
+                                            on:click=on_browse_path
+                                        >"Browse"</button>
+                                    </div>
                                 </div>
+                                <Show when=move || !path_validation_msg.get().is_empty() && !bambu_detected.get()>
+                                    <span class={move || if path_valid.get() { "status-text status-success" } else { "status-text status-warning" }}>
+                                        {move || path_validation_msg.get()}
+                                    </span>
+                                </Show>
                             </div>
                         </div>
                     </Show>
@@ -230,8 +419,7 @@ pub fn SetupWizard(
                             <h3>"AI Provider"</h3>
                             <p class="wizard-description">
                                 "BambuMate uses AI to analyze filament specifications and detect print defects. "
-                                "An API key from one of the following providers is required. "
-                                "Choose a provider and enter your API key below."
+                                "Choose a provider below."
                             </p>
 
                             <div class="wizard-providers">
@@ -253,20 +441,17 @@ pub fn SetupWizard(
                                                 selected_provider.set(pid.to_string());
                                                 api_key_input.set(String::new());
                                                 error_msg.set(String::new());
+                                                selected_model.set(String::new());
+                                                available_models.set(vec![]);
                                             }
                                         >
                                             <div class="wizard-provider-header">
                                                 <strong>{pname}</strong>
                                                 <Show when=move || !signup.is_empty()>
-                                                    <a
-                                                        href=signup
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
+                                                    <button
                                                         class="wizard-signup-link"
-                                                        on:click=move |ev| {
-                                                            ev.stop_propagation();
-                                                        }
-                                                    >"Get API Key"</a>
+                                                        on:click=open_url(signup)
+                                                    >"Get API Key"</button>
                                                 </Show>
                                             </div>
                                             <p class="wizard-provider-desc">{pdesc}</p>
@@ -314,7 +499,7 @@ pub fn SetupWizard(
                                         match info {
                                             Some(p) if !p.signup_url.is_empty() => {
                                                 format!(
-                                                    "Enter your {} API key below. If you don't have one, visit the signup page to create an account.",
+                                                    "Enter your {} API key below. Click the button to get one if you don't have one.",
                                                     p.name
                                                 )
                                             }
@@ -329,13 +514,12 @@ pub fn SetupWizard(
                                     match info {
                                         Some(p) if !p.signup_url.is_empty() => {
                                             let url = p.signup_url;
+                                            let name = p.name;
                                             Some(view! {
-                                                <a
-                                                    href=url
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
+                                                <button
                                                     class="wizard-signup-link wizard-signup-link-standalone"
-                                                >{format!("Sign up for {} API key", p.name)}</a>
+                                                    on:click=open_url(url)
+                                                >{format!("Sign up for {} API key", name)}</button>
                                             })
                                         }
                                         _ => None,
@@ -363,6 +547,56 @@ pub fn SetupWizard(
                         </div>
                     </Show>
 
+                    // Step 3: Model Selection
+                    <Show when=move || step.get() == 3>
+                        <div class="wizard-step">
+                            <h3>"Select AI Model"</h3>
+                            <p class="wizard-description">
+                                "Choose which model to use for filament analysis and profile generation."
+                            </p>
+
+                            <Show when=move || is_loading_models.get()>
+                                <div class="wizard-status">
+                                    "Loading available models..."
+                                </div>
+                            </Show>
+
+                            <Show when=move || !model_error.get().is_empty()>
+                                <div class="wizard-status wizard-status-warning">
+                                    {move || model_error.get()}
+                                </div>
+                                <button
+                                    class="btn btn-secondary btn-sm"
+                                    on:click=move |_| load_models()
+                                >"Retry"</button>
+                            </Show>
+
+                            <Show when=move || !is_loading_models.get() && model_error.get().is_empty()>
+                                <div class="form-group">
+                                    <label>"Model"</label>
+                                    <select
+                                        class="input"
+                                        prop:value=move || selected_model.get()
+                                        on:change=move |ev| {
+                                            use wasm_bindgen::JsCast;
+                                            let target = ev.target().unwrap().unchecked_into::<web_sys::HtmlSelectElement>();
+                                            selected_model.set(target.value());
+                                        }
+                                    >
+                                        <option value="">"-- Select a model --"</option>
+                                        {move || available_models.get().iter().map(|m| {
+                                            let id = m.id.clone();
+                                            let name = m.name.clone();
+                                            view! {
+                                                <option value={id.clone()}>{name}</option>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </select>
+                                </div>
+                            </Show>
+                        </div>
+                    </Show>
+
                     // Error message
                     <Show when=move || !error_msg.get().is_empty()>
                         <div class="wizard-error">
@@ -380,14 +614,18 @@ pub fn SetupWizard(
                         >"Back"</button>
                     </Show>
                     <div class="wizard-footer-spacer"></div>
-                    <Show when=move || step.get() < 2>
+                    <Show when=move || step.get() < 3>
                         <button
                             class="btn btn-primary"
                             on:click=on_next
-                            disabled=move || step.get() == 1 && selected_provider.get().is_empty()
+                            disabled=move || {
+                                (step.get() == 1 && selected_provider.get().is_empty()) ||
+                                (step.get() == 2 && selected_provider.get() != "local" && api_key_input.get().is_empty()) ||
+                                (step.get() == 2 && selected_provider.get() == "local" && local_url_input.get().is_empty())
+                            }
                         >"Next"</button>
                     </Show>
-                    <Show when=move || step.get() == 2>
+                    <Show when=move || step.get() == 3>
                         <button
                             class="btn btn-primary"
                             on:click=on_finish

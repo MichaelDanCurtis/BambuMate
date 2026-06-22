@@ -298,3 +298,12 @@ fn launch_platform(
 ) -> Result<(), String> {
     Err("Unsupported platform for launching Bambu Studio".to_string())
 }
+
+/// Open an external URL in the system's default browser.
+/// Uses the tauri-plugin-opener to handle cross-platform URL opening.
+#[tauri::command]
+pub async fn open_external_url(url: String) -> Result<(), String> {
+    info!("Opening external URL: {}", url);
+    tauri_plugin_opener::open_url(&url, None::<&str>)
+        .map_err(|e| format!("Failed to open URL: {}", e))
+}

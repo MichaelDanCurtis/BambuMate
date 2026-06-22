@@ -22,11 +22,9 @@ pub fn Sidebar() -> impl IntoView {
                         <a href="/filament" class="nav-link">"Create Profile"</a>
                     </li>
                 </Show>
-                <Show when=move || ff_ctx.flags.get().analysis_enabled>
-                    <li class="nav-item">
-                        <a href="/analysis" class="nav-link">"Print Analysis"</a>
-                    </li>
-                </Show>
+                <li class="nav-item">
+                    <a href="/analysis" class="nav-link">"Print Analysis"</a>
+                </li>
                 <Show when=move || ff_ctx.flags.get().profiles_enabled>
                     <li class="nav-item">
                         <a href="/profiles" class="nav-link">"Profiles"</a>

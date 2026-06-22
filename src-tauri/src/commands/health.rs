@@ -16,6 +16,14 @@ pub struct HealthReport {
     pub openrouter_api_key_set: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PathValidation {
+    pub valid: bool,
+    pub has_system_profiles: bool,
+    pub has_config_file: bool,
+    pub message: String,
+}
+
 #[tauri::command]
 pub fn run_health_check() -> Result<HealthReport, String> {
     info!("Running health check");
@@ -69,6 +77,128 @@ pub fn run_health_check() -> Result<HealthReport, String> {
     })
 }
 
+/// Search for the Bambu Studio configuration directory on the system.
+/// Returns the path if found, or an error message with guidance.
+#[tauri::command]
+pub fn search_bambu_studio_config() -> Result<String, String> {
+    info!("Searching for Bambu Studio config directory");
+
+    match BambuPaths::detect() {
+        Ok(paths) => {
+            let path = paths.config_root.to_string_lossy().to_string();
+            info!("Found Bambu Studio config at: {}", path);
+            Ok(path)
+        }
+        Err(_) => {
+            // Try additional platform-specific search paths
+            if let Some(path) = search_config_fallback() {
+                info!("Found Bambu Studio config via fallback: {}", path);
+                Ok(path)
+            } else {
+                Err("Could not find Bambu Studio configuration directory. Please select it manually.".to_string())
+            }
+        }
+    }
+}
+
+/// Validate that a given path is a valid Bambu Studio configuration directory.
+/// Checks for expected subdirectories and config files.
+#[tauri::command]
+pub fn validate_bambu_studio_path(path: String) -> Result<PathValidation, String> {
+    info!("Validating Bambu Studio path: {}", path);
+    let p = PathBuf::from(&path);
+
+    if !p.exists() || !p.is_dir() {
+        return Ok(PathValidation {
+            valid: false,
+            has_system_profiles: false,
+            has_config_file: false,
+            message: "Directory does not exist".to_string(),
+        });
+    }
+
+    // Check for system profiles (system/BBL/filament/)
+    let system_filament = p.join("system").join("BBL").join("filament");
+    let has_system_profiles = system_filament.exists() && system_filament.is_dir();
+
+    // Check for BambuStudio.conf
+    let conf_file = p.join("BambuStudio.conf");
+    let has_config_file = conf_file.exists();
+
+    let valid = has_system_profiles || has_config_file;
+    let message = if valid {
+        "Valid Bambu Studio configuration directory".to_string()
+    } else if p.join("user").exists() {
+        "Directory has a user folder but may be incomplete. You can try using it.".to_string()
+    } else {
+        "This does not appear to be a Bambu Studio configuration directory. Expected to find system/BBL/filament/ or BambuStudio.conf".to_string()
+    };
+
+    Ok(PathValidation {
+        valid,
+        has_system_profiles,
+        has_config_file,
+        message,
+    })
+}
+
+/// Platform-specific fallback search for the Bambu Studio config directory.
+#[cfg(target_os = "windows")]
+fn search_config_fallback() -> Option<String> {
+    // Check %APPDATA%\BambuStudio (primary on Windows)
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let bs_dir = PathBuf::from(&appdata).join("BambuStudio");
+        if bs_dir.exists() {
+            return Some(bs_dir.to_string_lossy().to_string());
+        }
+    }
+
+    // Check %LOCALAPPDATA%\BambuStudio
+    if let Some(local_data) = dirs::data_local_dir() {
+        let bs_dir = local_data.join("BambuStudio");
+        if bs_dir.exists() {
+            return Some(bs_dir.to_string_lossy().to_string());
+        }
+    }
+
+    // Check dirs::data_dir (maps to %APPDATA%)
+    if let Some(data_dir) = dirs::data_dir() {
+        let bs_dir = data_dir.join("BambuStudio");
+        if bs_dir.exists() {
+            return Some(bs_dir.to_string_lossy().to_string());
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn search_config_fallback() -> Option<String> {
+    if let Some(home) = dirs::home_dir() {
+        let bs_dir = home.join("Library/Application Support/BambuStudio");
+        if bs_dir.exists() {
+            return Some(bs_dir.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn search_config_fallback() -> Option<String> {
+    if let Some(home) = dirs::home_dir() {
+        let bs_dir = home.join(".config/BambuStudio");
+        if bs_dir.exists() {
+            return Some(bs_dir.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn search_config_fallback() -> Option<String> {
+    None
+}
+
 /// Detect Bambu Studio installation using platform-specific paths.
 #[cfg(target_os = "macos")]
 fn detect_bambu_studio_install() -> (bool, Option<String>) {
@@ -107,6 +237,17 @@ fn detect_bambu_studio_install() -> (bool, Option<String>) {
     // Check %LOCALAPPDATA%
     if let Some(local_data) = dirs::data_local_dir() {
         let path = local_data.join("BambuStudio").join("BambuStudio.exe");
+        if path.exists() {
+            return (true, Some(path.to_string_lossy().to_string()));
+        }
+    }
+
+    // Check %LOCALAPPDATA%\Programs (common for user-level Windows installs)
+    if let Some(local_data) = dirs::data_local_dir() {
+        let path = local_data
+            .join("Programs")
+            .join("BambuStudio")
+            .join("BambuStudio.exe");
         if path.exists() {
             return (true, Some(path.to_string_lossy().to_string()));
         }

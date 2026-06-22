@@ -1322,3 +1322,97 @@ pub async fn compare_profiles(
 
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
+
+// -- Bambu Studio Config Path Search & Validation --
+
+/// Result from validating a Bambu Studio config path.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PathValidation {
+    pub valid: bool,
+    pub has_system_profiles: bool,
+    pub has_config_file: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidatePathArgs {
+    path: String,
+}
+
+/// Search for the Bambu Studio configuration directory on the system.
+pub async fn search_bambu_studio_config() -> Result<String, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("search_bambu_studio_config", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Validate that a given path is a valid Bambu Studio configuration directory.
+pub async fn validate_bambu_studio_path(path: &str) -> Result<PathValidation, String> {
+    let args = serde_wasm_bindgen::to_value(&ValidatePathArgs {
+        path: path.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("validate_bambu_studio_path", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Open External URL --
+
+/// Open an external URL in the system's default browser using tauri-plugin-opener.
+pub async fn open_external_url(url: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct OpenUrlArgs {
+        url: String,
+    }
+    let args = serde_wasm_bindgen::to_value(&OpenUrlArgs {
+        url: url.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    invoke("open_external_url", args)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Failed to open URL".to_string()))
+}
+
+// -- Search Base Profiles --
+
+/// A base profile match from Bambu Studio's system profiles.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BaseProfileMatch {
+    pub name: String,
+    pub path: String,
+    pub filament_type: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchBaseProfilesArgs {
+    query: String,
+    material_type: Option<String>,
+}
+
+/// Search Bambu Studio's system profiles for filaments matching a query.
+pub async fn search_base_profiles(query: &str, material_type: Option<&str>) -> Result<Vec<BaseProfileMatch>, String> {
+    let args = serde_wasm_bindgen::to_value(&SearchBaseProfilesArgs {
+        query: query.to_string(),
+        material_type: material_type.map(|s| s.to_string()),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("search_base_profiles", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}

@@ -44,7 +44,7 @@ pub fn set_preference(app: AppHandle, key: &str, value: &str) -> Result<(), Stri
     })
 }
 
-/// Returns the current feature flags. Both modules are enabled by default.
+/// Returns the current feature flags. Analysis is always enabled.
 #[tauri::command]
 pub fn get_feature_flags(app: AppHandle) -> Result<FeatureFlags, String> {
     let store = app.store("preferences.json").map_err(|e| {
@@ -57,10 +57,8 @@ pub fn get_feature_flags(app: AppHandle) -> Result<FeatureFlags, String> {
         .and_then(|v| v.as_str().map(|s| s != "false"))
         .unwrap_or(true);
 
-    let analysis_enabled = store
-        .get("feature_analysis_enabled")
-        .and_then(|v| v.as_str().map(|s| s != "false"))
-        .unwrap_or(true);
+    // Analysis is always enabled - no longer a configurable toggle
+    let analysis_enabled = true;
 
     Ok(FeatureFlags {
         profiles_enabled,
