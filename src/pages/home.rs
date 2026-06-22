@@ -3,6 +3,10 @@ use leptos::prelude::*;
 use crate::app::FeatureFlagsContext;
 use crate::components::branding::HeroArtwork;
 
+const HERO_EYEBROW: &str = "Bambu Studio workflow";
+const HERO_DESCRIPTION: &str =
+    "Generate cleaner profiles, compare tuned presets, and refine prints with a calmer Bambu-inspired workspace.";
+
 #[component]
 pub fn HomePage() -> impl IntoView {
     let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
@@ -11,10 +15,10 @@ pub fn HomePage() -> impl IntoView {
         <div class="page home-page">
             <section class="hero-panel">
                 <div class="hero-copy">
-                    <span class="hero-eyebrow">"Bambu Studio workflow"</span>
+                    <span class="hero-eyebrow">{HERO_EYEBROW}</span>
                     <h2>"Welcome to BambuMate"</h2>
                     <p class="page-description hero-description">
-                        "Generate cleaner profiles, compare tuned presets, and refine prints with a calmer Bambu-inspired workspace."
+                        {HERO_DESCRIPTION}
                     </p>
                     <div class="hero-actions">
                         <Show when=move || ff_ctx.flags.get().profiles_enabled>

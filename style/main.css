@@ -98,9 +98,7 @@ body {
     font-size: 14px;
     line-height: 1.5;
     color: var(--text-primary);
-    background:
-        radial-gradient(circle at top right, rgba(0, 174, 66, 0.1), transparent 28%),
-        linear-gradient(180deg, var(--bg-tertiary) 0%, var(--bg-primary) 100%);
+    background: linear-gradient(180deg, var(--bg-tertiary) 0%, var(--bg-primary) 100%);
     overflow: hidden;
     height: 100vh;
 }
@@ -321,11 +319,15 @@ body {
 
 .settings-section {
     margin-bottom: 32px;
-    background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+    background: rgba(255, 255, 255, 0.92);
     border: 1px solid var(--border-primary);
     border-radius: 22px;
     padding: 24px;
     box-shadow: var(--shadow-card);
+}
+
+[data-theme="dark"] .settings-section {
+    background: rgba(51, 51, 55, 0.92);
 }
 
 .settings-section h3 {
@@ -373,7 +375,7 @@ body {
 
 .input:focus {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+    box-shadow: 0 0 0 3px rgba(0, 174, 66, 0.16);
 }
 
 .input::placeholder {
@@ -447,7 +449,7 @@ select.input option {
 
 .theme-preview-card.active {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+    box-shadow: 0 0 0 3px rgba(0, 174, 66, 0.18);
 }
 
 .theme-preview-header {
@@ -708,12 +710,14 @@ select.input option {
     gap: 28px;
     align-items: center;
     padding: 30px 32px;
-    background:
-        linear-gradient(135deg, color-mix(in srgb, var(--bg-card) 94%, #e7fbff 6%) 0%, var(--bg-card) 70%),
-        var(--bg-card);
+    background: linear-gradient(135deg, #ffffff 0%, #f5fbf3 100%);
     border: 1px solid var(--border-primary);
     border-radius: 28px;
     box-shadow: var(--shadow-card);
+}
+
+[data-theme="dark"] .hero-panel {
+    background: linear-gradient(135deg, #333337 0%, #2b342d 100%);
 }
 
 .hero-copy h2 {
@@ -726,7 +730,7 @@ select.input option {
     padding: 5px 10px;
     margin-bottom: 16px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 14%, var(--bg-tertiary));
+    background: rgba(0, 174, 66, 0.12);
     color: var(--accent);
     font-size: 11px;
     font-weight: 700;
