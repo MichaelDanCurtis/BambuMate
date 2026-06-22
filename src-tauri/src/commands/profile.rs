@@ -840,3 +840,100 @@ fn key_to_label(key: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// A base profile match from Bambu Studio system profiles.
+#[derive(Debug, Clone, Serialize)]
+pub struct BaseProfileMatch {
+    pub name: String,
+    pub path: String,
+    pub filament_type: Option<String>,
+}
+
+/// Search Bambu Studio's system profiles for filaments matching a query string.
+/// Searches by name and material type. Returns up to 20 matches.
+#[tauri::command]
+pub fn search_base_profiles(
+    query: String,
+    material_type: Option<String>,
+) -> Result<Vec<BaseProfileMatch>, String> {
+    info!("Searching system profiles for: {} (material: {:?})", query, material_type);
+
+    let paths = match BambuPaths::detect() {
+        Ok(p) => p,
+        Err(_) => {
+            return Ok(Vec::new());
+        }
+    };
+
+    let system_filament_dir = paths.config_root.join("system").join("BBL").join("filament");
+    if !system_filament_dir.exists() {
+        // Also try without BBL for some installations
+        let alt_dir = paths.config_root.join("system").join("filament");
+        if !alt_dir.exists() {
+            return Ok(Vec::new());
+        }
+        return search_profiles_in_dir(&alt_dir, &query, material_type.as_deref());
+    }
+
+    search_profiles_in_dir(&system_filament_dir, &query, material_type.as_deref())
+}
+
+fn search_profiles_in_dir(
+    dir: &std::path::Path,
+    query: &str,
+    material_type: Option<&str>,
+) -> Result<Vec<BaseProfileMatch>, String> {
+    let query_lower = query.to_lowercase();
+    let mut matches = Vec::new();
+
+    for entry in WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+
+        match read_profile(path) {
+            Ok(profile) => {
+                let name = profile.name().unwrap_or("").to_string();
+                let ftype = profile.filament_type().map(|s| s.to_string());
+
+                // Filter by material type if specified
+                if let Some(mat) = material_type {
+                    let mat_lower = mat.to_lowercase();
+                    let ftype_lower = ftype.as_deref().unwrap_or("").to_lowercase();
+                    if !ftype_lower.contains(&mat_lower) {
+                        continue;
+                    }
+                }
+
+                // Match against query (by name or filament type)
+                let name_lower = name.to_lowercase();
+                let ftype_lower = ftype.as_deref().unwrap_or("").to_lowercase();
+                if name_lower.contains(&query_lower) || ftype_lower.contains(&query_lower) {
+                    matches.push(BaseProfileMatch {
+                        name,
+                        path: path.to_string_lossy().to_string(),
+                        filament_type: ftype,
+                    });
+                }
+            }
+            Err(_) => continue,
+        }
+
+        // Limit results
+        if matches.len() >= 20 {
+            break;
+        }
+    }
+
+    // Sort by name
+    matches.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    info!("Found {} matching system profiles", matches.len());
+    Ok(matches)
+}

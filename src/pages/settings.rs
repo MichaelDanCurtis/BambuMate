@@ -10,6 +10,7 @@ use crate::theme::ThemeContext;
 pub fn SettingsPage() -> impl IntoView {
     let (bambu_path, set_bambu_path) = signal(String::new());
     let (path_status, set_path_status) = signal::<Option<String>>(None);
+    let (path_valid, set_path_valid) = signal(false);
     let (stl_watch_dir, set_stl_watch_dir) = signal(String::new());
     let (stl_status, set_stl_status) = signal::<Option<String>>(None);
     let (ai_model, set_ai_model) = signal(String::new());
@@ -21,6 +22,7 @@ pub fn SettingsPage() -> impl IntoView {
     let (prefs_loaded, set_prefs_loaded) = signal(false);
     let (local_url, set_local_url) = signal("http://localhost:1234".to_string());
     let (local_url_status, set_local_url_status) = signal::<Option<String>>(None);
+    let (is_searching_path, set_is_searching_path) = signal(false);
 
     let theme_ctx = use_context::<ThemeContext>().expect("ThemeContext not provided");
     let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
@@ -101,13 +103,79 @@ pub fn SettingsPage() -> impl IntoView {
     let save_bambu_path = move |_| {
         let path = bambu_path.get();
         spawn_local(async move {
+            // Validate first
+            if let Ok(validation) = commands::validate_bambu_studio_path(&path).await {
+                set_path_valid.set(validation.valid);
+                if !validation.valid {
+                    set_path_status.set(Some(format!("Warning: {}", validation.message)));
+                }
+            }
             match commands::set_preference("bambu_studio_path", &path).await {
                 Ok(()) => {
-                    set_path_status.set(Some("Path saved".to_string()));
+                    if path_valid.get_untracked() {
+                        set_path_status.set(Some("Path saved and validated".to_string()));
+                    } else {
+                        // Keep the warning from validation
+                        let existing = path_status.get_untracked().unwrap_or_default();
+                        if existing.is_empty() {
+                            set_path_status.set(Some("Path saved".to_string()));
+                        }
+                    }
                 }
                 Err(e) => {
                     set_path_status.set(Some(format!("Failed to save: {}", e)));
                 }
+            }
+        });
+    };
+
+    let on_search_path = move |_| {
+        set_is_searching_path.set(true);
+        set_path_status.set(None);
+        spawn_local(async move {
+            match commands::search_bambu_studio_config().await {
+                Ok(path) => {
+                    set_bambu_path.set(path.clone());
+                    if let Ok(validation) = commands::validate_bambu_studio_path(&path).await {
+                        set_path_valid.set(validation.valid);
+                        set_path_status.set(Some(validation.message));
+                    }
+                }
+                Err(e) => {
+                    set_path_status.set(Some(e));
+                    set_path_valid.set(false);
+                }
+            }
+            set_is_searching_path.set(false);
+        });
+    };
+
+    let on_browse_path = move |_| {
+        spawn_local(async move {
+            #[allow(unused_imports)]
+            use wasm_bindgen::prelude::*;
+            let args = serde_wasm_bindgen::to_value(&serde_json::json!({
+                "title": "Select Bambu Studio Configuration Folder",
+                "directory": true
+            })).unwrap();
+
+            #[wasm_bindgen]
+            extern "C" {
+                #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], catch)]
+                async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+            }
+
+            match invoke("plugin:dialog|open", args).await {
+                Ok(result) => {
+                    if let Some(path_str) = result.as_string() {
+                        set_bambu_path.set(path_str.clone());
+                        if let Ok(validation) = commands::validate_bambu_studio_path(&path_str).await {
+                            set_path_valid.set(validation.valid);
+                            set_path_status.set(Some(validation.message));
+                        }
+                    }
+                }
+                Err(_) => {}
             }
         });
     };
@@ -176,15 +244,15 @@ pub fn SettingsPage() -> impl IntoView {
         });
     };
 
-    let on_toggle_analysis = move |ev: leptos::ev::Event| {
-        let checked = event_target_checked(&ev);
-        let value = if checked { "true" } else { "false" };
-        let mut new_flags = ff_ctx.flags.get();
-        new_flags.analysis_enabled = checked;
-        ff_ctx.set_flags.set(new_flags);
-        spawn_local(async move {
-            let _ = commands::set_preference("feature_analysis_enabled", value).await;
-        });
+    // Open external URL helper
+    let open_url_handler = |url: &'static str| {
+        move |ev: leptos::ev::MouseEvent| {
+            ev.prevent_default();
+            let url = url.to_string();
+            spawn_local(async move {
+                let _ = commands::open_external_url(&url).await;
+            });
+        }
     };
 
     view! {
@@ -193,7 +261,7 @@ pub fn SettingsPage() -> impl IntoView {
 
             <section class="settings-section">
                 <h3>"Feature Modules"</h3>
-                <p class="section-description">"Enable or disable application features. You can use either feature independently."</p>
+                <p class="section-description">"Enable or disable application features."</p>
 
                 <div class="form-group feature-toggle">
                     <label class="toggle-label">
@@ -206,19 +274,6 @@ pub fn SettingsPage() -> impl IntoView {
                         <span class="toggle-text">"Filament Profiles"</span>
                     </label>
                     <p class="toggle-description">"Search filament specs from manufacturers, generate optimized Bambu Studio profiles, and manage installed profiles."</p>
-                </div>
-
-                <div class="form-group feature-toggle">
-                    <label class="toggle-label">
-                        <input
-                            type="checkbox"
-                            class="toggle-input"
-                            prop:checked=move || ff_ctx.flags.get().analysis_enabled
-                            on:change=on_toggle_analysis
-                        />
-                        <span class="toggle-text">"Print Analysis (AI/MCP)"</span>
-                    </label>
-                    <p class="toggle-description">"Upload photos of prints for AI-powered defect detection and profile tuning recommendations. Requires an AI API key."</p>
                 </div>
             </section>
 
@@ -243,7 +298,6 @@ pub fn SettingsPage() -> impl IntoView {
                 </div>
             </section>
 
-            <Show when=move || ff_ctx.flags.get().analysis_enabled>
             <section class="settings-section">
                 <h3>"API Keys"</h3>
                 <p class="section-description">"API keys are stored securely in your system keychain."</p>
@@ -254,7 +308,7 @@ pub fn SettingsPage() -> impl IntoView {
                     placeholder="sk-ant-..."
                 />
                 <span class="status-text">
-                    <a href="https://console.anthropic.com/account/keys" target="_blank" rel="noopener noreferrer">"Get Claude API key"</a>
+                    <button class="link-btn" on:click=open_url_handler("https://console.anthropic.com/account/keys")>"Get Claude API key"</button>
                 </span>
                 <ApiKeyForm
                     service_name="OpenAI API Key"
@@ -262,7 +316,7 @@ pub fn SettingsPage() -> impl IntoView {
                     placeholder="sk-..."
                 />
                 <span class="status-text">
-                    <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">"Get OpenAI API key"</a>
+                    <button class="link-btn" on:click=open_url_handler("https://platform.openai.com/api-keys")>"Get OpenAI API key"</button>
                 </span>
                 <ApiKeyForm
                     service_name="Kimi K2 API Key"
@@ -270,7 +324,7 @@ pub fn SettingsPage() -> impl IntoView {
                     placeholder="sk-..."
                 />
                 <span class="status-text">
-                    <a href="https://platform.moonshot.cn/console/api-keys" target="_blank" rel="noopener noreferrer">"Get Kimi API key"</a>
+                    <button class="link-btn" on:click=open_url_handler("https://platform.moonshot.cn/console/api-keys")>"Get Kimi API key"</button>
                 </span>
                 <ApiKeyForm
                     service_name="OpenRouter API Key"
@@ -278,7 +332,7 @@ pub fn SettingsPage() -> impl IntoView {
                     placeholder="sk-or-..."
                 />
                 <span class="status-text">
-                    <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">"Get OpenRouter API key"</a>
+                    <button class="link-btn" on:click=open_url_handler("https://openrouter.ai/keys")>"Get OpenRouter API key"</button>
                 </span>
             </section>
 
@@ -389,29 +443,39 @@ pub fn SettingsPage() -> impl IntoView {
                     </Show>
                 </div>
             </section>
-            </Show>
 
             <section class="settings-section">
                 <h3>"Application"</h3>
                 <p class="section-description">"Configure application paths and preferences."</p>
 
                 <div class="form-group">
-                    <label for="bambu-path">"Bambu Studio Path"</label>
-                    <div class="input-row">
+                    <label for="bambu-path">"Bambu Studio Configuration Path"</label>
+                    <p class="section-description">"The folder where Bambu Studio stores profiles. On Windows: %APPDATA%\\BambuStudio"</p>
+                    <div class="input-with-buttons">
                         <input
                             id="bambu-path"
                             type="text"
-                            placeholder="/Applications/BambuStudio.app"
+                            placeholder="e.g. C:\\Users\\You\\AppData\\Roaming\\BambuStudio"
                             class="input"
                             prop:value=move || bambu_path.get()
                             on:input=move |ev| {
                                 set_bambu_path.set(event_target_value(&ev));
                             }
                         />
+                        <button
+                            class="btn btn-secondary btn-sm"
+                            on:click=on_search_path
+                            disabled=move || is_searching_path.get()
+                        >
+                            {move || if is_searching_path.get() { "..." } else { "Search" }}
+                        </button>
+                        <button class="btn btn-secondary btn-sm" on:click=on_browse_path>"Browse"</button>
                         <button class="btn btn-save" on:click=save_bambu_path>"Save"</button>
                     </div>
                     <Show when=move || path_status.get().is_some()>
-                        <span class="status-text">{move || path_status.get().unwrap_or_default()}</span>
+                        <span class={move || if path_valid.get() { "status-text status-success" } else { "status-text status-warning" }}>
+                            {move || path_status.get().unwrap_or_default()}
+                        </span>
                     </Show>
                 </div>
 
