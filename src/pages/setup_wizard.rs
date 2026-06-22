@@ -238,11 +238,37 @@ pub fn SetupWizard(
         let current = step.get();
         if current < 3 {
             error_msg.set(String::new());
-            // When moving to step 3 (model selection), load models
+            // When moving to step 3 (model selection), save the API key first,
+            // then load models. The key must be in the keychain before list_models
+            // can authenticate with the provider's API.
             if current == 2 {
-                load_models();
+                let provider = selected_provider.get();
+                let key = api_key_input.get();
+                let local_url = local_url_input.get();
+                step.set(current + 1);
+                spawn_local(async move {
+                    if provider == "local" {
+                        // Save local server URL so list_models can read it
+                        let _ = commands::set_preference("local_mcp_url", &local_url).await;
+                    } else {
+                        // Save API key to keychain so list_models can authenticate
+                        let service = PROVIDERS
+                            .iter()
+                            .find(|p| p.id == provider)
+                            .map(|p| p.keychain_service)
+                            .unwrap_or("");
+                        if !service.is_empty() && !key.is_empty() {
+                            if let Err(e) = commands::set_api_key(service, &key).await {
+                                error_msg.set(format!("Failed to save API key: {}", e));
+                                return;
+                            }
+                        }
+                    }
+                    load_models();
+                });
+            } else {
+                step.set(current + 1);
             }
-            step.set(current + 1);
         }
     };
 
