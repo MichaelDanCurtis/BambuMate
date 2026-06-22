@@ -59,8 +59,8 @@ jobs:
           VER: ${{ steps.version.outputs.ver }}
         run: |
           echo "Setting version to $VER"
-          # Update tauri.conf.json
-          sed -i.bak 's/"version": "[^"]*"/"version": "'"$VER"'"/' src-tauri/tauri.conf.json && rm -f src-tauri/tauri.conf.json.bak
+          # Update tauri.conf.json (top-level version only)
+          jq --arg v "$VER" '.version = $v' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp && mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
           # Update src-tauri/Cargo.toml
           sed -i.bak 's/^version = "[^"]*"/version = "'"$VER"'"/' src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
           # Update root Cargo.toml
