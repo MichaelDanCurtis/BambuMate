@@ -41,12 +41,12 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           VERSION_INPUT: ${{ github.event.inputs.version }}
-          GITHUB_REF_NAME: ${{ github.ref }}
+          GIT_REF: ${{ github.ref }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$VERSION_INPUT" ]; then
             VER="${VERSION_INPUT#v}"
-          elif [[ "$GITHUB_REF_NAME" == refs/tags/v* ]]; then
-            VER="${GITHUB_REF_NAME#refs/tags/v}"
+          elif [[ "$GIT_REF" == refs/tags/v* ]]; then
+            VER="${GIT_REF#refs/tags/v}"
           else
             VER=""
           fi
@@ -60,11 +60,11 @@ jobs:
         run: |
           echo "Setting version to $VER"
           # Update tauri.conf.json
-          sed -i.bak "s/\"version\": \".*\"/\"version\": \"$VER\"/" src-tauri/tauri.conf.json && rm -f src-tauri/tauri.conf.json.bak
+          sed -i.bak 's/"version": "[^"]*"/"version": "'"$VER"'"/' src-tauri/tauri.conf.json && rm -f src-tauri/tauri.conf.json.bak
           # Update src-tauri/Cargo.toml
-          sed -i.bak "s/^version = \".*\"/version = \"$VER\"/" src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
+          sed -i.bak 's/^version = "[^"]*"/version = "'"$VER"'"/' src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
           # Update root Cargo.toml
-          sed -i.bak "s/^version = \".*\"/version = \"$VER\"/" Cargo.toml && rm -f Cargo.toml.bak
+          sed -i.bak 's/^version = "[^"]*"/version = "'"$VER"'"/' Cargo.toml && rm -f Cargo.toml.bak
           # Verify changes
           grep '"version"' src-tauri/tauri.conf.json
           grep '^version' src-tauri/Cargo.toml
