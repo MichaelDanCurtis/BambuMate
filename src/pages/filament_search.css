@@ -795,3 +795,155 @@
         width: 100%;
     }
 }
+
+/* Base Profile Reference Section */
+.base-profiles-section {
+    margin-top: 1.5rem;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.base-profiles-section h4 {
+    margin: 0 0 0.25rem 0;
+    font-size: 0.95rem;
+}
+
+.base-profiles-section .section-description {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+}
+
+.base-profiles-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.base-profile-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.base-profile-item:hover {
+    border-color: var(--accent);
+    background: var(--bg-hover);
+}
+
+.base-profile-name {
+    font-weight: 500;
+    flex: 1;
+}
+
+.base-profile-type {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+}
+
+.base-profile-action {
+    font-size: 0.75rem;
+    color: var(--accent);
+    font-weight: 500;
+}
+
+/* Settings Merge Screen */
+.merge-screen {
+    margin-top: 1.5rem;
+    padding: 1.25rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.merge-screen h3 {
+    margin: 0 0 0.25rem 0;
+}
+
+.merge-screen .section-description {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+}
+
+.settings-merge-container {
+    font-size: 0.85rem;
+}
+
+.merge-header-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+    border-bottom: 2px solid var(--border);
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.merge-rows {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.merge-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.5rem;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+}
+
+.merge-row.differs {
+    background: rgba(var(--accent-rgb, 59, 130, 246), 0.05);
+}
+
+.merge-setting-label {
+    font-weight: 500;
+    font-size: 0.8rem;
+}
+
+.merge-option {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.merge-option.selected {
+    background: rgba(var(--accent-rgb, 59, 130, 246), 0.1);
+    font-weight: 500;
+}
+
+.merge-option input[type="radio"] {
+    margin: 0;
+    accent-color: var(--accent);
+}
+
+.merge-value {
+    font-family: monospace;
+    font-size: 0.8rem;
+}
+
+.merge-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}

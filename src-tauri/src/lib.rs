@@ -65,6 +65,7 @@ pub fn run() {
             commands::history::revert_to_backup,
             commands::launcher::detect_bambu_studio_path,
             commands::launcher::launch_bambu_studio,
+            commands::launcher::open_external_url,
             commands::batch::list_catalog_brands,
             commands::batch::batch_generate_brand,
             commands::stl_bridge::set_stl_watch_dir,

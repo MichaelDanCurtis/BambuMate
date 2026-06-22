@@ -1379,8 +1379,7 @@ pub async fn open_external_url(url: &str) -> Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
 
-    // Use the plugin's JavaScript API directly
-    invoke("plugin:opener|open_url", args)
+    invoke("open_external_url", args)
         .await
         .map(|_| ())
         .map_err(|e| e.as_string().unwrap_or_else(|| "Failed to open URL".to_string()))
