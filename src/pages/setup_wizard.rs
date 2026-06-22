@@ -245,7 +245,6 @@ pub fn SetupWizard(
                 let provider = selected_provider.get();
                 let key = api_key_input.get();
                 let local_url = local_url_input.get();
-                step.set(current + 1);
                 spawn_local(async move {
                     if provider == "local" {
                         // Save local server URL so list_models can read it
@@ -264,6 +263,7 @@ pub fn SetupWizard(
                             }
                         }
                     }
+                    step.set(current + 1);
                     load_models();
                 });
             } else {
