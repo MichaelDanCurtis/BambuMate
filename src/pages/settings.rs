@@ -6,17 +6,6 @@ use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
 use crate::theme::ThemeContext;
 
-/// Provider signup URLs for display in settings.
-fn provider_signup_url(provider: &str) -> &'static str {
-    match provider {
-        "claude" => "https://console.anthropic.com/account/keys",
-        "openai" => "https://platform.openai.com/api-keys",
-        "openrouter" => "https://openrouter.ai/keys",
-        "kimi" => "https://platform.moonshot.cn/console/api-keys",
-        _ => "",
-    }
-}
-
 #[component]
 pub fn SettingsPage() -> impl IntoView {
     let (bambu_path, set_bambu_path) = signal(String::new());

@@ -155,7 +155,7 @@ pub fn SetupWizard(
             }
 
             saving.set(false);
-            on_complete.call(());
+            on_complete.run(());
         });
     };
 
@@ -214,7 +214,6 @@ pub fn SetupWizard(
                                         placeholder="/Applications/BambuStudio.app"
                                         prop:value=move || bambu_path.get()
                                         on:input=move |ev| {
-                                            use leptos::ev::EventTarget;
                                             use wasm_bindgen::JsCast;
                                             let target = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>();
                                             bambu_path.set(target.value());
@@ -296,7 +295,6 @@ pub fn SetupWizard(
                                         placeholder="http://localhost:1234"
                                         prop:value=move || local_url_input.get()
                                         on:input=move |ev| {
-                                            use leptos::ev::EventTarget;
                                             use wasm_bindgen::JsCast;
                                             let target = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>();
                                             local_url_input.set(target.value());
@@ -352,7 +350,6 @@ pub fn SetupWizard(
                                         placeholder="sk-..."
                                         prop:value=move || api_key_input.get()
                                         on:input=move |ev| {
-                                            use leptos::ev::EventTarget;
                                             use wasm_bindgen::JsCast;
                                             let target = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>();
                                             api_key_input.set(target.value());
@@ -375,7 +372,7 @@ pub fn SetupWizard(
                 </div>
 
                 <div class="wizard-footer">
-                    <Show when=move || step.get() > 0>
+                    <Show when=move || { step.get() > 0 }>
                         <button
                             class="btn btn-secondary"
                             on:click=on_back
