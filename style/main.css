@@ -42,6 +42,10 @@
     --error-border: #f1bcc8;
 
     --shadow-card: 0 10px 24px rgba(39, 39, 39, 0.08);
+    --shadow-brand: 0 10px 18px rgba(0, 174, 66, 0.18);
+    --shadow-button: 0 10px 20px rgba(0, 174, 66, 0.22);
+    --shadow-focus: 0 0 0 3px rgba(0, 174, 66, 0.16);
+    --shadow-focus-strong: 0 0 0 3px rgba(0, 174, 66, 0.18);
 }
 
 [data-theme="dark"] {
@@ -83,6 +87,10 @@
     --error-border: #6f3346;
 
     --shadow-card: 0 18px 40px rgba(0, 0, 0, 0.28);
+    --shadow-brand: 0 10px 18px rgba(0, 174, 66, 0.24);
+    --shadow-button: 0 10px 20px rgba(0, 174, 66, 0.28);
+    --shadow-focus: 0 0 0 3px rgba(0, 174, 66, 0.18);
+    --shadow-focus-strong: 0 0 0 3px rgba(0, 174, 66, 0.22);
 }
 
 /* ===== Reset and base ===== */
@@ -141,7 +149,7 @@ body {
     flex: 0 0 44px;
     border-radius: 14px;
     overflow: hidden;
-    box-shadow: 0 10px 18px rgba(0, 183, 168, 0.18);
+    box-shadow: var(--shadow-brand);
 }
 
 .brand-mark-svg {
@@ -278,7 +286,7 @@ body {
 .btn-primary {
     background-color: var(--accent);
     color: var(--text-on-accent);
-    box-shadow: 0 10px 20px rgba(0, 183, 168, 0.22);
+    box-shadow: var(--shadow-button);
 }
 
 .btn-primary:hover:not(:disabled) {
@@ -375,7 +383,7 @@ body {
 
 .input:focus {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(0, 174, 66, 0.16);
+    box-shadow: var(--shadow-focus);
 }
 
 .input::placeholder {
@@ -449,7 +457,7 @@ select.input option {
 
 .theme-preview-card.active {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(0, 174, 66, 0.18);
+    box-shadow: var(--shadow-focus-strong);
 }
 
 .theme-preview-header {

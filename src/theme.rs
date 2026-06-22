@@ -6,6 +6,8 @@ pub struct ThemeContext {
     pub set_theme: WriteSignal<String>,
 }
 
+/// Normalize stored or incoming theme values to the supported set.
+/// Unknown values fall back to the Bambu Studio light theme.
 pub fn normalize_theme(theme: &str) -> &'static str {
     match theme {
         "dark" => "dark",
