@@ -32,6 +32,7 @@ pub fn run() {
             commands::config::set_preference,
             commands::config::get_feature_flags,
             commands::config::check_setup_complete,
+            commands::config::reset_to_clean_install,
             commands::health::run_health_check,
             commands::health::search_bambu_studio_config,
             commands::health::validate_bambu_studio_path,

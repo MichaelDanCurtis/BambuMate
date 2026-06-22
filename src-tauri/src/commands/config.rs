@@ -129,3 +129,66 @@ pub fn check_setup_complete(app: AppHandle) -> Result<SetupStatus, String> {
         setup_complete,
     })
 }
+
+/// All keychain service names used by BambuMate.
+const KEYCHAIN_SERVICES: &[&str] = &[
+    "bambumate-claude-api",
+    "bambumate-openai-api",
+    "bambumate-kimi-api",
+    "bambumate-openrouter-api",
+];
+
+/// Reset BambuMate to a clean installation state.
+///
+/// This clears all preferences from the store and deletes all stored API keys
+/// from the system keychain. After calling this, the setup wizard will appear
+/// on the next launch.
+#[tauri::command]
+pub fn reset_to_clean_install(app: AppHandle) -> Result<(), String> {
+    info!("Resetting BambuMate to clean installation state");
+
+    // Clear the preferences store
+    let store = app.store("preferences.json").map_err(|e| {
+        warn!("Failed to open store: {}", e);
+        e.to_string()
+    })?;
+    store.clear();
+    store.save().map_err(|e| {
+        warn!("Failed to save cleared store: {}", e);
+        e.to_string()
+    })?;
+    info!("Preferences store cleared");
+
+    // Delete all API keys from the system keychain
+    let mut keychain_errors = Vec::new();
+    for service in KEYCHAIN_SERVICES {
+        match keyring::Entry::new(service, "bambumate") {
+            Ok(entry) => match entry.delete_credential() {
+                Ok(()) => info!("Deleted keychain entry: {}", service),
+                Err(keyring::Error::NoEntry) => {
+                    info!("No keychain entry to delete: {}", service);
+                }
+                Err(e) => {
+                    warn!("Failed to delete keychain entry {}: {}", service, e);
+                    keychain_errors.push(format!("{}: {}", service, e));
+                }
+            },
+            Err(e) => {
+                warn!("Failed to access keychain for {}: {}", service, e);
+                keychain_errors.push(format!("{}: {}", service, e));
+            }
+        }
+    }
+
+    if !keychain_errors.is_empty() {
+        let msg = format!(
+            "Reset completed but some API keys could not be removed: {}",
+            keychain_errors.join("; ")
+        );
+        warn!("{}", msg);
+        return Err(msg);
+    }
+
+    info!("Clean install reset complete");
+    Ok(())
+}

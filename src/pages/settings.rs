@@ -23,6 +23,9 @@ pub fn SettingsPage() -> impl IntoView {
     let (local_url, set_local_url) = signal("http://localhost:1234".to_string());
     let (local_url_status, set_local_url_status) = signal::<Option<String>>(None);
     let (is_searching_path, set_is_searching_path) = signal(false);
+    let (reset_confirm, set_reset_confirm) = signal(false);
+    let (resetting, set_resetting) = signal(false);
+    let (reset_status, set_reset_status) = signal::<Option<String>>(None);
 
     let theme_ctx = use_context::<ThemeContext>().expect("ThemeContext not provided");
     let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
@@ -499,6 +502,63 @@ pub fn SettingsPage() -> impl IntoView {
                         <span class="status-text">{move || stl_status.get().unwrap_or_default()}</span>
                     </Show>
                 </div>
+            </section>
+
+            <section class="settings-section settings-section-danger">
+                <h3>"Reset / Clean Installation"</h3>
+                <p class="section-description">
+                    "Delete all BambuMate preferences and stored API keys to return to a fresh installation state. "
+                    "This will not affect your Bambu Studio profiles or configuration."
+                </p>
+
+                <Show when=move || !reset_confirm.get()>
+                    <button
+                        class="btn btn-danger"
+                        on:click=move |_| set_reset_confirm.set(true)
+                        disabled=move || resetting.get()
+                    >"Reset for Clean Installation"</button>
+                </Show>
+
+                <Show when=move || reset_confirm.get() && !resetting.get()>
+                    <div class="reset-confirm">
+                        <p class="reset-confirm-warning">
+                            "Are you sure? This will clear all settings, API keys, and preferences. "
+                            "You will need to complete the setup wizard again."
+                        </p>
+                        <div class="input-row">
+                            <button
+                                class="btn btn-danger"
+                                on:click=move |_| {
+                                    set_resetting.set(true);
+                                    set_reset_confirm.set(false);
+                                    spawn_local(async move {
+                                        match commands::reset_to_clean_install().await {
+                                            Ok(()) => {
+                                                set_reset_status.set(Some("Reset complete. Reload the application to start fresh.".to_string()));
+                                            }
+                                            Err(e) => {
+                                                set_reset_status.set(Some(format!("Reset failed: {}", e)));
+                                            }
+                                        }
+                                        set_resetting.set(false);
+                                    });
+                                }
+                            >"Yes, Reset Everything"</button>
+                            <button
+                                class="btn btn-secondary"
+                                on:click=move |_| set_reset_confirm.set(false)
+                            >"Cancel"</button>
+                        </div>
+                    </div>
+                </Show>
+
+                <Show when=move || resetting.get()>
+                    <span class="status-text">"Resetting..."</span>
+                </Show>
+
+                <Show when=move || reset_status.get().is_some()>
+                    <span class="status-text status-warning">{move || reset_status.get().unwrap_or_default()}</span>
+                </Show>
             </section>
         </div>
     }

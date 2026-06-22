@@ -430,6 +430,35 @@ select.input option {
     background-color: var(--bg-danger-hover);
 }
 
+.btn-danger {
+    background-color: var(--color-danger);
+    color: var(--text-on-accent);
+}
+
+.btn-danger:hover:not(:disabled) {
+    background-color: var(--bg-danger-hover);
+}
+
+.settings-section-danger {
+    border-top: 1px solid var(--border-danger);
+    padding-top: 24px;
+}
+
+.reset-confirm {
+    margin-top: 12px;
+    padding: 16px;
+    background-color: var(--bg-danger);
+    border: 1px solid var(--border-danger);
+    border-radius: 6px;
+}
+
+.reset-confirm-warning {
+    font-size: 13px;
+    color: var(--color-danger);
+    margin-bottom: 12px;
+    font-weight: 500;
+}
+
 /* ===== Health check ===== */
 
 .health-results {

@@ -69,6 +69,8 @@ pub fn SetupWizard(
     let model_error = RwSignal::new(String::new());
     let saving = RwSignal::new(false);
     let error_msg = RwSignal::new(String::new());
+    let clean_install = RwSignal::new(false);
+    let clean_install_status = RwSignal::new(String::new());
 
     // Step 0: Auto-detect Bambu Studio config path on mount
     Effect::new(move || {
@@ -245,9 +247,19 @@ pub fn SetupWizard(
         let path = bambu_path.get();
         let local_url = local_url_input.get();
         let model = selected_model.get();
+        let is_clean_install = clean_install.get();
         let on_complete = on_complete.clone();
 
         spawn_local(async move {
+            // If clean install is checked, reset everything first
+            if is_clean_install {
+                if let Err(e) = commands::reset_to_clean_install().await {
+                    error_msg.set(format!("Failed to reset for clean install: {}", e));
+                    saving.set(false);
+                    return;
+                }
+            }
+
             // Save Bambu Studio path (validate first)
             if !path.is_empty() {
                 if let Ok(validation) = commands::validate_bambu_studio_path(&path).await {
@@ -409,6 +421,40 @@ pub fn SetupWizard(
                                         {move || path_validation_msg.get()}
                                     </span>
                                 </Show>
+                            </div>
+
+                            <div class="wizard-section">
+                                <h4>"Clean Installation"</h4>
+                                <div class="form-group feature-toggle">
+                                    <label class="toggle-label">
+                                        <input
+                                            type="checkbox"
+                                            class="toggle-input"
+                                            prop:checked=move || clean_install.get()
+                                            on:change=move |ev| {
+                                                use wasm_bindgen::JsCast;
+                                                let checked = ev.target()
+                                                    .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                                                    .map(|el| el.checked())
+                                                    .unwrap_or(false);
+                                                clean_install.set(checked);
+                                                if checked {
+                                                    clean_install_status.set("All existing preferences and API keys will be cleared on finish.".to_string());
+                                                } else {
+                                                    clean_install_status.set(String::new());
+                                                }
+                                            }
+                                        />
+                                        <span class="toggle-text">"Reset all settings for a clean installation"</span>
+                                    </label>
+                                    <p class="toggle-description">
+                                        "Check this to clear all existing BambuMate preferences and stored API keys before setting up. "
+                                        "Use this if you want to start fresh."
+                                    </p>
+                                    <Show when=move || !clean_install_status.get().is_empty()>
+                                        <span class="status-text status-warning">{move || clean_install_status.get()}</span>
+                                    </Show>
+                                </div>
                             </div>
                         </div>
                     </Show>

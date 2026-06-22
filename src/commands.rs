@@ -1385,6 +1385,20 @@ pub async fn open_external_url(url: &str) -> Result<(), String> {
         .map_err(|e| e.as_string().unwrap_or_else(|| "Failed to open URL".to_string()))
 }
 
+// -- Clean Install Reset --
+
+/// Reset BambuMate to a clean installation state.
+/// Clears all preferences and deletes all stored API keys from the system keychain.
+pub async fn reset_to_clean_install() -> Result<(), String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?;
+
+    invoke("reset_to_clean_install", args)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Failed to reset to clean install".to_string()))
+}
+
 // -- Search Base Profiles --
 
 /// A base profile match from Bambu Studio's system profiles.
