@@ -188,7 +188,7 @@ pub fn register_filament_in_conf(config_root: &Path, profile_name: &str) -> Resu
         profile_name
     );
 
-    // Write back with 4-space indentation (matching BambuStudio's format)
+    // Write back (serde_json::to_string_pretty uses 2-space indentation)
     let output = serde_json::to_string_pretty(&conf)?;
 
     // Write atomically using temp file

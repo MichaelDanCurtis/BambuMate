@@ -33,6 +33,8 @@ toml = "0.8"
 image = "0.25"
 base64 = "0.22"
 notify = "7"
+
+[target.'cfg(windows)'.dependencies]
 md5 = "0.7"
 
 [build-dependencies]
