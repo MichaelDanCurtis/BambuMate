@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
 use walkdir::WalkDir;
 
 use crate::profile::generator;
@@ -8,7 +8,7 @@ use crate::profile::paths::BambuPaths;
 use crate::profile::reader::{read_profile, read_profile_metadata};
 use crate::profile::registry::ProfileRegistry;
 use crate::profile::types::{FilamentProfile, ProfileMetadata};
-use crate::profile::writer::{write_profile_atomic, write_profile_with_metadata};
+use crate::profile::writer::{write_profile_atomic, write_profile_with_metadata, register_filament_in_conf};
 
 /// Summary information for a filament profile (used in list views).
 #[derive(Debug, Clone, Serialize)]
@@ -475,6 +475,19 @@ pub async fn install_generated_profile(
         .name()
         .unwrap_or("<unnamed>")
         .to_string();
+
+    // Register the filament in BambuStudio.conf so it appears as visible/available.
+    // The profile name in the filaments array is the file stem (filename without .json).
+    let file_stem = target_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&filename);
+    if let Err(e) = register_filament_in_conf(&paths.config_root, file_stem) {
+        warn!(
+            "Failed to register filament in BambuStudio.conf (profile still installed): {}",
+            e
+        );
+    }
 
     info!(
         "Installed profile '{}' to {:?}",

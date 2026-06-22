@@ -76,6 +76,22 @@ pub fn SetupWizard(
     Effect::new(move || {
         spawn_local(async move {
             is_searching_path.set(true);
+
+            // First, check if there's a previously saved preference
+            if let Ok(Some(saved_path)) = commands::get_preference("bambu_studio_path").await {
+                if !saved_path.is_empty() {
+                    bambu_path.set(saved_path.clone());
+                    bambu_detected.set(true);
+                    if let Ok(validation) = commands::validate_bambu_studio_path(&saved_path).await {
+                        path_valid.set(validation.valid);
+                        path_validation_msg.set(validation.message);
+                    }
+                    is_searching_path.set(false);
+                    return;
+                }
+            }
+
+            // No saved preference — try auto-detect
             match commands::search_bambu_studio_config().await {
                 Ok(path) => {
                     bambu_path.set(path.clone());
