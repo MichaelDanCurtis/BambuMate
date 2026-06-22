@@ -65,11 +65,18 @@ pub fn App() -> impl IntoView {
         setup_complete.set(Some(true));
     });
 
+    let on_wizard_cancel = Callback::new(move |()| {
+        setup_complete.set(Some(true));
+        spawn_local(async move {
+            let _ = commands::set_preference("setup_complete", "true").await;
+        });
+    });
+
     view! {
         <Router>
             // Show wizard overlay if setup is not complete
             <Show when=move || setup_complete.get() == Some(false)>
-                <SetupWizard on_complete=on_wizard_complete.clone() />
+                <SetupWizard on_complete=on_wizard_complete.clone() on_cancel=on_wizard_cancel.clone() />
             </Show>
 
             // Show main app when setup is complete (or still loading)

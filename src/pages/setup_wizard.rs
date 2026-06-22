@@ -53,6 +53,7 @@ const PROVIDERS: &[ProviderInfo] = &[
 #[component]
 pub fn SetupWizard(
     #[prop(into)] on_complete: Callback<()>,
+    #[prop(into)] on_cancel: Callback<()>,
 ) -> impl IntoView {
     let step = RwSignal::new(0u8);
     let bambu_path = RwSignal::new(String::new());
@@ -701,6 +702,11 @@ pub fn SetupWizard(
                             disabled=move || saving.get()
                         >"Back"</button>
                     </Show>
+                    <button
+                        class="btn btn-ghost wizard-skip-btn"
+                        on:click=move |_| on_cancel.run(())
+                        disabled=move || saving.get()
+                    >"Skip Setup"</button>
                     <div class="wizard-footer-spacer"></div>
                     <Show when=move || step.get() < 3>
                         <button
