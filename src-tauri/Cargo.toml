@@ -33,6 +33,7 @@ toml = "0.8"
 image = "0.25"
 base64 = "0.22"
 notify = "7"
+md5 = "0.7"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

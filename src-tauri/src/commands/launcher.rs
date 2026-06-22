@@ -11,30 +11,24 @@ pub struct LaunchResult {
     pub was_already_running: bool,
 }
 
-/// Detect the Bambu Studio application path.
+/// Detect the Bambu Studio application binary path.
 ///
 /// Priority:
-/// 1. User-configured `bambu_studio_path` preference
-/// 2. Platform-specific default location
-/// 3. Platform-specific search (Spotlight on macOS, registry/PATH on Windows)
+/// 1. Platform-specific default location
+/// 2. Platform-specific search (Spotlight on macOS, registry/PATH on Windows)
+///
+/// Note: The "bambu_studio_path" preference stores the CONFIG DIRECTORY,
+/// not the application binary path.
 #[tauri::command]
-pub async fn detect_bambu_studio_path(app: tauri::AppHandle) -> Result<String, String> {
-    // 1. Check user preference
-    if let Some(path) = get_bs_preference(&app) {
-        let p = std::path::Path::new(&path);
-        if p.exists() {
-            return Ok(path);
-        }
-    }
-
-    // 2. Platform-specific default path
+pub async fn detect_bambu_studio_path(_app: tauri::AppHandle) -> Result<String, String> {
+    // 1. Platform-specific default path
     if let Some(path) = default_bs_path() {
         if std::path::Path::new(&path).exists() {
             return Ok(path);
         }
     }
 
-    // 3. Platform-specific search
+    // 2. Platform-specific search
     if let Some(path) = search_bs_path() {
         return Ok(path);
     }
@@ -70,34 +64,27 @@ pub async fn launch_bambu_studio(
     })
 }
 
-/// Resolve the Bambu Studio path from preferences or defaults.
-fn resolve_bs_path(app: &tauri::AppHandle) -> Result<String, String> {
-    // Check preference
-    if let Some(path) = get_bs_preference(app) {
-        if std::path::Path::new(&path).exists() {
-            return Ok(path);
-        }
-    }
-
-    // Default path
+/// Resolve the Bambu Studio application binary path.
+///
+/// Note: The "bambu_studio_path" preference stores the CONFIG DIRECTORY
+/// (e.g., %APPDATA%\BambuStudio), not the application binary. We must not
+/// use it here. Instead, we search for the actual binary.
+fn resolve_bs_path(_app: &tauri::AppHandle) -> Result<String, String> {
+    // 1. Platform-specific default path
     if let Some(path) = default_bs_path() {
         if std::path::Path::new(&path).exists() {
             return Ok(path);
         }
     }
 
-    Err("Bambu Studio not found. Set the path in Settings.".to_string())
+    // 2. Platform-specific search (Spotlight, registry, PATH, etc.)
+    if let Some(path) = search_bs_path() {
+        return Ok(path);
+    }
+
+    Err("Bambu Studio application not found. Please install Bambu Studio.".to_string())
 }
 
-/// Read the bambu_studio_path preference from the Tauri store.
-fn get_bs_preference(app: &tauri::AppHandle) -> Option<String> {
-    use tauri_plugin_store::StoreExt;
-    let store = app.store("preferences.json").ok()?;
-    store
-        .get("bambu_studio_path")
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .filter(|s| !s.is_empty())
-}
 
 /// Get the platform-specific default Bambu Studio path.
 #[cfg(target_os = "macos")]

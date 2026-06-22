@@ -3,7 +3,7 @@ use chrono::Utc;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::types::{FilamentProfile, ProfileMetadata};
 
@@ -119,6 +119,113 @@ pub fn restore_from_backup(backup_path: &Path, profile_path: &Path) -> Result<()
     write_profile_atomic(&backup_profile, profile_path)?;
     info!("Restored profile from {:?}", backup_path);
     Ok(())
+}
+
+/// Register a filament profile name in BambuStudio.conf's "filaments" array.
+///
+/// BambuStudio.conf is a JSON file that contains a "filaments" section which is
+/// a JSON array of filament preset names (file stems without .json extension).
+/// When a profile is added to this array, Bambu Studio will show it as
+/// visible/available in the filament selection UI.
+///
+/// This function:
+/// 1. Reads BambuStudio.conf
+/// 2. Strips any trailing MD5 checksum line (Windows format)
+/// 3. Adds the profile name to the "filaments" array if not already present
+/// 4. Writes the file back with proper formatting
+///
+/// If BambuStudio.conf doesn't exist or can't be parsed, this is a non-fatal
+/// warning (the profile file itself is already installed and BS will discover it
+/// on next full rescan).
+pub fn register_filament_in_conf(config_root: &Path, profile_name: &str) -> Result<()> {
+    let conf_path = config_root.join("BambuStudio.conf");
+
+    if !conf_path.exists() {
+        warn!(
+            "BambuStudio.conf not found at {:?}, skipping filament registration",
+            conf_path
+        );
+        return Ok(());
+    }
+
+    // Read the conf file
+    let content = std::fs::read_to_string(&conf_path)?;
+
+    // BambuStudio on Windows appends an MD5 checksum line after the JSON.
+    // We need to strip it before parsing.
+    let json_content = strip_md5_checksum(&content);
+
+    // Parse as JSON
+    let mut conf: serde_json::Value = serde_json::from_str(json_content).map_err(|e| {
+        anyhow::anyhow!("Failed to parse BambuStudio.conf as JSON: {}", e)
+    })?;
+
+    // Get or create the "filaments" array
+    let filaments = conf
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("BambuStudio.conf root is not a JSON object"))?
+        .entry("filaments")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+
+    let filaments_arr = filaments.as_array_mut().ok_or_else(|| {
+        anyhow::anyhow!("BambuStudio.conf 'filaments' section is not an array")
+    })?;
+
+    // Check if the profile name is already registered
+    let name_value = serde_json::Value::String(profile_name.to_string());
+    if filaments_arr.contains(&name_value) {
+        debug!(
+            "Profile '{}' already registered in BambuStudio.conf filaments section",
+            profile_name
+        );
+        return Ok(());
+    }
+
+    // Add the profile name to the filaments array
+    filaments_arr.push(name_value);
+    info!(
+        "Registered profile '{}' in BambuStudio.conf filaments section",
+        profile_name
+    );
+
+    // Write back with 4-space indentation (matching BambuStudio's format)
+    let output = serde_json::to_string_pretty(&conf)?;
+
+    // Write atomically using temp file
+    let mut temp = NamedTempFile::new_in(config_root)?;
+    temp.write_all(output.as_bytes())?;
+    temp.write_all(b"\n")?;
+
+    // On Windows, BambuStudio expects an MD5 checksum appended after the JSON
+    #[cfg(target_os = "windows")]
+    {
+        let md5_line = compute_md5_checksum_line(&output);
+        temp.write_all(md5_line.as_bytes())?;
+    }
+
+    temp.flush()?;
+    temp.persist(&conf_path)?;
+
+    info!("Updated BambuStudio.conf at {:?}", conf_path);
+    Ok(())
+}
+
+/// Strip the MD5 checksum comment line that BambuStudio appends on Windows.
+/// The checksum line starts with "# MD5 checksum " and appears after the JSON.
+fn strip_md5_checksum(content: &str) -> &str {
+    // Find the last '}' which ends the JSON object
+    if let Some(pos) = content.rfind('}') {
+        &content[..=pos]
+    } else {
+        content
+    }
+}
+
+/// Compute the MD5 checksum line that BambuStudio expects on Windows.
+#[cfg(target_os = "windows")]
+fn compute_md5_checksum_line(json_content: &str) -> String {
+    let digest = md5::compute(json_content.as_bytes());
+    format!("# MD5 checksum {:X}\n", digest)
 }
 
 #[cfg(test)]
