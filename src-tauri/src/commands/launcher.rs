@@ -94,9 +94,14 @@ fn default_bs_path() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn default_bs_path() -> Option<String> {
-    // Common install locations on Windows
+    // Common install locations on Windows.
+    // Bambu Studio installs to "Bambu Studio" (with space) by default.
     let candidates = [
+        r"C:\Program Files\Bambu Studio\bambu-studio.exe",
+        r"C:\Program Files\Bambu Studio\BambuStudio.exe",
         r"C:\Program Files\BambuStudio\BambuStudio.exe",
+        r"C:\Program Files (x86)\Bambu Studio\bambu-studio.exe",
+        r"C:\Program Files (x86)\Bambu Studio\BambuStudio.exe",
         r"C:\Program Files (x86)\BambuStudio\BambuStudio.exe",
     ];
 
@@ -106,13 +111,19 @@ fn default_bs_path() -> Option<String> {
         }
     }
 
-    // Also check %PROGRAMFILES% environment variable
-    if let Ok(program_files) = std::env::var("ProgramFiles") {
-        let path = std::path::PathBuf::from(&program_files)
-            .join("BambuStudio")
-            .join("BambuStudio.exe");
-        if path.exists() {
-            return Some(path.to_string_lossy().to_string());
+    // Check %PROGRAMFILES% and %PROGRAMFILES(X86)% environment variables
+    for env_var in &["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Ok(program_files) = std::env::var(env_var) {
+            for folder in &["Bambu Studio", "BambuStudio"] {
+                for exe in &["bambu-studio.exe", "BambuStudio.exe"] {
+                    let path = std::path::PathBuf::from(&program_files)
+                        .join(folder)
+                        .join(exe);
+                    if path.exists() {
+                        return Some(path.to_string_lossy().to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -161,29 +172,140 @@ fn search_bs_path() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn search_bs_path() -> Option<String> {
-    // Search in PATH
-    if let Ok(output) = std::process::Command::new("where")
-        .arg("BambuStudio.exe")
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(line) = stdout.lines().next() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && std::path::Path::new(trimmed).exists() {
-                    return Some(trimmed.to_string());
+    // 1. Search Windows registry (most reliable for installed apps)
+    if let Some(path) = search_registry_for_bs() {
+        return Some(path);
+    }
+
+    // 2. Search PATH for both possible executable names
+    for exe_name in &["BambuStudio.exe", "bambu-studio.exe"] {
+        if let Ok(output) = std::process::Command::new("where")
+            .arg(exe_name)
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(line) = stdout.lines().next() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && std::path::Path::new(trimmed).exists() {
+                        return Some(trimmed.to_string());
+                    }
                 }
             }
         }
     }
 
-    // Search in common user install locations
+    // 3. Check common user-level install locations (with and without space)
     if let Some(local_data) = dirs::data_local_dir() {
-        let path = local_data
-            .join("BambuStudio")
-            .join("BambuStudio.exe");
-        if path.exists() {
-            return Some(path.to_string_lossy().to_string());
+        for folder in &["Bambu Studio", "BambuStudio"] {
+            for exe in &["bambu-studio.exe", "BambuStudio.exe"] {
+                let path = local_data.join(folder).join(exe);
+                if path.exists() {
+                    return Some(path.to_string_lossy().to_string());
+                }
+            }
+        }
+        // Also check %LOCALAPPDATA%\Programs\
+        for folder in &["Bambu Studio", "BambuStudio"] {
+            for exe in &["bambu-studio.exe", "BambuStudio.exe"] {
+                let path = local_data.join("Programs").join(folder).join(exe);
+                if path.exists() {
+                    return Some(path.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Search the Windows registry for the Bambu Studio install location.
+#[cfg(target_os = "windows")]
+fn search_registry_for_bs() -> Option<String> {
+    let reg_keys = [
+        r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\BambuStudio",
+        r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\BambuStudio",
+        r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\BambuStudio",
+        r"HKLM\SOFTWARE\Bambu Lab\BambuStudio",
+        r"HKCU\SOFTWARE\Bambu Lab\BambuStudio",
+    ];
+
+    for reg_key in &reg_keys {
+        if let Ok(output) = std::process::Command::new("reg")
+            .args(["query", reg_key, "/v", "InstallLocation"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if line.trim_start().starts_with("InstallLocation") {
+                        // reg query output format: "    InstallLocation    REG_SZ    C:\path\to\app"
+                        let parts: Vec<&str> = line.splitn(4, "    ").collect();
+                        if let Some(install_dir) = parts.last() {
+                            let install_dir = install_dir.trim();
+                            if !install_dir.is_empty() {
+                                for exe in &["bambu-studio.exe", "BambuStudio.exe"] {
+                                    let exe_path = std::path::PathBuf::from(install_dir).join(exe);
+                                    if exe_path.exists() {
+                                        return Some(exe_path.to_string_lossy().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also try searching all uninstall entries for "Bambu Studio" display name
+    for hive in &["HKLM", "HKCU"] {
+        let uninstall_key = format!(r"{}\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", hive);
+        if let Ok(output) = std::process::Command::new("reg")
+            .args(["query", &uninstall_key, "/s", "/v", "DisplayName"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let lines: Vec<&str> = stdout.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed.contains("DisplayName") && trimmed.contains("Bambu Studio") {
+                        // Find the preceding registry key line (starts with HKLM/HKCU)
+                        for j in (0..i).rev() {
+                            let key_line = lines[j].trim();
+                            if key_line.starts_with("HKEY_") {
+                                // Now query InstallLocation from this specific key
+                                if let Ok(loc_output) = std::process::Command::new("reg")
+                                    .args(["query", key_line, "/v", "InstallLocation"])
+                                    .output()
+                                {
+                                    if loc_output.status.success() {
+                                        let loc_stdout = String::from_utf8_lossy(&loc_output.stdout);
+                                        for loc_line in loc_stdout.lines() {
+                                            if loc_line.trim_start().starts_with("InstallLocation") {
+                                                let parts: Vec<&str> = loc_line.splitn(4, "    ").collect();
+                                                if let Some(install_dir) = parts.last() {
+                                                    let install_dir = install_dir.trim();
+                                                    if !install_dir.is_empty() {
+                                                        for exe in &["bambu-studio.exe", "BambuStudio.exe"] {
+                                                            let exe_path = std::path::PathBuf::from(install_dir).join(exe);
+                                                            if exe_path.exists() {
+                                                                return Some(exe_path.to_string_lossy().to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

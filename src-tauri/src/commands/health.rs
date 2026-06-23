@@ -212,8 +212,13 @@ fn detect_bambu_studio_install() -> (bool, Option<String>) {
 
 #[cfg(target_os = "windows")]
 fn detect_bambu_studio_install() -> (bool, Option<String>) {
+    // Bambu Studio on Windows installs to "Bambu Studio" (with space) by default.
     let candidates = [
+        r"C:\Program Files\Bambu Studio\bambu-studio.exe",
+        r"C:\Program Files\Bambu Studio\BambuStudio.exe",
         r"C:\Program Files\BambuStudio\BambuStudio.exe",
+        r"C:\Program Files (x86)\Bambu Studio\bambu-studio.exe",
+        r"C:\Program Files (x86)\Bambu Studio\BambuStudio.exe",
         r"C:\Program Files (x86)\BambuStudio\BambuStudio.exe",
     ];
 
@@ -224,32 +229,38 @@ fn detect_bambu_studio_install() -> (bool, Option<String>) {
         }
     }
 
-    // Check %PROGRAMFILES%
-    if let Ok(program_files) = std::env::var("ProgramFiles") {
-        let path = PathBuf::from(&program_files)
-            .join("BambuStudio")
-            .join("BambuStudio.exe");
-        if path.exists() {
-            return (true, Some(path.to_string_lossy().to_string()));
+    // Check %PROGRAMFILES% and %PROGRAMFILES(X86)%
+    for env_var in &["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Ok(program_files) = std::env::var(env_var) {
+            for folder in &["Bambu Studio", "BambuStudio"] {
+                for exe in &["bambu-studio.exe", "BambuStudio.exe"] {
+                    let path = PathBuf::from(&program_files).join(folder).join(exe);
+                    if path.exists() {
+                        return (true, Some(path.to_string_lossy().to_string()));
+                    }
+                }
+            }
         }
     }
 
-    // Check %LOCALAPPDATA%
+    // Check %LOCALAPPDATA% (user-level install)
     if let Some(local_data) = dirs::data_local_dir() {
-        let path = local_data.join("BambuStudio").join("BambuStudio.exe");
-        if path.exists() {
-            return (true, Some(path.to_string_lossy().to_string()));
+        for folder in &["Bambu Studio", "BambuStudio"] {
+            for exe in &["bambu-studio.exe", "BambuStudio.exe"] {
+                let path = local_data.join(folder).join(exe);
+                if path.exists() {
+                    return (true, Some(path.to_string_lossy().to_string()));
+                }
+            }
         }
-    }
-
-    // Check %LOCALAPPDATA%\Programs (common for user-level Windows installs)
-    if let Some(local_data) = dirs::data_local_dir() {
-        let path = local_data
-            .join("Programs")
-            .join("BambuStudio")
-            .join("BambuStudio.exe");
-        if path.exists() {
-            return (true, Some(path.to_string_lossy().to_string()));
+        // %LOCALAPPDATA%\Programs (common for user-level Windows installs)
+        for folder in &["Bambu Studio", "BambuStudio"] {
+            for exe in &["bambu-studio.exe", "BambuStudio.exe"] {
+                let path = local_data.join("Programs").join(folder).join(exe);
+                if path.exists() {
+                    return (true, Some(path.to_string_lossy().to_string()));
+                }
+            }
         }
     }
 

@@ -360,17 +360,21 @@ pub fn is_bambu_studio_running() -> bool {
 
 /// Check if Bambu Studio is currently running on Windows.
 ///
-/// Uses `tasklist` to search for the BambuStudio.exe process.
+/// Uses `tasklist` to search for both possible process names.
 #[cfg(target_os = "windows")]
 pub fn is_bambu_studio_running() -> bool {
-    std::process::Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq BambuStudio.exe", "/NH"])
-        .output()
-        .map(|output| {
+    for exe_name in &["BambuStudio.exe", "bambu-studio.exe"] {
+        if let Ok(output) = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {}", exe_name), "/NH"])
+            .output()
+        {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.contains("BambuStudio.exe")
-        })
-        .unwrap_or(false)
+            if stdout.contains(exe_name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(target_os = "linux")]
