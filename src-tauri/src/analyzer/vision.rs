@@ -229,7 +229,7 @@ async fn call_openai_vision(
 
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 1024,
+        "max_completion_tokens": 1024,
         "messages": [{
             "role": "user",
             "content": [
