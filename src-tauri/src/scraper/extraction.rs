@@ -494,7 +494,7 @@ async fn call_openai(
 
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 2048,
+        "max_completion_tokens": 2048,
         "messages": [
             {"role": "user", "content": prompt}
         ],
