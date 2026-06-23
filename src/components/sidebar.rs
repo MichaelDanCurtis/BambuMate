@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::app::FeatureFlagsContext;
+use crate::components::branding::BrandMark;
 use crate::components::stl_indicator::StlIndicator;
 
 #[component]
@@ -10,8 +11,13 @@ pub fn Sidebar() -> impl IntoView {
     view! {
         <nav class="sidebar">
             <div class="sidebar-header">
-                <h1 class="sidebar-title">"BambuMate"</h1>
-                <p class="sidebar-subtitle">"Filament Profile Manager"</p>
+                <div class="sidebar-brand">
+                    <BrandMark />
+                    <div>
+                        <h1 class="sidebar-title">"BambuMate"</h1>
+                        <p class="sidebar-subtitle">"Studio-inspired filament workflow"</p>
+                    </div>
+                </div>
             </div>
             <ul class="nav-list">
                 <li class="nav-item">

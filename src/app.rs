@@ -14,7 +14,7 @@ use crate::pages::profile_diff::ProfileDiffPage;
 use crate::pages::profile_management::ProfileManagementPage;
 use crate::pages::settings::SettingsPage;
 use crate::pages::setup_wizard::SetupWizard;
-use crate::theme::{apply_theme, ThemeContext};
+use crate::theme::{apply_theme, normalize_theme, ThemeContext};
 
 /// Shared context for feature flags, reactive so UI updates on toggle.
 #[derive(Clone)]
@@ -25,7 +25,7 @@ pub struct FeatureFlagsContext {
 
 #[component]
 pub fn App() -> impl IntoView {
-    let (theme, set_theme) = signal(String::from("system"));
+    let (theme, set_theme) = signal(String::from("bambu"));
     provide_context(ThemeContext { theme, set_theme });
 
     // Feature flags with both enabled by default
@@ -42,7 +42,7 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         spawn_local(async move {
             if let Ok(Some(saved)) = commands::get_preference("theme").await {
-                set_theme.set(saved);
+                set_theme.set(normalize_theme(&saved).to_string());
             }
             if let Ok(loaded_flags) = commands::get_feature_flags().await {
                 set_flags.set(loaded_flags);

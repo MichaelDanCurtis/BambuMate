@@ -1,6 +1,11 @@
 use leptos::prelude::*;
 
 use crate::app::FeatureFlagsContext;
+use crate::components::branding::HeroArtwork;
+
+const HERO_EYEBROW: &str = "Bambu Studio workflow";
+const HERO_DESCRIPTION: &str =
+    "Generate cleaner profiles, compare tuned presets, and refine prints with a calmer Bambu-inspired workspace.";
 
 #[component]
 pub fn HomePage() -> impl IntoView {
@@ -8,10 +13,24 @@ pub fn HomePage() -> impl IntoView {
 
     view! {
         <div class="page home-page">
-            <h2>"Welcome to BambuMate"</h2>
-            <p class="page-description">
-                "Optimize your Bambu Studio filament profiles with AI-powered analysis."
-            </p>
+            <section class="hero-panel">
+                <div class="hero-copy">
+                    <span class="hero-eyebrow">{HERO_EYEBROW}</span>
+                    <h2>"Welcome to BambuMate"</h2>
+                    <p class="page-description hero-description">
+                        {HERO_DESCRIPTION}
+                    </p>
+                    <div class="hero-actions">
+                        <Show when=move || ff_ctx.flags.get().profiles_enabled>
+                            <a href="/filament" class="btn btn-primary">"Create a Profile"</a>
+                        </Show>
+                        <Show when=move || ff_ctx.flags.get().analysis_enabled>
+                            <a href="/analysis" class="btn btn-secondary">"Analyze a Print"</a>
+                        </Show>
+                    </div>
+                </div>
+                <HeroArtwork />
+            </section>
 
             <div class="card-grid">
                 <Show when=move || ff_ctx.flags.get().profiles_enabled>

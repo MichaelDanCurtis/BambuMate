@@ -29,6 +29,24 @@ pub fn SettingsPage() -> impl IntoView {
 
     let theme_ctx = use_context::<ThemeContext>().expect("ThemeContext not provided");
     let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
+    let on_bambu_theme = {
+        let theme_ctx = theme_ctx.clone();
+        move |_| {
+            theme_ctx.set_theme.set("bambu".to_string());
+            spawn_local(async move {
+                let _ = commands::set_preference("theme", "bambu").await;
+            });
+        }
+    };
+    let on_dark_theme = {
+        let theme_ctx = theme_ctx.clone();
+        move |_| {
+            theme_ctx.set_theme.set("dark".to_string());
+            spawn_local(async move {
+                let _ = commands::set_preference("theme", "dark").await;
+            });
+        }
+    };
 
     // Load existing preferences on mount
     Effect::new(move |_| {
@@ -160,7 +178,8 @@ pub fn SettingsPage() -> impl IntoView {
             let args = serde_wasm_bindgen::to_value(&serde_json::json!({
                 "title": "Select Bambu Studio Configuration Folder",
                 "directory": true
-            })).unwrap();
+            }))
+            .unwrap();
 
             #[wasm_bindgen]
             extern "C" {
@@ -172,7 +191,9 @@ pub fn SettingsPage() -> impl IntoView {
                 Ok(result) => {
                     if let Some(path_str) = result.as_string() {
                         set_bambu_path.set(path_str.clone());
-                        if let Ok(validation) = commands::validate_bambu_studio_path(&path_str).await {
+                        if let Ok(validation) =
+                            commands::validate_bambu_studio_path(&path_str).await
+                        {
                             set_path_valid.set(validation.valid);
                             set_path_status.set(Some(validation.message));
                         }
@@ -293,10 +314,49 @@ pub fn SettingsPage() -> impl IntoView {
                             on:change=on_theme_change
                             prop:value=move || theme_ctx.theme.get()
                         >
-                            <option value="system" selected=move || theme_ctx.theme.get() == "system">"System"</option>
-                            <option value="light" selected=move || theme_ctx.theme.get() == "light">"Light"</option>
+                            <option value="bambu" selected=move || theme_ctx.theme.get() == "bambu">"Bambu Studio Light"</option>
                             <option value="dark" selected=move || theme_ctx.theme.get() == "dark">"Dark"</option>
                         </select>
+                    </div>
+                    <div class="theme-preview-grid">
+                        <button
+                            type="button"
+                            class="theme-preview-card"
+                            class:active=move || theme_ctx.theme.get() == "bambu"
+                            on:click=on_bambu_theme
+                        >
+                            <span class="theme-preview-header">
+                                <span>"Bambu Studio"</span>
+                                <span class="theme-preview-badge">"Light"</span>
+                            </span>
+                            <span class="theme-preview-frame theme-preview-frame-light">
+                                <span class="theme-preview-sidebar"></span>
+                                <span class="theme-preview-canvas">
+                                    <span class="theme-preview-line short"></span>
+                                    <span class="theme-preview-line"></span>
+                                    <span class="theme-preview-pill"></span>
+                                </span>
+                            </span>
+                        </button>
+                        <button
+                            type="button"
+                            class="theme-preview-card"
+                            class:active=move || theme_ctx.theme.get() == "dark"
+                            on:click=on_dark_theme
+                        >
+                            <span class="theme-preview-header">
+                                <span>"Dark"</span>
+                                <span class="theme-preview-badge">"Focus"</span>
+                            </span>
+                            <span class="theme-preview-frame theme-preview-frame-dark">
+                                <span class="theme-preview-sidebar"></span>
+                                <span class="theme-preview-canvas">
+                                    <span class="theme-preview-line short"></span>
+                                    <span class="theme-preview-line"></span>
+                                    <span class="theme-preview-pill"></span>
+                                </span>
+                            </span>
+                        </button>
                     </div>
                 </div>
             </section>
