@@ -28,10 +28,21 @@ pub fn Sidebar() -> impl IntoView {
                         <a href="/filament" class="nav-link">"Create Profile"</a>
                     </li>
                 </Show>
-                <li class="nav-item">
-                    <a href="/analysis" class="nav-link">"Print Analysis"</a>
-                </li>
-                <Show when=move || ff_ctx.flags.get().profiles_enabled>
+                <Show
+                    when=move || ff_ctx.flags.get().analysis_enabled
+                    fallback=move || view! {
+                        <li class="nav-item nav-item-locked" title="Requires AI — enable in Settings">
+                            <a href="/analysis" class="nav-link nav-link-locked">
+                                "Print Analysis"
+                                <span class="nav-lock-icon">" 🔒"</span>
+                            </a>
+                        </li>
+                    }
+                >
+                    <li class="nav-item">
+                        <a href="/analysis" class="nav-link">"Print Analysis"</a>
+                    </li>
+                </Show>                <Show when=move || ff_ctx.flags.get().profiles_enabled>
                     <li class="nav-item">
                         <a href="/profiles" class="nav-link">"Profiles"</a>
                     </li>
