@@ -150,35 +150,17 @@ pub fn SetupWizard(
     // Handler for the "Browse" button using Tauri dialog
     let on_browse_path = move |_| {
         spawn_local(async move {
-            // Call the Tauri dialog plugin to open a folder picker
-            #[allow(unused_imports)]
-            use wasm_bindgen::prelude::*;
-            let args = serde_wasm_bindgen::to_value(&serde_json::json!({
-                "title": "Select Bambu Studio Configuration Folder",
-                "directory": true
-            })).unwrap();
-
-            #[wasm_bindgen]
-            extern "C" {
-                #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], catch)]
-                async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
-            }
-
-            match invoke("plugin:dialog|open", args).await {
-                Ok(result) => {
-                    if let Some(path_str) = result.as_string() {
-                        bambu_path.set(path_str.clone());
-                        bambu_detected.set(true);
-                        // Validate the selected path
-                        if let Ok(validation) = commands::validate_bambu_studio_path(&path_str).await {
-                            path_valid.set(validation.valid);
-                            path_validation_msg.set(validation.message);
-                        }
+            match commands::pick_config_folder().await {
+                Ok(Some(path_str)) => {
+                    bambu_path.set(path_str.clone());
+                    bambu_detected.set(true);
+                    if let Ok(validation) = commands::validate_bambu_studio_path(&path_str).await {
+                        path_valid.set(validation.valid);
+                        path_validation_msg.set(validation.message);
                     }
                 }
-                Err(_) => {
-                    // User cancelled or error - do nothing
-                }
+                Ok(None) => {} // user cancelled
+                Err(_) => {}   // dialog error - do nothing
             }
         });
     };

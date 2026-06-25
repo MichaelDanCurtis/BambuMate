@@ -179,32 +179,17 @@ pub fn SettingsPage() -> impl IntoView {
 
     let on_browse_path = move |_| {
         spawn_local(async move {
-            #[allow(unused_imports)]
-            use wasm_bindgen::prelude::*;
-            let args = serde_wasm_bindgen::to_value(&serde_json::json!({
-                "title": "Select Bambu Studio Configuration Folder",
-                "directory": true
-            }))
-            .unwrap();
-
-            #[wasm_bindgen]
-            extern "C" {
-                #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], catch)]
-                async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
-            }
-
-            match invoke("plugin:dialog|open", args).await {
-                Ok(result) => {
-                    if let Some(path_str) = result.as_string() {
-                        set_bambu_path.set(path_str.clone());
-                        if let Ok(validation) =
-                            commands::validate_bambu_studio_path(&path_str).await
-                        {
-                            set_path_valid.set(validation.valid);
-                            set_path_status.set(Some(validation.message));
-                        }
+            match commands::pick_config_folder().await {
+                Ok(Some(path_str)) => {
+                    set_bambu_path.set(path_str.clone());
+                    if let Ok(validation) =
+                        commands::validate_bambu_studio_path(&path_str).await
+                    {
+                        set_path_valid.set(validation.valid);
+                        set_path_status.set(Some(validation.message));
                     }
                 }
+                Ok(None) => {} // user cancelled
                 Err(_) => {}
             }
         });
