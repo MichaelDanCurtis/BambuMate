@@ -56,6 +56,8 @@ pub fn SetupWizard(
     #[prop(into)] on_cancel: Callback<()>,
 ) -> impl IntoView {
     let step = RwSignal::new(0u8);
+    // None = not yet chosen, Some(true) = use AI, Some(false) = web-only
+    let use_ai_mode: RwSignal<Option<bool>> = RwSignal::new(None);
     let bambu_path = RwSignal::new(String::new());
     let bambu_detected = RwSignal::new(false);
     let path_validation_msg = RwSignal::new(String::new());
@@ -237,21 +239,47 @@ pub fn SetupWizard(
 
     let on_next = move |_| {
         let current = step.get();
-        if current < 3 {
-            error_msg.set(String::new());
-            // When moving to step 3 (model selection), save the API key first,
-            // then load models. The key must be in the keychain before list_models
-            // can authenticate with the provider's API.
-            if current == 2 {
+        error_msg.set(String::new());
+
+        // Step 1 with web-only mode: save prefs and complete wizard immediately
+        if current == 1 && use_ai_mode.get() == Some(false) {
+            saving.set(true);
+            let path = bambu_path.get();
+            let on_complete = on_complete.clone();
+            spawn_local(async move {
+                if !path.is_empty() {
+                    if let Err(e) = commands::set_preference("bambu_studio_path", &path).await {
+                        error_msg.set(format!("Failed to save path: {}", e));
+                        saving.set(false);
+                        return;
+                    }
+                }
+                if let Err(e) = commands::set_preference("filament_search_use_ai", "false").await {
+                    error_msg.set(format!("Failed to save setting: {}", e));
+                    saving.set(false);
+                    return;
+                }
+                if let Err(e) = commands::set_preference("setup_complete", "true").await {
+                    error_msg.set(format!("Failed to complete setup: {}", e));
+                    saving.set(false);
+                    return;
+                }
+                saving.set(false);
+                on_complete.run(());
+            });
+            return;
+        }
+
+        if current < 4 {
+            // Step 3 (API key entry): save key before advancing to model selection
+            if current == 3 {
                 let provider = selected_provider.get();
                 let key = api_key_input.get();
                 let local_url = local_url_input.get();
                 spawn_local(async move {
                     if provider == "local" {
-                        // Save local server URL so list_models can read it
                         let _ = commands::set_preference("local_mcp_url", &local_url).await;
                     } else {
-                        // Save API key to keychain so list_models can authenticate
                         let service = PROVIDERS
                             .iter()
                             .find(|p| p.id == provider)
@@ -357,6 +385,13 @@ pub fn SetupWizard(
                 }
             }
 
+            // Explicitly record that AI is enabled so feature flags are correct
+            if let Err(e) = commands::set_preference("filament_search_use_ai", "true").await {
+                error_msg.set(format!("Failed to save AI setting: {}", e));
+                saving.set(false);
+                return;
+            }
+
             // Mark setup as complete
             if let Err(e) = commands::set_preference("setup_complete", "true").await {
                 error_msg.set(format!("Failed to mark setup complete: {}", e));
@@ -374,7 +409,6 @@ pub fn SetupWizard(
         if provider.is_empty() {
             return false;
         }
-        // Must have a model selected
         if selected_model.get().is_empty() {
             return false;
         }
@@ -396,7 +430,9 @@ pub fn SetupWizard(
                         <span class="wizard-dot-line"></span>
                         <span class={move || if step.get() == 2 { "wizard-dot active" } else if step.get() > 2 { "wizard-dot completed" } else { "wizard-dot" }}></span>
                         <span class="wizard-dot-line"></span>
-                        <span class={move || if step.get() == 3 { "wizard-dot active" } else { "wizard-dot" }}></span>
+                        <span class={move || if step.get() == 3 { "wizard-dot active" } else if step.get() > 3 { "wizard-dot completed" } else { "wizard-dot" }}></span>
+                        <span class="wizard-dot-line"></span>
+                        <span class={move || if step.get() == 4 { "wizard-dot active" } else { "wizard-dot" }}></span>
                     </div>
                 </div>
 
@@ -502,8 +538,63 @@ pub fn SetupWizard(
                         </div>
                     </Show>
 
-                    // Step 1: AI Provider explanation + selection
+                    // Step 1: AI mode choice
                     <Show when=move || step.get() == 1>
+                        <div class="wizard-step">
+                            <h3>"How would you like to find filament specs?"</h3>
+                            <p class="wizard-description">
+                                "BambuMate can use an AI model to intelligently extract filament settings "
+                                "and analyze print quality, or it can pull specs directly from manufacturer "
+                                "websites without any AI or API key."
+                            </p>
+
+                            <div class="wizard-mode-cards">
+                                <div
+                                    class={move || if use_ai_mode.get() == Some(true) { "wizard-mode-card selected" } else { "wizard-mode-card" }}
+                                    on:click=move |_| use_ai_mode.set(Some(true))
+                                >
+                                    <div class="wizard-mode-icon">"🤖"</div>
+                                    <h4>"Use AI (Recommended)"</h4>
+                                    <p>
+                                        "Use an AI model with your API key to intelligently extract filament "
+                                        "specs and detect print defects. Best accuracy, especially for "
+                                        "niche or specialty filaments."
+                                    </p>
+                                    <ul class="wizard-mode-features">
+                                        <li>"✓ Filament profiles from AI knowledge"</li>
+                                        <li>"✓ Web scraping with AI extraction"</li>
+                                        <li>"✓ Print Analysis (defect detection)"</li>
+                                    </ul>
+                                    <p class="wizard-mode-note">"Requires a paid API key (Claude, OpenAI, etc.)"</p>
+                                </div>
+
+                                <div
+                                    class={move || if use_ai_mode.get() == Some(false) { "wizard-mode-card selected" } else { "wizard-mode-card" }}
+                                    on:click=move |_| use_ai_mode.set(Some(false))
+                                >
+                                    <div class="wizard-mode-icon">"🌐"</div>
+                                    <h4>"Use Manufacturer Specs"</h4>
+                                    <p>
+                                        "Pull specs directly from manufacturer websites and SpoolScout. "
+                                        "No API key required — free to use."
+                                    </p>
+                                    <ul class="wizard-mode-features">
+                                        <li>"✓ Filament profiles from web sources"</li>
+                                        <li>"✓ SpoolScout catalog lookup"</li>
+                                        <li>"✗ Print Analysis (requires AI)"</li>
+                                    </ul>
+                                    <p class="wizard-mode-note">"Free — no API key required"</p>
+                                </div>
+                            </div>
+
+                            <p class="wizard-description wizard-mode-footer">
+                                "You can change this at any time in Settings."
+                            </p>
+                        </div>
+                    </Show>
+
+                    // Step 2: AI Provider selection (was step 1)
+                    <Show when=move || step.get() == 2>
                         <div class="wizard-step">
                             <h3>"AI Provider"</h3>
                             <p class="wizard-description">
@@ -551,8 +642,8 @@ pub fn SetupWizard(
                         </div>
                     </Show>
 
-                    // Step 2: API Key input or Local server URL
-                    <Show when=move || step.get() == 2>
+                    // Step 3: API Key input or Local server URL (was step 2)
+                    <Show when=move || step.get() == 3>
                         <div class="wizard-step">
                             <Show when=move || selected_provider.get() == "local">
                                 <h3>"Local Server Configuration"</h3>
@@ -636,8 +727,8 @@ pub fn SetupWizard(
                         </div>
                     </Show>
 
-                    // Step 3: Model Selection
-                    <Show when=move || step.get() == 3>
+                    // Step 4: Model Selection (was step 3)
+                    <Show when=move || step.get() == 4>
                         <div class="wizard-step">
                             <h3>"Select AI Model"</h3>
                             <p class="wizard-description">
@@ -708,18 +799,30 @@ pub fn SetupWizard(
                         disabled=move || saving.get()
                     >"Skip Setup"</button>
                     <div class="wizard-footer-spacer"></div>
-                    <Show when=move || step.get() < 3>
+                    <Show when=move || step.get() < 4>
                         <button
                             class="btn btn-primary"
                             on:click=on_next
                             disabled=move || {
-                                (step.get() == 1 && selected_provider.get().is_empty()) ||
-                                (step.get() == 2 && selected_provider.get() != "local" && api_key_input.get().is_empty()) ||
-                                (step.get() == 2 && selected_provider.get() == "local" && local_url_input.get().is_empty())
+                                saving.get() ||
+                                (step.get() == 1 && use_ai_mode.get().is_none()) ||
+                                (step.get() == 2 && selected_provider.get().is_empty()) ||
+                                (step.get() == 3 && selected_provider.get() != "local" && api_key_input.get().is_empty()) ||
+                                (step.get() == 3 && selected_provider.get() == "local" && local_url_input.get().is_empty())
                             }
-                        >"Next"</button>
+                        >
+                            {move || {
+                                if saving.get() {
+                                    "Saving..."
+                                } else if step.get() == 1 && use_ai_mode.get() == Some(false) {
+                                    "Finish Setup"
+                                } else {
+                                    "Next"
+                                }
+                            }}
+                        </button>
                     </Show>
-                    <Show when=move || step.get() == 3>
+                    <Show when=move || step.get() == 4>
                         <button
                             class="btn btn-primary"
                             on:click=on_finish

@@ -26,6 +26,8 @@ pub fn SettingsPage() -> impl IntoView {
     let (reset_confirm, set_reset_confirm) = signal(false);
     let (resetting, set_resetting) = signal(false);
     let (reset_status, set_reset_status) = signal::<Option<String>>(None);
+    let (filament_ai_enabled, set_filament_ai_enabled) = signal(true);
+    let (filament_ai_status, set_filament_ai_status) = signal::<Option<String>>(None);
 
     let theme_ctx = use_context::<ThemeContext>().expect("ThemeContext not provided");
     let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
@@ -83,6 +85,10 @@ pub fn SettingsPage() -> impl IntoView {
                 }
                 Ok(None) => {}
                 Err(_) => {}
+            }
+            match commands::get_preference("filament_search_use_ai").await {
+                Ok(Some(val)) => set_filament_ai_enabled.set(val != "false"),
+                _ => set_filament_ai_enabled.set(true),
             }
             set_prefs_loaded.set(true);
         });
@@ -268,6 +274,25 @@ pub fn SettingsPage() -> impl IntoView {
         });
     };
 
+    let on_toggle_filament_ai = move |ev: leptos::ev::Event| {
+        let checked = event_target_checked(&ev);
+        let value = if checked { "true" } else { "false" };
+        set_filament_ai_enabled.set(checked);
+        // Also update the feature flags context so Print Analysis locks/unlocks immediately
+        let mut new_flags = ff_ctx.flags.get();
+        new_flags.analysis_enabled = checked;
+        ff_ctx.set_flags.set(new_flags);
+        spawn_local(async move {
+            match commands::set_preference("filament_search_use_ai", value).await {
+                Ok(()) => set_filament_ai_status.set(Some(
+                    if checked { "AI enabled — Print Analysis is available.".to_string() }
+                    else { "Web-only mode — specs pulled from manufacturer sites. Print Analysis disabled.".to_string() }
+                )),
+                Err(e) => set_filament_ai_status.set(Some(format!("Failed to save: {}", e))),
+            }
+        });
+    };
+
     // Open external URL helper
     let open_url_handler = |url: &'static str| {
         move |ev: leptos::ev::MouseEvent| {
@@ -298,6 +323,38 @@ pub fn SettingsPage() -> impl IntoView {
                         <span class="toggle-text">"Filament Profiles"</span>
                     </label>
                     <p class="toggle-description">"Search filament specs from manufacturers, generate optimized Bambu Studio profiles, and manage installed profiles."</p>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <h3>"Filament Search Mode"</h3>
+                <p class="section-description">
+                    "Choose how BambuMate finds filament specifications."
+                </p>
+
+                <div class="form-group feature-toggle">
+                    <label class="toggle-label">
+                        <input
+                            type="checkbox"
+                            class="toggle-input"
+                            prop:checked=move || filament_ai_enabled.get()
+                            on:change=on_toggle_filament_ai
+                        />
+                        <span class="toggle-text">"Use AI for filament profiles"</span>
+                    </label>
+                    <p class="toggle-description">
+                        "When enabled, an AI model extracts specs from manufacturer pages and provides recommendations. "
+                        "Requires an API key. When disabled, specs are pulled directly from manufacturer websites and SpoolScout — no API key required. "
+                        "Disabling AI also disables Print Analysis."
+                    </p>
+                    {move || filament_ai_status.get().map(|msg| {
+                        let is_disabled = msg.contains("Web-only");
+                        view! {
+                            <span class={if is_disabled { "status-text status-warning" } else { "status-text status-success" }}>
+                                {msg}
+                            </span>
+                        }
+                    })}
                 </div>
             </section>
 

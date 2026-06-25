@@ -44,7 +44,8 @@ pub fn set_preference(app: AppHandle, key: &str, value: &str) -> Result<(), Stri
     })
 }
 
-/// Returns the current feature flags. Analysis is always enabled.
+/// Returns the current feature flags.
+/// Analysis requires AI — it is disabled when `filament_search_use_ai` is `"false"`.
 #[tauri::command]
 pub fn get_feature_flags(app: AppHandle) -> Result<FeatureFlags, String> {
     let store = app.store("preferences.json").map_err(|e| {
@@ -57,8 +58,11 @@ pub fn get_feature_flags(app: AppHandle) -> Result<FeatureFlags, String> {
         .and_then(|v| v.as_str().map(|s| s != "false"))
         .unwrap_or(true);
 
-    // Analysis is always enabled - no longer a configurable toggle
-    let analysis_enabled = true;
+    // Analysis requires AI vision models; disabled when user opted out of AI.
+    let analysis_enabled = store
+        .get("filament_search_use_ai")
+        .and_then(|v| v.as_str().map(|s| s != "false"))
+        .unwrap_or(true);
 
     Ok(FeatureFlags {
         profiles_enabled,
@@ -120,7 +124,17 @@ pub fn check_setup_complete(app: AppHandle) -> Result<SetupStatus, String> {
         .and_then(|v| v.as_str().map(|s| s == "true"))
         .unwrap_or(false);
 
-    let setup_complete = setup_flag && ai_provider.is_some() && has_api_key;
+    // When the user opted out of AI, no API key is needed — just the setup flag.
+    let use_ai = store
+        .get("filament_search_use_ai")
+        .and_then(|v| v.as_str().map(|s| s != "false"))
+        .unwrap_or(true);
+
+    let setup_complete = if use_ai {
+        setup_flag && ai_provider.is_some() && has_api_key
+    } else {
+        setup_flag
+    };
 
     Ok(SetupStatus {
         bambu_studio_path,

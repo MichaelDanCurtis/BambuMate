@@ -965,15 +965,16 @@ select.input option {
     inset: 0;
     z-index: 1000;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
     background-color: var(--bg-primary);
+    overflow-y: auto;
+    padding: 5vh 0;
 }
 
 .wizard-container {
     width: 600px;
     max-width: 90vw;
-    max-height: 85vh;
     background-color: var(--bg-card);
     border: 1px solid var(--border-primary);
     border-radius: 12px;
@@ -1030,7 +1031,7 @@ select.input option {
 
 .wizard-body {
     flex: 1;
-    overflow-y: auto;
+    overflow-y: visible;
     padding: 24px 32px;
 }
 
@@ -1234,6 +1235,131 @@ select.input option {
     display: inline-block;
     margin-bottom: 0.75rem;
     font-size: 0.85rem;
+}
+
+
+/* ============================================================
+   Wizard mode selection cards (AI vs web-only)
+   ============================================================ */
+.wizard-mode-cards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 20px 0 8px;
+}
+
+.wizard-mode-card {
+    padding: 18px 20px;
+    border: 2px solid var(--border-primary);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+    user-select: none;
+}
+
+.wizard-mode-card:hover {
+    border-color: var(--accent, #3b82f6);
+    background-color: var(--bg-hover);
+}
+
+.wizard-mode-card.selected {
+    border-color: var(--accent, #3b82f6);
+    background-color: var(--bg-active);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #3b82f6) 20%, transparent);
+}
+
+.wizard-mode-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+}
+
+.wizard-mode-card h4 {
+    margin: 0 0 8px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.wizard-mode-card p {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0 0 10px;
+    line-height: 1.5;
+}
+
+.wizard-mode-features {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.8;
+}
+
+.wizard-mode-note {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-style: italic;
+    border-top: 1px solid var(--border-primary);
+    padding-top: 8px;
+    margin-top: 8px !important;
+}
+
+.wizard-mode-footer {
+    font-size: 12px;
+    text-align: center;
+    color: var(--text-muted);
+    margin-top: 8px !important;
+}
+
+/* ============================================================
+   AI-required gate (Print Analysis locked)
+   ============================================================ */
+.ai-required-notice {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 60px 40px;
+    gap: 16px;
+}
+
+.ai-required-lock {
+    font-size: 48px;
+}
+
+.ai-required-notice h3 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.ai-required-notice p {
+    font-size: 14px;
+    color: var(--text-muted);
+    max-width: 420px;
+    line-height: 1.6;
+    margin: 0;
+}
+
+.ai-required-notice a {
+    color: var(--accent, #3b82f6);
+    text-decoration: underline;
+}
+
+/* ============================================================
+   Sidebar locked nav item
+   ============================================================ */
+.nav-link-locked {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.nav-lock-icon {
+    font-size: 11px;
+    vertical-align: middle;
 }
 
 @media (max-width: 1100px) {

@@ -16,6 +16,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
     // Catalog state
     let (catalog_status, set_catalog_status) = signal::<Option<CatalogStatus>>(None);
     let (is_refreshing_catalog, set_is_refreshing_catalog) = signal(false);
+    let (filament_ai_enabled, set_filament_ai_enabled) = signal(true);
 
     // Autocomplete state
     let (search_query, set_search_query) = signal(String::new());
@@ -54,9 +55,14 @@ pub fn FilamentSearchPage() -> impl IntoView {
     let (base_profile_specs, set_base_profile_specs) = signal::<Option<FilamentSpecs>>(None);
     let (show_merge_screen, set_show_merge_screen) = signal(false);
 
-    // Check catalog status on mount
+    // Check catalog status on mount and load AI preference
     Effect::new(move |_| {
         spawn_local(async move {
+            // Load AI mode preference
+            if let Ok(Some(val)) = commands::get_preference("filament_search_use_ai").await {
+                set_filament_ai_enabled.set(val != "false");
+            }
+
             match commands::get_catalog_status().await {
                 Ok(status) => {
                     set_catalog_status.set(Some(status.clone()));
@@ -371,7 +377,11 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
             <h2>"Filament Search"</h2>
             <p class="page-description">
-                "Type to search from our catalog, or use AI to find any filament."
+                {move || if filament_ai_enabled.get() {
+                    "Type to search from our catalog, or use AI to find any filament."
+                } else {
+                    "🌐 Web-only mode — specs pulled from manufacturer sites. Enable AI in Settings for AI-powered search."
+                }}
             </p>
 
             // Catalog status
@@ -459,14 +469,24 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             }
                         />
 
-                        // AI/Web search options (require >= 5 chars when catalog matches exist)
+                        // AI/Web search options — only shown when AI is enabled
+                        // (both options call AI internally and fail without an API key)
                         {move || {
                             let query_len = search_query.get().len();
                             let has_catalog_matches = !suggestions.get().is_empty();
                             let show_ai_web = query_len >= 5 || !has_catalog_matches;
+                            let ai_on = filament_ai_enabled.get();
 
-                            if show_ai_web {
+                            if !ai_on {
+                                // Web-only mode: no AI options, just a hint
                                 view! {
+                                    <div class="specificity-hint">
+                                        "🌐 Web-only mode — select from catalog above or paste a URL"
+                                    </div>
+                                }.into_any()
+                            } else if show_ai_web {
+                                view! {
+                                    <>
                                     <div
                                         class="ai-fallback-item"
                                         on:mousedown=move |_| do_ai_generate()
@@ -489,6 +509,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                         </span>
                                         <span class="ai-fallback-hint">"Scrape pages"</span>
                                     </div>
+                                    </>
                                 }.into_any()
                             } else {
                                 view! {
@@ -542,7 +563,12 @@ pub fn FilamentSearchPage() -> impl IntoView {
                         </button>
                     </div>
                     <p class="url-input-hint">
-                        "Note: Some e-commerce sites (Shopify, etc.) may not work due to JavaScript rendering."
+                        {move || if filament_ai_enabled.get() {
+                            "AI-assisted extraction — works on most product pages."
+                        } else {
+                            "Web-only extraction — reads JSON-LD and spec tables. No API key needed. \
+                             Some JS-heavy sites may not work."
+                        }}
                     </p>
                 </div>
             </Show>
