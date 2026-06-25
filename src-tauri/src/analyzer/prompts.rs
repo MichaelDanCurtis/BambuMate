@@ -41,7 +41,7 @@ pub fn defect_report_schema() -> serde_json::Value {
                 "description": "Brief observation about the print (optional)"
             }
         },
-        "required": ["defects", "overall_quality"],
+        "required": ["defects", "overall_quality", "notes"],
         "additionalProperties": false
     })
 }
@@ -119,6 +119,12 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["defects"].is_object());
         assert!(schema["properties"]["overall_quality"].is_object());
+        assert!(schema["properties"]["notes"].is_object());
+
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "defects"));
+        assert!(required.iter().any(|v| v == "overall_quality"));
+        assert!(required.iter().any(|v| v == "notes"));
     }
 
     #[test]
