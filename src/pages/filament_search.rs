@@ -52,6 +52,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
     let (base_profile_matches, set_base_profile_matches) = signal::<Vec<BaseProfileMatch>>(vec![]);
     let (is_searching_base, set_is_searching_base) = signal(false);
     let (selected_base_profile, set_selected_base_profile) = signal::<Option<BaseProfileMatch>>(None);
+    let (selected_base_profile_path, set_selected_base_profile_path) = signal::<Option<String>>(None);
     let (base_profile_specs, set_base_profile_specs) = signal::<Option<FilamentSpecs>>(None);
     let (show_merge_screen, set_show_merge_screen) = signal(false);
 
@@ -89,15 +90,15 @@ pub fn FilamentSearchPage() -> impl IntoView {
     Effect::new(move |_| {
         let specs = current_specs.get();
         if let Some(ref s) = specs {
-            let query = s.name.clone();
             let material = s.material.clone();
             set_is_searching_base.set(true);
             set_base_profile_matches.set(vec![]);
             set_selected_base_profile.set(None);
+            set_selected_base_profile_path.set(None);
             set_base_profile_specs.set(None);
             set_show_merge_screen.set(false);
             spawn_local(async move {
-                if let Ok(matches) = commands::search_base_profiles(&query, Some(material.as_str())).await {
+                if let Ok(matches) = commands::search_base_profiles("", Some(material.as_str())).await {
                     set_base_profile_matches.set(matches);
                 }
                 set_is_searching_base.set(false);
@@ -289,8 +290,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_current_generate.set(None);
 
         set_is_generating.set(true);
+        let base_profile_path = selected_base_profile_path.get();
         spawn_local(async move {
-            let result = commands::generate_profile(&edited_specs, Some(printer)).await;
+            let result = commands::generate_profile(&edited_specs, Some(printer), base_profile_path).await;
             if let Ok(ref gen) = result {
                 set_current_generate.set(Some(gen.clone()));
             }
@@ -342,6 +344,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_show_editor.set(false);
         set_base_profile_matches.set(vec![]);
         set_selected_base_profile.set(None);
+        set_selected_base_profile_path.set(None);
         set_base_profile_specs.set(None);
         set_show_merge_screen.set(false);
     };
@@ -350,6 +353,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
     let on_select_base_profile = move |profile: BaseProfileMatch| {
         let path = profile.path.clone();
         set_selected_base_profile.set(Some(profile));
+        set_selected_base_profile_path.set(Some(path.clone()));
         spawn_local(async move {
             // Extract specs from the selected base profile
             if let Ok(specs) = commands::extract_specs_from_profile(&path).await {
@@ -357,6 +361,13 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 set_show_merge_screen.set(true);
             }
         });
+    };
+
+    let on_use_default_base = move || {
+        set_selected_base_profile.set(None);
+        set_selected_base_profile_path.set(None);
+        set_base_profile_specs.set(None);
+        set_show_merge_screen.set(false);
     };
 
     // Handler for completing the merge (user selected which settings to use)
@@ -617,36 +628,79 @@ pub fn FilamentSearchPage() -> impl IntoView {
                     return None;
                 }
                 let matches = base_profile_matches.get();
-                if matches.is_empty() && !is_searching_base.get() {
-                    return None;
-                }
                 Some(view! {
                     <div class="base-profiles-section">
-                        <h4>"Similar Profiles in Bambu Studio"</h4>
+                        <h4>"Base Profile (Installed in Bambu Studio)"</h4>
                         <p class="section-description">
-                            "Found existing profiles that may be similar. Select one to compare and merge settings before generating."
+                            "Choose a base profile to build from, or keep the material default base."
                         </p>
                         <Show when=move || is_searching_base.get()>
                             <span class="mini-spinner"></span>
-                            " Searching system profiles..."
+                            " Searching installed profiles..."
                         </Show>
                         <div class="base-profiles-list">
+                            <div
+                                class=move || {
+                                    if selected_base_profile_path.get().is_none() {
+                                        "base-profile-item selected".to_string()
+                                    } else {
+                                        "base-profile-item".to_string()
+                                    }
+                                }
+                                on:click=move |_| on_use_default_base()
+                            >
+                                <span class="base-profile-name">"Default base"</span>
+                                <span class="base-profile-type">"Material generic"</span>
+                                <span class="base-profile-action">
+                                    {move || {
+                                        if selected_base_profile_path.get().is_none() {
+                                            "Selected"
+                                        } else {
+                                            "Use default base"
+                                        }
+                                    }}
+                                </span>
+                            </div>
                             {matches.iter().map(|m| {
                                 let profile_click = m.clone();
                                 let name = m.name.clone();
+                                let path = m.path.clone();
+                                let path_for_class = path.clone();
+                                let path_for_label = path.clone();
                                 let ftype = m.filament_type.clone().unwrap_or_default();
                                 view! {
                                     <div
-                                        class="base-profile-item"
+                                        class=move || {
+                                            let selected = selected_base_profile_path
+                                                .get()
+                                                .is_some_and(|p| p == path_for_class);
+                                            if selected {
+                                                "base-profile-item selected".to_string()
+                                            } else {
+                                                "base-profile-item".to_string()
+                                            }
+                                        }
                                         on:click=move |_| on_select_base_profile(profile_click.clone())
                                     >
                                         <span class="base-profile-name">{name}</span>
                                         <span class="base-profile-type">{ftype}</span>
-                                        <span class="base-profile-action">"Use as reference"</span>
+                                        <span class="base-profile-action">
+                                            {move || {
+                                                let selected = selected_base_profile_path
+                                                    .get()
+                                                    .is_some_and(|p| p == path_for_label);
+                                                if selected { "Selected" } else { "Use as base" }
+                                            }}
+                                        </span>
                                     </div>
                                 }
                             }).collect::<Vec<_>>()}
                         </div>
+                        <Show when=move || matches.is_empty() && !is_searching_base.get()>
+                            <p class="section-description">
+                                "No close installed matches were found for this filament. You can continue with the default base."
+                            </p>
+                        </Show>
                     </div>
                 })
             }}

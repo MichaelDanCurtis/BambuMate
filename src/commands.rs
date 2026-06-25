@@ -528,6 +528,7 @@ struct SearchFilamentArgs {
 struct GenerateProfileArgs {
     specs: FilamentSpecs,
     target_printer: Option<String>,
+    base_profile_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -587,10 +588,12 @@ pub async fn search_filament(name: &str) -> Result<FilamentSpecs, String> {
 pub async fn generate_profile(
     specs: &FilamentSpecs,
     target_printer: Option<String>,
+    base_profile_path: Option<String>,
 ) -> Result<GenerateResult, String> {
     let args = serde_wasm_bindgen::to_value(&GenerateProfileArgs {
         specs: specs.clone(),
         target_printer,
+        base_profile_path,
     })
     .map_err(|e| e.to_string())?;
 

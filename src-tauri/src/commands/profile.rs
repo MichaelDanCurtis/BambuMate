@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashSet;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -298,6 +299,7 @@ pub struct InstallResult {
 pub async fn generate_profile_from_specs(
     specs: crate::scraper::types::FilamentSpecs,
     target_printer: Option<String>,
+    base_profile_path: Option<String>,
 ) -> Result<GenerateResult, String> {
     info!(
         "generate_profile_from_specs called for: {} {}",
@@ -312,7 +314,7 @@ pub async fn generate_profile_from_specs(
         )
     })?;
 
-    // Build registry from system filament profiles
+    // Build registry from system + user filament profiles
     let system_dir = paths.system_filament_dir();
     if !system_dir.exists() {
         return Err(format!(
@@ -321,23 +323,54 @@ pub async fn generate_profile_from_specs(
         ));
     }
 
-    let registry = ProfileRegistry::discover_system_profiles(&system_dir)
+    let mut registry = ProfileRegistry::discover_system_profiles(&system_dir)
         .map_err(|e| format!("Failed to load system profiles: {}", e))?;
+    if let Some(user_dir) = paths.user_filament_dir() {
+        if user_dir.exists() {
+            registry
+                .discover_user_profiles(&user_dir)
+                .map_err(|e| format!("Failed to load user profiles: {}", e))?;
+        }
+    }
 
-    // Determine the base profile name for reporting
+    // Determine the base profile to use (selected path or default by material).
     let material = crate::scraper::types::MaterialType::from_str(&specs.material);
-    let base_name = generator::base_profile_name(&material).to_string();
-
-    // Resolve the base profile to compare against later
-    let base_resolved = resolve_inheritance(
-        registry.get_by_name(&base_name).unwrap(),
-        &registry,
-    )
-    .map_err(|e| format!("Failed to resolve base profile: {}", e))?;
+    let default_base_name = generator::base_profile_name(&material).to_string();
+    let (base_name, base_resolved) = if let Some(path) = base_profile_path
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        let selected = read_profile(std::path::Path::new(&path))
+            .map_err(|e| format!("Failed to read selected base profile: {}", e))?;
+        let selected_name = selected
+            .name()
+            .ok_or_else(|| "Selected base profile has no name".to_string())?
+            .to_string();
+        let resolved = resolve_inheritance(&selected, &registry)
+            .map_err(|e| format!("Failed to resolve selected base profile '{}': {}", selected_name, e))?;
+        registry.insert(selected);
+        (selected_name, resolved)
+    } else {
+        let base = registry.get_by_name(&default_base_name).ok_or_else(|| {
+            format!(
+                "Base profile '{}' not found in registry. Is Bambu Studio installed with system profiles?",
+                default_base_name
+            )
+        })?;
+        let resolved = resolve_inheritance(base, &registry)
+            .map_err(|e| format!("Failed to resolve base profile '{}': {}", default_base_name, e))?;
+        (default_base_name, resolved)
+    };
 
     // Generate the profile
     let (profile, metadata, filename) =
-        generator::generate_profile(&specs, &registry, target_printer.as_deref())
+        generator::generate_profile(
+            &specs,
+            &registry,
+            target_printer.as_deref(),
+            Some(base_name.as_str()),
+        )
             .map_err(|e| format!("Failed to generate profile: {}", e))?;
 
     // Compute diffs between base and generated profile
@@ -869,7 +902,10 @@ pub fn search_base_profiles(
     query: String,
     material_type: Option<String>,
 ) -> Result<Vec<BaseProfileMatch>, String> {
-    info!("Searching system profiles for: {} (material: {:?})", query, material_type);
+    info!(
+        "Searching installed profiles for: {} (material: {:?})",
+        query, material_type
+    );
 
     let paths = match BambuPaths::detect() {
         Ok(p) => p,
@@ -878,17 +914,43 @@ pub fn search_base_profiles(
         }
     };
 
+    let mut combined = Vec::new();
+
     let system_filament_dir = paths.config_root.join("system").join("BBL").join("filament");
-    if !system_filament_dir.exists() {
+    if system_filament_dir.exists() {
+        combined.extend(search_profiles_in_dir(
+            &system_filament_dir,
+            &query,
+            material_type.as_deref(),
+        )?);
+    } else {
         // Also try without BBL for some installations
         let alt_dir = paths.config_root.join("system").join("filament");
-        if !alt_dir.exists() {
-            return Ok(Vec::new());
+        if alt_dir.exists() {
+            combined.extend(search_profiles_in_dir(
+                &alt_dir,
+                &query,
+                material_type.as_deref(),
+            )?);
         }
-        return search_profiles_in_dir(&alt_dir, &query, material_type.as_deref());
     }
 
-    search_profiles_in_dir(&system_filament_dir, &query, material_type.as_deref())
+    if let Some(user_dir) = paths.user_filament_dir() {
+        if user_dir.exists() {
+            combined.extend(search_profiles_in_dir(
+                &user_dir,
+                &query,
+                material_type.as_deref(),
+            )?);
+        }
+    }
+
+    let mut seen_paths = HashSet::new();
+    combined.retain(|m| seen_paths.insert(m.path.clone()));
+    combined.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    combined.truncate(20);
+
+    Ok(combined)
 }
 
 fn search_profiles_in_dir(

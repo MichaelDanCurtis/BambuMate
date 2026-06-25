@@ -270,9 +270,11 @@ pub fn generate_profile(
     specs: &FilamentSpecs,
     registry: &ProfileRegistry,
     target_printer: Option<&str>,
+    base_profile_override: Option<&str>,
 ) -> Result<(FilamentProfile, ProfileMetadata, String)> {
     let material = MaterialType::from_str(&specs.material);
-    let base_name = base_profile_name(&material);
+    let default_base = base_profile_name(&material);
+    let base_name = base_profile_override.unwrap_or(default_base);
 
     debug!(
         "Generating profile for {} {} (material={:?}, base={})",

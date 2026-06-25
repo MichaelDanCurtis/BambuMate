@@ -839,6 +839,11 @@
     background: var(--bg-hover);
 }
 
+.base-profile-item.selected {
+    border-color: var(--accent);
+    background: rgba(51, 154, 240, 0.12);
+}
+
 .base-profile-name {
     font-weight: 500;
     flex: 1;

@@ -114,7 +114,7 @@ pub async fn batch_generate_brand(
             ..Default::default()
         };
 
-        match generator::generate_profile(&specs, &registry, target_printer.as_deref()) {
+        match generator::generate_profile(&specs, &registry, target_printer.as_deref(), None) {
             Ok((profile, metadata, filename)) => {
                 let profile_name = profile.name().unwrap_or("<unnamed>").to_string();
 
