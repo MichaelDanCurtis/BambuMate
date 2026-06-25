@@ -469,30 +469,36 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             }
                         />
 
-                        // AI/Web search options (require >= 5 chars when catalog matches exist)
+                        // AI/Web search options — only shown when AI is enabled
+                        // (both options call AI internally and fail without an API key)
                         {move || {
                             let query_len = search_query.get().len();
                             let has_catalog_matches = !suggestions.get().is_empty();
                             let show_ai_web = query_len >= 5 || !has_catalog_matches;
                             let ai_on = filament_ai_enabled.get();
 
-                            if show_ai_web {
+                            if !ai_on {
+                                // Web-only mode: no AI options, just a hint
+                                view! {
+                                    <div class="specificity-hint">
+                                        "🌐 Web-only mode — select from catalog above or paste a URL"
+                                    </div>
+                                }.into_any()
+                            } else if show_ai_web {
                                 view! {
                                     <>
-                                    {if ai_on { Some(view! {
-                                        <div
-                                            class="ai-fallback-item"
-                                            on:mousedown=move |_| do_ai_generate()
-                                        >
-                                            <span class="ai-fallback-icon">"🤖"</span>
-                                            <span class="ai-fallback-text">
-                                                "Ask AI about \""
-                                                {move || search_query.get()}
-                                                "\""
-                                            </span>
-                                            <span class="ai-fallback-hint">"Recommended"</span>
-                                        </div>
-                                    })} else { None }}
+                                    <div
+                                        class="ai-fallback-item"
+                                        on:mousedown=move |_| do_ai_generate()
+                                    >
+                                        <span class="ai-fallback-icon">"🤖"</span>
+                                        <span class="ai-fallback-text">
+                                            "Ask AI about \""
+                                            {move || search_query.get()}
+                                            "\""
+                                        </span>
+                                        <span class="ai-fallback-hint">"Recommended"</span>
+                                    </div>
                                     <div
                                         class="ai-fallback-item"
                                         on:mousedown=move |_| do_web_search()
@@ -501,7 +507,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                         <span class="ai-fallback-text">
                                             "Search web for specs"
                                         </span>
-                                        <span class="ai-fallback-hint">{if ai_on { "Scrape pages" } else { "Web-only mode" }}</span>
+                                        <span class="ai-fallback-hint">"Scrape pages"</span>
                                     </div>
                                     </>
                                 }.into_any()
