@@ -563,7 +563,12 @@ pub fn FilamentSearchPage() -> impl IntoView {
                         </button>
                     </div>
                     <p class="url-input-hint">
-                        "Note: Some e-commerce sites (Shopify, etc.) may not work due to JavaScript rendering."
+                        {move || if filament_ai_enabled.get() {
+                            "AI-assisted extraction — works on most product pages."
+                        } else {
+                            "Web-only extraction — reads JSON-LD and spec tables. No API key needed. \
+                             Some JS-heavy sites may not work."
+                        }}
                     </p>
                 </div>
             </Show>
