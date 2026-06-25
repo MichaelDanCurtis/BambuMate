@@ -259,18 +259,17 @@ pub fn SettingsPage() -> impl IntoView {
         });
     };
 
-    let on_toggle_filament_ai = move |ev: leptos::ev::Event| {
-        let checked = event_target_checked(&ev);
-        let value = if checked { "true" } else { "false" };
-        set_filament_ai_enabled.set(checked);
-        // Also update the feature flags context so Print Analysis locks/unlocks immediately
+    let set_filament_ai_mode = move |enabled: bool| {
+        let value = if enabled { "true" } else { "false" };
+        set_filament_ai_enabled.set(enabled);
+        // Also update the feature flags context so Print Analysis locks/unlocks immediately.
         let mut new_flags = ff_ctx.flags.get();
-        new_flags.analysis_enabled = checked;
+        new_flags.analysis_enabled = enabled;
         ff_ctx.set_flags.set(new_flags);
         spawn_local(async move {
             match commands::set_preference("filament_search_use_ai", value).await {
                 Ok(()) => set_filament_ai_status.set(Some(
-                    if checked { "AI enabled — Print Analysis is available.".to_string() }
+                    if enabled { "AI enabled — Print Analysis is available.".to_string() }
                     else { "Web-only mode — specs pulled from manufacturer sites. Print Analysis disabled.".to_string() }
                 )),
                 Err(e) => set_filament_ai_status.set(Some(format!("Failed to save: {}", e))),
@@ -314,24 +313,45 @@ pub fn SettingsPage() -> impl IntoView {
             <section class="settings-section">
                 <h3>"Filament Search Mode"</h3>
                 <p class="section-description">
-                    "Choose how BambuMate finds filament specifications."
+                    "Choose whether BambuMate should use AI features (search + print analysis) or web-only filament lookup."
                 </p>
 
-                <div class="form-group feature-toggle">
-                    <label class="toggle-label">
-                        <input
-                            type="checkbox"
-                            class="toggle-input"
-                            prop:checked=move || filament_ai_enabled.get()
-                            on:change=on_toggle_filament_ai
-                        />
-                        <span class="toggle-text">"Use AI for filament profiles"</span>
-                    </label>
-                    <p class="toggle-description">
-                        "When enabled, an AI model extracts specs from manufacturer pages and provides recommendations. "
-                        "Requires an API key. When disabled, specs are pulled directly from manufacturer websites and SpoolScout — no API key required. "
-                        "Disabling AI also disables Print Analysis."
-                    </p>
+                <div class="form-group">
+                    <div class="wizard-mode-cards">
+                        <div
+                            class={move || if filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
+                            on:click=move |_| set_filament_ai_mode(true)
+                        >
+                            <div class="wizard-mode-icon">"🤖"</div>
+                            <h4>"Use AI Provider (Recommended)"</h4>
+                            <p>
+                                "Use your configured AI provider for filament spec extraction and Print Analysis."
+                            </p>
+                            <ul class="wizard-mode-features">
+                                <li>"✓ AI-powered filament spec extraction"</li>
+                                <li>"✓ Print Analysis (defect detection)"</li>
+                                <li>"✓ Better handling for niche materials"</li>
+                            </ul>
+                            <p class="wizard-mode-note">"Requires a configured API key/provider."</p>
+                        </div>
+
+                        <div
+                            class={move || if !filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
+                            on:click=move |_| set_filament_ai_mode(false)
+                        >
+                            <div class="wizard-mode-icon">"🌐"</div>
+                            <h4>"Use Manufacturer Specs Only"</h4>
+                            <p>
+                                "Use manufacturer sites and SpoolScout without any AI provider."
+                            </p>
+                            <ul class="wizard-mode-features">
+                                <li>"✓ Web/manufacturer spec lookup"</li>
+                                <li>"✓ No AI API key required"</li>
+                                <li>"✗ Print Analysis disabled"</li>
+                            </ul>
+                            <p class="wizard-mode-note">"Free mode for search without AI."</p>
+                        </div>
+                    </div>
                     {move || filament_ai_status.get().map(|msg| {
                         let is_disabled = msg.contains("Web-only");
                         view! {
