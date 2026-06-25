@@ -36,6 +36,7 @@ pub fn run() {
             commands::health::run_health_check,
             commands::health::search_bambu_studio_config,
             commands::health::validate_bambu_studio_path,
+            commands::health::pick_config_folder,
             commands::models::list_models,
             commands::profile::list_profiles,
             commands::profile::list_system_profiles,

@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::path::PathBuf;
 use tracing::info;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::profile::paths::BambuPaths;
 
@@ -140,6 +141,23 @@ pub fn validate_bambu_studio_path(path: String) -> Result<PathValidation, String
         has_config_file,
         message,
     })
+}
+
+/// Open a native folder picker dialog and return the selected path.
+/// Uses the Tauri dialog plugin from Rust for reliable cross-platform behavior.
+#[tauri::command]
+pub async fn pick_config_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    app.dialog()
+        .file()
+        .set_title("Select Bambu Studio Configuration Folder")
+        .pick_folder(move |path| {
+            let _ = tx.send(path);
+        });
+
+    let path = rx.await.map_err(|_| "Dialog closed unexpectedly".to_string())?;
+    Ok(path.map(|p| p.to_string()))
 }
 
 /// Platform-specific fallback search for the Bambu Studio config directory.
