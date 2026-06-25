@@ -965,15 +965,16 @@ select.input option {
     inset: 0;
     z-index: 1000;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
     background-color: var(--bg-primary);
+    overflow-y: auto;
+    padding: 5vh 0;
 }
 
 .wizard-container {
     width: 600px;
     max-width: 90vw;
-    max-height: 85vh;
     background-color: var(--bg-card);
     border: 1px solid var(--border-primary);
     border-radius: 12px;
@@ -1030,7 +1031,7 @@ select.input option {
 
 .wizard-body {
     flex: 1;
-    overflow-y: auto;
+    overflow-y: visible;
     padding: 24px 32px;
 }
 
