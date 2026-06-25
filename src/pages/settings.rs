@@ -403,43 +403,45 @@ pub fn SettingsPage() -> impl IntoView {
                 </div>
             </section>
 
-            <section class="settings-section">
-                <h3>"API Keys"</h3>
-                <p class="section-description">"API keys are stored securely in your system keychain."</p>
+            {move || filament_ai_enabled.get().then(|| view! {
+                <section class="settings-section">
+                    <h3>"API Keys"</h3>
+                    <p class="section-description">"API keys are stored securely in your system keychain."</p>
 
-                <ApiKeyForm
-                    service_name="Claude API Key"
-                    service_id="bambumate-claude-api"
-                    placeholder="sk-ant-..."
-                />
-                <span class="status-text">
-                    <button class="link-btn" on:click=open_url_handler("https://console.anthropic.com/account/keys")>"Get Claude API key"</button>
-                </span>
-                <ApiKeyForm
-                    service_name="OpenAI API Key"
-                    service_id="bambumate-openai-api"
-                    placeholder="sk-..."
-                />
-                <span class="status-text">
-                    <button class="link-btn" on:click=open_url_handler("https://platform.openai.com/api-keys")>"Get OpenAI API key"</button>
-                </span>
-                <ApiKeyForm
-                    service_name="Kimi K2 API Key"
-                    service_id="bambumate-kimi-api"
-                    placeholder="sk-..."
-                />
-                <span class="status-text">
-                    <button class="link-btn" on:click=open_url_handler("https://platform.moonshot.cn/console/api-keys")>"Get Kimi API key"</button>
-                </span>
-                <ApiKeyForm
-                    service_name="OpenRouter API Key"
-                    service_id="bambumate-openrouter-api"
-                    placeholder="sk-or-..."
-                />
-                <span class="status-text">
-                    <button class="link-btn" on:click=open_url_handler("https://openrouter.ai/keys")>"Get OpenRouter API key"</button>
-                </span>
-            </section>
+                    <ApiKeyForm
+                        service_name="Claude API Key"
+                        service_id="bambumate-claude-api"
+                        placeholder="sk-ant-..."
+                    />
+                    <span class="status-text">
+                        <button class="link-btn" on:click=open_url_handler("https://console.anthropic.com/account/keys")>"Get Claude API key"</button>
+                    </span>
+                    <ApiKeyForm
+                        service_name="OpenAI API Key"
+                        service_id="bambumate-openai-api"
+                        placeholder="sk-..."
+                    />
+                    <span class="status-text">
+                        <button class="link-btn" on:click=open_url_handler("https://platform.openai.com/api-keys")>"Get OpenAI API key"</button>
+                    </span>
+                    <ApiKeyForm
+                        service_name="Kimi K2 API Key"
+                        service_id="bambumate-kimi-api"
+                        placeholder="sk-..."
+                    />
+                    <span class="status-text">
+                        <button class="link-btn" on:click=open_url_handler("https://platform.moonshot.cn/console/api-keys")>"Get Kimi API key"</button>
+                    </span>
+                    <ApiKeyForm
+                        service_name="OpenRouter API Key"
+                        service_id="bambumate-openrouter-api"
+                        placeholder="sk-or-..."
+                    />
+                    <span class="status-text">
+                        <button class="link-btn" on:click=open_url_handler("https://openrouter.ai/keys")>"Get OpenRouter API key"</button>
+                    </span>
+                </section>
+            })}
 
             <section class="settings-section">
                 <h3>"Model Configuration"</h3>
