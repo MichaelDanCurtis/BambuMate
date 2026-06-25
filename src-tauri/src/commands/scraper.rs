@@ -21,6 +21,18 @@ fn get_ai_provider(app: &tauri::AppHandle) -> Result<String, String> {
     Ok(provider)
 }
 
+/// Returns `true` when AI is enabled for filament search (default), `false` for web-only mode.
+fn use_ai_for_filament(app: &tauri::AppHandle) -> bool {
+    let store = match app.store("preferences.json").ok() {
+        Some(s) => s,
+        None => return true,
+    };
+    store
+        .get("filament_search_use_ai")
+        .and_then(|v| v.as_str().map(|s| s != "false"))
+        .unwrap_or(true)
+}
+
 /// Get the configured AI model from preferences, defaulting to "claude-sonnet-4-20250514".
 fn get_ai_model(app: &tauri::AppHandle) -> Result<String, String> {
     let store = app.store("preferences.json").map_err(|e| {
@@ -80,6 +92,7 @@ fn get_cache_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 /// Search for filament specifications by name.
 /// Checks the cache first; if not cached, fetches from the web using
 /// the configured AI provider for spec extraction.
+/// When AI is disabled (`filament_search_use_ai = false`), uses pure HTML extraction.
 #[tauri::command]
 pub async fn search_filament(
     app: tauri::AppHandle,
@@ -87,10 +100,16 @@ pub async fn search_filament(
 ) -> Result<FilamentSpecs, String> {
     info!("search_filament called for: {}", filament_name);
 
+    let cache_dir = get_cache_dir(&app)?;
+
+    if !use_ai_for_filament(&app) {
+        info!("web-only mode: using html_extractor for '{}'", filament_name);
+        return crate::scraper::search_filament_web_only(&filament_name, &cache_dir).await;
+    }
+
     let provider = get_ai_provider(&app)?;
     let model = get_ai_model(&app)?;
     let api_key = get_api_key_for_provider(&app, &provider)?;
-    let cache_dir = get_cache_dir(&app)?;
 
     info!(
         "Using AI provider '{}' model '{}' for extraction",
@@ -124,8 +143,8 @@ pub async fn clear_filament_cache(app: tauri::AppHandle) -> Result<usize, String
 }
 
 /// Extract filament specs from a user-provided URL.
-/// Sends raw HTML directly to the LLM for better extraction accuracy —
-/// preserves tables, structured data, and meta tags that get lost in text conversion.
+/// In AI mode: sends raw HTML to the LLM for extraction.
+/// In web-only mode: uses pure HTML parsing (json-ld, tables, regex) — no API key needed.
 #[tauri::command]
 pub async fn extract_specs_from_url(
     app: tauri::AppHandle,
@@ -134,31 +153,49 @@ pub async fn extract_specs_from_url(
 ) -> Result<FilamentSpecs, String> {
     info!("extract_specs_from_url called for '{}' from '{}'", filament_name, url);
 
-    let provider = get_ai_provider(&app)?;
-    let model = get_ai_model(&app)?;
-    let api_key = get_api_key_for_provider(&app, &provider)?;
     let cache_dir = get_cache_dir(&app)?;
-
-    // Fetch the raw HTML
     let http_client = crate::scraper::http_client::ScraperHttpClient::new();
-    let html = http_client.fetch_page(&url).await?;
 
+    let html = http_client.fetch_page(&url).await?;
     if html.trim().is_empty() || html.len() < 100 {
         return Err(format!(
             "The page at '{}' returned no content. The site may require JavaScript \
-             or authentication. Try a different URL or use AI Knowledge mode instead.",
+             or authentication. Try a different URL.",
             url
         ));
     }
 
+    // Web-only path: pure HTML parsing, no API key
+    if !use_ai_for_filament(&app) {
+        info!("web-only mode: extracting specs from URL via html_extractor");
+        let mut specs = crate::scraper::html_extractor::extract(&html, &filament_name);
+        specs.source_url = url.clone();
+
+        // Cache the result
+        let db_path = cache_dir.join("filament_cache.db");
+        let store_name = filament_name.clone();
+        let store_specs = specs.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(cache) = crate::scraper::cache::FilamentCache::new(&db_path) {
+                let _ = cache.put(&store_name, &store_specs, 30);
+            }
+        }).await;
+
+        return Ok(specs);
+    }
+
+    // AI path
+    let provider = get_ai_provider(&app)?;
+    let model = get_ai_model(&app)?;
+    let api_key = get_api_key_for_provider(&app, &provider)?;
+
     // Send raw HTML directly to LLM — much better at extracting structured data
-    // from tables, meta tags, JSON-LD, etc. than from stripped plain text
     let mut specs = crate::scraper::extraction::extract_specs_from_html(
         &html, &filament_name, &provider, &model, &api_key
     ).await?;
     specs.source_url = url.clone();
 
-    // If HTML extraction got low confidence, fall back to text extraction as backup
+    // If HTML extraction got low confidence, fall back to text extraction
     if specs.extraction_confidence < 0.3 {
         info!("HTML extraction got low confidence ({:.2}), trying text extraction fallback", specs.extraction_confidence);
         let text = crate::scraper::http_client::ScraperHttpClient::html_to_text(&html);
@@ -336,17 +373,13 @@ pub async fn fetch_filament_from_catalog(
         entry.brand, entry.name
     );
 
-    let provider = get_ai_provider(&app)?;
-    let model = get_ai_model(&app)?;
-    let api_key = get_api_key_for_provider(&app, &provider)?;
     let cache_dir = get_cache_dir(&app)?;
-
-    // Check cache first with a normalized key
     let cache_key = format!("{} {}", entry.brand, entry.name);
     let db_path = cache_dir.join("filament_cache.db");
+
+    // Check cache first
     let cache_key_clone = cache_key.clone();
     let db_path_clone = db_path.clone();
-
     let cached = tokio::task::spawn_blocking(move || {
         let cache = crate::scraper::cache::FilamentCache::new(&db_path_clone)?;
         cache.get(&cache_key_clone)
@@ -359,20 +392,31 @@ pub async fn fetch_filament_from_catalog(
         return Ok(specs);
     }
 
-    // Fetch from URL
     let http_client = ScraperHttpClient::new();
     let html = http_client.fetch_page(&entry.full_url).await?;
-    let text = ScraperHttpClient::html_to_text(&html);
-
-    if text.trim().is_empty() {
+    if html.trim().is_empty() {
         return Err(format!("Empty page content from {}", entry.full_url));
     }
 
-    // Extract via LLM
     let filament_name = format!("{} {}", entry.brand, entry.name);
-    let mut specs =
+
+    let mut specs = if !use_ai_for_filament(&app) {
+        // Web-only: pure HTML extraction
+        info!("web-only mode: using html_extractor for catalog entry '{}'", filament_name);
+        crate::scraper::html_extractor::extract(&html, &filament_name)
+    } else {
+        // AI path
+        let provider = get_ai_provider(&app)?;
+        let model = get_ai_model(&app)?;
+        let api_key = get_api_key_for_provider(&app, &provider)?;
+        let text = ScraperHttpClient::html_to_text(&html);
+        if text.trim().is_empty() {
+            return Err(format!("Empty page content from {}", entry.full_url));
+        }
         crate::scraper::extraction::extract_specs(&text, &filament_name, &provider, &model, &api_key)
-            .await?;
+            .await?
+    };
+
     specs.source_url = entry.full_url;
 
     // Validate
@@ -384,7 +428,7 @@ pub async fn fetch_filament_from_catalog(
         );
     }
 
-    // Cache the result
+    // Cache
     let store_key = cache_key.clone();
     let store_specs = specs.clone();
     let _ = tokio::task::spawn_blocking(move || {
