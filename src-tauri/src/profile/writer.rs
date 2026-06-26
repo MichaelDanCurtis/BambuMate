@@ -156,9 +156,8 @@ pub fn register_filament_in_conf(config_root: &Path, profile_name: &str) -> Resu
     let json_content = strip_md5_checksum(&content);
 
     // Parse as JSON
-    let mut conf: serde_json::Value = serde_json::from_str(json_content).map_err(|e| {
-        anyhow::anyhow!("Failed to parse BambuStudio.conf as JSON: {}", e)
-    })?;
+    let mut conf: serde_json::Value = serde_json::from_str(json_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse BambuStudio.conf as JSON: {}", e))?;
 
     // Get or create the "filaments" array
     let filaments = conf
@@ -167,9 +166,9 @@ pub fn register_filament_in_conf(config_root: &Path, profile_name: &str) -> Resu
         .entry("filaments")
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
 
-    let filaments_arr = filaments.as_array_mut().ok_or_else(|| {
-        anyhow::anyhow!("BambuStudio.conf 'filaments' section is not an array")
-    })?;
+    let filaments_arr = filaments
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("BambuStudio.conf 'filaments' section is not an array"))?;
 
     // Check if the profile name is already registered
     let name_value = serde_json::Value::String(profile_name.to_string());

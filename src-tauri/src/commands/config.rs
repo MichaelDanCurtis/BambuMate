@@ -26,7 +26,9 @@ pub fn get_preference(app: AppHandle, key: &str) -> Result<Option<String>, Strin
         warn!("Failed to open store: {}", e);
         e.to_string()
     })?;
-    let value = store.get(key).and_then(|v| v.as_str().map(|s| s.to_string()));
+    let value = store
+        .get(key)
+        .and_then(|v| v.as_str().map(|s| s.to_string()));
     Ok(value)
 }
 
@@ -53,10 +55,7 @@ pub fn get_feature_flags(app: AppHandle) -> Result<FeatureFlags, String> {
         e.to_string()
     })?;
 
-    let profiles_enabled = store
-        .get("feature_profiles_enabled")
-        .and_then(|v| v.as_str().map(|s| s != "false"))
-        .unwrap_or(true);
+    let profiles_enabled = true;
 
     // Analysis requires AI vision models; disabled when user opted out of AI.
     let analysis_enabled = store

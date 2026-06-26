@@ -100,21 +100,18 @@ impl RuleEngine {
     /// Clamp a value to material-safe operating range.
     ///
     /// Returns (clamped_value, was_clamped).
-    fn clamp_to_safe_range(
-        &self,
-        param: &str,
-        value: f32,
-        material: &MaterialType,
-    ) -> (f32, bool) {
+    fn clamp_to_safe_range(&self, param: &str, value: f32, material: &MaterialType) -> (f32, bool) {
         let constraints = constraints_for_material(material);
 
         let (min, max): (f32, f32) = match param {
-            "nozzle_temperature" | "nozzle_temperature_initial_layer" => {
-                (constraints.nozzle_temp_min as f32, constraints.nozzle_temp_max as f32)
-            }
-            "cool_plate_temp" | "hot_plate_temp" | "textured_plate_temp" => {
-                (constraints.bed_temp_min as f32, constraints.bed_temp_max as f32)
-            }
+            "nozzle_temperature" | "nozzle_temperature_initial_layer" => (
+                constraints.nozzle_temp_min as f32,
+                constraints.nozzle_temp_max as f32,
+            ),
+            "cool_plate_temp" | "hot_plate_temp" | "textured_plate_temp" => (
+                constraints.bed_temp_min as f32,
+                constraints.bed_temp_max as f32,
+            ),
             "filament_retraction_length" => (0.0, 15.0),
             "filament_retraction_speed" => (10.0, 100.0),
             "filament_flow_ratio" => (0.85, 1.15),
@@ -357,7 +354,8 @@ mod tests {
         let has_retraction_conflict = result.conflicts.iter().any(|c| {
             c.parameter.contains("retraction")
                 || (c.conflicting_defects.contains(&"stringing".to_string())
-                    && c.conflicting_defects.contains(&"under_extrusion".to_string()))
+                    && c.conflicting_defects
+                        .contains(&"under_extrusion".to_string()))
         });
 
         assert!(
@@ -407,10 +405,22 @@ mod tests {
 
         assert!(types.contains(&"stringing"), "Should know stringing");
         assert!(types.contains(&"warping"), "Should know warping");
-        assert!(types.contains(&"layer_adhesion"), "Should know layer_adhesion");
-        assert!(types.contains(&"under_extrusion"), "Should know under_extrusion");
-        assert!(types.contains(&"over_extrusion"), "Should know over_extrusion");
-        assert!(types.contains(&"elephants_foot"), "Should know elephants_foot");
+        assert!(
+            types.contains(&"layer_adhesion"),
+            "Should know layer_adhesion"
+        );
+        assert!(
+            types.contains(&"under_extrusion"),
+            "Should know under_extrusion"
+        );
+        assert!(
+            types.contains(&"over_extrusion"),
+            "Should know over_extrusion"
+        );
+        assert!(
+            types.contains(&"elephants_foot"),
+            "Should know elephants_foot"
+        );
         assert!(types.contains(&"z_banding"), "Should know z_banding");
     }
 
@@ -454,7 +464,10 @@ mod tests {
                 || r.parameter == "hot_plate_temp"
                 || r.parameter == "textured_plate_temp"
         });
-        assert!(bed_temp_rec.is_some(), "Should recommend bed temp adjustment");
+        assert!(
+            bed_temp_rec.is_some(),
+            "Should recommend bed temp adjustment"
+        );
 
         let rec = bed_temp_rec.unwrap();
         assert!(

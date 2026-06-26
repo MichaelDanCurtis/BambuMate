@@ -51,8 +51,10 @@ pub fn FilamentSearchPage() -> impl IntoView {
     // Base profile reference state
     let (base_profile_matches, set_base_profile_matches) = signal::<Vec<BaseProfileMatch>>(vec![]);
     let (is_searching_base, set_is_searching_base) = signal(false);
-    let (selected_base_profile, set_selected_base_profile) = signal::<Option<BaseProfileMatch>>(None);
-    let (selected_base_profile_path, set_selected_base_profile_path) = signal::<Option<String>>(None);
+    let (selected_base_profile, set_selected_base_profile) =
+        signal::<Option<BaseProfileMatch>>(None);
+    let (selected_base_profile_path, set_selected_base_profile_path) =
+        signal::<Option<String>>(None);
     let (base_profile_specs, set_base_profile_specs) = signal::<Option<FilamentSpecs>>(None);
     let (show_merge_screen, set_show_merge_screen) = signal(false);
 
@@ -98,7 +100,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
             set_base_profile_specs.set(None);
             set_show_merge_screen.set(false);
             spawn_local(async move {
-                if let Ok(matches) = commands::search_base_profiles("", Some(material.as_str())).await {
+                if let Ok(matches) =
+                    commands::search_base_profiles("", Some(material.as_str())).await
+                {
                     set_base_profile_matches.set(matches);
                 }
                 set_is_searching_base.set(false);
@@ -174,7 +178,10 @@ pub fn FilamentSearchPage() -> impl IntoView {
     let do_ai_generate = move || {
         let query = search_query.get();
         if query.len() < 5 {
-            set_fetch_error.set(Some("Please enter a more specific filament name (at least 5 characters) for AI search.".to_string()));
+            set_fetch_error.set(Some(
+                "Please enter a more specific filament name (at least 5 characters) for AI search."
+                    .to_string(),
+            ));
             return;
         }
 
@@ -249,11 +256,17 @@ pub fn FilamentSearchPage() -> impl IntoView {
         let name = search_query.get();
 
         if url.is_empty() || !url.starts_with("http") {
-            set_fetch_error.set(Some("Please enter a valid URL starting with http:// or https://".to_string()));
+            set_fetch_error.set(Some(
+                "Please enter a valid URL starting with http:// or https://".to_string(),
+            ));
             return;
         }
 
-        let filament_name = if name.len() >= 3 { name } else { "Unknown Filament".to_string() };
+        let filament_name = if name.len() >= 3 {
+            name
+        } else {
+            "Unknown Filament".to_string()
+        };
 
         set_show_url_input.set(false);
         set_current_specs.set(None);
@@ -292,7 +305,8 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_is_generating.set(true);
         let base_profile_path = selected_base_profile_path.get();
         spawn_local(async move {
-            let result = commands::generate_profile(&edited_specs, Some(printer), base_profile_path).await;
+            let result =
+                commands::generate_profile(&edited_specs, Some(printer), base_profile_path).await;
             if let Ok(ref gen) = result {
                 set_current_generate.set(Some(gen.clone()));
             }

@@ -16,7 +16,8 @@ const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         id: "claude",
         name: "Anthropic Claude",
-        description: "Excellent at structured extraction and vision analysis. Recommended for best results.",
+        description:
+            "Excellent at structured extraction and vision analysis. Recommended for best results.",
         signup_url: "https://console.anthropic.com/account/keys",
         keychain_service: "bambumate-claude-api",
     },
@@ -44,7 +45,8 @@ const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         id: "local",
         name: "Local Server",
-        description: "Use a local OpenAI-compatible server (LM Studio, Ollama, etc.). No API key required.",
+        description:
+            "Use a local OpenAI-compatible server (LM Studio, Ollama, etc.). No API key required.",
         signup_url: "",
         keychain_service: "",
     },
@@ -85,7 +87,8 @@ pub fn SetupWizard(
                 if !saved_path.is_empty() {
                     bambu_path.set(saved_path.clone());
                     bambu_detected.set(true);
-                    if let Ok(validation) = commands::validate_bambu_studio_path(&saved_path).await {
+                    if let Ok(validation) = commands::validate_bambu_studio_path(&saved_path).await
+                    {
                         path_valid.set(validation.valid);
                         path_validation_msg.set(validation.message);
                     }
@@ -111,7 +114,9 @@ pub fn SetupWizard(
                         if let Some(ref profile_path) = report.profile_dir_path {
                             bambu_path.set(profile_path.clone());
                             bambu_detected.set(true);
-                            if let Ok(validation) = commands::validate_bambu_studio_path(profile_path).await {
+                            if let Ok(validation) =
+                                commands::validate_bambu_studio_path(profile_path).await
+                            {
                                 path_valid.set(validation.valid);
                                 path_validation_msg.set(validation.message);
                             }
@@ -168,7 +173,10 @@ pub fn SetupWizard(
     // Validate path when input changes
     let on_path_input = move |ev: web_sys::Event| {
         use wasm_bindgen::JsCast;
-        let target = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>();
+        let target = ev
+            .target()
+            .unwrap()
+            .unchecked_into::<web_sys::HtmlInputElement>();
         let path = target.value();
         bambu_path.set(path.clone());
         if path.is_empty() {
@@ -748,7 +756,11 @@ pub fn SetupWizard(
                                         <option value="">"-- Select a model --"</option>
                                         {move || available_models.get().iter().map(|m| {
                                             let id = m.id.clone();
-                                            let name = m.name.clone();
+                                            let name = if m.recommended {
+                                                format!("⭐ Recommended — {}", m.name)
+                                            } else {
+                                                m.name.clone()
+                                            };
                                             view! {
                                                 <option value={id.clone()}>{name}</option>
                                             }

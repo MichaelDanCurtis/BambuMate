@@ -471,7 +471,10 @@ async fn call_local_vision(
     // If we get a 400 error about response_format, retry without it
     let body_text = if response.status() == reqwest::StatusCode::BAD_REQUEST {
         let error_body = response.text().await.unwrap_or_default();
-        if error_body.contains("response_format") || error_body.contains("json_schema") || error_body.contains("json_object") {
+        if error_body.contains("response_format")
+            || error_body.contains("json_schema")
+            || error_body.contains("json_object")
+        {
             info!("Local vision server does not support response_format, retrying without it");
             let body_without_format = serde_json::json!({
                 "model": model,
@@ -504,8 +507,14 @@ async fn call_local_vision(
 
             handle_api_response(retry_response, "local").await?
         } else {
-            error!("Vision API error: 400 Bad Request from local - {}", error_body);
-            return Err(format!("Vision API error: 400 Bad Request from local - {}", error_body));
+            error!(
+                "Vision API error: 400 Bad Request from local - {}",
+                error_body
+            );
+            return Err(format!(
+                "Vision API error: 400 Bad Request from local - {}",
+                error_body
+            ));
         }
     } else {
         handle_api_response(response, "local").await?

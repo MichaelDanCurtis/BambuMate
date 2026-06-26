@@ -38,6 +38,7 @@ pub fn run() {
             commands::health::validate_bambu_studio_path,
             commands::health::pick_config_folder,
             commands::models::list_models,
+            commands::models::validate_model,
             commands::profile::list_profiles,
             commands::profile::list_system_profiles,
             commands::profile::read_profile_command,

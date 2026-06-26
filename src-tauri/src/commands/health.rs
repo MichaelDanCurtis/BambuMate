@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::path::PathBuf;
-use tracing::info;
 use tauri_plugin_dialog::DialogExt;
+use tracing::info;
 
 use crate::profile::paths::BambuPaths;
 
@@ -46,10 +46,20 @@ pub fn run_health_check() -> Result<HealthReport, String> {
                 .map(|d| d.join("BambuStudio"))
                 .unwrap_or_else(|| PathBuf::from(""));
             let accessible = dir.exists() && dir.is_dir();
-            (accessible, if accessible { Some(dir.to_string_lossy().to_string()) } else { None })
+            (
+                accessible,
+                if accessible {
+                    Some(dir.to_string_lossy().to_string())
+                } else {
+                    None
+                },
+            )
         }
     };
-    info!("Profile directory accessible: {}, path: {:?}", profile_accessible, profile_dir_path);
+    info!(
+        "Profile directory accessible: {}, path: {:?}",
+        profile_accessible, profile_dir_path
+    );
 
     // Check API keys
     let claude_key_set = keyring::Entry::new("bambumate-claude-api", "bambumate")
@@ -156,7 +166,9 @@ pub async fn pick_config_folder(app: tauri::AppHandle) -> Result<Option<String>,
             let _ = tx.send(path);
         });
 
-    let path = rx.await.map_err(|_| "Dialog closed unexpectedly".to_string())?;
+    let path = rx
+        .await
+        .map_err(|_| "Dialog closed unexpectedly".to_string())?;
     Ok(path.map(|p| p.to_string()))
 }
 
@@ -287,10 +299,7 @@ fn detect_bambu_studio_install() -> (bool, Option<String>) {
 
 #[cfg(target_os = "linux")]
 fn detect_bambu_studio_install() -> (bool, Option<String>) {
-    let candidates = [
-        "/usr/bin/BambuStudio",
-        "/opt/BambuStudio/BambuStudio",
-    ];
+    let candidates = ["/usr/bin/BambuStudio", "/opt/BambuStudio/BambuStudio"];
     for path_str in &candidates {
         let path = PathBuf::from(path_str);
         if path.exists() {

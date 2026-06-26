@@ -33,7 +33,10 @@ mod tests {
     #[test]
     fn test_fallback_url() {
         let url = fallback_url("polymaker", "Polymaker PLA Pro");
-        assert_eq!(url, "https://www.spoolscout.com/data-sheets/polymaker/pla-pro");
+        assert_eq!(
+            url,
+            "https://www.spoolscout.com/data-sheets/polymaker/pla-pro"
+        );
     }
 
     #[test]

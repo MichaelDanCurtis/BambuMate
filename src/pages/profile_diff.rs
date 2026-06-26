@@ -14,7 +14,11 @@ fn build_select_options(
     for p in user_profiles {
         options.push(SelectOption {
             value: p.path.clone(),
-            label: format!("{} ({})", p.name, p.filament_type.clone().unwrap_or_default()),
+            label: format!(
+                "{} ({})",
+                p.name,
+                p.filament_type.clone().unwrap_or_default()
+            ),
             group: "My Profiles".to_string(),
         });
     }
@@ -22,7 +26,11 @@ fn build_select_options(
     for p in system_profiles {
         options.push(SelectOption {
             value: p.path.clone(),
-            label: format!("{} ({})", p.name, p.filament_type.clone().unwrap_or_default()),
+            label: format!(
+                "{} ({})",
+                p.name,
+                p.filament_type.clone().unwrap_or_default()
+            ),
             group: "Bambu Lab Factory Profiles".to_string(),
         });
     }
@@ -47,9 +55,8 @@ pub fn ProfileDiffPage() -> impl IntoView {
     let (collapsed, set_collapsed) = signal::<Vec<String>>(vec![]);
 
     // Build options signal from both profile lists
-    let all_options = Signal::derive(move || {
-        build_select_options(&user_profiles.get(), &system_profiles.get())
-    });
+    let all_options =
+        Signal::derive(move || build_select_options(&user_profiles.get(), &system_profiles.get()));
 
     // Load both user and system profiles on mount
     Effect::new(move |_| {

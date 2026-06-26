@@ -23,8 +23,8 @@ impl RefinementHistory {
                 .map_err(|e| format!("Failed to create data dir: {}", e))?;
         }
 
-        let conn = Connection::open(db_path)
-            .map_err(|e| format!("Failed to open history db: {}", e))?;
+        let conn =
+            Connection::open(db_path).map_err(|e| format!("Failed to open history db: {}", e))?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS refinement_sessions (
@@ -211,7 +211,11 @@ mod tests {
         ];
 
         store
-            .record_apply(id, &changes, "/path/to/.backups/profile_20260101_120000.json")
+            .record_apply(
+                id,
+                &changes,
+                "/path/to/.backups/profile_20260101_120000.json",
+            )
             .unwrap();
 
         let session = store.get_session(id).unwrap();

@@ -302,7 +302,10 @@ pub async fn apply_recommendations(
 fn format_value_for_profile(value: f32, parameter: &str) -> String {
     match parameter {
         // Temperatures: integers
-        "nozzle_temperature" | "cool_plate_temp" | "hot_plate_temp" | "textured_plate_temp"
+        "nozzle_temperature"
+        | "cool_plate_temp"
+        | "hot_plate_temp"
+        | "textured_plate_temp"
         | "nozzle_temperature_initial_layer" => {
             format!("{:.0}", value)
         }
@@ -483,7 +486,9 @@ fn detect_material_type(profile: &FilamentProfile) -> String {
     if let Some(inherits) = profile.raw().get("inherits") {
         if let Some(s) = inherits.as_str() {
             // Parse "Generic PLA" -> "PLA"
-            for material in ["PLA", "PETG", "ABS", "ASA", "TPU", "PA", "PC", "PVA", "HIPS"] {
+            for material in [
+                "PLA", "PETG", "ABS", "ASA", "TPU", "PA", "PC", "PVA", "HIPS",
+            ] {
                 if s.to_uppercase().contains(material) {
                     return material.to_string();
                 }
@@ -633,7 +638,10 @@ mod integration_tests {
         let recommendations = format_recommendations(&evaluation, &current_values);
 
         // Should have retraction recommendation for stringing
-        assert!(!recommendations.is_empty(), "Should produce recommendations");
+        assert!(
+            !recommendations.is_empty(),
+            "Should produce recommendations"
+        );
 
         let retraction_rec = recommendations
             .iter()

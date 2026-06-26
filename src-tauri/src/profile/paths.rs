@@ -47,7 +47,10 @@ impl BambuPaths {
         if let Some(data_dir) = dirs::data_dir() {
             let bs_dir = data_dir.join("BambuStudio");
             if bs_dir.exists() {
-                debug!("Found Bambu Studio config at {:?} (via dirs::data_dir)", bs_dir);
+                debug!(
+                    "Found Bambu Studio config at {:?} (via dirs::data_dir)",
+                    bs_dir
+                );
                 return Ok(bs_dir);
             }
         }
@@ -79,7 +82,10 @@ impl BambuPaths {
         if let Some(data_dir) = dirs::data_dir() {
             let bs_dir = data_dir.join("BambuStudio");
             if bs_dir.exists() {
-                debug!("Found Bambu Studio config at {:?} (via dirs::data_dir)", bs_dir);
+                debug!(
+                    "Found Bambu Studio config at {:?} (via dirs::data_dir)",
+                    bs_dir
+                );
                 return Ok(bs_dir);
             }
         }
@@ -165,10 +171,7 @@ impl BambuPaths {
                 if name != "default" && entry.path().is_dir() {
                     let path = entry.path().join("filament").join("base");
                     if path.exists() {
-                        debug!(
-                            "Found user filament dir via directory scan: {:?}",
-                            path
-                        );
+                        debug!("Found user filament dir via directory scan: {:?}", path);
                         return Some(path);
                     }
                 }

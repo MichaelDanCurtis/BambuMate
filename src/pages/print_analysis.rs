@@ -2,8 +2,8 @@
 //!
 //! Users can drag-and-drop or browse for a print photo to analyze.
 
-use leptos::prelude::*;
 use leptos::html::Div;
+use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::JsCast;
@@ -448,7 +448,9 @@ fn PhotoDropZone(
                                 handle_file_loaded(base64);
                             }
                             Err(e) => {
-                                web_sys::console::error_1(&format!("Failed to read file: {}", e).into());
+                                web_sys::console::error_1(
+                                    &format!("Failed to read file: {}", e).into(),
+                                );
                             }
                         }
                         set_is_loading.set(false);
@@ -470,7 +472,9 @@ fn PhotoDropZone(
                             handle_file_loaded(base64);
                         }
                         Err(e) => {
-                            web_sys::console::error_1(&format!("Failed to read file: {}", e).into());
+                            web_sys::console::error_1(
+                                &format!("Failed to read file: {}", e).into(),
+                            );
                         }
                     }
                     set_is_loading.set(false);

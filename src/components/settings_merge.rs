@@ -130,8 +130,16 @@ fn build_mergeable_settings(ai: &FilamentSpecs, base: &FilamentSpecs) -> Vec<Mer
     }
 
     // Temperature settings
-    add_opt_i32!("Nozzle Temperature", nozzle_temperature, "nozzle_temperature");
-    add_opt_i32!("Nozzle Temp (Initial Layer)", nozzle_temperature_initial_layer, "nozzle_temperature_initial_layer");
+    add_opt_i32!(
+        "Nozzle Temperature",
+        nozzle_temperature,
+        "nozzle_temperature"
+    );
+    add_opt_i32!(
+        "Nozzle Temp (Initial Layer)",
+        nozzle_temperature_initial_layer,
+        "nozzle_temperature_initial_layer"
+    );
     add_opt_i32!("Nozzle Temp Min", nozzle_temp_min, "nozzle_temp_min");
     add_opt_i32!("Nozzle Temp Max", nozzle_temp_max, "nozzle_temp_max");
     add_opt_i32!("Bed Temp Min", bed_temp_min, "bed_temp_min");
@@ -139,23 +147,51 @@ fn build_mergeable_settings(ai: &FilamentSpecs, base: &FilamentSpecs) -> Vec<Mer
     add_opt_i32!("Hot Plate Temp", hot_plate_temp, "hot_plate_temp");
     add_opt_i32!("Cool Plate Temp", cool_plate_temp, "cool_plate_temp");
     add_opt_i32!("Engineering Plate Temp", eng_plate_temp, "eng_plate_temp");
-    add_opt_i32!("Textured Plate Temp", textured_plate_temp, "textured_plate_temp");
+    add_opt_i32!(
+        "Textured Plate Temp",
+        textured_plate_temp,
+        "textured_plate_temp"
+    );
 
     // Speed/Flow
-    add_opt_f64!("Max Volumetric Speed", max_volumetric_speed, "max_volumetric_speed");
-    add_opt_f64!("Filament Flow Ratio", filament_flow_ratio, "filament_flow_ratio");
+    add_opt_f64!(
+        "Max Volumetric Speed",
+        max_volumetric_speed,
+        "max_volumetric_speed"
+    );
+    add_opt_f64!(
+        "Filament Flow Ratio",
+        filament_flow_ratio,
+        "filament_flow_ratio"
+    );
     add_opt_f64!("Pressure Advance", pressure_advance, "pressure_advance");
     add_opt_i32!("Max Speed (mm/s)", max_speed_mm_s, "max_speed_mm_s");
 
     // Fan/Cooling
     add_opt_i32!("Fan Min Speed", fan_min_speed, "fan_min_speed");
     add_opt_i32!("Fan Max Speed", fan_max_speed, "fan_max_speed");
-    add_opt_i32!("Overhang Fan Speed", overhang_fan_speed, "overhang_fan_speed");
-    add_opt_i32!("Close Fan Below Layer", close_fan_the_first_x_layers, "close_fan_the_first_x_layers");
+    add_opt_i32!(
+        "Overhang Fan Speed",
+        overhang_fan_speed,
+        "overhang_fan_speed"
+    );
+    add_opt_i32!(
+        "Close Fan Below Layer",
+        close_fan_the_first_x_layers,
+        "close_fan_the_first_x_layers"
+    );
 
     // Retraction
-    add_opt_f64!("Retraction Distance (mm)", retraction_distance_mm, "retraction_distance_mm");
-    add_opt_i32!("Retraction Speed (mm/s)", retraction_speed_mm_s, "retraction_speed_mm_s");
+    add_opt_f64!(
+        "Retraction Distance (mm)",
+        retraction_distance_mm,
+        "retraction_distance_mm"
+    );
+    add_opt_i32!(
+        "Retraction Speed (mm/s)",
+        retraction_speed_mm_s,
+        "retraction_speed_mm_s"
+    );
 
     settings
 }
@@ -172,7 +208,9 @@ fn apply_merge(
         if source == "base" {
             match key.as_str() {
                 "nozzle_temperature" => merged.nozzle_temperature = base.nozzle_temperature,
-                "nozzle_temperature_initial_layer" => merged.nozzle_temperature_initial_layer = base.nozzle_temperature_initial_layer,
+                "nozzle_temperature_initial_layer" => {
+                    merged.nozzle_temperature_initial_layer = base.nozzle_temperature_initial_layer
+                }
                 "nozzle_temp_min" => merged.nozzle_temp_min = base.nozzle_temp_min,
                 "nozzle_temp_max" => merged.nozzle_temp_max = base.nozzle_temp_max,
                 "bed_temp_min" => merged.bed_temp_min = base.bed_temp_min,
@@ -188,9 +226,15 @@ fn apply_merge(
                 "fan_min_speed" => merged.fan_min_speed = base.fan_min_speed,
                 "fan_max_speed" => merged.fan_max_speed = base.fan_max_speed,
                 "overhang_fan_speed" => merged.overhang_fan_speed = base.overhang_fan_speed,
-                "close_fan_the_first_x_layers" => merged.close_fan_the_first_x_layers = base.close_fan_the_first_x_layers,
-                "retraction_distance_mm" => merged.retraction_distance_mm = base.retraction_distance_mm,
-                "retraction_speed_mm_s" => merged.retraction_speed_mm_s = base.retraction_speed_mm_s,
+                "close_fan_the_first_x_layers" => {
+                    merged.close_fan_the_first_x_layers = base.close_fan_the_first_x_layers
+                }
+                "retraction_distance_mm" => {
+                    merged.retraction_distance_mm = base.retraction_distance_mm
+                }
+                "retraction_speed_mm_s" => {
+                    merged.retraction_speed_mm_s = base.retraction_speed_mm_s
+                }
                 _ => {}
             }
         }

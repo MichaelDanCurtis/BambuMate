@@ -19,6 +19,7 @@ pub fn SettingsPage() -> impl IntoView {
     let (models, set_models) = signal::<Vec<ModelInfo>>(vec![]);
     let (models_loading, set_models_loading) = signal(false);
     let (models_error, set_models_error) = signal::<Option<String>>(None);
+    let (model_checking, set_model_checking) = signal(false);
     let (prefs_loaded, set_prefs_loaded) = signal(false);
     let (local_url, set_local_url) = signal("http://localhost:1234".to_string());
     let (local_url_status, set_local_url_status) = signal::<Option<String>>(None);
@@ -182,9 +183,7 @@ pub fn SettingsPage() -> impl IntoView {
             match commands::pick_config_folder().await {
                 Ok(Some(path_str)) => {
                     set_bambu_path.set(path_str.clone());
-                    if let Ok(validation) =
-                        commands::validate_bambu_studio_path(&path_str).await
-                    {
+                    if let Ok(validation) = commands::validate_bambu_studio_path(&path_str).await {
                         set_path_valid.set(validation.valid);
                         set_path_status.set(Some(validation.message));
                     }
@@ -198,17 +197,43 @@ pub fn SettingsPage() -> impl IntoView {
     let save_model_config = move |_| {
         let model = ai_model.get();
         let provider = ai_provider.get();
+        if model.is_empty() {
+            set_model_status.set(Some("Select a model first".to_string()));
+            return;
+        }
         spawn_local(async move {
+            set_model_checking.set(true);
+            set_model_status.set(Some("Checking model compatibility...".to_string()));
+            let check = commands::validate_model(&provider, &model).await;
+            match check {
+                Ok(result) if result.text_ok && result.vision_ok => {}
+                Ok(result) => {
+                    set_model_status.set(Some(format!(
+                        "{} {}",
+                        result.text_message, result.vision_message
+                    )));
+                    set_model_checking.set(false);
+                    return;
+                }
+                Err(e) => {
+                    set_model_status.set(Some(format!("Model check failed: {}", e)));
+                    set_model_checking.set(false);
+                    return;
+                }
+            }
+
             let model_result = commands::set_preference("ai_model", &model).await;
             let provider_result = commands::set_preference("ai_provider", &provider).await;
             match (model_result, provider_result) {
                 (Ok(()), Ok(())) => {
-                    set_model_status.set(Some("Model configuration saved".to_string()));
+                    set_model_status
+                        .set(Some("Model configuration saved and validated.".to_string()));
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     set_model_status.set(Some(format!("Failed to save: {}", e)));
                 }
             }
+            set_model_checking.set(false);
         });
     };
 
@@ -216,11 +241,35 @@ pub fn SettingsPage() -> impl IntoView {
         let provider = ai_provider.get();
         set_models_loading.set(true);
         set_models_error.set(None);
+        set_model_status.set(None);
         spawn_local(async move {
             match commands::list_models(&provider).await {
                 Ok(model_list) => {
                     set_models.set(model_list);
                     set_models_loading.set(false);
+                    let selected_model = ai_model.get_untracked();
+                    if !selected_model.is_empty() {
+                        set_model_checking.set(true);
+                        set_model_status.set(Some("Checking model compatibility...".to_string()));
+                        match commands::validate_model(&provider, &selected_model).await {
+                            Ok(result) if result.text_ok && result.vision_ok => {
+                                set_model_status.set(Some(
+                                    "Model works for filament search and print analysis."
+                                        .to_string(),
+                                ));
+                            }
+                            Ok(result) => {
+                                set_model_status.set(Some(format!(
+                                    "{} {}",
+                                    result.text_message, result.vision_message
+                                )));
+                            }
+                            Err(e) => {
+                                set_model_status.set(Some(format!("Model check failed: {}", e)));
+                            }
+                        }
+                        set_model_checking.set(false);
+                    }
                 }
                 Err(e) => {
                     set_models_error.set(Some(e));
@@ -248,17 +297,6 @@ pub fn SettingsPage() -> impl IntoView {
         });
     };
 
-    let on_toggle_profiles = move |ev: leptos::ev::Event| {
-        let checked = event_target_checked(&ev);
-        let value = if checked { "true" } else { "false" };
-        let mut new_flags = ff_ctx.flags.get();
-        new_flags.profiles_enabled = checked;
-        ff_ctx.set_flags.set(new_flags);
-        spawn_local(async move {
-            let _ = commands::set_preference("feature_profiles_enabled", value).await;
-        });
-    };
-
     let set_filament_ai_mode = move |enabled: bool| {
         let value = if enabled { "true" } else { "false" };
         set_filament_ai_enabled.set(enabled);
@@ -268,10 +306,12 @@ pub fn SettingsPage() -> impl IntoView {
         ff_ctx.set_flags.set(new_flags);
         spawn_local(async move {
             match commands::set_preference("filament_search_use_ai", value).await {
-                Ok(()) => set_filament_ai_status.set(Some(
-                    if enabled { "AI enabled — Print Analysis is available.".to_string() }
-                    else { "Web-only mode — specs pulled from manufacturer sites. Print Analysis disabled.".to_string() }
-                )),
+                Ok(()) => set_filament_ai_status.set(Some(if enabled {
+                    "AI enabled — Print Analysis is available.".to_string()
+                } else {
+                    "Web-only mode — specs pulled from manufacturer sites. Print Analysis disabled."
+                        .to_string()
+                })),
                 Err(e) => set_filament_ai_status.set(Some(format!("Failed to save: {}", e))),
             }
         });
@@ -291,24 +331,6 @@ pub fn SettingsPage() -> impl IntoView {
     view! {
         <div class="page settings-page">
             <h2>"Settings"</h2>
-
-            <section class="settings-section">
-                <h3>"Feature Modules"</h3>
-                <p class="section-description">"Enable or disable application features."</p>
-
-                <div class="form-group feature-toggle">
-                    <label class="toggle-label">
-                        <input
-                            type="checkbox"
-                            class="toggle-input"
-                            prop:checked=move || ff_ctx.flags.get().profiles_enabled
-                            on:change=on_toggle_profiles
-                        />
-                        <span class="toggle-text">"Filament Profiles"</span>
-                    </label>
-                    <p class="toggle-description">"Search filament specs from manufacturers, generate optimized Bambu Studio profiles, and manage installed profiles."</p>
-                </div>
-            </section>
 
             <section class="settings-section">
                 <h3>"Filament Search Mode"</h3>
@@ -539,7 +561,30 @@ pub fn SettingsPage() -> impl IntoView {
                                 id="ai-model"
                                 class="input"
                                 on:change=move |ev| {
-                                    set_ai_model.set(event_target_value(&ev));
+                                    let model = event_target_value(&ev);
+                                    let provider = ai_provider.get_untracked();
+                                    set_ai_model.set(model.clone());
+                                    set_model_status.set(Some("Checking model compatibility...".to_string()));
+                                    set_model_checking.set(true);
+                                    spawn_local(async move {
+                                        match commands::validate_model(&provider, &model).await {
+                                            Ok(result) if result.text_ok && result.vision_ok => {
+                                                set_model_status.set(Some(
+                                                    "Model works for filament search and print analysis.".to_string()
+                                                ));
+                                            }
+                                            Ok(result) => {
+                                                set_model_status.set(Some(format!(
+                                                    "{} {}",
+                                                    result.text_message, result.vision_message
+                                                )));
+                                            }
+                                            Err(e) => {
+                                                set_model_status.set(Some(format!("Model check failed: {}", e)));
+                                            }
+                                        }
+                                        set_model_checking.set(false);
+                                    });
                                 }
                                 prop:value=move || ai_model.get()
                             >
@@ -547,10 +592,15 @@ pub fn SettingsPage() -> impl IntoView {
                                 {move || {
                                     models.get().into_iter().map(|m| {
                                         let id = m.id.clone();
-                                        let display = if m.name != m.id {
+                                        let display_base = if m.name != m.id {
                                             format!("{} ({})", m.name, m.id)
                                         } else {
                                             m.id.clone()
+                                        };
+                                        let display = if m.recommended {
+                                            format!("⭐ Recommended — {}", display_base)
+                                        } else {
+                                            display_base
                                         };
                                         let is_selected = ai_model.get() == id;
                                         view! {
@@ -566,7 +616,16 @@ pub fn SettingsPage() -> impl IntoView {
                         <button class="btn btn-save" on:click=save_model_config>"Save"</button>
                     </div>
                     <Show when=move || model_status.get().is_some()>
-                        <span class="status-text">{move || model_status.get().unwrap_or_default()}</span>
+                        <span class={move || {
+                            let msg = model_status.get().unwrap_or_default().to_lowercase();
+                            if msg.contains("failed") {
+                                "status-text status-error"
+                            } else if model_checking.get() {
+                                "status-text"
+                            } else {
+                                "status-text status-success"
+                            }
+                        }}>{move || model_status.get().unwrap_or_default()}</span>
                     </Show>
                 </div>
             </section>
@@ -686,13 +745,4 @@ pub fn SettingsPage() -> impl IntoView {
             </section>
         </div>
     }
-}
-
-/// Helper to extract checked state from a checkbox change event.
-fn event_target_checked(ev: &leptos::ev::Event) -> bool {
-    use wasm_bindgen::JsCast;
-    ev.target()
-        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
-        .map(|el| el.checked())
-        .unwrap_or(false)
 }

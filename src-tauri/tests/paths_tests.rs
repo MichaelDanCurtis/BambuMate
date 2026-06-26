@@ -52,7 +52,11 @@ fn test_user_filament_dir_fallback_scan() {
     assert!(result.is_some(), "Should find user filament dir via scan");
     // Should NOT be the "default" directory
     assert!(
-        !result.as_ref().unwrap().to_string_lossy().contains("default"),
+        !result
+            .as_ref()
+            .unwrap()
+            .to_string_lossy()
+            .contains("default"),
         "Should skip 'default' directory"
     );
 }
@@ -75,7 +79,10 @@ fn test_user_filament_dir_missing() {
     };
 
     let result = paths.user_filament_dir();
-    assert!(result.is_none(), "Should return None when no filament dir exists");
+    assert!(
+        result.is_none(),
+        "Should return None when no filament dir exists"
+    );
 }
 
 /// Test that system_filament_dir returns the expected path structure.
@@ -165,12 +172,12 @@ fn test_paths_use_native_separators() {
 fn test_path_normalization() {
     // PathBuf::from on Windows normalizes forward slashes to backslashes
     // On Unix, backslashes are literal characters in filenames
-    let path = PathBuf::from("user").join("12345").join("filament").join("base");
+    let path = PathBuf::from("user")
+        .join("12345")
+        .join("filament")
+        .join("base");
 
     // The path should be constructable regardless of platform
     assert!(path.components().count() == 4);
-    assert_eq!(
-        path.file_name().and_then(|n| n.to_str()),
-        Some("base")
-    );
+    assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("base"));
 }

@@ -37,42 +37,182 @@ pub fn SpecsEditor(
     let (material, set_material) = signal(specs.material.clone());
 
     // Temperature signals
-    let (nozzle_temp_min, set_nozzle_temp_min) = signal(specs.nozzle_temp_min.map(|v| v.to_string()).unwrap_or_default());
-    let (nozzle_temp_max, set_nozzle_temp_max) = signal(specs.nozzle_temp_max.map(|v| v.to_string()).unwrap_or_default());
-    let (bed_temp_min, set_bed_temp_min) = signal(specs.bed_temp_min.map(|v| v.to_string()).unwrap_or_default());
-    let (bed_temp_max, set_bed_temp_max) = signal(specs.bed_temp_max.map(|v| v.to_string()).unwrap_or_default());
-    let (nozzle_temperature, set_nozzle_temperature) = signal(specs.nozzle_temperature.map(|v| v.to_string()).unwrap_or_default());
-    let (nozzle_temperature_initial_layer, set_nozzle_temperature_initial_layer) = signal(specs.nozzle_temperature_initial_layer.map(|v| v.to_string()).unwrap_or_default());
-    let (hot_plate_temp, set_hot_plate_temp) = signal(specs.hot_plate_temp.map(|v| v.to_string()).unwrap_or_default());
-    let (cool_plate_temp, set_cool_plate_temp) = signal(specs.cool_plate_temp.map(|v| v.to_string()).unwrap_or_default());
-    let (eng_plate_temp, set_eng_plate_temp) = signal(specs.eng_plate_temp.map(|v| v.to_string()).unwrap_or_default());
-    let (textured_plate_temp, set_textured_plate_temp) = signal(specs.textured_plate_temp.map(|v| v.to_string()).unwrap_or_default());
+    let (nozzle_temp_min, set_nozzle_temp_min) = signal(
+        specs
+            .nozzle_temp_min
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (nozzle_temp_max, set_nozzle_temp_max) = signal(
+        specs
+            .nozzle_temp_max
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (bed_temp_min, set_bed_temp_min) = signal(
+        specs
+            .bed_temp_min
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (bed_temp_max, set_bed_temp_max) = signal(
+        specs
+            .bed_temp_max
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (nozzle_temperature, set_nozzle_temperature) = signal(
+        specs
+            .nozzle_temperature
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (nozzle_temperature_initial_layer, set_nozzle_temperature_initial_layer) = signal(
+        specs
+            .nozzle_temperature_initial_layer
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (hot_plate_temp, set_hot_plate_temp) = signal(
+        specs
+            .hot_plate_temp
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (cool_plate_temp, set_cool_plate_temp) = signal(
+        specs
+            .cool_plate_temp
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (eng_plate_temp, set_eng_plate_temp) = signal(
+        specs
+            .eng_plate_temp
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (textured_plate_temp, set_textured_plate_temp) = signal(
+        specs
+            .textured_plate_temp
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
 
     // Speed/Flow signals
-    let (max_volumetric_speed, set_max_volumetric_speed) = signal(specs.max_volumetric_speed.map(|v| format!("{:.1}", v)).unwrap_or_default());
-    let (filament_flow_ratio, set_filament_flow_ratio) = signal(specs.filament_flow_ratio.map(|v| format!("{:.2}", v)).unwrap_or_default());
-    let (pressure_advance, set_pressure_advance) = signal(specs.pressure_advance.map(|v| format!("{:.3}", v)).unwrap_or_default());
-    let (max_speed_mm_s, set_max_speed_mm_s) = signal(specs.max_speed_mm_s.map(|v| v.to_string()).unwrap_or_default());
+    let (max_volumetric_speed, set_max_volumetric_speed) = signal(
+        specs
+            .max_volumetric_speed
+            .map(|v| format!("{:.1}", v))
+            .unwrap_or_default(),
+    );
+    let (filament_flow_ratio, set_filament_flow_ratio) = signal(
+        specs
+            .filament_flow_ratio
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_default(),
+    );
+    let (pressure_advance, set_pressure_advance) = signal(
+        specs
+            .pressure_advance
+            .map(|v| format!("{:.3}", v))
+            .unwrap_or_default(),
+    );
+    let (max_speed_mm_s, set_max_speed_mm_s) = signal(
+        specs
+            .max_speed_mm_s
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
 
     // Fan/Cooling signals
-    let (fan_min_speed, set_fan_min_speed) = signal(specs.fan_min_speed.map(|v| v.to_string()).unwrap_or_default());
-    let (fan_max_speed, set_fan_max_speed) = signal(specs.fan_max_speed.map(|v| v.to_string()).unwrap_or_default());
-    let (overhang_fan_speed, set_overhang_fan_speed) = signal(specs.overhang_fan_speed.map(|v| v.to_string()).unwrap_or_default());
-    let (close_fan_first_layers, set_close_fan_first_layers) = signal(specs.close_fan_the_first_x_layers.map(|v| v.to_string()).unwrap_or_default());
-    let (additional_cooling_fan_speed, set_additional_cooling_fan_speed) = signal(specs.additional_cooling_fan_speed.map(|v| v.to_string()).unwrap_or_default());
-    let (slow_down_layer_time, set_slow_down_layer_time) = signal(specs.slow_down_layer_time.map(|v| v.to_string()).unwrap_or_default());
-    let (slow_down_min_speed, set_slow_down_min_speed) = signal(specs.slow_down_min_speed.map(|v| v.to_string()).unwrap_or_default());
+    let (fan_min_speed, set_fan_min_speed) = signal(
+        specs
+            .fan_min_speed
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (fan_max_speed, set_fan_max_speed) = signal(
+        specs
+            .fan_max_speed
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (overhang_fan_speed, set_overhang_fan_speed) = signal(
+        specs
+            .overhang_fan_speed
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (close_fan_first_layers, set_close_fan_first_layers) = signal(
+        specs
+            .close_fan_the_first_x_layers
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (additional_cooling_fan_speed, set_additional_cooling_fan_speed) = signal(
+        specs
+            .additional_cooling_fan_speed
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (slow_down_layer_time, set_slow_down_layer_time) = signal(
+        specs
+            .slow_down_layer_time
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (slow_down_min_speed, set_slow_down_min_speed) = signal(
+        specs
+            .slow_down_min_speed
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
 
     // Retraction signals
-    let (retraction_distance_mm, set_retraction_distance_mm) = signal(specs.retraction_distance_mm.map(|v| format!("{:.1}", v)).unwrap_or_default());
-    let (retraction_speed_mm_s, set_retraction_speed_mm_s) = signal(specs.retraction_speed_mm_s.map(|v| v.to_string()).unwrap_or_default());
-    let (deretraction_speed_mm_s, set_deretraction_speed_mm_s) = signal(specs.deretraction_speed_mm_s.map(|v| v.to_string()).unwrap_or_default());
+    let (retraction_distance_mm, set_retraction_distance_mm) = signal(
+        specs
+            .retraction_distance_mm
+            .map(|v| format!("{:.1}", v))
+            .unwrap_or_default(),
+    );
+    let (retraction_speed_mm_s, set_retraction_speed_mm_s) = signal(
+        specs
+            .retraction_speed_mm_s
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let (deretraction_speed_mm_s, set_deretraction_speed_mm_s) = signal(
+        specs
+            .deretraction_speed_mm_s
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
 
     // Physical signals
-    let (density_g_cm3, set_density_g_cm3) = signal(specs.density_g_cm3.map(|v| format!("{:.2}", v)).unwrap_or_default());
-    let (diameter_mm, set_diameter_mm) = signal(specs.diameter_mm.map(|v| format!("{:.2}", v)).unwrap_or_default());
-    let (filament_cost, set_filament_cost) = signal(specs.filament_cost.map(|v| format!("{:.2}", v)).unwrap_or_default());
-    let (temperature_vitrification, set_temperature_vitrification) = signal(specs.temperature_vitrification.map(|v| v.to_string()).unwrap_or_default());
+    let (density_g_cm3, set_density_g_cm3) = signal(
+        specs
+            .density_g_cm3
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_default(),
+    );
+    let (diameter_mm, set_diameter_mm) = signal(
+        specs
+            .diameter_mm
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_default(),
+    );
+    let (filament_cost, set_filament_cost) = signal(
+        specs
+            .filament_cost
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_default(),
+    );
+    let (temperature_vitrification, set_temperature_vitrification) = signal(
+        specs
+            .temperature_vitrification
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
 
     // Reset handler
     let do_reset = move |_| {
@@ -84,30 +224,102 @@ pub fn SpecsEditor(
         set_nozzle_temp_max.set(o.nozzle_temp_max.map(|v| v.to_string()).unwrap_or_default());
         set_bed_temp_min.set(o.bed_temp_min.map(|v| v.to_string()).unwrap_or_default());
         set_bed_temp_max.set(o.bed_temp_max.map(|v| v.to_string()).unwrap_or_default());
-        set_nozzle_temperature.set(o.nozzle_temperature.map(|v| v.to_string()).unwrap_or_default());
-        set_nozzle_temperature_initial_layer.set(o.nozzle_temperature_initial_layer.map(|v| v.to_string()).unwrap_or_default());
+        set_nozzle_temperature.set(
+            o.nozzle_temperature
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        set_nozzle_temperature_initial_layer.set(
+            o.nozzle_temperature_initial_layer
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
         set_hot_plate_temp.set(o.hot_plate_temp.map(|v| v.to_string()).unwrap_or_default());
         set_cool_plate_temp.set(o.cool_plate_temp.map(|v| v.to_string()).unwrap_or_default());
         set_eng_plate_temp.set(o.eng_plate_temp.map(|v| v.to_string()).unwrap_or_default());
-        set_textured_plate_temp.set(o.textured_plate_temp.map(|v| v.to_string()).unwrap_or_default());
-        set_max_volumetric_speed.set(o.max_volumetric_speed.map(|v| format!("{:.1}", v)).unwrap_or_default());
-        set_filament_flow_ratio.set(o.filament_flow_ratio.map(|v| format!("{:.2}", v)).unwrap_or_default());
-        set_pressure_advance.set(o.pressure_advance.map(|v| format!("{:.3}", v)).unwrap_or_default());
+        set_textured_plate_temp.set(
+            o.textured_plate_temp
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        set_max_volumetric_speed.set(
+            o.max_volumetric_speed
+                .map(|v| format!("{:.1}", v))
+                .unwrap_or_default(),
+        );
+        set_filament_flow_ratio.set(
+            o.filament_flow_ratio
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+        );
+        set_pressure_advance.set(
+            o.pressure_advance
+                .map(|v| format!("{:.3}", v))
+                .unwrap_or_default(),
+        );
         set_max_speed_mm_s.set(o.max_speed_mm_s.map(|v| v.to_string()).unwrap_or_default());
         set_fan_min_speed.set(o.fan_min_speed.map(|v| v.to_string()).unwrap_or_default());
         set_fan_max_speed.set(o.fan_max_speed.map(|v| v.to_string()).unwrap_or_default());
-        set_overhang_fan_speed.set(o.overhang_fan_speed.map(|v| v.to_string()).unwrap_or_default());
-        set_close_fan_first_layers.set(o.close_fan_the_first_x_layers.map(|v| v.to_string()).unwrap_or_default());
-        set_additional_cooling_fan_speed.set(o.additional_cooling_fan_speed.map(|v| v.to_string()).unwrap_or_default());
-        set_slow_down_layer_time.set(o.slow_down_layer_time.map(|v| v.to_string()).unwrap_or_default());
-        set_slow_down_min_speed.set(o.slow_down_min_speed.map(|v| v.to_string()).unwrap_or_default());
-        set_retraction_distance_mm.set(o.retraction_distance_mm.map(|v| format!("{:.1}", v)).unwrap_or_default());
-        set_retraction_speed_mm_s.set(o.retraction_speed_mm_s.map(|v| v.to_string()).unwrap_or_default());
-        set_deretraction_speed_mm_s.set(o.deretraction_speed_mm_s.map(|v| v.to_string()).unwrap_or_default());
-        set_density_g_cm3.set(o.density_g_cm3.map(|v| format!("{:.2}", v)).unwrap_or_default());
-        set_diameter_mm.set(o.diameter_mm.map(|v| format!("{:.2}", v)).unwrap_or_default());
-        set_filament_cost.set(o.filament_cost.map(|v| format!("{:.2}", v)).unwrap_or_default());
-        set_temperature_vitrification.set(o.temperature_vitrification.map(|v| v.to_string()).unwrap_or_default());
+        set_overhang_fan_speed.set(
+            o.overhang_fan_speed
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        set_close_fan_first_layers.set(
+            o.close_fan_the_first_x_layers
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        set_additional_cooling_fan_speed.set(
+            o.additional_cooling_fan_speed
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        set_slow_down_layer_time.set(
+            o.slow_down_layer_time
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        set_slow_down_min_speed.set(
+            o.slow_down_min_speed
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        set_retraction_distance_mm.set(
+            o.retraction_distance_mm
+                .map(|v| format!("{:.1}", v))
+                .unwrap_or_default(),
+        );
+        set_retraction_speed_mm_s.set(
+            o.retraction_speed_mm_s
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        set_deretraction_speed_mm_s.set(
+            o.deretraction_speed_mm_s
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        set_density_g_cm3.set(
+            o.density_g_cm3
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+        );
+        set_diameter_mm.set(
+            o.diameter_mm
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+        );
+        set_filament_cost.set(
+            o.filament_cost
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+        );
+        set_temperature_vitrification.set(
+            o.temperature_vitrification
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
         set_selected_printer.set(PRINTER_OPTIONS[0].to_string());
     };
 
@@ -131,7 +343,8 @@ pub fn SpecsEditor(
         edited.bed_temp_min = parse_u16(&bed_temp_min.get());
         edited.bed_temp_max = parse_u16(&bed_temp_max.get());
         edited.nozzle_temperature = parse_u16(&nozzle_temperature.get());
-        edited.nozzle_temperature_initial_layer = parse_u16(&nozzle_temperature_initial_layer.get());
+        edited.nozzle_temperature_initial_layer =
+            parse_u16(&nozzle_temperature_initial_layer.get());
         edited.hot_plate_temp = parse_u16(&hot_plate_temp.get());
         edited.hot_plate_temp_initial_layer = edited.hot_plate_temp;
         edited.cool_plate_temp = parse_u16(&cool_plate_temp.get());

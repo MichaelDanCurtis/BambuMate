@@ -87,8 +87,7 @@ pub async fn batch_generate_brand(
     let mut failed = 0usize;
 
     // Pre-load registry once for all generations
-    let paths =
-        BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
+    let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
     let system_dir = paths.system_filament_dir();
     let registry = ProfileRegistry::discover_system_profiles(&system_dir)
         .map_err(|e| format!("Failed to load system profiles: {}", e))?;

@@ -19,14 +19,12 @@ use super::types::{FilamentSpecs, MaterialType};
 // ─── Regex patterns ────────────────────────────────────────────────────────
 
 /// Range: "200-230°C", "200 ~ 230 °C", "200°C to 230°C", "200 to 230°C"
-const NOZZLE_RANGE_RE: &str =
-    r"(?i)(?:nozzle|print(?:ing)?|extrusion|hotend)[^\d]{0,30}?(\d{3})\s*[-–~to°]+\s*(\d{3})\s*°?\s*[Cc]";
+const NOZZLE_RANGE_RE: &str = r"(?i)(?:nozzle|print(?:ing)?|extrusion|hotend)[^\d]{0,30}?(\d{3})\s*[-–~to°]+\s*(\d{3})\s*°?\s*[Cc]";
 /// Single nozzle temp: "Nozzle: 210°C"
 const NOZZLE_SINGLE_RE: &str =
     r"(?i)(?:nozzle|print(?:ing)?|extrusion)[^\d]{0,20}?(\d{3})\s*°?\s*[Cc]";
 /// Bed range: "Bed: 55-70°C", "Build Plate: 55–70 °C"
-const BED_RANGE_RE: &str =
-    r"(?i)(?:bed|build\s*plate|heated\s*bed|platform)[^\d]{0,30}?(\d{2,3})\s*[-–~to°]+\s*(\d{2,3})\s*°?\s*[Cc]";
+const BED_RANGE_RE: &str = r"(?i)(?:bed|build\s*plate|heated\s*bed|platform)[^\d]{0,30}?(\d{2,3})\s*[-–~to°]+\s*(\d{2,3})\s*°?\s*[Cc]";
 /// Single bed temp
 const BED_SINGLE_RE: &str =
     r"(?i)(?:bed|build\s*plate|heated\s*bed|platform)[^\d]{0,20}?(\d{2,3})\s*°?\s*[Cc]";
@@ -67,7 +65,10 @@ pub fn extract(html: &str, filament_name: &str) -> FilamentSpecs {
 
     // 1. JSON-LD
     if try_json_ld(&document, &mut specs, &mut confidence) {
-        info!("html_extractor: JSON-LD extraction contributed confidence {:.2}", confidence);
+        info!(
+            "html_extractor: JSON-LD extraction contributed confidence {:.2}",
+            confidence
+        );
     }
 
     // 2. Table rows
@@ -120,7 +121,11 @@ fn try_json_ld(document: &Html, specs: &mut FilamentSpecs, confidence: &mut f32)
     false
 }
 
-fn extract_from_json_ld_value(val: &Value, specs: &mut FilamentSpecs, confidence: &mut f32) -> bool {
+fn extract_from_json_ld_value(
+    val: &Value,
+    specs: &mut FilamentSpecs,
+    confidence: &mut f32,
+) -> bool {
     // Handle arrays at the top level
     if let Some(arr) = val.as_array() {
         for item in arr {
@@ -146,12 +151,21 @@ fn extract_from_json_ld_value(val: &Value, specs: &mut FilamentSpecs, confidence
     // additionalProperty array: [{name:"Nozzle Temperature", value:"200-230°C"}, ...]
     if let Some(props) = val.get("additionalProperty").and_then(|v| v.as_array()) {
         for prop in props {
-            let prop_name = prop.get("name").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-            let prop_value = prop.get("value").and_then(|v| v.as_str())
+            let prop_name = prop
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let prop_value = prop
+                .get("value")
+                .and_then(|v| v.as_str())
                 .or_else(|| prop.get("unitText").and_then(|v| v.as_str()))
                 .unwrap_or("");
 
-            if prop_name.contains("nozzle") || prop_name.contains("print") || prop_name.contains("extru") {
+            if prop_name.contains("nozzle")
+                || prop_name.contains("print")
+                || prop_name.contains("extru")
+            {
                 if let Some((lo, hi)) = parse_temp_range(prop_value) {
                     specs.nozzle_temp_min = Some(lo);
                     specs.nozzle_temp_max = Some(hi);
@@ -159,7 +173,10 @@ fn extract_from_json_ld_value(val: &Value, specs: &mut FilamentSpecs, confidence
                     *confidence += 0.35;
                     found = true;
                 }
-            } else if prop_name.contains("bed") || prop_name.contains("build plate") || prop_name.contains("platform") {
+            } else if prop_name.contains("bed")
+                || prop_name.contains("build plate")
+                || prop_name.contains("platform")
+            {
                 if let Some((lo, hi)) = parse_temp_range(prop_value) {
                     specs.bed_temp_min = Some(lo);
                     specs.bed_temp_max = Some(hi);
@@ -179,8 +196,11 @@ fn extract_from_json_ld_value(val: &Value, specs: &mut FilamentSpecs, confidence
                 }
             } else if prop_name.contains("densit") {
                 if let Ok(d) = prop_value
-                    .trim_end_matches("g/cm³").trim_end_matches("g/cm3").trim()
-                    .parse::<f32>() {
+                    .trim_end_matches("g/cm³")
+                    .trim_end_matches("g/cm3")
+                    .trim()
+                    .parse::<f32>()
+                {
                     specs.density_g_cm3 = Some(d);
                 }
             }
@@ -231,10 +251,12 @@ fn try_definition_lists(document: &Html, specs: &mut FilamentSpecs, confidence: 
     let dt_sel = Selector::parse("dt").unwrap();
     let dd_sel = Selector::parse("dd").unwrap();
 
-    let dts: Vec<String> = document.select(&dt_sel)
+    let dts: Vec<String> = document
+        .select(&dt_sel)
         .map(|el| el.text().collect::<String>().trim().to_lowercase())
         .collect();
-    let dds: Vec<String> = document.select(&dd_sel)
+    let dds: Vec<String> = document
+        .select(&dd_sel)
         .map(|el| el.text().collect::<String>().trim().to_string())
         .collect();
 
@@ -246,10 +268,14 @@ fn try_definition_lists(document: &Html, specs: &mut FilamentSpecs, confidence: 
 // ─── Shared label→field mapping ─────────────────────────────────────────────
 
 fn apply_label_value(label: &str, value: &str, specs: &mut FilamentSpecs, confidence: &mut f32) {
-    let is_nozzle = label.contains("nozzle") || label.contains("print temp")
-        || label.contains("extrusion") || label.contains("hotend");
-    let is_bed = label.contains("bed") || label.contains("build plate")
-        || label.contains("heated") || label.contains("platform");
+    let is_nozzle = label.contains("nozzle")
+        || label.contains("print temp")
+        || label.contains("extrusion")
+        || label.contains("hotend");
+    let is_bed = label.contains("bed")
+        || label.contains("build plate")
+        || label.contains("heated")
+        || label.contains("platform");
     let is_density = label.contains("densit");
     let is_diameter = label.contains("diam");
 
@@ -270,7 +296,12 @@ fn apply_label_value(label: &str, value: &str, specs: &mut FilamentSpecs, confid
             *confidence += 0.10;
         }
     } else if is_density && specs.density_g_cm3.is_none() {
-        if let Ok(d) = value.trim_end_matches("g/cm³").trim_end_matches("g/cm3").trim().parse::<f32>() {
+        if let Ok(d) = value
+            .trim_end_matches("g/cm³")
+            .trim_end_matches("g/cm3")
+            .trim()
+            .parse::<f32>()
+        {
             specs.density_g_cm3 = Some(d);
         }
     } else if is_diameter && specs.diameter_mm.is_none() {

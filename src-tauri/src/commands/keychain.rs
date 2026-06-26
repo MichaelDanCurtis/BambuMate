@@ -11,11 +11,17 @@ pub fn set_api_key(service: &str, key: &str) -> Result<(), String> {
     info!("Setting API key for service: {}", service);
     let entry = Entry::new(service, "bambumate").map_err(|e| {
         warn!("Failed to create keyring entry for {}: {}", service, e);
-        format!("Credential store unavailable: {}. Ensure your OS credential manager is running.", e)
+        format!(
+            "Credential store unavailable: {}. Ensure your OS credential manager is running.",
+            e
+        )
     })?;
     entry.set_password(key).map_err(|e| {
         warn!("Failed to set password for {}: {}", service, e);
-        format!("Failed to save API key: {}. Check that your OS credential manager is accessible.", e)
+        format!(
+            "Failed to save API key: {}. Check that your OS credential manager is accessible.",
+            e
+        )
     })
 }
 
@@ -28,7 +34,10 @@ pub fn get_api_key(service: &str) -> Result<Option<String>, String> {
     info!("Getting API key for service: {}", service);
     let entry = Entry::new(service, "bambumate").map_err(|e| {
         warn!("Failed to create keyring entry for {}: {}", service, e);
-        format!("Credential store unavailable: {}. Ensure your OS credential manager is running.", e)
+        format!(
+            "Credential store unavailable: {}. Ensure your OS credential manager is running.",
+            e
+        )
     })?;
     match entry.get_password() {
         Ok(password) => Ok(Some(password)),

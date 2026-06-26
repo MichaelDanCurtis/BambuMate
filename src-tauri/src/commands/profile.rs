@@ -9,7 +9,9 @@ use crate::profile::paths::BambuPaths;
 use crate::profile::reader::{read_profile, read_profile_metadata};
 use crate::profile::registry::ProfileRegistry;
 use crate::profile::types::{FilamentProfile, ProfileMetadata};
-use crate::profile::writer::{write_profile_atomic, write_profile_with_metadata, register_filament_in_conf};
+use crate::profile::writer::{
+    register_filament_in_conf, write_profile_atomic, write_profile_with_metadata,
+};
 
 /// Summary information for a filament profile (used in list views).
 #[derive(Debug, Clone, Serialize)]
@@ -70,10 +72,7 @@ pub fn list_profiles() -> Result<Vec<ProfileInfo>, String> {
 
     let mut profiles: Vec<ProfileInfo> = Vec::new();
 
-    for entry in WalkDir::new(&user_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&user_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -84,10 +83,7 @@ pub fn list_profiles() -> Result<Vec<ProfileInfo>, String> {
 
         match read_profile(path) {
             Ok(profile) => {
-                let name = profile
-                    .name()
-                    .unwrap_or("<unnamed>")
-                    .to_string();
+                let name = profile.name().unwrap_or("<unnamed>").to_string();
 
                 profiles.push(ProfileInfo {
                     name,
@@ -176,8 +172,7 @@ pub fn get_system_profile_count() -> Result<usize, String> {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.path().is_file()
-                && e.path().extension().and_then(|ext| ext.to_str()) == Some("json")
+            e.path().is_file() && e.path().extension().and_then(|ext| ext.to_str()) == Some("json")
         })
         .count();
 
@@ -207,10 +202,7 @@ pub fn list_system_profiles() -> Result<Vec<ProfileInfo>, String> {
 
     let mut profiles: Vec<ProfileInfo> = Vec::new();
 
-    for entry in WalkDir::new(&system_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&system_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -347,8 +339,12 @@ pub async fn generate_profile_from_specs(
             .name()
             .ok_or_else(|| "Selected base profile has no name".to_string())?
             .to_string();
-        let resolved = resolve_inheritance(&selected, &registry)
-            .map_err(|e| format!("Failed to resolve selected base profile '{}': {}", selected_name, e))?;
+        let resolved = resolve_inheritance(&selected, &registry).map_err(|e| {
+            format!(
+                "Failed to resolve selected base profile '{}': {}",
+                selected_name, e
+            )
+        })?;
         registry.insert(selected);
         (selected_name, resolved)
     } else {
@@ -358,20 +354,23 @@ pub async fn generate_profile_from_specs(
                 default_base_name
             )
         })?;
-        let resolved = resolve_inheritance(base, &registry)
-            .map_err(|e| format!("Failed to resolve base profile '{}': {}", default_base_name, e))?;
+        let resolved = resolve_inheritance(base, &registry).map_err(|e| {
+            format!(
+                "Failed to resolve base profile '{}': {}",
+                default_base_name, e
+            )
+        })?;
         (default_base_name, resolved)
     };
 
     // Generate the profile
-    let (profile, metadata, filename) =
-        generator::generate_profile(
-            &specs,
-            &registry,
-            target_printer.as_deref(),
-            Some(base_name.as_str()),
-        )
-            .map_err(|e| format!("Failed to generate profile: {}", e))?;
+    let (profile, metadata, filename) = generator::generate_profile(
+        &specs,
+        &registry,
+        target_printer.as_deref(),
+        Some(base_name.as_str()),
+    )
+    .map_err(|e| format!("Failed to generate profile: {}", e))?;
 
     // Compute diffs between base and generated profile
     let diffs = compute_profile_diffs(&base_resolved, &profile);
@@ -420,10 +419,7 @@ pub async fn generate_profile_from_specs(
         }),
     };
 
-    let profile_name = profile
-        .name()
-        .unwrap_or("<unnamed>")
-        .to_string();
+    let profile_name = profile.name().unwrap_or("<unnamed>").to_string();
 
     info!(
         "Generated profile '{}' with {} fields, {} diffs from base (base: {})",
@@ -462,8 +458,8 @@ pub async fn install_generated_profile(
     info!("install_generated_profile called for: {}", filename);
 
     // Parse the profile and metadata back from serialized form
-    let profile =
-        FilamentProfile::from_json(&profile_json).map_err(|e| format!("Invalid profile JSON: {}", e))?;
+    let profile = FilamentProfile::from_json(&profile_json)
+        .map_err(|e| format!("Invalid profile JSON: {}", e))?;
     let metadata = ProfileMetadata::from_info_string(&metadata_info)
         .map_err(|e| format!("Invalid metadata: {}", e))?;
 
@@ -494,20 +490,14 @@ pub async fn install_generated_profile(
 
     // Check for existing file
     if target_path.exists() {
-        info!(
-            "Overwriting existing profile at {:?}",
-            target_path
-        );
+        info!("Overwriting existing profile at {:?}", target_path);
     }
 
     // Write profile + metadata atomically
     write_profile_with_metadata(&profile, &target_path, &metadata)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
 
-    let profile_name = profile
-        .name()
-        .unwrap_or("<unnamed>")
-        .to_string();
+    let profile_name = profile.name().unwrap_or("<unnamed>").to_string();
 
     // Register the filament in BambuStudio.conf so it appears as visible/available.
     // The profile name in the filaments array is the file stem (filename without .json).
@@ -522,10 +512,7 @@ pub async fn install_generated_profile(
         );
     }
 
-    info!(
-        "Installed profile '{}' to {:?}",
-        profile_name, target_path
-    );
+    info!("Installed profile '{}' to {:?}", profile_name, target_path);
 
     Ok(InstallResult {
         installed_path: target_path.to_string_lossy().to_string(),
@@ -592,9 +579,7 @@ pub fn update_profile_field(
     let json_value: serde_json::Value =
         serde_json::from_str(&value).map_err(|e| format!("Invalid JSON value: {}", e))?;
 
-    profile
-        .raw_mut()
-        .insert(key.clone(), json_value);
+    profile.raw_mut().insert(key.clone(), json_value);
 
     write_profile_atomic(&profile, file_path)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
@@ -658,7 +643,9 @@ pub fn duplicate_profile(path: String, new_name: String) -> Result<ProfileDetail
 /// Reads the profile and maps BS profile fields back to the FilamentSpecs struct,
 /// so the SpecsEditor UI can display and edit them.
 #[tauri::command]
-pub fn extract_specs_from_profile(path: String) -> Result<crate::scraper::types::FilamentSpecs, String> {
+pub fn extract_specs_from_profile(
+    path: String,
+) -> Result<crate::scraper::types::FilamentSpecs, String> {
     let file_path = std::path::Path::new(&path);
     let profile = read_profile(file_path).map_err(|e| e.to_string())?;
     Ok(generator::extract_specs_from_profile(&profile))
@@ -715,16 +702,37 @@ pub struct CompareResult {
 fn key_to_category(key: &str) -> &'static str {
     match key {
         k if k.contains("temperature") || k.contains("temp") => "Temperature",
-        k if k.contains("speed") || k.contains("flow") || k.contains("volumetric")
-            || k.contains("acceleration") || k.contains("jerk") => "Speed & Flow",
+        k if k.contains("speed")
+            || k.contains("flow")
+            || k.contains("volumetric")
+            || k.contains("acceleration")
+            || k.contains("jerk") =>
+        {
+            "Speed & Flow"
+        }
         k if k.contains("fan") || k.contains("cool") || k.contains("slow_down") => "Cooling & Fan",
         k if k.contains("retract") || k.contains("wipe") || k.contains("z_hop") => "Retraction",
-        k if k.contains("density") || k.contains("diameter") || k.contains("cost")
-            || k.contains("vitrification") || k.contains("shrinkage") => "Physical Properties",
-        k if k.contains("name") || k.contains("id") || k.contains("version")
-            || k.contains("inherits") || k.contains("from") || k.contains("vendor")
-            || k.contains("type") || k.contains("compatible") || k.contains("setting")
-            || k.contains("instantiation") => "Identity & Metadata",
+        k if k.contains("density")
+            || k.contains("diameter")
+            || k.contains("cost")
+            || k.contains("vitrification")
+            || k.contains("shrinkage") =>
+        {
+            "Physical Properties"
+        }
+        k if k.contains("name")
+            || k.contains("id")
+            || k.contains("version")
+            || k.contains("inherits")
+            || k.contains("from")
+            || k.contains("vendor")
+            || k.contains("type")
+            || k.contains("compatible")
+            || k.contains("setting")
+            || k.contains("instantiation") =>
+        {
+            "Identity & Metadata"
+        }
         _ => "Other",
     }
 }
@@ -772,15 +780,12 @@ pub fn compare_profiles(
 
         if is_different || show_identical {
             let cat = key_to_category(key);
-            category_map
-                .entry(cat)
-                .or_default()
-                .push(ProfileDiff {
-                    key: key.clone(),
-                    label: key_to_label(key),
-                    base_value: display_a,
-                    new_value: display_b,
-                });
+            category_map.entry(cat).or_default().push(ProfileDiff {
+                key: key.clone(),
+                label: key_to_label(key),
+                base_value: display_a,
+                new_value: display_b,
+            });
         }
     }
 
@@ -916,7 +921,11 @@ pub fn search_base_profiles(
 
     let mut combined = Vec::new();
 
-    let system_filament_dir = paths.config_root.join("system").join("BBL").join("filament");
+    let system_filament_dir = paths
+        .config_root
+        .join("system")
+        .join("BBL")
+        .join("filament");
     if system_filament_dir.exists() {
         combined.extend(search_profiles_in_dir(
             &system_filament_dir,
@@ -961,10 +970,7 @@ fn search_profiles_in_dir(
     let query_lower = query.to_lowercase();
     let mut matches = Vec::new();
 
-    for entry in WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -1000,7 +1006,6 @@ fn search_profiles_in_dir(
             }
             Err(_) => continue,
         }
-
     }
 
     // Sort by name and truncate to 20 results

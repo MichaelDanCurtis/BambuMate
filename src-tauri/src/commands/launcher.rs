@@ -85,7 +85,6 @@ fn resolve_bs_path(_app: &tauri::AppHandle) -> Result<String, String> {
     Err("Bambu Studio application not found. Please install Bambu Studio.".to_string())
 }
 
-
 /// Get the platform-specific default Bambu Studio path.
 #[cfg(target_os = "macos")]
 fn default_bs_path() -> Option<String> {
@@ -132,10 +131,7 @@ fn default_bs_path() -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn default_bs_path() -> Option<String> {
-    let candidates = [
-        "/usr/bin/BambuStudio",
-        "/opt/BambuStudio/BambuStudio",
-    ];
+    let candidates = ["/usr/bin/BambuStudio", "/opt/BambuStudio/BambuStudio"];
     for path in &candidates {
         if std::path::Path::new(path).exists() {
             return Some(path.to_string());
@@ -179,10 +175,7 @@ fn search_bs_path() -> Option<String> {
 
     // 2. Search PATH for both possible executable names
     for exe_name in &["BambuStudio.exe", "bambu-studio.exe"] {
-        if let Ok(output) = std::process::Command::new("where")
-            .arg(exe_name)
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new("where").arg(exe_name).output() {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if let Some(line) = stdout.lines().next() {
@@ -260,7 +253,10 @@ fn search_registry_for_bs() -> Option<String> {
 
     // Also try searching all uninstall entries for "Bambu Studio" display name
     for hive in &["HKLM", "HKCU"] {
-        let uninstall_key = format!(r"{}\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", hive);
+        let uninstall_key = format!(
+            r"{}\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            hive
+        );
         if let Ok(output) = std::process::Command::new("reg")
             .args(["query", &uninstall_key, "/s", "/v", "DisplayName"])
             .output()
@@ -281,17 +277,30 @@ fn search_registry_for_bs() -> Option<String> {
                                     .output()
                                 {
                                     if loc_output.status.success() {
-                                        let loc_stdout = String::from_utf8_lossy(&loc_output.stdout);
+                                        let loc_stdout =
+                                            String::from_utf8_lossy(&loc_output.stdout);
                                         for loc_line in loc_stdout.lines() {
-                                            if loc_line.trim_start().starts_with("InstallLocation") {
-                                                let parts: Vec<&str> = loc_line.splitn(4, "    ").collect();
+                                            if loc_line.trim_start().starts_with("InstallLocation")
+                                            {
+                                                let parts: Vec<&str> =
+                                                    loc_line.splitn(4, "    ").collect();
                                                 if let Some(install_dir) = parts.last() {
                                                     let install_dir = install_dir.trim();
                                                     if !install_dir.is_empty() {
-                                                        for exe in &["bambu-studio.exe", "BambuStudio.exe"] {
-                                                            let exe_path = std::path::PathBuf::from(install_dir).join(exe);
+                                                        for exe in
+                                                            &["bambu-studio.exe", "BambuStudio.exe"]
+                                                        {
+                                                            let exe_path =
+                                                                std::path::PathBuf::from(
+                                                                    install_dir,
+                                                                )
+                                                                .join(exe);
                                                             if exe_path.exists() {
-                                                                return Some(exe_path.to_string_lossy().to_string());
+                                                                return Some(
+                                                                    exe_path
+                                                                        .to_string_lossy()
+                                                                        .to_string(),
+                                                                );
                                                             }
                                                         }
                                                     }

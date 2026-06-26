@@ -66,14 +66,20 @@ fn get_api_key_for_provider(app: &tauri::AppHandle, provider: &str) -> Result<St
         "openai" => "bambumate-openai-api",
         "kimi" => "bambumate-kimi-api",
         "openrouter" => "bambumate-openrouter-api",
-        _ => return Err(format!("Unknown AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local", provider)),
+        _ => {
+            return Err(format!(
+                "Unknown AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
+                provider
+            ))
+        }
     };
     let entry = Entry::new(service, "bambumate").map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(key) => Ok(key),
-        Err(keyring::Error::NoEntry) => {
-            Err(format!("No API key configured for '{}'. Please set it in Settings.", provider))
-        }
+        Err(keyring::Error::NoEntry) => Err(format!(
+            "No API key configured for '{}'. Please set it in Settings.",
+            provider
+        )),
         Err(e) => Err(format!("Failed to read API key for '{}': {}", provider, e)),
     }
 }
@@ -103,7 +109,10 @@ pub async fn search_filament(
     let cache_dir = get_cache_dir(&app)?;
 
     if !use_ai_for_filament(&app) {
-        info!("web-only mode: using html_extractor for '{}'", filament_name);
+        info!(
+            "web-only mode: using html_extractor for '{}'",
+            filament_name
+        );
         return crate::scraper::search_filament_web_only(&filament_name, &cache_dir).await;
     }
 
@@ -151,7 +160,10 @@ pub async fn extract_specs_from_url(
     url: String,
     filament_name: String,
 ) -> Result<FilamentSpecs, String> {
-    info!("extract_specs_from_url called for '{}' from '{}'", filament_name, url);
+    info!(
+        "extract_specs_from_url called for '{}' from '{}'",
+        filament_name, url
+    );
 
     let cache_dir = get_cache_dir(&app)?;
     let http_client = crate::scraper::http_client::ScraperHttpClient::new();
@@ -179,7 +191,8 @@ pub async fn extract_specs_from_url(
             if let Ok(cache) = crate::scraper::cache::FilamentCache::new(&db_path) {
                 let _ = cache.put(&store_name, &store_specs, 30);
             }
-        }).await;
+        })
+        .await;
 
         return Ok(specs);
     }
@@ -191,18 +204,32 @@ pub async fn extract_specs_from_url(
 
     // Send raw HTML directly to LLM — much better at extracting structured data
     let mut specs = crate::scraper::extraction::extract_specs_from_html(
-        &html, &filament_name, &provider, &model, &api_key
-    ).await?;
+        &html,
+        &filament_name,
+        &provider,
+        &model,
+        &api_key,
+    )
+    .await?;
     specs.source_url = url.clone();
 
     // If HTML extraction got low confidence, fall back to text extraction
     if specs.extraction_confidence < 0.3 {
-        info!("HTML extraction got low confidence ({:.2}), trying text extraction fallback", specs.extraction_confidence);
+        info!(
+            "HTML extraction got low confidence ({:.2}), trying text extraction fallback",
+            specs.extraction_confidence
+        );
         let text = crate::scraper::http_client::ScraperHttpClient::html_to_text(&html);
         if !text.trim().is_empty() && text.len() >= 100 {
             if let Ok(text_specs) = crate::scraper::extraction::extract_specs(
-                &text, &filament_name, &provider, &model, &api_key
-            ).await {
+                &text,
+                &filament_name,
+                &provider,
+                &model,
+                &api_key,
+            )
+            .await
+            {
                 if text_specs.extraction_confidence > specs.extraction_confidence {
                     specs = text_specs;
                     specs.source_url = url.clone();
@@ -219,7 +246,8 @@ pub async fn extract_specs_from_url(
         if let Ok(cache) = crate::scraper::cache::FilamentCache::new(&db_path) {
             let _ = cache.put(&store_name, &store_specs, 30);
         }
-    }).await;
+    })
+    .await;
 
     Ok(specs)
 }
@@ -402,7 +430,10 @@ pub async fn fetch_filament_from_catalog(
 
     let mut specs = if !use_ai_for_filament(&app) {
         // Web-only: pure HTML extraction
-        info!("web-only mode: using html_extractor for catalog entry '{}'", filament_name);
+        info!(
+            "web-only mode: using html_extractor for catalog entry '{}'",
+            filament_name
+        );
         crate::scraper::html_extractor::extract(&html, &filament_name)
     } else {
         // AI path
@@ -413,8 +444,14 @@ pub async fn fetch_filament_from_catalog(
         if text.trim().is_empty() {
             return Err(format!("Empty page content from {}", entry.full_url));
         }
-        crate::scraper::extraction::extract_specs(&text, &filament_name, &provider, &model, &api_key)
-            .await?
+        crate::scraper::extraction::extract_specs(
+            &text,
+            &filament_name,
+            &provider,
+            &model,
+            &api_key,
+        )
+        .await?
     };
 
     specs.source_url = entry.full_url;

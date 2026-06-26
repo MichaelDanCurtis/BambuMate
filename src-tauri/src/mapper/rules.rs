@@ -71,11 +71,7 @@ mod tests {
     #[test]
     fn test_default_rules_has_seven_defect_types() {
         let rules = default_rules();
-        assert_eq!(
-            rules.defects.len(),
-            7,
-            "Should have exactly 7 defect types"
-        );
+        assert_eq!(rules.defects.len(), 7, "Should have exactly 7 defect types");
 
         // Verify expected defect types exist
         assert!(rules.defects.contains_key("stringing"));
@@ -96,10 +92,7 @@ mod tests {
             .filter(|r| r.defect == "stringing")
             .collect();
 
-        assert!(
-            !stringing_rules.is_empty(),
-            "Should have stringing rules"
-        );
+        assert!(!stringing_rules.is_empty(), "Should have stringing rules");
 
         // Should have retraction adjustment
         let has_retraction = stringing_rules.iter().any(|r| {
@@ -123,9 +116,9 @@ mod tests {
 
         // Should have bed temp adjustment
         let has_bed_temp = warping_rules.iter().any(|r| {
-            r.adjustments.iter().any(|a| {
-                a.parameter.contains("plate_temp")
-            })
+            r.adjustments
+                .iter()
+                .any(|a| a.parameter.contains("plate_temp"))
         });
         assert!(has_bed_temp, "Warping rules should adjust bed temp");
     }
@@ -140,7 +133,8 @@ mod tests {
 
         // Should have retraction/extrusion conflict
         let has_retraction_conflict = rules.conflicts.iter().any(|c| {
-            c.parameters.contains(&"filament_retraction_length".to_string())
+            c.parameters
+                .contains(&"filament_retraction_length".to_string())
         });
         assert!(
             has_retraction_conflict,

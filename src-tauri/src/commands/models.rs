@@ -8,6 +8,15 @@ use tracing::{info, warn};
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
+    pub recommended: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelValidationResult {
+    pub text_ok: bool,
+    pub vision_ok: bool,
+    pub text_message: String,
+    pub vision_message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,9 +44,10 @@ fn get_key_for_provider(provider: &str) -> Result<String, String> {
     let entry = Entry::new(service, "bambumate").map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(key) => Ok(key),
-        Err(keyring::Error::NoEntry) => {
-            Err(format!("No API key configured for {}. Set it above first.", provider))
-        }
+        Err(keyring::Error::NoEntry) => Err(format!(
+            "No API key configured for {}. Set it above first.",
+            provider
+        )),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -90,10 +100,7 @@ pub async fn list_models(app: AppHandle, provider: String) -> Result<Vec<ModelIn
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        warn!(
-            "Models API error for {} ({}): {}",
-            provider, status, body
-        );
+        warn!("Models API error for {} ({}): {}", provider, status, body);
         return Err(format!("API error ({})", status));
     }
 
@@ -106,15 +113,21 @@ pub async fn list_models(app: AppHandle, provider: String) -> Result<Vec<ModelIn
         .data
         .into_iter()
         .map(|m| {
-            let name = m
-                .display_name
-                .or(m.name)
-                .unwrap_or_else(|| m.id.clone());
-            ModelInfo { id: m.id, name }
+            let name = m.display_name.or(m.name).unwrap_or_else(|| m.id.clone());
+            let recommended = is_recommended_model(&provider, &m.id);
+            ModelInfo {
+                id: m.id,
+                name,
+                recommended,
+            }
         })
         .collect();
 
-    result.sort_by(|a, b| a.id.cmp(&b.id));
+    result.sort_by(|a, b| {
+        b.recommended
+            .cmp(&a.recommended)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     info!("Found {} models for {}", result.len(), provider);
     Ok(result)
 }
@@ -130,20 +143,16 @@ async fn list_local_models(app: &AppHandle) -> Result<Vec<ModelInfo>, String> {
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() || e.is_connect() {
-                format!(
-                    "Cannot connect to local server at {}. Is your local model server running?",
-                    base_url
-                )
-            } else {
-                format!("Request failed: {}", e)
-            }
-        })?;
+    let resp = client.get(&url).send().await.map_err(|e| {
+        if e.is_timeout() || e.is_connect() {
+            format!(
+                "Cannot connect to local server at {}. Is your local model server running?",
+                base_url
+            )
+        } else {
+            format!("Request failed: {}", e)
+        }
+    })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -162,15 +171,107 @@ async fn list_local_models(app: &AppHandle) -> Result<Vec<ModelInfo>, String> {
         .data
         .into_iter()
         .map(|m| {
-            let name = m
-                .display_name
-                .or(m.name)
-                .unwrap_or_else(|| m.id.clone());
-            ModelInfo { id: m.id, name }
+            let name = m.display_name.or(m.name).unwrap_or_else(|| m.id.clone());
+            let recommended = is_recommended_model("local", &m.id);
+            ModelInfo {
+                id: m.id,
+                name,
+                recommended,
+            }
         })
         .collect();
 
-    result.sort_by(|a, b| a.id.cmp(&b.id));
+    result.sort_by(|a, b| {
+        b.recommended
+            .cmp(&a.recommended)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     info!("Found {} models from local server", result.len());
     Ok(result)
+}
+
+#[tauri::command]
+pub async fn validate_model(
+    app: AppHandle,
+    provider: String,
+    model: String,
+) -> Result<ModelValidationResult, String> {
+    if model.trim().is_empty() {
+        return Err("Please select a model to validate".to_string());
+    }
+
+    let api_key = if provider == "local" {
+        get_local_server_url(&app)
+    } else {
+        get_key_for_provider(&provider)?
+    };
+
+    let text_result = crate::scraper::extraction::generate_specs_from_knowledge(
+        "Bambu PLA Basic",
+        &provider,
+        &model,
+        &api_key,
+    )
+    .await;
+
+    let text_ok = text_result.is_ok();
+    let text_message = match text_result {
+        Ok(_) => "Filament search check passed.".to_string(),
+        Err(e) => format!("Filament search check failed: {}", e),
+    };
+
+    let probe_image = build_probe_image_bytes()?;
+    let mut probe_settings = std::collections::HashMap::new();
+    probe_settings.insert("nozzle_temperature".to_string(), 220.0);
+    probe_settings.insert("hot_plate_temp".to_string(), 60.0);
+    let vision_result = crate::analyzer::analyze_image(
+        &probe_image,
+        &probe_settings,
+        "PLA",
+        &provider,
+        &model,
+        &api_key,
+    )
+    .await;
+
+    let vision_ok = vision_result.is_ok();
+    let vision_message = match vision_result {
+        Ok(_) => "Print analysis check passed.".to_string(),
+        Err(e) => format!("Print analysis check failed: {}", e),
+    };
+
+    Ok(ModelValidationResult {
+        text_ok,
+        vision_ok,
+        text_message,
+        vision_message,
+    })
+}
+
+fn build_probe_image_bytes() -> Result<Vec<u8>, String> {
+    let image = image::RgbaImage::from_fn(256, 256, |x, y| {
+        let r = (x % 255) as u8;
+        let g = (y % 255) as u8;
+        let b = ((x + y) % 255) as u8;
+        image::Rgba([r, g, b, 255])
+    });
+
+    let mut bytes = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut bytes);
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to build probe image: {}", e))?;
+    Ok(bytes)
+}
+
+fn is_recommended_model(provider: &str, model_id: &str) -> bool {
+    let id = model_id.to_lowercase();
+    match provider {
+        "claude" => id.contains("sonnet"),
+        "openai" => id.contains("gpt-4o"),
+        "kimi" => id.contains("moonshot-v1-128k") || id.contains("kimi-k2"),
+        "openrouter" => id.contains("claude-sonnet-4") || id.contains("gpt-4o"),
+        "local" => false,
+        _ => false,
+    }
 }

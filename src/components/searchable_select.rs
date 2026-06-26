@@ -107,21 +107,20 @@ pub fn SearchableSelect(
         }
         let container = el.unwrap();
 
-        let closure = Closure::<dyn Fn(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-            if let Some(target) = ev.target() {
-                if let Some(node) = target.dyn_ref::<web_sys::Node>() {
-                    if !container.contains(Some(node)) {
-                        set_is_open.set(false);
+        let closure =
+            Closure::<dyn Fn(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
+                if let Some(target) = ev.target() {
+                    if let Some(node) = target.dyn_ref::<web_sys::Node>() {
+                        if !container.contains(Some(node)) {
+                            set_is_open.set(false);
+                        }
                     }
                 }
-            }
-        });
+            });
 
         let window = web_sys::window().unwrap();
-        let _ = window.add_event_listener_with_callback(
-            "mousedown",
-            closure.as_ref().unchecked_ref(),
-        );
+        let _ =
+            window.add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref());
 
         closure.forget();
     });

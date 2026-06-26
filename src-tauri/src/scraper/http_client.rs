@@ -24,7 +24,11 @@ impl RateLimiter {
     /// Wait until enough time has elapsed since the last request to the same domain.
     /// If `extra_delay` is provided and greater than `min_interval`, use it instead
     /// (this supports crawl-delay from robots.txt).
-    pub async fn wait_for_domain(&self, url: &str, extra_delay: Option<Duration>) -> Result<(), String> {
+    pub async fn wait_for_domain(
+        &self,
+        url: &str,
+        extra_delay: Option<Duration>,
+    ) -> Result<(), String> {
         let domain = Url::parse(url)
             .map_err(|e| format!("Failed to parse URL '{}': {}", url, e))?
             .host_str()
@@ -135,7 +139,10 @@ impl RobotsCache {
         }
 
         if !status.is_success() {
-            warn!("robots.txt fetch returned {} for {}, assuming all allowed", status, domain);
+            warn!(
+                "robots.txt fetch returned {} for {}, assuming all allowed",
+                status, domain
+            );
             let robot = Robot::new("BambuMate/1.0", b"")
                 .map_err(|e| format!("Failed to create default robot: {}", e))?;
             let mut cache = self.cache.lock().unwrap();
@@ -258,10 +265,26 @@ mod tests {
     fn test_html_to_text_strips_tags() {
         let html = "<h1>Hello</h1><p>World</p>";
         let text = ScraperHttpClient::html_to_text(html);
-        assert!(text.contains("Hello"), "Expected 'Hello' in output: {}", text);
-        assert!(text.contains("World"), "Expected 'World' in output: {}", text);
-        assert!(!text.contains("<h1>"), "Expected no HTML tags in output: {}", text);
-        assert!(!text.contains("<p>"), "Expected no HTML tags in output: {}", text);
+        assert!(
+            text.contains("Hello"),
+            "Expected 'Hello' in output: {}",
+            text
+        );
+        assert!(
+            text.contains("World"),
+            "Expected 'World' in output: {}",
+            text
+        );
+        assert!(
+            !text.contains("<h1>"),
+            "Expected no HTML tags in output: {}",
+            text
+        );
+        assert!(
+            !text.contains("<p>"),
+            "Expected no HTML tags in output: {}",
+            text
+        );
     }
 
     #[test]
