@@ -76,6 +76,8 @@ pub fn run() {
             commands::stl_bridge::list_received_stls,
             commands::stl_bridge::clear_received_stls,
             commands::stl_bridge::dismiss_stl,
+            commands::updater::get_app_version,
+            commands::updater::check_for_updates,
         ])
         .setup(|app| {
             // Restore STL watch directory from preferences

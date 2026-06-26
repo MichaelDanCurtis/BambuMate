@@ -56,6 +56,9 @@ pub fn Sidebar() -> impl IntoView {
                 <li class="nav-item">
                     <a href="/health" class="nav-link">"Health Check"</a>
                 </li>
+                <li class="nav-item">
+                    <a href="/about" class="nav-link">"About"</a>
+                </li>
             </ul>
             <div class="sidebar-footer">
                 <StlIndicator />

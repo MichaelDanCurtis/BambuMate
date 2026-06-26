@@ -1,3 +1,4 @@
+pub mod about;
 pub mod batch_generate;
 pub mod filament_search;
 pub mod health;

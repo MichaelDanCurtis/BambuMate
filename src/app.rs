@@ -5,6 +5,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, FeatureFlags};
 use crate::components::sidebar::Sidebar;
+use crate::pages::about::AboutPage;
 use crate::pages::batch_generate::BatchGeneratePage;
 use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
@@ -93,6 +94,7 @@ pub fn App() -> impl IntoView {
                             <Route path=path!("/compare") view=ProfileDiffPage />
                             <Route path=path!("/settings") view=SettingsPage />
                             <Route path=path!("/health") view=HealthPage />
+                            <Route path=path!("/about") view=AboutPage />
                         </Routes>
                     </main>
                 </div>

@@ -1530,3 +1530,42 @@ pub async fn search_base_profiles(
 
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
+
+// -- Version / Auto-Update --
+
+/// Current app version returned by the backend.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VersionInfo {
+    pub current_version: String,
+}
+
+/// Update availability information from GitHub releases.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateInfo {
+    pub has_update: bool,
+    pub latest_version: String,
+    pub release_url: String,
+    pub release_notes: Option<String>,
+}
+
+/// Get the current application version embedded at build time.
+pub async fn get_app_version() -> Result<VersionInfo, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("get_app_version", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Check GitHub releases for a newer version of BambuMate.
+pub async fn check_for_updates() -> Result<UpdateInfo, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("check_for_updates", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
