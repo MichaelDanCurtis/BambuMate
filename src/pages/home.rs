@@ -1,13 +1,34 @@
 use leptos::prelude::*;
 
+use crate::app::FeatureFlagsContext;
+use crate::components::branding::HeroArtwork;
+
+const HERO_EYEBROW: &str = "Bambu Studio workflow";
+const HERO_DESCRIPTION: &str =
+    "Generate cleaner profiles, compare tuned presets, and refine prints with a calmer Bambu-inspired workspace.";
+
 #[component]
 pub fn HomePage() -> impl IntoView {
+    let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
+
     view! {
         <div class="page home-page">
-            <h2>"Welcome to BambuMate"</h2>
-            <p class="page-description">
-                "Optimize your Bambu Studio filament profiles with AI-powered analysis."
-            </p>
+            <section class="hero-panel">
+                <div class="hero-copy">
+                    <span class="hero-eyebrow">{HERO_EYEBROW}</span>
+                    <h2>"Welcome to BambuMate"</h2>
+                    <p class="page-description hero-description">
+                        {HERO_DESCRIPTION}
+                    </p>
+                    <div class="hero-actions">
+                        <a href="/filament" class="btn btn-primary">"Create a Profile"</a>
+                        <Show when=move || ff_ctx.flags.get().analysis_enabled>
+                            <a href="/analysis" class="btn btn-secondary">"Analyze a Print"</a>
+                        </Show>
+                    </div>
+                </div>
+                <HeroArtwork />
+            </section>
 
             <div class="card-grid">
                 <div class="card">
@@ -15,11 +36,13 @@ pub fn HomePage() -> impl IntoView {
                     <p>"Find filament specs and generate optimized profiles"</p>
                     <a href="/filament" class="btn btn-primary">"Search Now"</a>
                 </div>
-                <div class="card">
-                    <h3>"Analyze Print"</h3>
-                    <p>"Upload a photo for AI defect analysis and recommendations"</p>
-                    <a href="/analysis" class="btn btn-primary">"Analyze Now"</a>
-                </div>
+                <Show when=move || ff_ctx.flags.get().analysis_enabled>
+                    <div class="card">
+                        <h3>"Analyze Print"</h3>
+                        <p>"Upload a photo for AI defect analysis and recommendations"</p>
+                        <a href="/analysis" class="btn btn-primary">"Analyze Now"</a>
+                    </div>
+                </Show>
                 <div class="card">
                     <h3>"View Profiles"</h3>
                     <p>"Browse and manage your generated filament profiles"</p>
@@ -44,13 +67,15 @@ pub fn HomePage() -> impl IntoView {
                             <p>"We create an optimized Bambu Studio profile from the specs"</p>
                         </div>
                     </div>
-                    <div class="step">
-                        <span class="step-number">"3"</span>
-                        <div class="step-content">
-                            <strong>"Refine"</strong>
-                            <p>"Print a test, photograph it, and get AI-powered tuning suggestions"</p>
+                    <Show when=move || ff_ctx.flags.get().analysis_enabled>
+                        <div class="step">
+                            <span class="step-number">"3"</span>
+                            <div class="step-content">
+                                <strong>"Refine"</strong>
+                                <p>"Print a test, photograph it, and get AI-powered tuning suggestions"</p>
+                            </div>
                         </div>
-                    </div>
+                    </Show>
                 </div>
             </div>
         </div>

@@ -21,9 +21,7 @@ pub fn StlIndicator() -> impl IntoView {
 
         // Initial fetch
         let cb_ref = callback.as_ref().unchecked_ref();
-        let _ = web_sys::window()
-            .unwrap()
-            .set_timeout_with_callback(cb_ref);
+        let _ = web_sys::window().unwrap().set_timeout_with_callback(cb_ref);
 
         let interval_id = web_sys::window()
             .unwrap()

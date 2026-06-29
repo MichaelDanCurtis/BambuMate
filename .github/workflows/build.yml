@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.1.0). Leave empty for build-only (no release)."
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,7 +33,42 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Determine version
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          VERSION_INPUT: ${{ github.event.inputs.version }}
+          GIT_REF: ${{ github.ref }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$VERSION_INPUT" ]; then
+            VER="${VERSION_INPUT#v}"
+          elif [[ "$GIT_REF" == refs/tags/v* ]]; then
+            VER="${GIT_REF#refs/tags/v}"
+          else
+            VER=""
+          fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Update version in config files
+        if: steps.version.outputs.ver != ''
+        shell: bash
+        env:
+          VER: ${{ steps.version.outputs.ver }}
+        run: |
+          echo "Setting version to $VER"
+          # Update tauri.conf.json (top-level version only)
+          jq --arg v "$VER" '.version = $v' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp && mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
+          # Update src-tauri/Cargo.toml
+          sed -i.bak 's/^version = "[^"]*"/version = "'"$VER"'"/' src-tauri/Cargo.toml && rm -f src-tauri/Cargo.toml.bak
+          # Update root Cargo.toml
+          sed -i.bak 's/^version = "[^"]*"/version = "'"$VER"'"/' Cargo.toml && rm -f Cargo.toml.bak
+          # Verify changes
+          grep '"version"' src-tauri/tauri.conf.json
+          grep '^version' src-tauri/Cargo.toml
+          grep '^version' Cargo.toml
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -38,31 +78,27 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            .
+            src-tauri
 
       - name: Install Trunk
         uses: jetli/trunk-action@v0.5.0
         with:
           version: latest
 
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
-        run: echo "macOS has all required deps pre-installed"
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
 
-      - name: Install Windows dependencies
-        if: runner.os == 'Windows'
-        run: echo "Windows has all required deps pre-installed"
+      - name: Install Tauri CLI
+        run: cargo binstall tauri-cli --version "^2" --no-confirm
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          args: --target ${{ matrix.target }}
+        run: cargo tauri build --target ${{ matrix.target }}
 
       - name: Upload macOS artifacts
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BambuMate-${{ matrix.target }}
           path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
@@ -70,7 +106,7 @@ jobs:
 
       - name: Upload Windows artifacts
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BambuMate-${{ matrix.target }}
           path: |
@@ -79,7 +115,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -87,13 +123,26 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
+      - name: Determine version tag
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          VERSION_INPUT: ${{ github.event.inputs.version }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "tag=$VERSION_INPUT" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
           draft: true
           generate_release_notes: true
           files: |

@@ -28,8 +28,12 @@ pub const MIN_IMAGE_DIMENSION: u32 = 200;
 /// - Image too small (< 200px on shortest side)
 pub fn prepare_image(image_bytes: &[u8]) -> Result<String, String> {
     // Load image
-    let img = image::load_from_memory(image_bytes)
-        .map_err(|e| format!("Failed to load image: {}. Ensure it's a valid JPEG/PNG/WebP.", e))?;
+    let img = image::load_from_memory(image_bytes).map_err(|e| {
+        format!(
+            "Failed to load image: {}. Ensure it's a valid JPEG/PNG/WebP.",
+            e
+        )
+    })?;
 
     let (width, height) = (img.width(), img.height());
     info!("Loaded image: {}x{}", width, height);

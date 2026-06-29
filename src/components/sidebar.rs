@@ -1,25 +1,46 @@
 use leptos::prelude::*;
 
+use crate::app::FeatureFlagsContext;
+use crate::components::branding::BrandMark;
 use crate::components::stl_indicator::StlIndicator;
 
 #[component]
 pub fn Sidebar() -> impl IntoView {
+    let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
+
     view! {
         <nav class="sidebar">
             <div class="sidebar-header">
-                <h1 class="sidebar-title">"BambuMate"</h1>
-                <p class="sidebar-subtitle">"Filament Profile Manager"</p>
+                <div class="sidebar-brand">
+                    <BrandMark />
+                    <div>
+                        <h1 class="sidebar-title">"BambuMate"</h1>
+                        <p class="sidebar-subtitle">"Studio-inspired filament workflow"</p>
+                    </div>
+                </div>
             </div>
             <ul class="nav-list">
                 <li class="nav-item">
                     <a href="/" class="nav-link">"Home"</a>
                 </li>
                 <li class="nav-item">
-                    <a href="/filament" class="nav-link">"Filament Search"</a>
+                    <a href="/filament" class="nav-link">"Create Profile"</a>
                 </li>
-                <li class="nav-item">
-                    <a href="/analysis" class="nav-link">"Print Analysis"</a>
-                </li>
+                <Show
+                    when=move || ff_ctx.flags.get().analysis_enabled
+                    fallback=move || view! {
+                        <li class="nav-item nav-item-locked" title="Requires AI — enable in Settings">
+                            <a href="/analysis" class="nav-link nav-link-locked">
+                                "Print Analysis"
+                                <span class="nav-lock-icon">" 🔒"</span>
+                            </a>
+                        </li>
+                    }
+                >
+                    <li class="nav-item">
+                        <a href="/analysis" class="nav-link">"Print Analysis"</a>
+                    </li>
+                </Show>
                 <li class="nav-item">
                     <a href="/profiles" class="nav-link">"Profiles"</a>
                 </li>
@@ -34,6 +55,9 @@ pub fn Sidebar() -> impl IntoView {
                 </li>
                 <li class="nav-item">
                     <a href="/health" class="nav-link">"Health Check"</a>
+                </li>
+                <li class="nav-item">
+                    <a href="/about" class="nav-link">"About"</a>
                 </li>
             </ul>
             <div class="sidebar-footer">

@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use bambumate_tauri::profile::*;
 use bambumate_tauri::profile::reader::read_profile;
-use bambumate_tauri::profile::writer::{write_profile_atomic, write_profile_with_metadata};
 use bambumate_tauri::profile::types::ProfileMetadata;
+use bambumate_tauri::profile::writer::{write_profile_atomic, write_profile_with_metadata};
+use bambumate_tauri::profile::*;
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -18,7 +18,11 @@ fn test_round_trip_preserves_all_fields() {
     let profile = read_profile(&path).expect("Failed to read fixture");
 
     let original_count = profile.field_count();
-    assert!(original_count > 30, "Fixture should have 30+ fields, got {}", original_count);
+    assert!(
+        original_count > 30,
+        "Fixture should have 30+ fields, got {}",
+        original_count
+    );
 
     // Serialize and re-parse
     let json = profile.to_json_4space().expect("Failed to serialize");
@@ -57,7 +61,8 @@ fn test_round_trip_byte_identical() {
     let output = profile.to_json_4space().expect("Failed to serialize");
 
     assert_eq!(
-        raw_input, output,
+        raw_input,
+        output,
         "Round-trip produced different bytes.\n\
          Input length: {}, Output length: {}\n\
          First difference at byte: {}",
@@ -143,7 +148,9 @@ fn test_dual_extruder_arrays_preserved() {
     }
 
     // Verify specific values
-    let temps = reparsed.nozzle_temperature().expect("nozzle_temperature missing");
+    let temps = reparsed
+        .nozzle_temperature()
+        .expect("nozzle_temperature missing");
     assert_eq!(temps, vec!["220", "220"]);
 
     // Verify percentages are preserved as strings
@@ -218,13 +225,11 @@ fn test_atomic_write_with_metadata() {
 
     // Verify JSON content
     let written_json = std::fs::read_to_string(&target_json).expect("Failed to read written JSON");
-    let reparsed =
-        FilamentProfile::from_json(&written_json).expect("Written JSON is not valid");
+    let reparsed = FilamentProfile::from_json(&written_json).expect("Written JSON is not valid");
     assert_eq!(profile.name(), reparsed.name());
 
     // Verify metadata content
-    let written_info =
-        std::fs::read_to_string(&target_info).expect("Failed to read written .info");
+    let written_info = std::fs::read_to_string(&target_info).expect("Failed to read written .info");
     let reparsed_meta =
         ProfileMetadata::from_info_string(&written_info).expect("Written .info is not valid");
     assert_eq!(metadata.user_id, reparsed_meta.user_id);

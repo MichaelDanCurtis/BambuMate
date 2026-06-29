@@ -60,17 +60,31 @@ pub fn apply_specs_to_profile(profile: &mut FilamentProfile, specs: &FilamentSpe
     if let Some(temp) = specs.nozzle_temperature.or(specs.nozzle_temp_max) {
         set_dual(profile, "nozzle_temperature", temp.to_string());
     }
-    if let Some(temp) = specs.nozzle_temperature_initial_layer.or(
-        specs.nozzle_temperature.map(|t| t + 5).or(specs.nozzle_temp_max.map(|t| t + 5))
-    ) {
-        set_dual(profile, "nozzle_temperature_initial_layer", temp.to_string());
+    if let Some(temp) = specs.nozzle_temperature_initial_layer.or(specs
+        .nozzle_temperature
+        .map(|t| t + 5)
+        .or(specs.nozzle_temp_max.map(|t| t + 5)))
+    {
+        set_dual(
+            profile,
+            "nozzle_temperature_initial_layer",
+            temp.to_string(),
+        );
     }
     // Range bounds for BS temperature slider
     if let Some(temp_max) = specs.nozzle_temp_max {
-        set_dual(profile, "nozzle_temperature_range_high", (temp_max + 20).to_string());
+        set_dual(
+            profile,
+            "nozzle_temperature_range_high",
+            (temp_max + 20).to_string(),
+        );
     }
     if let Some(temp_min) = specs.nozzle_temp_min {
-        set_dual(profile, "nozzle_temperature_range_low", temp_min.to_string());
+        set_dual(
+            profile,
+            "nozzle_temperature_range_low",
+            temp_min.to_string(),
+        );
     }
 
     // === Per-plate bed temperatures ===
@@ -78,31 +92,58 @@ pub fn apply_specs_to_profile(profile: &mut FilamentProfile, specs: &FilamentSpe
     if let Some(temp) = specs.hot_plate_temp.or(specs.bed_temp_max) {
         set_dual(profile, "hot_plate_temp", temp.to_string());
     }
-    if let Some(temp) = specs.hot_plate_temp_initial_layer.or(specs.hot_plate_temp).or(specs.bed_temp_max) {
+    if let Some(temp) = specs
+        .hot_plate_temp_initial_layer
+        .or(specs.hot_plate_temp)
+        .or(specs.bed_temp_max)
+    {
         set_dual(profile, "hot_plate_temp_initial_layer", temp.to_string());
     }
     if let Some(temp) = specs.cool_plate_temp.or(specs.bed_temp_min) {
         set_dual(profile, "cool_plate_temp", temp.to_string());
     }
-    if let Some(temp) = specs.cool_plate_temp_initial_layer.or(specs.cool_plate_temp).or(specs.bed_temp_min) {
+    if let Some(temp) = specs
+        .cool_plate_temp_initial_layer
+        .or(specs.cool_plate_temp)
+        .or(specs.bed_temp_min)
+    {
         set_dual(profile, "cool_plate_temp_initial_layer", temp.to_string());
     }
     if let Some(temp) = specs.eng_plate_temp.or(specs.bed_temp_max) {
         set_dual(profile, "eng_plate_temp", temp.to_string());
     }
-    if let Some(temp) = specs.eng_plate_temp_initial_layer.or(specs.eng_plate_temp).or(specs.bed_temp_max) {
+    if let Some(temp) = specs
+        .eng_plate_temp_initial_layer
+        .or(specs.eng_plate_temp)
+        .or(specs.bed_temp_max)
+    {
         set_dual(profile, "eng_plate_temp_initial_layer", temp.to_string());
     }
-    if let Some(temp) = specs.textured_plate_temp.or(specs.bed_temp_min.map(|t| t.saturating_sub(5))) {
+    if let Some(temp) = specs
+        .textured_plate_temp
+        .or(specs.bed_temp_min.map(|t| t.saturating_sub(5)))
+    {
         set_dual(profile, "textured_plate_temp", temp.to_string());
     }
-    if let Some(temp) = specs.textured_plate_temp_initial_layer.or(specs.textured_plate_temp).or(specs.bed_temp_min.map(|t| t.saturating_sub(5))) {
-        set_dual(profile, "textured_plate_temp_initial_layer", temp.to_string());
+    if let Some(temp) = specs
+        .textured_plate_temp_initial_layer
+        .or(specs.textured_plate_temp)
+        .or(specs.bed_temp_min.map(|t| t.saturating_sub(5)))
+    {
+        set_dual(
+            profile,
+            "textured_plate_temp_initial_layer",
+            temp.to_string(),
+        );
     }
 
     // === Flow & volumetric speed ===
     if let Some(mvs) = specs.max_volumetric_speed {
-        set_dual(profile, "filament_max_volumetric_speed", format!("{:.0}", mvs));
+        set_dual(
+            profile,
+            "filament_max_volumetric_speed",
+            format!("{:.0}", mvs),
+        );
     }
     if let Some(ratio) = specs.filament_flow_ratio {
         set_dual(profile, "filament_flow_ratio", format!("{:.2}", ratio));
@@ -116,7 +157,10 @@ pub fn apply_specs_to_profile(profile: &mut FilamentProfile, specs: &FilamentSpe
     if let Some(fan_max) = specs.fan_max_speed.or(specs.fan_speed_percent) {
         set_dual(profile, "fan_max_speed", fan_max.to_string());
     }
-    if let Some(fan_min) = specs.fan_min_speed.or(specs.fan_speed_percent.map(|f| (f as f32 * 0.6) as u8)) {
+    if let Some(fan_min) = specs
+        .fan_min_speed
+        .or(specs.fan_speed_percent.map(|f| (f as f32 * 0.6) as u8))
+    {
         set_dual(profile, "fan_min_speed", fan_min.to_string());
     }
     if let Some(overhang) = specs.overhang_fan_speed {
@@ -139,7 +183,11 @@ pub fn apply_specs_to_profile(profile: &mut FilamentProfile, specs: &FilamentSpe
 
     // === Retraction ===
     if let Some(dist) = specs.retraction_distance_mm {
-        set_dual(profile, "filament_retraction_length", format!("{:.1}", dist));
+        set_dual(
+            profile,
+            "filament_retraction_length",
+            format!("{:.1}", dist),
+        );
     }
     if let Some(speed) = specs.retraction_speed_mm_s {
         set_dual(profile, "filament_retraction_speed", speed.to_string());
@@ -158,7 +206,11 @@ pub fn apply_specs_to_profile(profile: &mut FilamentProfile, specs: &FilamentSpe
         set_dual(profile, "filament_density", format!("{:.2}", density));
     }
     if let Some(vitrification) = specs.temperature_vitrification {
-        set_dual(profile, "temperature_vitrification", vitrification.to_string());
+        set_dual(
+            profile,
+            "temperature_vitrification",
+            vitrification.to_string(),
+        );
     }
     if let Some(cost) = specs.filament_cost {
         set_dual(profile, "filament_cost", format!("{:.2}", cost));
@@ -195,7 +247,13 @@ pub fn extract_specs_from_profile(profile: &FilamentProfile) -> FilamentSpecs {
         profile
             .get_string_array(key)
             .and_then(|arr| arr.first().map(|s| s.to_string()))
-            .or_else(|| profile.raw().get(key).and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .or_else(|| {
+                profile
+                    .raw()
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .unwrap_or_default()
     };
 
@@ -270,9 +328,11 @@ pub fn generate_profile(
     specs: &FilamentSpecs,
     registry: &ProfileRegistry,
     target_printer: Option<&str>,
+    base_profile_override: Option<&str>,
 ) -> Result<(FilamentProfile, ProfileMetadata, String)> {
     let material = MaterialType::from_str(&specs.material);
-    let base_name = base_profile_name(&material);
+    let default_base = base_profile_name(&material);
+    let base_name = base_profile_override.unwrap_or(default_base);
 
     debug!(
         "Generating profile for {} {} (material={:?}, base={})",
@@ -290,7 +350,10 @@ pub fn generate_profile(
 
     // 2. Set identity fields
     let printer = target_printer.unwrap_or("Bambu Lab H2C 0.4 nozzle");
-    let profile_name = format!("{} {} {} @{}", specs.brand, specs.material, specs.name, printer);
+    let profile_name = format!(
+        "{} {} {} @{}",
+        specs.brand, specs.material, specs.name, printer
+    );
 
     profile.set_string("name", profile_name.clone());
     profile.set_string("inherits", String::new()); // Fully flattened
@@ -326,7 +389,10 @@ pub fn generate_profile(
     };
 
     // 7. Generate filename
-    let filename = format!("{} {} {} @{}.json", specs.brand, specs.material, specs.name, printer);
+    let filename = format!(
+        "{} {} {} @{}.json",
+        specs.brand, specs.material, specs.name, printer
+    );
 
     debug!(
         "Generated profile '{}' with {} fields (base: {})",
@@ -342,7 +408,7 @@ pub fn generate_profile(
 ///
 /// Uses platform-specific process detection:
 /// - macOS/Linux: `pgrep -f BambuStudio`
-/// - Windows: stub (returns false)
+/// - Windows: `tasklist /FI` filtering for BambuStudio.exe
 ///
 /// This is a lightweight check using std::process::Command to avoid
 /// adding the heavyweight sysinfo dependency.
@@ -358,9 +424,23 @@ pub fn is_bambu_studio_running() -> bool {
         .unwrap_or(false)
 }
 
+/// Check if Bambu Studio is currently running on Windows.
+///
+/// Uses `tasklist` to search for both possible process names.
 #[cfg(target_os = "windows")]
 pub fn is_bambu_studio_running() -> bool {
-    false // Windows stub
+    for exe_name in &["BambuStudio.exe", "bambu-studio.exe"] {
+        if let Ok(output) = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {}", exe_name), "/NH"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains(exe_name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(target_os = "linux")]

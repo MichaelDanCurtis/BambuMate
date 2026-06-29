@@ -21,6 +21,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(stl_watcher::StlWatcherState::new())
         .invoke_handler(tauri::generate_handler![
             commands::keychain::set_api_key,
@@ -28,8 +30,15 @@ pub fn run() {
             commands::keychain::delete_api_key,
             commands::config::get_preference,
             commands::config::set_preference,
+            commands::config::get_feature_flags,
+            commands::config::check_setup_complete,
+            commands::config::reset_to_clean_install,
             commands::health::run_health_check,
+            commands::health::search_bambu_studio_config,
+            commands::health::validate_bambu_studio_path,
+            commands::health::pick_config_folder,
             commands::models::list_models,
+            commands::models::validate_model,
             commands::profile::list_profiles,
             commands::profile::list_system_profiles,
             commands::profile::read_profile_command,
@@ -42,6 +51,7 @@ pub fn run() {
             commands::profile::extract_specs_from_profile,
             commands::profile::save_profile_specs,
             commands::profile::compare_profiles,
+            commands::profile::search_base_profiles,
             commands::scraper::search_filament,
             commands::scraper::get_cached_filament,
             commands::scraper::clear_filament_cache,
@@ -58,6 +68,7 @@ pub fn run() {
             commands::history::revert_to_backup,
             commands::launcher::detect_bambu_studio_path,
             commands::launcher::launch_bambu_studio,
+            commands::launcher::open_external_url,
             commands::batch::list_catalog_brands,
             commands::batch::batch_generate_brand,
             commands::stl_bridge::set_stl_watch_dir,
@@ -65,6 +76,8 @@ pub fn run() {
             commands::stl_bridge::list_received_stls,
             commands::stl_bridge::clear_received_stls,
             commands::stl_bridge::dismiss_stl,
+            commands::updater::get_app_version,
+            commands::updater::check_for_updates,
         ])
         .setup(|app| {
             // Restore STL watch directory from preferences

@@ -34,10 +34,7 @@ impl ProfileRegistry {
         let mut count = 0u32;
         let mut skipped = 0u32;
 
-        for entry in WalkDir::new(system_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for entry in WalkDir::new(system_dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
             if !path.is_file() {
                 continue;
@@ -83,10 +80,7 @@ impl ProfileRegistry {
         let mut count = 0u32;
         let mut skipped = 0u32;
 
-        for entry in WalkDir::new(user_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for entry in WalkDir::new(user_dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
             if !path.is_file() {
                 continue;

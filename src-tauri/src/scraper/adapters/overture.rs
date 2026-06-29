@@ -1,4 +1,4 @@
-use super::{slugify, strip_brand, spoolscout, BrandAdapter};
+use super::{slugify, spoolscout, strip_brand, BrandAdapter};
 
 pub struct Overture;
 

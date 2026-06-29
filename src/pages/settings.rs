@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::app::FeatureFlagsContext;
 use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
 use crate::theme::ThemeContext;
@@ -9,6 +10,7 @@ use crate::theme::ThemeContext;
 pub fn SettingsPage() -> impl IntoView {
     let (bambu_path, set_bambu_path) = signal(String::new());
     let (path_status, set_path_status) = signal::<Option<String>>(None);
+    let (path_valid, set_path_valid) = signal(false);
     let (stl_watch_dir, set_stl_watch_dir) = signal(String::new());
     let (stl_status, set_stl_status) = signal::<Option<String>>(None);
     let (ai_model, set_ai_model) = signal(String::new());
@@ -17,9 +19,37 @@ pub fn SettingsPage() -> impl IntoView {
     let (models, set_models) = signal::<Vec<ModelInfo>>(vec![]);
     let (models_loading, set_models_loading) = signal(false);
     let (models_error, set_models_error) = signal::<Option<String>>(None);
+    let (model_checking, set_model_checking) = signal(false);
     let (prefs_loaded, set_prefs_loaded) = signal(false);
+    let (local_url, set_local_url) = signal("http://localhost:1234".to_string());
+    let (local_url_status, set_local_url_status) = signal::<Option<String>>(None);
+    let (is_searching_path, set_is_searching_path) = signal(false);
+    let (reset_confirm, set_reset_confirm) = signal(false);
+    let (resetting, set_resetting) = signal(false);
+    let (reset_status, set_reset_status) = signal::<Option<String>>(None);
+    let (filament_ai_enabled, set_filament_ai_enabled) = signal(true);
+    let (filament_ai_status, set_filament_ai_status) = signal::<Option<String>>(None);
 
     let theme_ctx = use_context::<ThemeContext>().expect("ThemeContext not provided");
+    let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
+    let on_bambu_theme = {
+        let theme_ctx = theme_ctx.clone();
+        move |_| {
+            theme_ctx.set_theme.set("bambu".to_string());
+            spawn_local(async move {
+                let _ = commands::set_preference("theme", "bambu").await;
+            });
+        }
+    };
+    let on_dark_theme = {
+        let theme_ctx = theme_ctx.clone();
+        move |_| {
+            theme_ctx.set_theme.set("dark".to_string());
+            spawn_local(async move {
+                let _ = commands::set_preference("theme", "dark").await;
+            });
+        }
+    };
 
     // Load existing preferences on mount
     Effect::new(move |_| {
@@ -49,6 +79,17 @@ pub fn SettingsPage() -> impl IntoView {
                 }
                 Ok(None) => {}
                 Err(_) => {}
+            }
+            match commands::get_preference("local_mcp_url").await {
+                Ok(Some(url)) => {
+                    set_local_url.set(url);
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+            match commands::get_preference("filament_search_use_ai").await {
+                Ok(Some(val)) => set_filament_ai_enabled.set(val != "false"),
+                _ => set_filament_ai_enabled.set(true),
             }
             set_prefs_loaded.set(true);
         });
@@ -90,9 +131,24 @@ pub fn SettingsPage() -> impl IntoView {
     let save_bambu_path = move |_| {
         let path = bambu_path.get();
         spawn_local(async move {
+            // Validate first
+            if let Ok(validation) = commands::validate_bambu_studio_path(&path).await {
+                set_path_valid.set(validation.valid);
+                if !validation.valid {
+                    set_path_status.set(Some(format!("Warning: {}", validation.message)));
+                }
+            }
             match commands::set_preference("bambu_studio_path", &path).await {
                 Ok(()) => {
-                    set_path_status.set(Some("Path saved".to_string()));
+                    if path_valid.get_untracked() {
+                        set_path_status.set(Some("Path saved and validated".to_string()));
+                    } else {
+                        // Keep the warning from validation
+                        let existing = path_status.get_untracked().unwrap_or_default();
+                        if existing.is_empty() {
+                            set_path_status.set(Some("Path saved".to_string()));
+                        }
+                    }
                 }
                 Err(e) => {
                     set_path_status.set(Some(format!("Failed to save: {}", e)));
@@ -101,20 +157,83 @@ pub fn SettingsPage() -> impl IntoView {
         });
     };
 
+    let on_search_path = move |_| {
+        set_is_searching_path.set(true);
+        set_path_status.set(None);
+        spawn_local(async move {
+            match commands::search_bambu_studio_config().await {
+                Ok(path) => {
+                    set_bambu_path.set(path.clone());
+                    if let Ok(validation) = commands::validate_bambu_studio_path(&path).await {
+                        set_path_valid.set(validation.valid);
+                        set_path_status.set(Some(validation.message));
+                    }
+                }
+                Err(e) => {
+                    set_path_status.set(Some(e));
+                    set_path_valid.set(false);
+                }
+            }
+            set_is_searching_path.set(false);
+        });
+    };
+
+    let on_browse_path = move |_| {
+        spawn_local(async move {
+            match commands::pick_config_folder().await {
+                Ok(Some(path_str)) => {
+                    set_bambu_path.set(path_str.clone());
+                    if let Ok(validation) = commands::validate_bambu_studio_path(&path_str).await {
+                        set_path_valid.set(validation.valid);
+                        set_path_status.set(Some(validation.message));
+                    }
+                }
+                Ok(None) => {} // user cancelled
+                Err(_) => {}
+            }
+        });
+    };
+
     let save_model_config = move |_| {
         let model = ai_model.get();
         let provider = ai_provider.get();
+        if model.is_empty() {
+            set_model_status.set(Some("Select a model first".to_string()));
+            return;
+        }
         spawn_local(async move {
+            set_model_checking.set(true);
+            set_model_status.set(Some("Checking model compatibility...".to_string()));
+            let check = commands::validate_model(&provider, &model).await;
+            match check {
+                Ok(result) if result.text_ok && result.vision_ok => {}
+                Ok(result) => {
+                    set_model_status.set(Some(format!(
+                        "{} {}",
+                        result.text_message, result.vision_message
+                    )));
+                    set_model_checking.set(false);
+                    return;
+                }
+                Err(e) => {
+                    set_model_status.set(Some(format!("Model check failed: {}", e)));
+                    set_model_checking.set(false);
+                    return;
+                }
+            }
+
             let model_result = commands::set_preference("ai_model", &model).await;
             let provider_result = commands::set_preference("ai_provider", &provider).await;
             match (model_result, provider_result) {
                 (Ok(()), Ok(())) => {
-                    set_model_status.set(Some("Model configuration saved".to_string()));
+                    set_model_status
+                        .set(Some("Model configuration saved and validated.".to_string()));
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     set_model_status.set(Some(format!("Failed to save: {}", e)));
                 }
             }
+            set_model_checking.set(false);
         });
     };
 
@@ -122,11 +241,35 @@ pub fn SettingsPage() -> impl IntoView {
         let provider = ai_provider.get();
         set_models_loading.set(true);
         set_models_error.set(None);
+        set_model_status.set(None);
         spawn_local(async move {
             match commands::list_models(&provider).await {
                 Ok(model_list) => {
                     set_models.set(model_list);
                     set_models_loading.set(false);
+                    let selected_model = ai_model.get_untracked();
+                    if !selected_model.is_empty() {
+                        set_model_checking.set(true);
+                        set_model_status.set(Some("Checking model compatibility...".to_string()));
+                        match commands::validate_model(&provider, &selected_model).await {
+                            Ok(result) if result.text_ok && result.vision_ok => {
+                                set_model_status.set(Some(
+                                    "Model works for filament search and print analysis."
+                                        .to_string(),
+                                ));
+                            }
+                            Ok(result) => {
+                                set_model_status.set(Some(format!(
+                                    "{} {}",
+                                    result.text_message, result.vision_message
+                                )));
+                            }
+                            Err(e) => {
+                                set_model_status.set(Some(format!("Model check failed: {}", e)));
+                            }
+                        }
+                        set_model_checking.set(false);
+                    }
                 }
                 Err(e) => {
                     set_models_error.set(Some(e));
@@ -144,9 +287,103 @@ pub fn SettingsPage() -> impl IntoView {
         });
     };
 
+    let save_local_url = move |_| {
+        let url = local_url.get();
+        spawn_local(async move {
+            match commands::set_preference("local_mcp_url", &url).await {
+                Ok(()) => set_local_url_status.set(Some("Local server URL saved".to_string())),
+                Err(e) => set_local_url_status.set(Some(format!("Failed: {}", e))),
+            }
+        });
+    };
+
+    let set_filament_ai_mode = move |enabled: bool| {
+        let value = if enabled { "true" } else { "false" };
+        set_filament_ai_enabled.set(enabled);
+        // Also update the feature flags context so Print Analysis locks/unlocks immediately.
+        let mut new_flags = ff_ctx.flags.get();
+        new_flags.analysis_enabled = enabled;
+        ff_ctx.set_flags.set(new_flags);
+        spawn_local(async move {
+            match commands::set_preference("filament_search_use_ai", value).await {
+                Ok(()) => set_filament_ai_status.set(Some(if enabled {
+                    "AI enabled — Print Analysis is available.".to_string()
+                } else {
+                    "Web-only mode — specs pulled from manufacturer sites. Print Analysis disabled."
+                        .to_string()
+                })),
+                Err(e) => set_filament_ai_status.set(Some(format!("Failed to save: {}", e))),
+            }
+        });
+    };
+
+    // Open external URL helper
+    let open_url_handler = |url: &'static str| {
+        move |ev: leptos::ev::MouseEvent| {
+            ev.prevent_default();
+            let url = url.to_string();
+            spawn_local(async move {
+                let _ = commands::open_external_url(&url).await;
+            });
+        }
+    };
+
     view! {
         <div class="page settings-page">
             <h2>"Settings"</h2>
+
+            <section class="settings-section">
+                <h3>"Filament Search Mode"</h3>
+                <p class="section-description">
+                    "Choose whether BambuMate should use AI features (search + print analysis) or web-only filament lookup."
+                </p>
+
+                <div class="form-group">
+                    <div class="wizard-mode-cards">
+                        <div
+                            class={move || if filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
+                            on:click=move |_| set_filament_ai_mode(true)
+                        >
+                            <div class="wizard-mode-icon">"🤖"</div>
+                            <h4>"Use AI Provider (Recommended)"</h4>
+                            <p>
+                                "Use your configured AI provider for filament spec extraction and Print Analysis."
+                            </p>
+                            <ul class="wizard-mode-features">
+                                <li>"✓ AI-powered filament spec extraction"</li>
+                                <li>"✓ Print Analysis (defect detection)"</li>
+                                <li>"✓ Better handling for niche materials"</li>
+                            </ul>
+                            <p class="wizard-mode-note">"Requires a configured API key/provider."</p>
+                        </div>
+
+                        <div
+                            class={move || if !filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
+                            on:click=move |_| set_filament_ai_mode(false)
+                        >
+                            <div class="wizard-mode-icon">"🌐"</div>
+                            <h4>"Use Manufacturer Specs Only"</h4>
+                            <p>
+                                "Use manufacturer sites and SpoolScout without any AI provider."
+                            </p>
+                            <ul class="wizard-mode-features">
+                                <li>"✓ Web/manufacturer spec lookup"</li>
+                                <li>"✓ No AI API key required"</li>
+                                <li>"✗ Print Analysis disabled"</li>
+                            </ul>
+                            <p class="wizard-mode-note">"Free mode for search without AI."</p>
+                        </div>
+                    </div>
+                    {move || filament_ai_status.get().map(|msg| {
+                        let is_disabled = msg.contains("Web-only");
+                        view! {
+                            <span class={if is_disabled { "status-text status-warning" } else { "status-text status-success" }}>
+                                {msg}
+                            </span>
+                        }
+                    })}
+                </div>
+            </section>
 
             <section class="settings-section">
                 <h3>"Appearance"</h3>
@@ -161,39 +398,92 @@ pub fn SettingsPage() -> impl IntoView {
                             on:change=on_theme_change
                             prop:value=move || theme_ctx.theme.get()
                         >
-                            <option value="system" selected=move || theme_ctx.theme.get() == "system">"System"</option>
-                            <option value="light" selected=move || theme_ctx.theme.get() == "light">"Light"</option>
+                            <option value="bambu" selected=move || theme_ctx.theme.get() == "bambu">"Bambu Studio Light"</option>
                             <option value="dark" selected=move || theme_ctx.theme.get() == "dark">"Dark"</option>
                         </select>
+                    </div>
+                    <div class="theme-preview-grid">
+                        <button
+                            type="button"
+                            class="theme-preview-card"
+                            class:active=move || theme_ctx.theme.get() == "bambu"
+                            on:click=on_bambu_theme
+                        >
+                            <span class="theme-preview-header">
+                                <span>"Bambu Studio"</span>
+                                <span class="theme-preview-badge">"Light"</span>
+                            </span>
+                            <span class="theme-preview-frame theme-preview-frame-light">
+                                <span class="theme-preview-sidebar"></span>
+                                <span class="theme-preview-canvas">
+                                    <span class="theme-preview-line short"></span>
+                                    <span class="theme-preview-line"></span>
+                                    <span class="theme-preview-pill"></span>
+                                </span>
+                            </span>
+                        </button>
+                        <button
+                            type="button"
+                            class="theme-preview-card"
+                            class:active=move || theme_ctx.theme.get() == "dark"
+                            on:click=on_dark_theme
+                        >
+                            <span class="theme-preview-header">
+                                <span>"Dark"</span>
+                                <span class="theme-preview-badge">"Focus"</span>
+                            </span>
+                            <span class="theme-preview-frame theme-preview-frame-dark">
+                                <span class="theme-preview-sidebar"></span>
+                                <span class="theme-preview-canvas">
+                                    <span class="theme-preview-line short"></span>
+                                    <span class="theme-preview-line"></span>
+                                    <span class="theme-preview-pill"></span>
+                                </span>
+                            </span>
+                        </button>
                     </div>
                 </div>
             </section>
 
-            <section class="settings-section">
-                <h3>"API Keys"</h3>
-                <p class="section-description">"API keys are stored securely in your macOS Keychain."</p>
+            {move || filament_ai_enabled.get().then(|| view! {
+                <section class="settings-section">
+                    <h3>"API Keys"</h3>
+                    <p class="section-description">"API keys are stored securely in your system keychain."</p>
 
-                <ApiKeyForm
-                    service_name="Claude API Key"
-                    service_id="bambumate-claude-api"
-                    placeholder="sk-ant-..."
-                />
-                <ApiKeyForm
-                    service_name="OpenAI API Key"
-                    service_id="bambumate-openai-api"
-                    placeholder="sk-..."
-                />
-                <ApiKeyForm
-                    service_name="Kimi K2 API Key"
-                    service_id="bambumate-kimi-api"
-                    placeholder="sk-..."
-                />
-                <ApiKeyForm
-                    service_name="OpenRouter API Key"
-                    service_id="bambumate-openrouter-api"
-                    placeholder="sk-or-..."
-                />
-            </section>
+                    <ApiKeyForm
+                        service_name="Claude API Key"
+                        service_id="bambumate-claude-api"
+                        placeholder="sk-ant-..."
+                    />
+                    <span class="status-text">
+                        <button class="link-btn" on:click=open_url_handler("https://console.anthropic.com/account/keys")>"Get Claude API key"</button>
+                    </span>
+                    <ApiKeyForm
+                        service_name="OpenAI API Key"
+                        service_id="bambumate-openai-api"
+                        placeholder="sk-..."
+                    />
+                    <span class="status-text">
+                        <button class="link-btn" on:click=open_url_handler("https://platform.openai.com/api-keys")>"Get OpenAI API key"</button>
+                    </span>
+                    <ApiKeyForm
+                        service_name="Kimi K2 API Key"
+                        service_id="bambumate-kimi-api"
+                        placeholder="sk-..."
+                    />
+                    <span class="status-text">
+                        <button class="link-btn" on:click=open_url_handler("https://platform.moonshot.cn/console/api-keys")>"Get Kimi API key"</button>
+                    </span>
+                    <ApiKeyForm
+                        service_name="OpenRouter API Key"
+                        service_id="bambumate-openrouter-api"
+                        placeholder="sk-or-..."
+                    />
+                    <span class="status-text">
+                        <button class="link-btn" on:click=open_url_handler("https://openrouter.ai/keys")>"Get OpenRouter API key"</button>
+                    </span>
+                </section>
+            })}
 
             <section class="settings-section">
                 <h3>"Model Configuration"</h3>
@@ -213,8 +503,32 @@ pub fn SettingsPage() -> impl IntoView {
                         <option value="openai" selected=move || ai_provider.get() == "openai">"OpenAI"</option>
                         <option value="kimi" selected=move || ai_provider.get() == "kimi">"Kimi K2 (Moonshot)"</option>
                         <option value="openrouter" selected=move || ai_provider.get() == "openrouter">"OpenRouter"</option>
+                        <option value="local" selected=move || ai_provider.get() == "local">"Local Server"</option>
                     </select>
                 </div>
+
+                <Show when=move || ai_provider.get() == "local">
+                    <div class="form-group">
+                        <label for="local-url">"Local Server URL"</label>
+                        <p class="section-description">"URL of your OpenAI-compatible local server (LM Studio, Ollama, llama.cpp, etc.)."</p>
+                        <div class="input-row">
+                            <input
+                                id="local-url"
+                                type="text"
+                                placeholder="http://localhost:1234"
+                                class="input"
+                                prop:value=move || local_url.get()
+                                on:input=move |ev| {
+                                    set_local_url.set(event_target_value(&ev));
+                                }
+                            />
+                            <button class="btn btn-save" on:click=save_local_url>"Save"</button>
+                        </div>
+                        <Show when=move || local_url_status.get().is_some()>
+                            <span class="status-text">{move || local_url_status.get().unwrap_or_default()}</span>
+                        </Show>
+                    </div>
+                </Show>
 
                 <div class="form-group">
                     <label for="ai-model">"Model"</label>
@@ -247,7 +561,30 @@ pub fn SettingsPage() -> impl IntoView {
                                 id="ai-model"
                                 class="input"
                                 on:change=move |ev| {
-                                    set_ai_model.set(event_target_value(&ev));
+                                    let model = event_target_value(&ev);
+                                    let provider = ai_provider.get_untracked();
+                                    set_ai_model.set(model.clone());
+                                    set_model_status.set(Some("Checking model compatibility...".to_string()));
+                                    set_model_checking.set(true);
+                                    spawn_local(async move {
+                                        match commands::validate_model(&provider, &model).await {
+                                            Ok(result) if result.text_ok && result.vision_ok => {
+                                                set_model_status.set(Some(
+                                                    "Model works for filament search and print analysis.".to_string()
+                                                ));
+                                            }
+                                            Ok(result) => {
+                                                set_model_status.set(Some(format!(
+                                                    "{} {}",
+                                                    result.text_message, result.vision_message
+                                                )));
+                                            }
+                                            Err(e) => {
+                                                set_model_status.set(Some(format!("Model check failed: {}", e)));
+                                            }
+                                        }
+                                        set_model_checking.set(false);
+                                    });
                                 }
                                 prop:value=move || ai_model.get()
                             >
@@ -255,10 +592,15 @@ pub fn SettingsPage() -> impl IntoView {
                                 {move || {
                                     models.get().into_iter().map(|m| {
                                         let id = m.id.clone();
-                                        let display = if m.name != m.id {
+                                        let display_base = if m.name != m.id {
                                             format!("{} ({})", m.name, m.id)
                                         } else {
                                             m.id.clone()
+                                        };
+                                        let display = if m.recommended {
+                                            format!("⭐ Recommended — {}", display_base)
+                                        } else {
+                                            display_base
                                         };
                                         let is_selected = ai_model.get() == id;
                                         view! {
@@ -274,7 +616,16 @@ pub fn SettingsPage() -> impl IntoView {
                         <button class="btn btn-save" on:click=save_model_config>"Save"</button>
                     </div>
                     <Show when=move || model_status.get().is_some()>
-                        <span class="status-text">{move || model_status.get().unwrap_or_default()}</span>
+                        <span class={move || {
+                            let msg = model_status.get().unwrap_or_default().to_lowercase();
+                            if msg.contains("failed") {
+                                "status-text status-error"
+                            } else if model_checking.get() {
+                                "status-text"
+                            } else {
+                                "status-text status-success"
+                            }
+                        }}>{move || model_status.get().unwrap_or_default()}</span>
                     </Show>
                 </div>
             </section>
@@ -284,22 +635,33 @@ pub fn SettingsPage() -> impl IntoView {
                 <p class="section-description">"Configure application paths and preferences."</p>
 
                 <div class="form-group">
-                    <label for="bambu-path">"Bambu Studio Path"</label>
-                    <div class="input-row">
+                    <label for="bambu-path">"Bambu Studio Configuration Path"</label>
+                    <p class="section-description">"The folder where Bambu Studio stores profiles. On Windows: %APPDATA%\\BambuStudio"</p>
+                    <div class="input-with-buttons">
                         <input
                             id="bambu-path"
                             type="text"
-                            placeholder="/Applications/BambuStudio.app"
+                            placeholder="e.g. C:\\Users\\You\\AppData\\Roaming\\BambuStudio"
                             class="input"
                             prop:value=move || bambu_path.get()
                             on:input=move |ev| {
                                 set_bambu_path.set(event_target_value(&ev));
                             }
                         />
+                        <button
+                            class="btn btn-secondary btn-sm"
+                            on:click=on_search_path
+                            disabled=move || is_searching_path.get()
+                        >
+                            {move || if is_searching_path.get() { "..." } else { "Search" }}
+                        </button>
+                        <button class="btn btn-secondary btn-sm" on:click=on_browse_path>"Browse"</button>
                         <button class="btn btn-save" on:click=save_bambu_path>"Save"</button>
                     </div>
                     <Show when=move || path_status.get().is_some()>
-                        <span class="status-text">{move || path_status.get().unwrap_or_default()}</span>
+                        <span class={move || if path_valid.get() { "status-text status-success" } else { "status-text status-warning" }}>
+                            {move || path_status.get().unwrap_or_default()}
+                        </span>
                     </Show>
                 </div>
 
@@ -323,6 +685,63 @@ pub fn SettingsPage() -> impl IntoView {
                         <span class="status-text">{move || stl_status.get().unwrap_or_default()}</span>
                     </Show>
                 </div>
+            </section>
+
+            <section class="settings-section settings-section-danger">
+                <h3>"Reset / Clean Installation"</h3>
+                <p class="section-description">
+                    "Delete all BambuMate preferences and stored API keys to return to a fresh installation state. "
+                    "This will not affect your Bambu Studio profiles or configuration."
+                </p>
+
+                <Show when=move || !reset_confirm.get()>
+                    <button
+                        class="btn btn-danger"
+                        on:click=move |_| set_reset_confirm.set(true)
+                        disabled=move || resetting.get()
+                    >"Reset for Clean Installation"</button>
+                </Show>
+
+                <Show when=move || reset_confirm.get() && !resetting.get()>
+                    <div class="reset-confirm">
+                        <p class="reset-confirm-warning">
+                            "Are you sure? This will clear all settings, API keys, and preferences. "
+                            "You will need to complete the setup wizard again."
+                        </p>
+                        <div class="input-row">
+                            <button
+                                class="btn btn-danger"
+                                on:click=move |_| {
+                                    set_resetting.set(true);
+                                    set_reset_confirm.set(false);
+                                    spawn_local(async move {
+                                        match commands::reset_to_clean_install().await {
+                                            Ok(()) => {
+                                                set_reset_status.set(Some("Reset complete. Reload the application to start fresh.".to_string()));
+                                            }
+                                            Err(e) => {
+                                                set_reset_status.set(Some(format!("Reset failed: {}", e)));
+                                            }
+                                        }
+                                        set_resetting.set(false);
+                                    });
+                                }
+                            >"Yes, Reset Everything"</button>
+                            <button
+                                class="btn btn-secondary"
+                                on:click=move |_| set_reset_confirm.set(false)
+                            >"Cancel"</button>
+                        </div>
+                    </div>
+                </Show>
+
+                <Show when=move || resetting.get()>
+                    <span class="status-text">"Resetting..."</span>
+                </Show>
+
+                <Show when=move || reset_status.get().is_some()>
+                    <span class="status-text status-warning">{move || reset_status.get().unwrap_or_default()}</span>
+                </Show>
             </section>
         </div>
     }

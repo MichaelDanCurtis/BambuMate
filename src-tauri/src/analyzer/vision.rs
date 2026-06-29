@@ -51,9 +51,10 @@ pub async fn analyze_image(
         "openrouter" => {
             call_openrouter_vision(api_key, model, &prompt, &base64_image, &schema).await?
         }
+        "local" => call_local_vision(api_key, model, &prompt, &base64_image).await?,
         _ => {
             let msg = format!(
-                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter",
+                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
                 provider
             );
             error!("{}", msg);
@@ -228,7 +229,7 @@ async fn call_openai_vision(
 
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 1024,
+        "max_completion_tokens": 1024,
         "messages": [{
             "role": "user",
             "content": [
@@ -404,6 +405,128 @@ async fn call_openrouter_vision(
         .as_str()
         .map(|s| s.to_string())
         .ok_or_else(|| "No content in OpenRouter vision response".to_string())
+}
+
+/// Call a local OpenAI-compatible vision API (LM Studio, Ollama, etc.).
+/// Tries json_object mode first, falls back to no response_format if unsupported.
+/// The `api_key` argument contains the local server base URL (e.g. "http://localhost:1234").
+async fn call_local_vision(
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    base64_image: &str,
+) -> Result<String, String> {
+    let base_url = if api_key.is_empty() {
+        "http://localhost:1234"
+    } else {
+        api_key
+    };
+    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+
+    let client = build_api_client()?;
+
+    let body_with_format = serde_json::json!({
+        "model": model,
+        "max_tokens": 1024,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", image_media_type(), base64_image),
+                        "detail": "low"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": prompt
+                }
+            ]
+        }],
+        "response_format": {
+            "type": "json_object"
+        }
+    });
+
+    let response = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .json(&body_with_format)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                "Vision API timeout after 90s for local server".to_string()
+            } else if e.is_connect() {
+                format!(
+                    "Cannot connect to local server at {}. Is your local model server running?",
+                    base_url
+                )
+            } else {
+                format!("Vision API request failed for local server: {}", e)
+            }
+        })?;
+
+    // If we get a 400 error about response_format, retry without it
+    let body_text = if response.status() == reqwest::StatusCode::BAD_REQUEST {
+        let error_body = response.text().await.unwrap_or_default();
+        if error_body.contains("response_format")
+            || error_body.contains("json_schema")
+            || error_body.contains("json_object")
+        {
+            info!("Local vision server does not support response_format, retrying without it");
+            let body_without_format = serde_json::json!({
+                "model": model,
+                "max_tokens": 1024,
+                "messages": [
+                    {"role": "system", "content": "You MUST respond with valid JSON only. No markdown, no code blocks, no explanation."},
+                    {"role": "user", "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", image_media_type(), base64_image),
+                                "detail": "low"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]}
+                ]
+            });
+
+            let retry_response = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&body_without_format)
+                .send()
+                .await
+                .map_err(|e| format!("Vision API retry request failed for local server: {}", e))?;
+
+            handle_api_response(retry_response, "local").await?
+        } else {
+            error!(
+                "Vision API error: 400 Bad Request from local - {}",
+                error_body
+            );
+            return Err(format!(
+                "Vision API error: 400 Bad Request from local - {}",
+                error_body
+            ));
+        }
+    } else {
+        handle_api_response(response, "local").await?
+    };
+
+    let resp_json: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| format!("Failed to parse local server response: {}", e))?;
+
+    resp_json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No content in local server vision response".to_string())
 }
 
 #[cfg(test)]

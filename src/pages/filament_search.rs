@@ -3,10 +3,12 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{
-    self, CatalogEntry, CatalogMatch, CatalogStatus, FilamentSpecs, GenerateResult, InstallResult,
+    self, BaseProfileMatch, CatalogEntry, CatalogMatch, CatalogStatus, FilamentSpecs,
+    GenerateResult, InstallResult,
 };
 use crate::components::filament_card::FilamentCard;
 use crate::components::profile_preview::ProfilePreview;
+use crate::components::settings_merge::SettingsMerge;
 use crate::components::specs_editor::SpecsEditor;
 
 #[component]
@@ -14,6 +16,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
     // Catalog state
     let (catalog_status, set_catalog_status) = signal::<Option<CatalogStatus>>(None);
     let (is_refreshing_catalog, set_is_refreshing_catalog) = signal(false);
+    let (filament_ai_enabled, set_filament_ai_enabled) = signal(true);
 
     // Autocomplete state
     let (search_query, set_search_query) = signal(String::new());
@@ -45,9 +48,24 @@ pub fn FilamentSearchPage() -> impl IntoView {
         signal::<Option<Result<InstallResult, String>>>(None);
     let (is_installing, set_is_installing) = signal(false);
 
-    // Check catalog status on mount
+    // Base profile reference state
+    let (base_profile_matches, set_base_profile_matches) = signal::<Vec<BaseProfileMatch>>(vec![]);
+    let (is_searching_base, set_is_searching_base) = signal(false);
+    let (selected_base_profile, set_selected_base_profile) =
+        signal::<Option<BaseProfileMatch>>(None);
+    let (selected_base_profile_path, set_selected_base_profile_path) =
+        signal::<Option<String>>(None);
+    let (base_profile_specs, set_base_profile_specs) = signal::<Option<FilamentSpecs>>(None);
+    let (show_merge_screen, set_show_merge_screen) = signal(false);
+
+    // Check catalog status on mount and load AI preference
     Effect::new(move |_| {
         spawn_local(async move {
+            // Load AI mode preference
+            if let Ok(Some(val)) = commands::get_preference("filament_search_use_ai").await {
+                set_filament_ai_enabled.set(val != "false");
+            }
+
             match commands::get_catalog_status().await {
                 Ok(status) => {
                     set_catalog_status.set(Some(status.clone()));
@@ -68,6 +86,28 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 }
             }
         });
+    });
+
+    // Auto-search for base profiles when specs are fetched
+    Effect::new(move |_| {
+        let specs = current_specs.get();
+        if let Some(ref s) = specs {
+            let material = s.material.clone();
+            set_is_searching_base.set(true);
+            set_base_profile_matches.set(vec![]);
+            set_selected_base_profile.set(None);
+            set_selected_base_profile_path.set(None);
+            set_base_profile_specs.set(None);
+            set_show_merge_screen.set(false);
+            spawn_local(async move {
+                if let Ok(matches) =
+                    commands::search_base_profiles("", Some(material.as_str())).await
+                {
+                    set_base_profile_matches.set(matches);
+                }
+                set_is_searching_base.set(false);
+            });
+        }
     });
 
     // Debounced autocomplete search
@@ -138,7 +178,10 @@ pub fn FilamentSearchPage() -> impl IntoView {
     let do_ai_generate = move || {
         let query = search_query.get();
         if query.len() < 5 {
-            set_fetch_error.set(Some("Please enter a more specific filament name (at least 5 characters) for AI search.".to_string()));
+            set_fetch_error.set(Some(
+                "Please enter a more specific filament name (at least 5 characters) for AI search."
+                    .to_string(),
+            ));
             return;
         }
 
@@ -213,11 +256,17 @@ pub fn FilamentSearchPage() -> impl IntoView {
         let name = search_query.get();
 
         if url.is_empty() || !url.starts_with("http") {
-            set_fetch_error.set(Some("Please enter a valid URL starting with http:// or https://".to_string()));
+            set_fetch_error.set(Some(
+                "Please enter a valid URL starting with http:// or https://".to_string(),
+            ));
             return;
         }
 
-        let filament_name = if name.len() >= 3 { name } else { "Unknown Filament".to_string() };
+        let filament_name = if name.len() >= 3 {
+            name
+        } else {
+            "Unknown Filament".to_string()
+        };
 
         set_show_url_input.set(false);
         set_current_specs.set(None);
@@ -254,8 +303,10 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_current_generate.set(None);
 
         set_is_generating.set(true);
+        let base_profile_path = selected_base_profile_path.get();
         spawn_local(async move {
-            let result = commands::generate_profile(&edited_specs, Some(printer)).await;
+            let result =
+                commands::generate_profile(&edited_specs, Some(printer), base_profile_path).await;
             if let Ok(ref gen) = result {
                 set_current_generate.set(Some(gen.clone()));
             }
@@ -305,6 +356,44 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_current_generate.set(None);
         set_fetch_error.set(None);
         set_show_editor.set(false);
+        set_base_profile_matches.set(vec![]);
+        set_selected_base_profile.set(None);
+        set_selected_base_profile_path.set(None);
+        set_base_profile_specs.set(None);
+        set_show_merge_screen.set(false);
+    };
+
+    // Handler for selecting a base profile to use as reference
+    let on_select_base_profile = move |profile: BaseProfileMatch| {
+        let path = profile.path.clone();
+        set_selected_base_profile.set(Some(profile));
+        set_selected_base_profile_path.set(Some(path.clone()));
+        spawn_local(async move {
+            // Extract specs from the selected base profile
+            if let Ok(specs) = commands::extract_specs_from_profile(&path).await {
+                set_base_profile_specs.set(Some(specs));
+                set_show_merge_screen.set(true);
+            }
+        });
+    };
+
+    let on_use_default_base = move || {
+        set_selected_base_profile.set(None);
+        set_selected_base_profile_path.set(None);
+        set_base_profile_specs.set(None);
+        set_show_merge_screen.set(false);
+    };
+
+    // Handler for completing the merge (user selected which settings to use)
+    let on_merge_complete = move |merged_specs: FilamentSpecs| {
+        set_current_specs.set(Some(merged_specs));
+        set_show_merge_screen.set(false);
+        set_show_editor.set(true);
+    };
+
+    let on_skip_merge = move || {
+        set_show_merge_screen.set(false);
+        set_show_editor.set(true);
     };
 
     view! {
@@ -313,7 +402,11 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
             <h2>"Filament Search"</h2>
             <p class="page-description">
-                "Type to search from our catalog, or use AI to find any filament."
+                {move || if filament_ai_enabled.get() {
+                    "Type to search from our catalog, or use AI to find any filament."
+                } else {
+                    "🌐 Web-only mode — specs pulled from manufacturer sites. Enable AI in Settings for AI-powered search."
+                }}
             </p>
 
             // Catalog status
@@ -401,14 +494,24 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             }
                         />
 
-                        // AI/Web search options (require >= 5 chars when catalog matches exist)
+                        // AI/Web search options — only shown when AI is enabled
+                        // (both options call AI internally and fail without an API key)
                         {move || {
                             let query_len = search_query.get().len();
                             let has_catalog_matches = !suggestions.get().is_empty();
                             let show_ai_web = query_len >= 5 || !has_catalog_matches;
+                            let ai_on = filament_ai_enabled.get();
 
-                            if show_ai_web {
+                            if !ai_on {
+                                // Web-only mode: no AI options, just a hint
                                 view! {
+                                    <div class="specificity-hint">
+                                        "🌐 Web-only mode — select from catalog above or paste a URL"
+                                    </div>
+                                }.into_any()
+                            } else if show_ai_web {
+                                view! {
+                                    <>
                                     <div
                                         class="ai-fallback-item"
                                         on:mousedown=move |_| do_ai_generate()
@@ -431,6 +534,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                         </span>
                                         <span class="ai-fallback-hint">"Scrape pages"</span>
                                     </div>
+                                    </>
                                 }.into_any()
                             } else {
                                 view! {
@@ -484,7 +588,12 @@ pub fn FilamentSearchPage() -> impl IntoView {
                         </button>
                     </div>
                     <p class="url-input-hint">
-                        "Note: Some e-commerce sites (Shopify, etc.) may not work due to JavaScript rendering."
+                        {move || if filament_ai_enabled.get() {
+                            "AI-assisted extraction — works on most product pages."
+                        } else {
+                            "Web-only extraction — reads JSON-LD and spec tables. No API key needed. \
+                             Some JS-heavy sites may not work."
+                        }}
                     </p>
                 </div>
             </Show>
@@ -510,7 +619,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
             // Specs display (FilamentCard) — shown when specs exist and editor is not shown
             {move || {
                 if let Some(specs) = current_specs.get() {
-                    if show_editor.get() || generate_result.get().is_some() {
+                    if show_editor.get() || generate_result.get().is_some() || show_merge_screen.get() {
                         return None;
                     }
                     Some(view! {
@@ -525,6 +634,116 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 } else {
                     None
                 }
+            }}
+
+            // Base profile reference matches — shown after specs are fetched
+            {move || {
+                if current_specs.get().is_none() || show_editor.get() || generate_result.get().is_some() || show_merge_screen.get() {
+                    return None;
+                }
+                let matches = base_profile_matches.get();
+                Some(view! {
+                    <div class="base-profiles-section">
+                        <h4>"Base Profile (Installed in Bambu Studio)"</h4>
+                        <p class="section-description">
+                            "Choose a base profile to build from, or keep the material default base."
+                        </p>
+                        <Show when=move || is_searching_base.get()>
+                            <span class="mini-spinner"></span>
+                            " Searching installed profiles..."
+                        </Show>
+                        <div class="base-profiles-list">
+                            <div
+                                class=move || {
+                                    if selected_base_profile_path.get().is_none() {
+                                        "base-profile-item selected".to_string()
+                                    } else {
+                                        "base-profile-item".to_string()
+                                    }
+                                }
+                                on:click=move |_| on_use_default_base()
+                            >
+                                <span class="base-profile-name">"Default base"</span>
+                                <span class="base-profile-type">"Material generic"</span>
+                                <span class="base-profile-action">
+                                    {move || {
+                                        if selected_base_profile_path.get().is_none() {
+                                            "Selected"
+                                        } else {
+                                            "Use default base"
+                                        }
+                                    }}
+                                </span>
+                            </div>
+                            {matches.iter().map(|m| {
+                                let profile_click = m.clone();
+                                let name = m.name.clone();
+                                let path = m.path.clone();
+                                let path_for_class = path.clone();
+                                let path_for_label = path.clone();
+                                let ftype = m.filament_type.clone().unwrap_or_default();
+                                view! {
+                                    <div
+                                        class=move || {
+                                            let selected = selected_base_profile_path
+                                                .get()
+                                                .is_some_and(|p| p == path_for_class);
+                                            if selected {
+                                                "base-profile-item selected".to_string()
+                                            } else {
+                                                "base-profile-item".to_string()
+                                            }
+                                        }
+                                        on:click=move |_| on_select_base_profile(profile_click.clone())
+                                    >
+                                        <span class="base-profile-name">{name}</span>
+                                        <span class="base-profile-type">{ftype}</span>
+                                        <span class="base-profile-action">
+                                            {move || {
+                                                let selected = selected_base_profile_path
+                                                    .get()
+                                                    .is_some_and(|p| p == path_for_label);
+                                                if selected { "Selected" } else { "Use as base" }
+                                            }}
+                                        </span>
+                                    </div>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </div>
+                        <Show when=move || matches.is_empty() && !is_searching_base.get()>
+                            <p class="section-description">
+                                "No close installed matches were found for this filament. You can continue with the default base."
+                            </p>
+                        </Show>
+                    </div>
+                })
+            }}
+
+            // Settings merge screen — shown when user selects a base profile
+            {move || {
+                if !show_merge_screen.get() {
+                    return None;
+                }
+                let ai_specs = current_specs.get()?;
+                let base_specs = base_profile_specs.get()?;
+                let base_name = selected_base_profile.get().map(|p| p.name).unwrap_or_default();
+
+                Some(view! {
+                    <div class="merge-screen">
+                        <h3>"Compare & Merge Settings"</h3>
+                        <p class="section-description">
+                            "Choose which settings to use from each source. AI-recommended values are on the left, "
+                            "values from \""{base_name.clone()}"\" are on the right."
+                        </p>
+                        <SettingsMerge
+                            ai_specs=ai_specs
+                            base_specs=base_specs
+                            base_name=base_name
+                            on_apply=move |merged| on_merge_complete(merged)
+                            on_skip=move |_| on_skip_merge()
+                        />
+                    </div>
+                })
             }}
 
             // Specs Editor — shown between FilamentCard and ProfilePreview

@@ -18,7 +18,9 @@ pub fn ApiKeyForm(
     let (key_value, set_key_value) = signal(String::new());
     let (is_saved, set_is_saved) = signal(false);
     let (is_loading, set_is_loading) = signal(false);
+    let (is_testing, set_is_testing) = signal(false);
     let (error_message, set_error_message) = signal::<Option<String>>(None);
+    let (test_message, set_test_message) = signal::<Option<String>>(None);
 
     // Check for existing key on mount
     let sid_check = service_id.clone();
@@ -56,6 +58,7 @@ pub fn ApiKeyForm(
                     set_is_saved.set(true);
                     set_key_value.set(String::new());
                     set_error_message.set(None);
+                    set_test_message.set(None);
                 }
                 Err(e) => {
                     set_error_message.set(Some(format!("Failed to save: {}", e)));
@@ -76,12 +79,48 @@ pub fn ApiKeyForm(
                 Ok(()) => {
                     set_is_saved.set(false);
                     set_error_message.set(None);
+                    set_test_message.set(None);
                 }
                 Err(e) => {
                     set_error_message.set(Some(format!("Failed to delete: {}", e)));
                 }
             }
             set_is_loading.set(false);
+        });
+    };
+
+    let sid_test = service_id.clone();
+    let test_key = move |_| {
+        let provider = match sid_test.as_str() {
+            "bambumate-claude-api" => Some("claude"),
+            "bambumate-openai-api" => Some("openai"),
+            "bambumate-kimi-api" => Some("kimi"),
+            "bambumate-openrouter-api" => Some("openrouter"),
+            _ => None,
+        };
+
+        let Some(provider) = provider else {
+            set_error_message.set(Some("Unknown API key service".to_string()));
+            return;
+        };
+
+        set_is_testing.set(true);
+        set_error_message.set(None);
+        set_test_message.set(Some("Testing key...".to_string()));
+        spawn_local(async move {
+            match commands::list_models(provider).await {
+                Ok(models) => {
+                    set_test_message.set(Some(format!(
+                        "API key works ({} models returned)",
+                        models.len()
+                    )));
+                }
+                Err(e) => {
+                    set_error_message.set(Some(format!("API key test failed: {}", e)));
+                    set_test_message.set(None);
+                }
+            }
+            set_is_testing.set(false);
         });
     };
 
@@ -96,20 +135,29 @@ pub fn ApiKeyForm(
                     prop:value=move || key_value.get()
                     on:input=move |ev| {
                         set_key_value.set(event_target_value(&ev));
+                        set_test_message.set(None);
                     }
-                    disabled=move || is_loading.get()
+                    disabled=move || is_loading.get() || is_testing.get()
                 />
                 <button
                     class="btn btn-save"
                     on:click=save_key
-                    disabled=move || is_loading.get()
+                    disabled=move || is_loading.get() || is_testing.get()
                 >
                     {move || if is_loading.get() { "Saving..." } else { "Save" }}
                 </button>
                 <button
+                    class="btn btn-secondary"
+                    on:click=test_key
+                    disabled=move || is_loading.get() || is_testing.get()
+                    style:display=move || if is_saved.get() { "inline-block" } else { "none" }
+                >
+                    {move || if is_testing.get() { "Testing..." } else { "Test" }}
+                </button>
+                <button
                     class="btn btn-delete"
                     on:click=delete_key
-                    disabled=move || is_loading.get()
+                    disabled=move || is_loading.get() || is_testing.get()
                     style:display=move || if is_saved.get() { "inline-block" } else { "none" }
                 >
                     "Delete"
@@ -120,6 +168,10 @@ pub fn ApiKeyForm(
                     if let Some(err) = error_message.get() {
                         view! {
                             <span class="status-text status-error">{err}</span>
+                        }.into_any()
+                    } else if let Some(msg) = test_message.get() {
+                        view! {
+                            <span class="status-text status-success">{msg}</span>
                         }.into_any()
                     } else if is_saved.get() {
                         view! {

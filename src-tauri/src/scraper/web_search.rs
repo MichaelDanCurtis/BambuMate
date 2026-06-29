@@ -2,7 +2,7 @@
 //! Uses DuckDuckGo HTML search (no API key required).
 
 use scraper::{Html, Selector};
-use tracing::{info, warn};
+use tracing::info;
 
 use super::http_client::ScraperHttpClient;
 
@@ -103,10 +103,21 @@ fn is_likely_filament_page(url: &str) -> bool {
 
     // Exclude search engines, social media, shopping carts
     let excluded = [
-        "google.com", "bing.com", "yahoo.com", "duckduckgo.com",
-        "facebook.com", "twitter.com", "instagram.com", "youtube.com",
-        "amazon.com/gp", "cart", "checkout", "signin", "login",
-        "reddit.com", "quora.com",
+        "google.com",
+        "bing.com",
+        "yahoo.com",
+        "duckduckgo.com",
+        "facebook.com",
+        "twitter.com",
+        "instagram.com",
+        "youtube.com",
+        "amazon.com/gp",
+        "cart",
+        "checkout",
+        "signin",
+        "login",
+        "reddit.com",
+        "quora.com",
     ];
 
     if excluded.iter().any(|ex| url_lower.contains(ex)) {
@@ -115,10 +126,24 @@ fn is_likely_filament_page(url: &str) -> bool {
 
     // Prefer manufacturer sites, datasheets, specs pages
     let preferred = [
-        "spoolscout", "polymaker", "esun", "hatchbox", "overture",
-        "sunlu", "prusament", "bambu", "creality", "elegoo",
-        "matterhackers", "filament", "spec", "datasheet", "data-sheet",
-        "3d-fuel", "colorfabb", "protopasta",
+        "spoolscout",
+        "polymaker",
+        "esun",
+        "hatchbox",
+        "overture",
+        "sunlu",
+        "prusament",
+        "bambu",
+        "creality",
+        "elegoo",
+        "matterhackers",
+        "filament",
+        "spec",
+        "datasheet",
+        "data-sheet",
+        "3d-fuel",
+        "colorfabb",
+        "protopasta",
     ];
 
     // Accept if contains any preferred term
@@ -134,9 +159,15 @@ mod tests {
 
     #[test]
     fn test_is_likely_filament_page() {
-        assert!(is_likely_filament_page("https://www.polymaker.com/products/polylite-pla"));
-        assert!(is_likely_filament_page("https://spoolscout.com/data-sheets/sunlu"));
-        assert!(!is_likely_filament_page("https://www.google.com/search?q=pla"));
+        assert!(is_likely_filament_page(
+            "https://www.polymaker.com/products/polylite-pla"
+        ));
+        assert!(is_likely_filament_page(
+            "https://spoolscout.com/data-sheets/sunlu"
+        ));
+        assert!(!is_likely_filament_page(
+            "https://www.google.com/search?q=pla"
+        ));
         assert!(!is_likely_filament_page("https://www.amazon.com/gp/cart"));
     }
 

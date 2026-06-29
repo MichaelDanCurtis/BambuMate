@@ -16,7 +16,10 @@ pub fn ChangePreview(
     on_cancel: Callback<()>,
 ) -> impl IntoView {
     // Track which recommendations are selected (all by default)
-    let initial_selected: Vec<String> = recommendations.iter().map(|r| r.parameter.clone()).collect();
+    let initial_selected: Vec<String> = recommendations
+        .iter()
+        .map(|r| r.parameter.clone())
+        .collect();
     let (selected, set_selected) = signal(initial_selected);
 
     // Clone recommendations for use in closures

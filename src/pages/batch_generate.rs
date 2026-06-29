@@ -11,7 +11,8 @@ pub fn BatchGeneratePage() -> impl IntoView {
     let (brands_error, set_brands_error) = signal::<Option<String>>(None);
 
     let (selected_brand, set_selected_brand) = signal(String::new());
-    let (selected_printer, set_selected_printer) = signal(String::from("Bambu Lab X1 Carbon 0.4 nozzle"));
+    let (selected_printer, set_selected_printer) =
+        signal(String::from("Bambu Lab X1 Carbon 0.4 nozzle"));
     let (install_profiles, set_install_profiles) = signal(true);
 
     let (is_generating, set_is_generating) = signal(false);

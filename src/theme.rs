@@ -6,25 +6,21 @@ pub struct ThemeContext {
     pub set_theme: WriteSignal<String>,
 }
 
-/// Apply the theme by setting or removing the `data-theme` attribute on `<html>`.
-/// - "light" → forces light
-/// - "dark" → forces dark
-/// - anything else ("system") → removes attribute, CSS @media handles it
+/// Normalize stored or incoming theme values to the supported set.
+/// Unknown values fall back to the Bambu Studio light theme.
+pub fn normalize_theme(theme: &str) -> &'static str {
+    match theme {
+        "dark" => "dark",
+        _ => "bambu",
+    }
+}
+
+/// Apply the theme by setting `data-theme` on `<html>`.
 pub fn apply_theme(theme: &str) {
     if let Some(window) = web_sys::window() {
         if let Some(doc) = window.document() {
             if let Some(html) = doc.document_element() {
-                match theme {
-                    "light" => {
-                        let _ = html.set_attribute("data-theme", "light");
-                    }
-                    "dark" => {
-                        let _ = html.set_attribute("data-theme", "dark");
-                    }
-                    _ => {
-                        let _ = html.remove_attribute("data-theme");
-                    }
-                }
+                let _ = html.set_attribute("data-theme", normalize_theme(theme));
             }
         }
     }

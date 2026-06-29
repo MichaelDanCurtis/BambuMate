@@ -302,7 +302,10 @@ pub async fn apply_recommendations(
 fn format_value_for_profile(value: f32, parameter: &str) -> String {
     match parameter {
         // Temperatures: integers
-        "nozzle_temperature" | "cool_plate_temp" | "hot_plate_temp" | "textured_plate_temp"
+        "nozzle_temperature"
+        | "cool_plate_temp"
+        | "hot_plate_temp"
+        | "textured_plate_temp"
         | "nozzle_temperature_initial_layer" => {
             format!("{:.0}", value)
         }
@@ -339,12 +342,23 @@ fn get_ai_settings(app: &tauri::AppHandle) -> Result<(String, String, String), S
         "openai" => "gpt-4o",
         "kimi" => "moonshot-v1-128k",
         "openrouter" => "anthropic/claude-sonnet-4",
+        "local" => "default",
         _ => "claude-sonnet-4-20250514",
     };
     let model = store
         .get("ai_model")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| default_model.to_string());
+
+    // Local provider passes the server URL as the "api_key"
+    if provider == "local" {
+        let local_url = store
+            .get("local_mcp_url")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "http://localhost:1234".to_string());
+        return Ok((provider, model, local_url));
+    }
 
     // Get API key from keychain
     let service = match provider.as_str() {
@@ -472,7 +486,9 @@ fn detect_material_type(profile: &FilamentProfile) -> String {
     if let Some(inherits) = profile.raw().get("inherits") {
         if let Some(s) = inherits.as_str() {
             // Parse "Generic PLA" -> "PLA"
-            for material in ["PLA", "PETG", "ABS", "ASA", "TPU", "PA", "PC", "PVA", "HIPS"] {
+            for material in [
+                "PLA", "PETG", "ABS", "ASA", "TPU", "PA", "PC", "PVA", "HIPS",
+            ] {
                 if s.to_uppercase().contains(material) {
                     return material.to_string();
                 }
@@ -622,7 +638,10 @@ mod integration_tests {
         let recommendations = format_recommendations(&evaluation, &current_values);
 
         // Should have retraction recommendation for stringing
-        assert!(!recommendations.is_empty(), "Should produce recommendations");
+        assert!(
+            !recommendations.is_empty(),
+            "Should produce recommendations"
+        );
 
         let retraction_rec = recommendations
             .iter()

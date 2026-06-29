@@ -14,9 +14,11 @@ pub fn DefectReportDisplay(
     conflicts: Vec<Conflict>,
     material_type: String,
     /// Optional profile path for apply functionality
-    #[prop(default = None)] profile_path: Option<String>,
+    #[prop(default = None)]
+    profile_path: Option<String>,
     /// Callback when user clicks Apply Changes button
-    #[prop(default = None)] on_apply_click: Option<Callback<()>>,
+    #[prop(default = None)]
+    on_apply_click: Option<Callback<()>>,
 ) -> impl IntoView {
     // Clone for use in apply section
     let has_profile = profile_path.is_some();
@@ -167,7 +169,11 @@ fn DefectCard(defect_type: String, severity: f32, confidence: f32) -> impl IntoV
 /// Individual recommendation card.
 #[component]
 fn RecommendationCard(recommendation: RecommendationDisplay) -> impl IntoView {
-    let clamped_class = if recommendation.was_clamped { "recommendation-card was-clamped" } else { "recommendation-card" };
+    let clamped_class = if recommendation.was_clamped {
+        "recommendation-card was-clamped"
+    } else {
+        "recommendation-card"
+    };
 
     view! {
         <div class=clamped_class>
@@ -198,7 +204,9 @@ fn RecommendationCard(recommendation: RecommendationDisplay) -> impl IntoView {
 /// Conflict card.
 #[component]
 fn ConflictCard(conflict: Conflict) -> impl IntoView {
-    let defects_text = conflict.conflicting_defects.iter()
+    let defects_text = conflict
+        .conflicting_defects
+        .iter()
         .map(|d| defect_display_name(d))
         .collect::<Vec<_>>()
         .join(", ");

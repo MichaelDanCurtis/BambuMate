@@ -62,7 +62,7 @@ impl FilamentCatalog {
             CREATE TABLE IF NOT EXISTS catalog_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );"
+            );",
         )
         .map_err(|e| format!("Failed to create catalog tables: {}", e))?;
 
@@ -188,7 +188,11 @@ impl FilamentCatalog {
             .collect();
 
         // Sort by score descending
-        matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        matches.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Limit results
         matches.truncate(limit);
@@ -207,7 +211,9 @@ impl FilamentCatalog {
             .query_map([], |row| row.get(0))
             .map_err(|e| format!("Brand query failed: {}", e))?;
 
-        brands.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        brands
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     /// Get all entries for a specific brand.
@@ -233,7 +239,9 @@ impl FilamentCatalog {
             })
             .map_err(|e| format!("Brand query failed: {}", e))?;
 
-        entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -290,7 +298,10 @@ fn compute_match_score(query_words: &[&str], search_text: &str) -> f32 {
     }
 
     // Bonus for matching brand at start
-    if search_words.first().map_or(false, |sw| sw.starts_with(query_words[0])) {
+    if search_words
+        .first()
+        .map_or(false, |sw| sw.starts_with(query_words[0]))
+    {
         total_score += 5.0;
     }
 
@@ -321,17 +332,15 @@ pub async fn fetch_catalog(http_client: &ScraperHttpClient) -> Result<Vec<Catalo
         info!("Fetching filaments for {}", brand_name);
 
         match http_client.fetch_page(&url).await {
-            Ok(html) => {
-                match parse_brand_filaments(&html, brand_name, brand_slug) {
-                    Ok(entries) => {
-                        info!("  Found {} filaments for {}", entries.len(), brand_name);
-                        all_entries.extend(entries);
-                    }
-                    Err(e) => {
-                        warn!("Failed to parse filaments for {}: {}", brand_name, e);
-                    }
+            Ok(html) => match parse_brand_filaments(&html, brand_name, brand_slug) {
+                Ok(entries) => {
+                    info!("  Found {} filaments for {}", entries.len(), brand_name);
+                    all_entries.extend(entries);
                 }
-            }
+                Err(e) => {
+                    warn!("Failed to parse filaments for {}: {}", brand_name, e);
+                }
+            },
             Err(e) => {
                 warn!("Failed to fetch brand page for {}: {}", brand_name, e);
             }
@@ -341,7 +350,10 @@ pub async fn fetch_catalog(http_client: &ScraperHttpClient) -> Result<Vec<Catalo
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
-    info!("Catalog fetch complete: {} total entries", all_entries.len());
+    info!(
+        "Catalog fetch complete: {} total entries",
+        all_entries.len()
+    );
     Ok(all_entries)
 }
 
@@ -350,8 +362,8 @@ fn parse_brand_list(html: &str) -> Result<Vec<(String, String)>, String> {
     let document = Html::parse_document(html);
 
     // SpoolScout uses links to /data-sheets/{brand}
-    let link_selector = Selector::parse("a[href^='/data-sheets/']")
-        .map_err(|_| "Invalid selector")?;
+    let link_selector =
+        Selector::parse("a[href^='/data-sheets/']").map_err(|_| "Invalid selector")?;
 
     let mut brands = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -385,8 +397,8 @@ fn parse_brand_filaments(
 
     // Look for links to individual filament pages: /data-sheets/{brand}/{filament}
     let pattern = format!("/data-sheets/{}/", brand_slug);
-    let link_selector = Selector::parse(&format!("a[href^='{}']", pattern))
-        .map_err(|_| "Invalid selector")?;
+    let link_selector =
+        Selector::parse(&format!("a[href^='{}']", pattern)).map_err(|_| "Invalid selector")?;
 
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -444,7 +456,9 @@ fn titlecase_slug(slug: &str) -> String {
         .map(|word| {
             // Keep common abbreviations uppercase
             let upper = word.to_uppercase();
-            if ["PLA", "ABS", "PETG", "TPU", "ASA", "PA", "PC", "CF", "GF"].contains(&upper.as_str()) {
+            if ["PLA", "ABS", "PETG", "TPU", "ASA", "PA", "PC", "CF", "GF"]
+                .contains(&upper.as_str())
+            {
                 upper
             } else {
                 let mut chars = word.chars();

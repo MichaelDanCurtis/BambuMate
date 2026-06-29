@@ -41,7 +41,7 @@ pub fn defect_report_schema() -> serde_json::Value {
                 "description": "Brief observation about the print (optional)"
             }
         },
-        "required": ["defects", "overall_quality"],
+        "required": ["defects", "overall_quality", "notes"],
         "additionalProperties": false
     })
 }
@@ -55,9 +55,7 @@ pub fn build_defect_analysis_prompt(
     current_settings: &HashMap<String, f32>,
     material_type: &str,
 ) -> String {
-    let nozzle_temp = current_settings
-        .get("nozzle_temperature")
-        .unwrap_or(&200.0);
+    let nozzle_temp = current_settings.get("nozzle_temperature").unwrap_or(&200.0);
     let bed_temp = current_settings
         .get("cool_plate_temp")
         .or_else(|| current_settings.get("hot_plate_temp"))
@@ -65,9 +63,7 @@ pub fn build_defect_analysis_prompt(
     let retraction = current_settings
         .get("filament_retraction_length")
         .unwrap_or(&0.8);
-    let flow = current_settings
-        .get("filament_flow_ratio")
-        .unwrap_or(&1.0);
+    let flow = current_settings.get("filament_flow_ratio").unwrap_or(&1.0);
 
     format!(
         r#"Analyze this 3D print photo for defects.
@@ -119,13 +115,19 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["defects"].is_object());
         assert!(schema["properties"]["overall_quality"].is_object());
+        assert!(schema["properties"]["notes"].is_object());
+
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "defects"));
+        assert!(required.iter().any(|v| v == "overall_quality"));
+        assert!(required.iter().any(|v| v == "notes"));
     }
 
     #[test]
     fn test_defect_report_schema_defect_types() {
         let schema = defect_report_schema();
-        let defect_types = &schema["properties"]["defects"]["items"]["properties"]["defect_type"]
-            ["enum"];
+        let defect_types =
+            &schema["properties"]["defects"]["items"]["properties"]["defect_type"]["enum"];
         assert!(defect_types.is_array());
 
         let types: Vec<&str> = defect_types

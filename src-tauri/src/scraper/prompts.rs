@@ -383,7 +383,9 @@ mod tests {
         assert!(nozzle_type.contains(&serde_json::json!("null")));
 
         // Retraction distance should be nullable number (float)
-        let retract_type = properties["retraction_distance_mm"]["type"].as_array().unwrap();
+        let retract_type = properties["retraction_distance_mm"]["type"]
+            .as_array()
+            .unwrap();
         assert!(retract_type.contains(&serde_json::json!("number")));
         assert!(retract_type.contains(&serde_json::json!("null")));
 
@@ -404,16 +406,22 @@ mod tests {
         assert!(fan_min_type.contains(&serde_json::json!("integer")));
         assert!(fan_min_type.contains(&serde_json::json!("null")));
 
-        let vitrification_type = properties["temperature_vitrification"]["type"].as_array().unwrap();
+        let vitrification_type = properties["temperature_vitrification"]["type"]
+            .as_array()
+            .unwrap();
         assert!(vitrification_type.contains(&serde_json::json!("integer")));
         assert!(vitrification_type.contains(&serde_json::json!("null")));
 
         // New nullable number (float) fields
-        let mvs_type = properties["max_volumetric_speed"]["type"].as_array().unwrap();
+        let mvs_type = properties["max_volumetric_speed"]["type"]
+            .as_array()
+            .unwrap();
         assert!(mvs_type.contains(&serde_json::json!("number")));
         assert!(mvs_type.contains(&serde_json::json!("null")));
 
-        let flow_type = properties["filament_flow_ratio"]["type"].as_array().unwrap();
+        let flow_type = properties["filament_flow_ratio"]["type"]
+            .as_array()
+            .unwrap();
         assert!(flow_type.contains(&serde_json::json!("number")));
         assert!(flow_type.contains(&serde_json::json!("null")));
 
@@ -568,10 +576,7 @@ mod tests {
     fn test_extraction_prompt_contains_source_text() {
         let source = "Nozzle Temperature: 190-220C, Bed Temperature: 50-60C";
         let prompt = build_extraction_prompt("Test PLA", source);
-        assert!(
-            prompt.contains(source),
-            "Prompt should contain source text"
-        );
+        assert!(prompt.contains(source), "Prompt should contain source text");
     }
 
     #[test]

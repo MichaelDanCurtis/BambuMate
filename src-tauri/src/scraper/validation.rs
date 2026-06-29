@@ -151,10 +151,7 @@ pub fn validate_specs(specs: &FilamentSpecs) -> Vec<ValidationWarning> {
         if retraction < 0.0 || retraction > 15.0 {
             warnings.push(ValidationWarning {
                 field: "retraction_distance_mm".to_string(),
-                message: format!(
-                    "Retraction distance {}mm out of range (0-15mm)",
-                    retraction
-                ),
+                message: format!("Retraction distance {}mm out of range (0-15mm)", retraction),
                 value: retraction.to_string(),
             });
         }
@@ -165,10 +162,7 @@ pub fn validate_specs(specs: &FilamentSpecs) -> Vec<ValidationWarning> {
         if speed > 100 {
             warnings.push(ValidationWarning {
                 field: "retraction_speed_mm_s".to_string(),
-                message: format!(
-                    "Retraction speed {}mm/s out of range (0-100mm/s)",
-                    speed
-                ),
+                message: format!("Retraction speed {}mm/s out of range (0-100mm/s)", speed),
                 value: speed.to_string(),
             });
         }
@@ -190,10 +184,7 @@ pub fn validate_specs(specs: &FilamentSpecs) -> Vec<ValidationWarning> {
         if diameter < 1.0 || diameter > 3.5 {
             warnings.push(ValidationWarning {
                 field: "diameter_mm".to_string(),
-                message: format!(
-                    "Diameter {}mm out of range (1.0-3.5mm)",
-                    diameter
-                ),
+                message: format!("Diameter {}mm out of range (1.0-3.5mm)", diameter),
                 value: diameter.to_string(),
             });
         }
@@ -254,7 +245,11 @@ mod tests {
     fn test_pla_valid_specs_no_warnings() {
         let specs = make_pla_specs();
         let warnings = validate_specs(&specs);
-        assert!(warnings.is_empty(), "Expected no warnings, got: {:?}", warnings);
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings, got: {:?}",
+            warnings
+        );
     }
 
     #[test]
@@ -424,7 +419,11 @@ mod tests {
             extraction_confidence: 0.5,
         };
         let warnings = validate_specs(&specs);
-        assert!(warnings.is_empty(), "Other material should use permissive ranges, got: {:?}", warnings);
+        assert!(
+            warnings.is_empty(),
+            "Other material should use permissive ranges, got: {:?}",
+            warnings
+        );
     }
 
     #[test]

@@ -28,7 +28,7 @@ impl FilamentCache {
                 cached_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_filament_cache_expires ON filament_cache(expires_at);"
+            CREATE INDEX IF NOT EXISTS idx_filament_cache_expires ON filament_cache(expires_at);",
         )
         .map_err(|e| format!("Failed to create cache table: {}", e))?;
 
@@ -88,7 +88,10 @@ impl FilamentCache {
             )
             .map_err(|e| format!("Failed to store specs in cache: {}", e))?;
 
-        info!("Cached specs for '{}' (expires in {} days)", query, ttl_days);
+        info!(
+            "Cached specs for '{}' (expires in {} days)",
+            query, ttl_days
+        );
         Ok(())
     }
 
@@ -303,9 +306,6 @@ mod tests {
         assert_eq!(normalize_query("  Hello  World  "), "hello world");
         assert_eq!(normalize_query("UPPER"), "upper");
         assert_eq!(normalize_query("  spaces  "), "spaces");
-        assert_eq!(
-            normalize_query("Polymaker  PLA   Pro"),
-            "polymaker pla pro"
-        );
+        assert_eq!(normalize_query("Polymaker  PLA   Pro"), "polymaker pla pro");
     }
 }

@@ -3,7 +3,10 @@ use std::time::Duration;
 use serde_json;
 use tracing::{error, info, warn};
 
-use super::prompts::{build_extraction_prompt, build_html_extraction_prompt, build_knowledge_prompt, filament_specs_json_schema};
+use super::prompts::{
+    build_extraction_prompt, build_html_extraction_prompt, build_knowledge_prompt,
+    filament_specs_json_schema,
+};
 use super::types::FilamentSpecs;
 use super::validation::validate_specs;
 
@@ -48,9 +51,10 @@ pub async fn extract_specs(
         "openai" => call_openai(api_key, model, &prompt, &schema).await?,
         "kimi" => call_kimi(api_key, model, &prompt).await?,
         "openrouter" => call_openrouter(api_key, model, &prompt, &schema).await?,
+        "local" => call_local(api_key, model, &prompt).await?,
         _ => {
             let msg = format!(
-                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter",
+                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
                 provider
             );
             error!("{}", msg);
@@ -78,7 +82,10 @@ pub async fn extract_specs(
     // The LLM schema uses "confidence" but our struct uses "extraction_confidence",
     // and the LLM schema doesn't include source_url or diameter_mm.
     let specs = map_response_to_specs(&response_json, filament_name).map_err(|e| {
-        let msg = format!("LLM response JSON does not match FilamentSpecs schema: {}", e);
+        let msg = format!(
+            "LLM response JSON does not match FilamentSpecs schema: {}",
+            e
+        );
         error!("{}", msg);
         msg
     })?;
@@ -131,9 +138,10 @@ pub async fn extract_specs_from_html(
         "openai" => call_openai(api_key, model, &prompt, &schema).await?,
         "kimi" => call_kimi(api_key, model, &prompt).await?,
         "openrouter" => call_openrouter(api_key, model, &prompt, &schema).await?,
+        "local" => call_local(api_key, model, &prompt).await?,
         _ => {
             let msg = format!(
-                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter",
+                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
                 provider
             );
             error!("{}", msg);
@@ -158,7 +166,10 @@ pub async fn extract_specs_from_html(
     })?;
 
     let specs = map_response_to_specs(&response_json, filament_name).map_err(|e| {
-        let msg = format!("LLM response JSON does not match FilamentSpecs schema: {}", e);
+        let msg = format!(
+            "LLM response JSON does not match FilamentSpecs schema: {}",
+            e
+        );
         error!("{}", msg);
         msg
     })?;
@@ -218,9 +229,10 @@ pub async fn generate_specs_from_knowledge(
         "openai" => call_openai(api_key, model, &prompt, &schema).await?,
         "kimi" => call_kimi(api_key, model, &prompt).await?,
         "openrouter" => call_openrouter(api_key, model, &prompt, &schema).await?,
+        "local" => call_local(api_key, model, &prompt).await?,
         _ => {
             let msg = format!(
-                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter",
+                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
                 provider
             );
             error!("{}", msg);
@@ -246,7 +258,10 @@ pub async fn generate_specs_from_knowledge(
 
     // Map the LLM response JSON to our FilamentSpecs struct
     let mut specs = map_response_to_specs(&response_json, filament_name).map_err(|e| {
-        let msg = format!("LLM response JSON does not match FilamentSpecs schema: {}", e);
+        let msg = format!(
+            "LLM response JSON does not match FilamentSpecs schema: {}",
+            e
+        );
         error!("{}", msg);
         msg
     })?;
@@ -280,10 +295,7 @@ fn map_response_to_specs(
     json: &serde_json::Value,
     filament_name: &str,
 ) -> Result<FilamentSpecs, String> {
-    let name = json["name"]
-        .as_str()
-        .unwrap_or(filament_name)
-        .to_string();
+    let name = json["name"].as_str().unwrap_or(filament_name).to_string();
     let brand = json["brand"]
         .as_str()
         .ok_or("Missing 'brand' field")?
@@ -304,17 +316,27 @@ fn map_response_to_specs(
 
         // Actual printing temperatures
         nozzle_temperature: json["nozzle_temperature"].as_u64().map(|v| v as u16),
-        nozzle_temperature_initial_layer: json["nozzle_temperature_initial_layer"].as_u64().map(|v| v as u16),
+        nozzle_temperature_initial_layer: json["nozzle_temperature_initial_layer"]
+            .as_u64()
+            .map(|v| v as u16),
 
         // Per-plate bed temperatures
         hot_plate_temp: json["hot_plate_temp"].as_u64().map(|v| v as u16),
-        hot_plate_temp_initial_layer: json["hot_plate_temp_initial_layer"].as_u64().map(|v| v as u16),
+        hot_plate_temp_initial_layer: json["hot_plate_temp_initial_layer"]
+            .as_u64()
+            .map(|v| v as u16),
         cool_plate_temp: json["cool_plate_temp"].as_u64().map(|v| v as u16),
-        cool_plate_temp_initial_layer: json["cool_plate_temp_initial_layer"].as_u64().map(|v| v as u16),
+        cool_plate_temp_initial_layer: json["cool_plate_temp_initial_layer"]
+            .as_u64()
+            .map(|v| v as u16),
         eng_plate_temp: json["eng_plate_temp"].as_u64().map(|v| v as u16),
-        eng_plate_temp_initial_layer: json["eng_plate_temp_initial_layer"].as_u64().map(|v| v as u16),
+        eng_plate_temp_initial_layer: json["eng_plate_temp_initial_layer"]
+            .as_u64()
+            .map(|v| v as u16),
         textured_plate_temp: json["textured_plate_temp"].as_u64().map(|v| v as u16),
-        textured_plate_temp_initial_layer: json["textured_plate_temp_initial_layer"].as_u64().map(|v| v as u16),
+        textured_plate_temp_initial_layer: json["textured_plate_temp_initial_layer"]
+            .as_u64()
+            .map(|v| v as u16),
 
         // Flow & volumetric speed
         max_volumetric_speed: json["max_volumetric_speed"].as_f64().map(|v| v as f32),
@@ -325,8 +347,12 @@ fn map_response_to_specs(
         fan_min_speed: json["fan_min_speed"].as_u64().map(|v| v as u8),
         fan_max_speed: json["fan_max_speed"].as_u64().map(|v| v as u8),
         overhang_fan_speed: json["overhang_fan_speed"].as_u64().map(|v| v as u8),
-        close_fan_the_first_x_layers: json["close_fan_the_first_x_layers"].as_u64().map(|v| v as u8),
-        additional_cooling_fan_speed: json["additional_cooling_fan_speed"].as_u64().map(|v| v as u8),
+        close_fan_the_first_x_layers: json["close_fan_the_first_x_layers"]
+            .as_u64()
+            .map(|v| v as u8),
+        additional_cooling_fan_speed: json["additional_cooling_fan_speed"]
+            .as_u64()
+            .map(|v| v as u8),
 
         // Legacy fan field
         fan_speed_percent: json["fan_speed_percent"].as_u64().map(|v| v as u8),
@@ -353,13 +379,8 @@ fn map_response_to_specs(
         max_speed_mm_s: json["max_speed_mm_s"].as_u64().map(|v| v as u16),
 
         // Metadata
-        source_url: json["source_url"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
-        extraction_confidence: json["confidence"]
-            .as_f64()
-            .unwrap_or(0.0) as f32,
+        source_url: json["source_url"].as_str().unwrap_or("").to_string(),
+        extraction_confidence: json["confidence"].as_f64().unwrap_or(0.0) as f32,
     })
 }
 
@@ -491,7 +512,7 @@ async fn call_openai(
 
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 2048,
+        "max_completion_tokens": 2048,
         "messages": [
             {"role": "user", "content": prompt}
         ],
@@ -544,11 +565,7 @@ async fn call_openai(
 /// Call the Kimi (Moonshot) API.
 /// Uses standard JSON mode with prompt-based enforcement since
 /// Kimi structured output support is unverified.
-async fn call_kimi(
-    api_key: &str,
-    model: &str,
-    prompt: &str,
-) -> Result<String, String> {
+async fn call_kimi(api_key: &str, model: &str, prompt: &str) -> Result<String, String> {
     let client = build_api_client()?;
 
     let body = serde_json::json!({
@@ -652,6 +669,110 @@ async fn call_openrouter(
         .map(|s| s.to_string())
         .ok_or_else(|| {
             let msg = "No content in OpenRouter API response".to_string();
+            error!("{}", msg);
+            msg
+        })
+}
+
+/// Call a local OpenAI-compatible server (LM Studio, Ollama, etc.).
+/// Tries json_object mode first, falls back to no response_format if unsupported.
+/// The `api_key` argument contains the local server base URL (e.g. "http://localhost:1234").
+async fn call_local(api_key: &str, model: &str, prompt: &str) -> Result<String, String> {
+    let base_url = if api_key.is_empty() {
+        "http://localhost:1234"
+    } else {
+        api_key
+    };
+    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+
+    let client = build_api_client()?;
+
+    // Try with json_object response_format first
+    let body_with_format = serde_json::json!({
+        "model": model,
+        "max_tokens": 2048,
+        "messages": [
+            {"role": "system", "content": "You are a filament specification extraction assistant. Always respond with valid JSON only, no markdown formatting or code blocks."},
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {
+            "type": "json_object"
+        }
+    });
+
+    let response = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .json(&body_with_format)
+        .send()
+        .await
+        .map_err(|e| {
+            let msg = if e.is_timeout() {
+                "LLM API timeout after 60s for local server".to_string()
+            } else if e.is_connect() {
+                format!(
+                    "Cannot connect to local server at {}. Is your local model server running?",
+                    base_url
+                )
+            } else {
+                format!("LLM API request failed for local server: {}", e)
+            };
+            error!("{}", msg);
+            msg
+        })?;
+
+    // If we get a 400 error about response_format, retry without it
+    let body_text = if response.status() == reqwest::StatusCode::BAD_REQUEST {
+        let error_body = response.text().await.unwrap_or_default();
+        if error_body.contains("response_format")
+            || error_body.contains("json_schema")
+            || error_body.contains("json_object")
+        {
+            info!("Local server does not support response_format, retrying without it");
+            let body_without_format = serde_json::json!({
+                "model": model,
+                "max_tokens": 2048,
+                "messages": [
+                    {"role": "system", "content": "You are a filament specification extraction assistant. You MUST respond with valid JSON only. No markdown, no code blocks, no explanation - just the raw JSON object."},
+                    {"role": "user", "content": prompt}
+                ]
+            });
+
+            let retry_response = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&body_without_format)
+                .send()
+                .await
+                .map_err(|e| {
+                    let msg = format!("LLM API retry request failed for local server: {}", e);
+                    error!("{}", msg);
+                    msg
+                })?;
+
+            handle_api_response(retry_response, "local").await?
+        } else {
+            // Not a response_format error, return the original error
+            let msg = format!("LLM API error: 400 Bad Request from local - {}", error_body);
+            error!("{}", msg);
+            return Err(msg);
+        }
+    } else {
+        handle_api_response(response, "local").await?
+    };
+
+    // Parse response (OpenAI-compatible format)
+    let resp_json: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+        let msg = format!("Failed to parse local server response: {}", e);
+        error!("{}", msg);
+        msg
+    })?;
+
+    resp_json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            let msg = "No content in local server response".to_string();
             error!("{}", msg);
             msg
         })

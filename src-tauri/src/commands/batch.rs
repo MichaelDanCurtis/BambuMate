@@ -87,8 +87,7 @@ pub async fn batch_generate_brand(
     let mut failed = 0usize;
 
     // Pre-load registry once for all generations
-    let paths =
-        BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
+    let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
     let system_dir = paths.system_filament_dir();
     let registry = ProfileRegistry::discover_system_profiles(&system_dir)
         .map_err(|e| format!("Failed to load system profiles: {}", e))?;
@@ -114,7 +113,7 @@ pub async fn batch_generate_brand(
             ..Default::default()
         };
 
-        match generator::generate_profile(&specs, &registry, target_printer.as_deref()) {
+        match generator::generate_profile(&specs, &registry, target_printer.as_deref(), None) {
             Ok((profile, metadata, filename)) => {
                 let profile_name = profile.name().unwrap_or("<unnamed>").to_string();
 

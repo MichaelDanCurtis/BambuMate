@@ -5,10 +5,7 @@ use crate::stl_watcher::{StlFile, StlWatcherState};
 
 /// Set the STL watch directory and start watching.
 #[tauri::command]
-pub async fn set_stl_watch_dir(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<(), String> {
+pub async fn set_stl_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
     info!("Setting STL watch directory to: {}", path);
 
     // Save preference

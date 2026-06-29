@@ -7,6 +7,48 @@ extern "C" {
     async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 }
 
+// -- Feature Flags --
+
+/// Feature flags indicating which app modules are enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+pub struct FeatureFlags {
+    pub profiles_enabled: bool,
+    pub analysis_enabled: bool,
+}
+
+/// Get current feature flags from preferences.
+pub async fn get_feature_flags() -> Result<FeatureFlags, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("get_feature_flags", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Setup Status --
+
+/// Status of the initial setup wizard.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SetupStatus {
+    pub bambu_studio_path: Option<String>,
+    pub ai_provider: Option<String>,
+    pub has_api_key: bool,
+    pub setup_complete: bool,
+}
+
+/// Check whether the initial setup wizard has been completed.
+pub async fn check_setup_complete() -> Result<SetupStatus, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("check_setup_complete", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
 // -- Arg structs for serialization --
 
 #[derive(Serialize)]
@@ -42,11 +84,26 @@ struct SetPreferenceArgs {
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
+    pub recommended: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelValidationResult {
+    pub text_ok: bool,
+    pub vision_ok: bool,
+    pub text_message: String,
+    pub vision_message: String,
 }
 
 #[derive(Serialize)]
 struct ListModelsArgs {
     provider: String,
+}
+
+#[derive(Serialize)]
+struct ValidateModelArgs {
+    provider: String,
+    model: String,
 }
 
 // -- Health report matching backend struct --
@@ -104,10 +161,20 @@ pub async fn delete_api_key(service: &str) -> Result<(), String> {
 }
 
 pub async fn run_health_check() -> Result<HealthReport, String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
-        .map_err(|e| e.to_string())?;
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
 
     let result = invoke("run_health_check", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Open a native folder picker and return the selected path, or None if cancelled.
+pub async fn pick_config_folder() -> Result<Option<String>, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("pick_config_folder", args)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 
@@ -134,6 +201,20 @@ pub async fn list_models(provider: &str) -> Result<Vec<ModelInfo>, String> {
     .map_err(|e| e.to_string())?;
 
     let result = invoke("list_models", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+pub async fn validate_model(provider: &str, model: &str) -> Result<ModelValidationResult, String> {
+    let args = serde_wasm_bindgen::to_value(&ValidateModelArgs {
+        provider: provider.to_string(),
+        model: model.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("validate_model", args)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 
@@ -242,60 +323,108 @@ fn material_defaults(material: &str) -> MaterialDefaults {
     let m = material.to_uppercase();
     if m.contains("PLA") {
         MaterialDefaults {
-            fan_min: 100, fan_max: 100, overhang_fan: 100,
-            close_fan_layers: 1, additional_cooling_fan: 80,
-            slow_down_layer_time: 8, slow_down_min_speed: 20,
-            max_volumetric_speed: 21.0, flow_ratio: 0.98, pressure_advance: 0.04,
+            fan_min: 100,
+            fan_max: 100,
+            overhang_fan: 100,
+            close_fan_layers: 1,
+            additional_cooling_fan: 80,
+            slow_down_layer_time: 8,
+            slow_down_min_speed: 20,
+            max_volumetric_speed: 21.0,
+            flow_ratio: 0.98,
+            pressure_advance: 0.04,
         }
     } else if m.contains("PETG") {
         MaterialDefaults {
-            fan_min: 20, fan_max: 40, overhang_fan: 100,
-            close_fan_layers: 3, additional_cooling_fan: 50,
-            slow_down_layer_time: 10, slow_down_min_speed: 20,
-            max_volumetric_speed: 18.0, flow_ratio: 0.97, pressure_advance: 0.02,
+            fan_min: 20,
+            fan_max: 40,
+            overhang_fan: 100,
+            close_fan_layers: 3,
+            additional_cooling_fan: 50,
+            slow_down_layer_time: 10,
+            slow_down_min_speed: 20,
+            max_volumetric_speed: 18.0,
+            flow_ratio: 0.97,
+            pressure_advance: 0.02,
         }
     } else if m.contains("ASA") {
         MaterialDefaults {
-            fan_min: 0, fan_max: 30, overhang_fan: 80,
-            close_fan_layers: 3, additional_cooling_fan: 0,
-            slow_down_layer_time: 10, slow_down_min_speed: 20,
-            max_volumetric_speed: 16.0, flow_ratio: 0.98, pressure_advance: 0.02,
+            fan_min: 0,
+            fan_max: 30,
+            overhang_fan: 80,
+            close_fan_layers: 3,
+            additional_cooling_fan: 0,
+            slow_down_layer_time: 10,
+            slow_down_min_speed: 20,
+            max_volumetric_speed: 16.0,
+            flow_ratio: 0.98,
+            pressure_advance: 0.02,
         }
     } else if m.contains("ABS") {
         MaterialDefaults {
-            fan_min: 0, fan_max: 30, overhang_fan: 80,
-            close_fan_layers: 3, additional_cooling_fan: 0,
-            slow_down_layer_time: 10, slow_down_min_speed: 20,
-            max_volumetric_speed: 16.0, flow_ratio: 0.98, pressure_advance: 0.02,
+            fan_min: 0,
+            fan_max: 30,
+            overhang_fan: 80,
+            close_fan_layers: 3,
+            additional_cooling_fan: 0,
+            slow_down_layer_time: 10,
+            slow_down_min_speed: 20,
+            max_volumetric_speed: 16.0,
+            flow_ratio: 0.98,
+            pressure_advance: 0.02,
         }
     } else if m.contains("TPU") || m.contains("TPE") {
         MaterialDefaults {
-            fan_min: 50, fan_max: 80, overhang_fan: 100,
-            close_fan_layers: 3, additional_cooling_fan: 0,
-            slow_down_layer_time: 12, slow_down_min_speed: 15,
-            max_volumetric_speed: 8.0, flow_ratio: 1.0, pressure_advance: 0.04,
+            fan_min: 50,
+            fan_max: 80,
+            overhang_fan: 100,
+            close_fan_layers: 3,
+            additional_cooling_fan: 0,
+            slow_down_layer_time: 12,
+            slow_down_min_speed: 15,
+            max_volumetric_speed: 8.0,
+            flow_ratio: 1.0,
+            pressure_advance: 0.04,
         }
     } else if m.contains("PA") || m.contains("NYLON") {
         MaterialDefaults {
-            fan_min: 0, fan_max: 30, overhang_fan: 80,
-            close_fan_layers: 3, additional_cooling_fan: 0,
-            slow_down_layer_time: 10, slow_down_min_speed: 20,
-            max_volumetric_speed: 12.0, flow_ratio: 0.98, pressure_advance: 0.02,
+            fan_min: 0,
+            fan_max: 30,
+            overhang_fan: 80,
+            close_fan_layers: 3,
+            additional_cooling_fan: 0,
+            slow_down_layer_time: 10,
+            slow_down_min_speed: 20,
+            max_volumetric_speed: 12.0,
+            flow_ratio: 0.98,
+            pressure_advance: 0.02,
         }
     } else if m.contains("PC") {
         MaterialDefaults {
-            fan_min: 0, fan_max: 30, overhang_fan: 80,
-            close_fan_layers: 3, additional_cooling_fan: 0,
-            slow_down_layer_time: 10, slow_down_min_speed: 20,
-            max_volumetric_speed: 14.0, flow_ratio: 0.98, pressure_advance: 0.02,
+            fan_min: 0,
+            fan_max: 30,
+            overhang_fan: 80,
+            close_fan_layers: 3,
+            additional_cooling_fan: 0,
+            slow_down_layer_time: 10,
+            slow_down_min_speed: 20,
+            max_volumetric_speed: 14.0,
+            flow_ratio: 0.98,
+            pressure_advance: 0.02,
         }
     } else {
         // Safe PLA-like defaults for unknown materials
         MaterialDefaults {
-            fan_min: 80, fan_max: 100, overhang_fan: 100,
-            close_fan_layers: 1, additional_cooling_fan: 80,
-            slow_down_layer_time: 8, slow_down_min_speed: 20,
-            max_volumetric_speed: 18.0, flow_ratio: 0.98, pressure_advance: 0.04,
+            fan_min: 80,
+            fan_max: 100,
+            overhang_fan: 100,
+            close_fan_layers: 1,
+            additional_cooling_fan: 80,
+            slow_down_layer_time: 8,
+            slow_down_min_speed: 20,
+            max_volumetric_speed: 18.0,
+            flow_ratio: 0.98,
+            pressure_advance: 0.04,
         }
     }
 }
@@ -472,6 +601,7 @@ struct SearchFilamentArgs {
 struct GenerateProfileArgs {
     specs: FilamentSpecs,
     target_printer: Option<String>,
+    base_profile_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -531,10 +661,12 @@ pub async fn search_filament(name: &str) -> Result<FilamentSpecs, String> {
 pub async fn generate_profile(
     specs: &FilamentSpecs,
     target_printer: Option<String>,
+    base_profile_path: Option<String>,
 ) -> Result<GenerateResult, String> {
     let args = serde_wasm_bindgen::to_value(&GenerateProfileArgs {
         specs: specs.clone(),
         target_printer,
+        base_profile_path,
     })
     .map_err(|e| e.to_string())?;
 
@@ -582,8 +714,7 @@ pub struct ProfileInfo {
 
 /// List all user filament profiles from Bambu Studio.
 pub async fn list_profiles() -> Result<Vec<ProfileInfo>, String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
-        .map_err(|e| e.to_string())?;
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
 
     let result = invoke("list_profiles", args)
         .await
@@ -594,8 +725,7 @@ pub async fn list_profiles() -> Result<Vec<ProfileInfo>, String> {
 
 /// List all system/factory filament profiles from Bambu Studio.
 pub async fn list_system_profiles() -> Result<Vec<ProfileInfo>, String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
-        .map_err(|e| e.to_string())?;
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
 
     let result = invoke("list_system_profiles", args)
         .await
@@ -608,8 +738,7 @@ pub async fn list_system_profiles() -> Result<Vec<ProfileInfo>, String> {
 
 /// Get the status of the local filament catalog.
 pub async fn get_catalog_status() -> Result<CatalogStatus, String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
-        .map_err(|e| e.to_string())?;
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
 
     let result = invoke("get_catalog_status", args)
         .await
@@ -621,8 +750,7 @@ pub async fn get_catalog_status() -> Result<CatalogStatus, String> {
 /// Refresh the catalog by fetching all filaments from SpoolScout.
 /// This may take a few seconds as it fetches ~200 filaments.
 pub async fn refresh_catalog() -> Result<CatalogStatus, String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
-        .map_err(|e| e.to_string())?;
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
 
     let result = invoke("refresh_catalog", args)
         .await
@@ -633,7 +761,10 @@ pub async fn refresh_catalog() -> Result<CatalogStatus, String> {
 
 /// Search the local catalog for filaments matching the query.
 /// Returns matches sorted by relevance (best first).
-pub async fn search_catalog(query: &str, limit: Option<usize>) -> Result<Vec<CatalogMatch>, String> {
+pub async fn search_catalog(
+    query: &str,
+    limit: Option<usize>,
+) -> Result<Vec<CatalogMatch>, String> {
     let args = serde_wasm_bindgen::to_value(&SearchCatalogArgs {
         query: query.to_string(),
         limit,
@@ -664,7 +795,10 @@ pub async fn fetch_filament_from_catalog(entry: &CatalogEntry) -> Result<Filamen
 
 /// Extract specs from a user-provided URL.
 /// Useful for filaments not in the catalog.
-pub async fn extract_specs_from_url(url: &str, filament_name: &str) -> Result<FilamentSpecs, String> {
+pub async fn extract_specs_from_url(
+    url: &str,
+    filament_name: &str,
+) -> Result<FilamentSpecs, String> {
     let args = serde_wasm_bindgen::to_value(&ExtractFromUrlArgs {
         url: url.to_string(),
         filament_name: filament_name.to_string(),
@@ -844,7 +978,10 @@ pub async fn extract_specs_from_profile(path: &str) -> Result<FilamentSpecs, Str
 }
 
 /// Save edited FilamentSpecs back to an existing profile.
-pub async fn save_profile_specs(path: &str, specs: &FilamentSpecs) -> Result<ProfileDetail, String> {
+pub async fn save_profile_specs(
+    path: &str,
+    specs: &FilamentSpecs,
+) -> Result<ProfileDetail, String> {
     let args = serde_wasm_bindgen::to_value(&SaveProfileSpecsArgs {
         path: path.to_string(),
         specs: specs.clone(),
@@ -888,13 +1025,15 @@ pub async fn analyze_print(
         },
     };
 
-    invoke("analyze_print", serde_wasm_bindgen::to_value(&args).unwrap())
-        .await
-        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
-        .and_then(|v| {
-            serde_wasm_bindgen::from_value(v)
-                .map_err(|e| format!("Failed to parse response: {}", e))
-        })
+    invoke(
+        "analyze_print",
+        serde_wasm_bindgen::to_value(&args).unwrap(),
+    )
+    .await
+    .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
+    .and_then(|v| {
+        serde_wasm_bindgen::from_value(v).map_err(|e| format!("Failed to parse response: {}", e))
+    })
 }
 
 // -- Apply Recommendations Types --
@@ -1032,13 +1171,15 @@ pub async fn apply_recommendations(
         },
     };
 
-    invoke("apply_recommendations", serde_wasm_bindgen::to_value(&args).unwrap())
-        .await
-        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
-        .and_then(|v| {
-            serde_wasm_bindgen::from_value(v)
-                .map_err(|e| format!("Failed to parse response: {}", e))
-        })
+    invoke(
+        "apply_recommendations",
+        serde_wasm_bindgen::to_value(&args).unwrap(),
+    )
+    .await
+    .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
+    .and_then(|v| {
+        serde_wasm_bindgen::from_value(v).map_err(|e| format!("Failed to parse response: {}", e))
+    })
 }
 
 // -- Bambu Studio Launcher --
@@ -1060,8 +1201,7 @@ struct LaunchBambuStudioArgs {
 
 /// Detect the Bambu Studio application path.
 pub async fn detect_bambu_studio_path() -> Result<String, String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
-        .map_err(|e| e.to_string())?;
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
 
     let result = invoke("detect_bambu_studio_path", args)
         .await
@@ -1121,8 +1261,7 @@ struct BatchGenerateBrandArgs {
 
 /// List all distinct brands from the filament catalog.
 pub async fn list_catalog_brands() -> Result<Vec<String>, String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
-        .map_err(|e| e.to_string())?;
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
 
     let result = invoke("list_catalog_brands", args)
         .await
@@ -1188,8 +1327,7 @@ pub async fn set_stl_watch_dir(path: &str) -> Result<(), String> {
 
 /// Get the current STL watch directory.
 pub async fn get_stl_watch_dir() -> Result<Option<String>, String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
-        .map_err(|e| e.to_string())?;
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
 
     let result = invoke("get_stl_watch_dir", args)
         .await
@@ -1200,8 +1338,7 @@ pub async fn get_stl_watch_dir() -> Result<Option<String>, String> {
 
 /// List all received STL files.
 pub async fn list_received_stls() -> Result<Vec<StlFile>, String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({}))
-        .map_err(|e| e.to_string())?;
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
 
     let result = invoke("list_received_stls", args)
         .await
@@ -1273,6 +1410,160 @@ pub async fn compare_profiles(
     .map_err(|e| e.to_string())?;
 
     let result = invoke("compare_profiles", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Bambu Studio Config Path Search & Validation --
+
+/// Result from validating a Bambu Studio config path.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PathValidation {
+    pub valid: bool,
+    pub has_system_profiles: bool,
+    pub has_config_file: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidatePathArgs {
+    path: String,
+}
+
+/// Search for the Bambu Studio configuration directory on the system.
+pub async fn search_bambu_studio_config() -> Result<String, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("search_bambu_studio_config", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Validate that a given path is a valid Bambu Studio configuration directory.
+pub async fn validate_bambu_studio_path(path: &str) -> Result<PathValidation, String> {
+    let args = serde_wasm_bindgen::to_value(&ValidatePathArgs {
+        path: path.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("validate_bambu_studio_path", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Open External URL --
+
+/// Open an external URL in the system's default browser using tauri-plugin-opener.
+pub async fn open_external_url(url: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct OpenUrlArgs {
+        url: String,
+    }
+    let args = serde_wasm_bindgen::to_value(&OpenUrlArgs {
+        url: url.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    invoke("open_external_url", args)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            e.as_string()
+                .unwrap_or_else(|| "Failed to open URL".to_string())
+        })
+}
+
+// -- Clean Install Reset --
+
+/// Reset BambuMate to a clean installation state.
+/// Clears all preferences and deletes all stored API keys from the system keychain.
+pub async fn reset_to_clean_install() -> Result<(), String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    invoke("reset_to_clean_install", args)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            e.as_string()
+                .unwrap_or_else(|| "Failed to reset to clean install".to_string())
+        })
+}
+
+// -- Search Base Profiles --
+
+/// A base profile match from Bambu Studio's system profiles.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BaseProfileMatch {
+    pub name: String,
+    pub path: String,
+    pub filament_type: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchBaseProfilesArgs {
+    query: String,
+    material_type: Option<String>,
+}
+
+/// Search Bambu Studio's system profiles for filaments matching a query.
+pub async fn search_base_profiles(
+    query: &str,
+    material_type: Option<&str>,
+) -> Result<Vec<BaseProfileMatch>, String> {
+    let args = serde_wasm_bindgen::to_value(&SearchBaseProfilesArgs {
+        query: query.to_string(),
+        material_type: material_type.map(|s| s.to_string()),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("search_base_profiles", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+// -- Version / Auto-Update --
+
+/// Current app version returned by the backend.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VersionInfo {
+    pub current_version: String,
+}
+
+/// Update availability information from GitHub releases.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateInfo {
+    pub has_update: bool,
+    pub latest_version: String,
+    pub release_url: String,
+    pub release_notes: Option<String>,
+}
+
+/// Get the current application version embedded at build time.
+pub async fn get_app_version() -> Result<VersionInfo, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("get_app_version", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Check GitHub releases for a newer version of BambuMate.
+pub async fn check_for_updates() -> Result<UpdateInfo, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("check_for_updates", args)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 

@@ -63,10 +63,7 @@ pub async fn get_history_session(
 /// Restores the profile from the backup created when changes were applied.
 /// Returns a message indicating success.
 #[tauri::command]
-pub async fn revert_to_backup(
-    app: tauri::AppHandle,
-    session_id: i64,
-) -> Result<String, String> {
+pub async fn revert_to_backup(app: tauri::AppHandle, session_id: i64) -> Result<String, String> {
     let data_dir = app
         .path()
         .app_data_dir()

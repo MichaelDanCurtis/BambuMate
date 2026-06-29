@@ -2,13 +2,14 @@
 //!
 //! Users can drag-and-drop or browse for a print photo to analyze.
 
-use leptos::prelude::*;
 use leptos::html::Div;
+use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::app::FeatureFlagsContext;
 use crate::commands;
 use crate::components::change_preview::ChangePreview;
 use crate::components::defect_report::DefectReportDisplay;
@@ -91,6 +92,7 @@ pub enum AnalysisState {
 /// Print analysis page component.
 #[component]
 pub fn PrintAnalysisPage() -> impl IntoView {
+    let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
     let (state, set_state) = signal(AnalysisState::Idle);
     let (image_preview, set_image_preview) = signal::<Option<String>>(None);
     let (material_override, set_material_override) = signal::<Option<String>>(None);
@@ -153,6 +155,23 @@ pub fn PrintAnalysisPage() -> impl IntoView {
             <style>{include_str!("print_analysis.css")}</style>
 
             <h2>"Print Analysis"</h2>
+
+            <Show
+                when=move || ff_ctx.flags.get().analysis_enabled
+                fallback=move || view! {
+                    <div class="ai-required-notice">
+                        <div class="ai-required-lock">"🔒"</div>
+                        <h3>"AI Required"</h3>
+                        <p>
+                            "Print Analysis uses AI vision models to detect defects in your prints "
+                            "and suggest parameter corrections. "
+                            "To use this feature, go to "
+                            <a href="/settings">"Settings"</a>
+                            " and enable AI with an API key."
+                        </p>
+                    </div>
+                }
+            >
             <p class="page-description">
                 "Upload a photo of your test print to detect defects and get recommendations."
             </p>
@@ -392,6 +411,7 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                     },
                 }
             }}
+            </Show>
         </div>
     }
 }
@@ -428,7 +448,9 @@ fn PhotoDropZone(
                                 handle_file_loaded(base64);
                             }
                             Err(e) => {
-                                web_sys::console::error_1(&format!("Failed to read file: {}", e).into());
+                                web_sys::console::error_1(
+                                    &format!("Failed to read file: {}", e).into(),
+                                );
                             }
                         }
                         set_is_loading.set(false);
@@ -450,7 +472,9 @@ fn PhotoDropZone(
                             handle_file_loaded(base64);
                         }
                         Err(e) => {
-                            web_sys::console::error_1(&format!("Failed to read file: {}", e).into());
+                            web_sys::console::error_1(
+                                &format!("Failed to read file: {}", e).into(),
+                            );
                         }
                     }
                     set_is_loading.set(false);

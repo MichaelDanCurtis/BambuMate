@@ -1,4 +1,4 @@
-use super::{slugify, strip_brand, spoolscout, BrandAdapter};
+use super::{slugify, spoolscout, strip_brand, BrandAdapter};
 
 pub struct Prusament;
 
@@ -16,9 +16,10 @@ impl BrandAdapter for Prusament {
         let product = strip_brand(&product, "prusa");
         let slug = slugify(&product);
 
-        let mut urls = vec![
-            format!("https://www.prusa3d.com/product/prusament-{}/", slug),
-        ];
+        let mut urls = vec![format!(
+            "https://www.prusa3d.com/product/prusament-{}/",
+            slug
+        )];
         urls.push(spoolscout::fallback_url("prusament", filament_name));
         urls
     }
