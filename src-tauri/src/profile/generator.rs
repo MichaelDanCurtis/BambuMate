@@ -362,11 +362,8 @@ pub fn generate_profile(
     profile.set_string("filament_id", generate_filament_id());
     profile.set_string("instantiation", "true".to_string());
 
-    // 3. Set display identifier (2-element array)
-    profile.set_string_array(
-        "filament_settings_id",
-        vec![profile_name.clone(), profile_name.clone()],
-    );
+    // 3. Set display identifier (single element matching profile name)
+    profile.set_string_array("filament_settings_id", vec![profile_name.clone()]);
 
     // 4. Apply scraped spec overrides
     apply_specs_to_profile(&mut profile, specs);
