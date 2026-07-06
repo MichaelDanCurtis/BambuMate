@@ -204,16 +204,30 @@ impl FilamentCatalog {
     pub fn list_brands(&self) -> Result<Vec<String>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT DISTINCT brand FROM catalog ORDER BY brand")
+            .prepare(
+                "SELECT brand FROM catalog
+                 WHERE TRIM(brand) != ''
+                 ORDER BY LOWER(TRIM(brand)), id",
+            )
             .map_err(|e| format!("Failed to query brands: {}", e))?;
 
         let brands = stmt
-            .query_map([], |row| row.get(0))
+            .query_map([], |row| row.get::<_, String>(0))
             .map_err(|e| format!("Brand query failed: {}", e))?;
 
-        brands
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())
+        let mut deduped = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for brand in brands {
+            let brand = brand.map_err(|e| e.to_string())?;
+            let trimmed = brand.trim();
+            let key = trimmed.to_lowercase();
+            if !trimmed.is_empty() && seen.insert(key) {
+                deduped.push(trimmed.to_string());
+            }
+        }
+
+        Ok(deduped)
     }
 
     /// Get all entries for a specific brand.
@@ -510,5 +524,77 @@ mod tests {
         let (mat, name) = parse_filament_slug_clean("petg-petg");
         assert_eq!(mat, "PETG");
         assert_eq!(name, "PETG");
+    }
+
+    #[test]
+    fn test_list_brands_dedupes_case_and_whitespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("catalog.db");
+        let catalog = FilamentCatalog::new(&db_path).unwrap();
+
+        catalog
+            .conn
+            .execute(
+                "INSERT INTO catalog (brand, name, material, url_slug, full_url, search_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "eSun",
+                    "PLA",
+                    "PLA",
+                    "pla",
+                    "https://example.com/esun/pla",
+                    "esun pla pla"
+                ],
+            )
+            .unwrap();
+        catalog
+            .conn
+            .execute(
+                "INSERT INTO catalog (brand, name, material, url_slug, full_url, search_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    " ESUN ",
+                    "PETG",
+                    "PETG",
+                    "petg",
+                    "https://example.com/esun/petg",
+                    "esun petg petg"
+                ],
+            )
+            .unwrap();
+        catalog
+            .conn
+            .execute(
+                "INSERT INTO catalog (brand, name, material, url_slug, full_url, search_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "Sunlu",
+                    "PLA",
+                    "PLA",
+                    "sunlu-pla",
+                    "https://example.com/sunlu/pla",
+                    "sunlu pla pla"
+                ],
+            )
+            .unwrap();
+        catalog
+            .conn
+            .execute(
+                "INSERT INTO catalog (brand, name, material, url_slug, full_url, search_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "sunlu",
+                    "ABS",
+                    "ABS",
+                    "sunlu-abs",
+                    "https://example.com/sunlu/abs",
+                    "sunlu abs abs"
+                ],
+            )
+            .unwrap();
+
+        let brands = catalog.list_brands().unwrap();
+        let lower: Vec<String> = brands.into_iter().map(|b| b.to_lowercase()).collect();
+        assert_eq!(lower, vec!["esun", "sunlu"]);
     }
 }
