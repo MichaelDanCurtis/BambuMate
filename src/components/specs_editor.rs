@@ -463,7 +463,7 @@ pub fn SpecsEditor(
                                     .get()
                                     .printer_models
                                     .into_iter()
-                                    .map(|printer| view! { <option value={printer.clone()}>{printer}</option> })
+                                    .map(|printer| view! { <option value={printer.clone()}>{printer.clone()}</option> })
                                     .collect::<Vec<_>>()}
                             </select>
                         </div>
