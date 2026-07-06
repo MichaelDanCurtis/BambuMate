@@ -1,6 +1,7 @@
 use serde::Serialize;
 use tracing::info;
 
+use crate::process_command;
 use crate::profile::generator;
 
 /// Result from launching Bambu Studio.
@@ -175,7 +176,7 @@ fn search_bs_path() -> Option<String> {
 
     // 2. Search PATH for both possible executable names
     for exe_name in &["BambuStudio.exe", "bambu-studio.exe"] {
-        if let Ok(output) = std::process::Command::new("where").arg(exe_name).output() {
+        if let Ok(output) = process_command::new_command("where").arg(exe_name).output() {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if let Some(line) = stdout.lines().next() {
@@ -224,7 +225,7 @@ fn search_registry_for_bs() -> Option<String> {
     ];
 
     for reg_key in &reg_keys {
-        if let Ok(output) = std::process::Command::new("reg")
+        if let Ok(output) = process_command::new_command("reg")
             .args(["query", reg_key, "/v", "InstallLocation"])
             .output()
         {
@@ -257,7 +258,7 @@ fn search_registry_for_bs() -> Option<String> {
             r"{}\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
             hive
         );
-        if let Ok(output) = std::process::Command::new("reg")
+        if let Ok(output) = process_command::new_command("reg")
             .args(["query", &uninstall_key, "/s", "/v", "DisplayName"])
             .output()
         {
@@ -272,7 +273,7 @@ fn search_registry_for_bs() -> Option<String> {
                             let key_line = lines[j].trim();
                             if key_line.starts_with("HKEY_") {
                                 // Now query InstallLocation from this specific key
-                                if let Ok(loc_output) = std::process::Command::new("reg")
+                                if let Ok(loc_output) = process_command::new_command("reg")
                                     .args(["query", key_line, "/v", "InstallLocation"])
                                     .output()
                                 {
@@ -387,7 +388,7 @@ fn launch_platform(
     stl_path: Option<&str>,
     profile_path: Option<&str>,
 ) -> Result<(), String> {
-    let mut cmd = std::process::Command::new(bs_path);
+    let mut cmd = process_command::new_command(bs_path);
 
     if let Some(stl) = stl_path {
         if std::path::Path::new(stl).exists() {

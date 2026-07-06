@@ -5,6 +5,7 @@ mod commands;
 mod error;
 pub mod history;
 pub mod mapper;
+mod process_command;
 pub mod profile;
 pub mod scraper;
 pub mod stl_watcher;

@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use tracing::debug;
 
+use crate::process_command;
 use super::inheritance::resolve_inheritance;
 use super::paths::BambuPaths;
 use super::registry::ProfileRegistry;
@@ -430,7 +431,7 @@ pub fn is_bambu_studio_running() -> bool {
 #[cfg(target_os = "windows")]
 pub fn is_bambu_studio_running() -> bool {
     for exe_name in &["BambuStudio.exe", "bambu-studio.exe"] {
-        if let Ok(output) = std::process::Command::new("tasklist")
+        if let Ok(output) = process_command::new_command("tasklist")
             .args(["/FI", &format!("IMAGENAME eq {}", exe_name), "/NH"])
             .output()
         {
