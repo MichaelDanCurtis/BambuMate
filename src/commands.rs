@@ -239,7 +239,7 @@ pub async fn set_preference(key: &str, value: &str) -> Result<(), String> {
 /// Filament specifications from scraping/extraction.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FilamentSpecs {
-    pub name: String,
+    pub serial: String,
     pub brand: String,
     pub material: String,
 

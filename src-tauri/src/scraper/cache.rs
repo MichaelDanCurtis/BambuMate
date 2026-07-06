@@ -127,9 +127,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn make_test_specs(name: &str) -> FilamentSpecs {
+    fn make_test_specs(serial: &str) -> FilamentSpecs {
         FilamentSpecs {
-            name: name.to_string(),
+            serial: serial.to_string(),
             brand: "TestBrand".to_string(),
             material: "PLA".to_string(),
             nozzle_temp_min: Some(190),
@@ -181,7 +181,7 @@ mod tests {
         let result = cache.get("Test PLA").unwrap();
         assert!(result.is_some());
         let cached = result.unwrap();
-        assert_eq!(cached.name, "Test PLA");
+        assert_eq!(cached.serial, "Test PLA");
         assert_eq!(cached.brand, "TestBrand");
         assert_eq!(cached.nozzle_temp_min, Some(190));
         assert_eq!(cached.extraction_confidence, 0.85);
@@ -297,7 +297,7 @@ mod tests {
         cache.put("test pla", &specs2, 30).unwrap();
 
         let result = cache.get("test pla").unwrap().unwrap();
-        assert_eq!(result.name, "PLA v2");
+        assert_eq!(result.serial, "PLA v2");
         assert_eq!(result.nozzle_temp_min, Some(195));
     }
 

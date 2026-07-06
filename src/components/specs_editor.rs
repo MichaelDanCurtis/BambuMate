@@ -74,7 +74,7 @@ pub fn SpecsEditor(
     }
 
     // Identity signals
-    let (profile_name, set_profile_name) = signal(specs.name.clone());
+    let (serial, set_serial) = signal(specs.serial.clone());
     let (brand, set_brand) = signal(specs.brand.clone());
     let (material, set_material) = signal(specs.material.clone());
 
@@ -259,7 +259,7 @@ pub fn SpecsEditor(
     // Reset handler
     let do_reset = move |_| {
         let o = &original;
-        set_profile_name.set(o.name.clone());
+        set_serial.set(o.serial.clone());
         set_brand.set(o.brand.clone());
         set_material.set(o.material.clone());
         set_nozzle_temp_min.set(o.nozzle_temp_min.map(|v| v.to_string()).unwrap_or_default());
@@ -373,7 +373,7 @@ pub fn SpecsEditor(
         let mut edited = specs_for_generate.clone();
 
         // Identity fields
-        edited.name = profile_name.get();
+        edited.serial = serial.get();
         edited.brand = brand.get();
         edited.material = material.get();
 
@@ -438,8 +438,8 @@ pub fn SpecsEditor(
             <div class="specs-section">
                 <h4 class="specs-section-title">"Profile Identity"</h4>
                 <div class="spec-fields-grid">
-                    {spec_input("Name", "", profile_name, set_profile_name,
-                        "Profile display name as it appears in Bambu Studio's filament list.")}
+                    {spec_input("Serial", "", serial, set_serial,
+                        "Product serial/model identifier (e.g., High Flow, Basic, Matte). Used with Brand and Material to compose the full profile name.")}
                     {spec_input("Brand", "", brand, set_brand,
                         "Filament manufacturer/brand name (e.g., SUNLU, Bambu Lab, eSUN).")}
                     {spec_input("Material", "", material, set_material,

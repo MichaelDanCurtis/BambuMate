@@ -105,7 +105,7 @@ pub async fn batch_generate_brand(
 
         // Build minimal specs from catalog entry
         let specs = crate::scraper::types::FilamentSpecs {
-            name: entry.name.clone(),
+            serial: crate::scraper::html_extractor::infer_serial(&filament_name),
             brand: entry.brand.clone(),
             material: entry.material.clone(),
             source_url: entry.full_url.clone(),
