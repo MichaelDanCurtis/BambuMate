@@ -588,6 +588,14 @@ pub struct CatalogStatus {
     pub needs_refresh: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TargetPrinterOptions {
+    pub printer_models: Vec<String>,
+    pub nozzle_sizes: Vec<String>,
+    pub default_printer_model: String,
+    pub default_nozzle_size: String,
+}
+
 // -- Arg structs for filament/profile commands --
 
 #[derive(Serialize)]
@@ -694,6 +702,47 @@ pub async fn install_profile(
     .map_err(|e| e.to_string())?;
 
     let result = invoke("install_generated_profile", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+pub fn default_target_printer_options() -> TargetPrinterOptions {
+    TargetPrinterOptions {
+        printer_models: vec![
+            "H2C".to_string(),
+            "H2D".to_string(),
+            "X1 Carbon".to_string(),
+            "X1E".to_string(),
+            "P1P".to_string(),
+            "P1S".to_string(),
+            "A1".to_string(),
+            "A1 mini".to_string(),
+        ],
+        nozzle_sizes: vec![
+            "0.4".to_string(),
+            "0.2".to_string(),
+            "0.6".to_string(),
+            "0.8".to_string(),
+        ],
+        default_printer_model: "H2C".to_string(),
+        default_nozzle_size: "0.4".to_string(),
+    }
+}
+
+pub fn format_target_printer_label(printer_model: &str, nozzle_size: &str) -> String {
+    format!(
+        "Bambu Lab {} {} nozzle",
+        printer_model.trim(),
+        nozzle_size.trim()
+    )
+}
+
+pub async fn list_target_printer_options() -> Result<TargetPrinterOptions, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("list_target_printer_options", args)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 

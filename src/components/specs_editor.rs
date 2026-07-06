@@ -1,11 +1,18 @@
 use leptos::prelude::*;
+use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::FilamentSpecs;
+use crate::commands::{self, TargetPrinterOptions};
 
 pub const PRINTER_OPTIONS: &[&str] = &[
     "Bambu Lab H2C 0.4 nozzle",
     "Bambu Lab H2D 0.4 nozzle",
-    "Bambu Lab X1C 0.4 nozzle",
+    "Bambu Lab X1 Carbon 0.2 nozzle",
+    "Bambu Lab X1 Carbon 0.4 nozzle",
+    "Bambu Lab X1 Carbon 0.6 nozzle",
+    "Bambu Lab X1 Carbon 0.8 nozzle",
+    "Bambu Lab X1E 0.4 nozzle",
+    "Bambu Lab P1P 0.4 nozzle",
     "Bambu Lab P1S 0.4 nozzle",
     "Bambu Lab A1 0.4 nozzle",
     "Bambu Lab A1 mini 0.4 nozzle",
@@ -29,7 +36,42 @@ pub fn SpecsEditor(
     let original = specs.clone();
 
     // Printer selector
-    let (selected_printer, set_selected_printer) = signal(PRINTER_OPTIONS[0].to_string());
+    let fallback_target_printers = commands::default_target_printer_options();
+    let (target_printer_options, set_target_printer_options) =
+        signal::<TargetPrinterOptions>(fallback_target_printers.clone());
+    let (selected_printer_model, set_selected_printer_model) =
+        signal(fallback_target_printers.default_printer_model.clone());
+    let (selected_nozzle_size, set_selected_nozzle_size) =
+        signal(fallback_target_printers.default_nozzle_size.clone());
+
+    if show_printer {
+        Effect::new(move |_| {
+            spawn_local(async move {
+                if let Ok(options) = commands::list_target_printer_options().await {
+                    let current_printer = selected_printer_model.get_untracked();
+                    let current_nozzle = selected_nozzle_size.get_untracked();
+
+                    if !options
+                        .printer_models
+                        .iter()
+                        .any(|printer| printer == &current_printer)
+                    {
+                        set_selected_printer_model.set(options.default_printer_model.clone());
+                    }
+
+                    if !options
+                        .nozzle_sizes
+                        .iter()
+                        .any(|nozzle| nozzle == &current_nozzle)
+                    {
+                        set_selected_nozzle_size.set(options.default_nozzle_size.clone());
+                    }
+
+                    set_target_printer_options.set(options);
+                }
+            });
+        });
+    }
 
     // Identity signals
     let (profile_name, set_profile_name) = signal(specs.name.clone());
@@ -320,7 +362,9 @@ pub fn SpecsEditor(
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
         );
-        set_selected_printer.set(PRINTER_OPTIONS[0].to_string());
+        let defaults = target_printer_options.get_untracked();
+        set_selected_printer_model.set(defaults.default_printer_model);
+        set_selected_nozzle_size.set(defaults.default_nozzle_size);
     };
 
     // Build edited specs
@@ -372,7 +416,13 @@ pub fn SpecsEditor(
         edited.filament_cost = parse_f32(&filament_cost.get());
         edited.temperature_vitrification = parse_u16(&temperature_vitrification.get());
 
-        on_generate.run((edited, selected_printer.get()));
+        on_generate.run((
+            edited,
+            commands::format_target_printer_label(
+                &selected_printer_model.get(),
+                &selected_nozzle_size.get(),
+            ),
+        ));
     };
 
     view! {
@@ -401,17 +451,49 @@ pub fn SpecsEditor(
             <Show when=move || show_printer>
                 <div class="specs-section">
                     <h4 class="specs-section-title">"Target Printer"</h4>
+                    <div class="spec-fields-grid">
+                        <div class="spec-field">
+                            <label class="spec-field-label">"Bambu printer"</label>
+                            <select
+                                class="spec-field-select"
+                                prop:value=move || selected_printer_model.get()
+                                on:change=move |ev| set_selected_printer_model.set(event_target_value(&ev))
+                            >
+                                {move || target_printer_options
+                                    .get()
+                                    .printer_models
+                                    .into_iter()
+                                    .map(|printer| view! { <option value={printer.clone()}>{printer}</option> })
+                                    .collect::<Vec<_>>()}
+                            </select>
+                        </div>
+                        <div class="spec-field">
+                            <label class="spec-field-label">"Nozzle size"</label>
+                            <select
+                                class="spec-field-select"
+                                prop:value=move || selected_nozzle_size.get()
+                                on:change=move |ev| set_selected_nozzle_size.set(event_target_value(&ev))
+                            >
+                                {move || target_printer_options
+                                    .get()
+                                    .nozzle_sizes
+                                    .into_iter()
+                                    .map(|nozzle| view! { <option value={nozzle.clone()}>{format!("{} mm", nozzle)}</option> })
+                                    .collect::<Vec<_>>()}
+                            </select>
+                        </div>
+                    </div>
                     <div class="spec-field full-width">
-                        <label class="spec-field-label">"Printer / Nozzle"</label>
-                        <select
-                            class="spec-field-select"
-                            on:change=move |ev| set_selected_printer.set(event_target_value(&ev))
-                        >
-                            {PRINTER_OPTIONS.iter().map(|p| {
-                                let p_str = p.to_string();
-                                view! { <option value={*p}>{p_str}</option> }
-                            }).collect::<Vec<_>>()}
-                        </select>
+                        <label class="spec-field-label">"Profile target"</label>
+                        <input
+                            class="spec-field-input"
+                            type="text"
+                            readonly=true
+                            prop:value=move || commands::format_target_printer_label(
+                                &selected_printer_model.get(),
+                                &selected_nozzle_size.get(),
+                            )
+                        />
                     </div>
                 </div>
             </Show>

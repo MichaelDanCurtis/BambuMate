@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -12,6 +12,23 @@ use crate::profile::types::{FilamentProfile, ProfileMetadata};
 use crate::profile::writer::{
     register_filament_in_conf, write_profile_atomic, write_profile_with_metadata,
 };
+
+const DEFAULT_TARGET_PRINTER_LABEL: &str = "Bambu Lab H2C 0.4 nozzle";
+const DEFAULT_TARGET_PRINTER_MODEL: &str = "H2C";
+const DEFAULT_NOZZLE_SIZE: &str = "0.4";
+const FALLBACK_TARGET_PRINTER_LABELS: &[&str] = &[
+    DEFAULT_TARGET_PRINTER_LABEL,
+    "Bambu Lab H2D 0.4 nozzle",
+    "Bambu Lab X1 Carbon 0.4 nozzle",
+    "Bambu Lab X1E 0.4 nozzle",
+    "Bambu Lab P1P 0.4 nozzle",
+    "Bambu Lab P1S 0.4 nozzle",
+    "Bambu Lab A1 0.4 nozzle",
+    "Bambu Lab A1 mini 0.4 nozzle",
+    "Bambu Lab X1 Carbon 0.2 nozzle",
+    "Bambu Lab X1 Carbon 0.6 nozzle",
+    "Bambu Lab X1 Carbon 0.8 nozzle",
+];
 
 /// Summary information for a filament profile (used in list views).
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +63,16 @@ pub struct ProfileMetadataInfo {
     pub setting_id: String,
     pub base_id: String,
     pub updated_time: u64,
+}
+
+/// Printer and nozzle choices for generated profiles.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetPrinterOptions {
+    pub printer_models: Vec<String>,
+    pub nozzle_sizes: Vec<String>,
+    pub default_printer_model: String,
+    pub default_nozzle_size: String,
 }
 
 /// List all user filament profiles.
@@ -236,6 +263,25 @@ pub fn list_system_profiles() -> Result<Vec<ProfileInfo>, String> {
 
     info!("Found {} system profiles", profiles.len());
     Ok(profiles)
+}
+
+/// List the Bambu printer models and nozzle sizes available for profile generation.
+///
+/// Discovers printer+nozzle combinations from installed Bambu Studio profiles and
+/// falls back to a built-in set so the UI can always prompt explicitly.
+#[tauri::command]
+pub fn list_target_printer_options() -> Result<TargetPrinterOptions, String> {
+    let mut labels = HashSet::new();
+
+    if let Ok(paths) = BambuPaths::detect() {
+        collect_target_printer_labels(&paths.system_filament_dir(), &mut labels);
+
+        if let Some(user_dir) = paths.user_filament_dir() {
+            collect_target_printer_labels(&user_dir, &mut labels);
+        }
+    }
+
+    Ok(build_target_printer_options(&labels))
 }
 
 /// Result from profile generation (preview step, no files written).
@@ -962,6 +1008,90 @@ pub fn search_base_profiles(
     Ok(combined)
 }
 
+fn collect_target_printer_labels(dir: &std::path::Path, labels: &mut HashSet<String>) {
+    if !dir.exists() {
+        return;
+    }
+
+    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+
+        let Ok(profile) = read_profile(path) else {
+            continue;
+        };
+
+        let Some(compatible_printers) = profile.compatible_printers() else {
+            continue;
+        };
+
+        for printer in compatible_printers {
+            if parse_target_printer_label(printer).is_some() {
+                labels.insert(printer.to_string());
+            }
+        }
+    }
+}
+
+fn build_target_printer_options(discovered_labels: &HashSet<String>) -> TargetPrinterOptions {
+    let mut all_labels = discovered_labels.clone();
+    for label in FALLBACK_TARGET_PRINTER_LABELS {
+        all_labels.insert((*label).to_string());
+    }
+
+    let mut printer_models = BTreeSet::new();
+    let mut nozzle_sizes = BTreeSet::new();
+
+    for label in &all_labels {
+        if let Some((printer_model, nozzle_size)) = parse_target_printer_label(label) {
+            printer_models.insert(printer_model);
+            nozzle_sizes.insert(nozzle_size);
+        }
+    }
+
+    printer_models.insert(DEFAULT_TARGET_PRINTER_MODEL.to_string());
+    nozzle_sizes.insert(DEFAULT_NOZZLE_SIZE.to_string());
+
+    TargetPrinterOptions {
+        printer_models: prioritize_default(
+            printer_models.into_iter().collect(),
+            DEFAULT_TARGET_PRINTER_MODEL,
+        ),
+        nozzle_sizes: prioritize_default(nozzle_sizes.into_iter().collect(), DEFAULT_NOZZLE_SIZE),
+        default_printer_model: DEFAULT_TARGET_PRINTER_MODEL.to_string(),
+        default_nozzle_size: DEFAULT_NOZZLE_SIZE.to_string(),
+    }
+}
+
+fn parse_target_printer_label(label: &str) -> Option<(String, String)> {
+    let trimmed = label.trim();
+    let without_prefix = trimmed.strip_prefix("Bambu Lab ")?;
+    let without_suffix = without_prefix.strip_suffix(" nozzle")?;
+    let (printer_model, nozzle_size) = without_suffix.rsplit_once(' ')?;
+
+    if printer_model.is_empty() || nozzle_size.is_empty() {
+        return None;
+    }
+
+    Some((printer_model.to_string(), nozzle_size.to_string()))
+}
+
+fn prioritize_default(mut values: Vec<String>, default: &str) -> Vec<String> {
+    values.sort();
+
+    if let Some(index) = values.iter().position(|value| value == default) {
+        let default_value = values.remove(index);
+        values.insert(0, default_value);
+    }
+
+    values
+}
+
 fn search_profiles_in_dir(
     dir: &std::path::Path,
     query: &str,
@@ -1013,4 +1143,41 @@ fn search_profiles_in_dir(
     matches.truncate(20);
     info!("Found {} matching system profiles", matches.len());
     Ok(matches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_target_printer_options, parse_target_printer_label, DEFAULT_NOZZLE_SIZE,
+        DEFAULT_TARGET_PRINTER_MODEL,
+    };
+    use std::collections::HashSet;
+
+    #[test]
+    fn parses_bambu_printer_label() {
+        let parsed = parse_target_printer_label("Bambu Lab X1 Carbon 0.6 nozzle");
+        assert_eq!(
+            parsed,
+            Some(("X1 Carbon".to_string(), "0.6".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_non_bambu_printer_label() {
+        assert_eq!(parse_target_printer_label("X1 Carbon 0.6 nozzle"), None);
+    }
+
+    #[test]
+    fn includes_default_target_when_only_other_printers_are_discovered() {
+        let labels = HashSet::from([String::from("Bambu Lab A1 0.8 nozzle")]);
+
+        let options = build_target_printer_options(&labels);
+
+        assert_eq!(options.default_printer_model, DEFAULT_TARGET_PRINTER_MODEL);
+        assert_eq!(options.default_nozzle_size, DEFAULT_NOZZLE_SIZE);
+        assert_eq!(options.printer_models.first().map(String::as_str), Some("H2C"));
+        assert_eq!(options.nozzle_sizes.first().map(String::as_str), Some("0.4"));
+        assert!(options.printer_models.iter().any(|printer| printer == "A1"));
+        assert!(options.nozzle_sizes.iter().any(|nozzle| nozzle == "0.8"));
+    }
 }
