@@ -295,7 +295,19 @@ fn map_response_to_specs(
     json: &serde_json::Value,
     filament_name: &str,
 ) -> Result<FilamentSpecs, String> {
-    let name = json["name"].as_str().unwrap_or(filament_name).to_string();
+    // Read "serial" from the LLM response; fall back to stripping brand+material from filament_name.
+    // infer_serial() always returns a non-empty value (defaults to "Basic").
+    let serial = {
+        let s = json["serial"]
+            .as_str()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if s.is_empty() {
+            crate::scraper::html_extractor::infer_serial(filament_name)
+        } else {
+            s
+        }
+    };
     let brand = json["brand"]
         .as_str()
         .ok_or("Missing 'brand' field")?
@@ -306,7 +318,7 @@ fn map_response_to_specs(
         .to_string();
 
     Ok(FilamentSpecs {
-        name,
+        serial,
         brand,
         material,
         nozzle_temp_min: json["nozzle_temp_min"].as_u64().map(|v| v as u16),
@@ -785,7 +797,7 @@ mod tests {
     #[test]
     fn test_map_response_to_specs_full() {
         let json = serde_json::json!({
-            "name": "Polymaker PLA Pro",
+            "serial": "Pro",
             "brand": "Polymaker",
             "material": "PLA",
             "nozzle_temp_min": 190,
@@ -825,7 +837,7 @@ mod tests {
         });
 
         let specs = map_response_to_specs(&json, "Polymaker PLA Pro").unwrap();
-        assert_eq!(specs.name, "Polymaker PLA Pro");
+        assert_eq!(specs.serial, "Pro");
         assert_eq!(specs.brand, "Polymaker");
         assert_eq!(specs.material, "PLA");
         assert_eq!(specs.nozzle_temp_min, Some(190));
@@ -869,7 +881,7 @@ mod tests {
     #[test]
     fn test_map_response_to_specs_with_nulls() {
         let json = serde_json::json!({
-            "name": "Test PLA",
+            "serial": "",
             "brand": "TestBrand",
             "material": "PLA",
             "nozzle_temp_min": null,
@@ -925,7 +937,7 @@ mod tests {
     #[test]
     fn test_map_response_to_specs_missing_brand() {
         let json = serde_json::json!({
-            "name": "Test PLA",
+            "serial": "",
             "material": "PLA",
             "confidence": 0.5
         });
@@ -938,7 +950,7 @@ mod tests {
     #[test]
     fn test_map_response_to_specs_missing_material() {
         let json = serde_json::json!({
-            "name": "Test PLA",
+            "serial": "",
             "brand": "TestBrand",
             "confidence": 0.5
         });
@@ -975,7 +987,21 @@ mod tests {
             "confidence": 0.5
         });
 
-        let specs = map_response_to_specs(&json, "Fallback Name").unwrap();
-        assert_eq!(specs.name, "Fallback Name");
+        // No "serial" key — fallback derives serial from filament_name by stripping brand+material
+        let specs = map_response_to_specs(&json, "TestBrand PLA High Flow").unwrap();
+        assert_eq!(specs.serial, "High Flow");
+    }
+
+    #[test]
+    fn test_map_response_uses_basic_fallback_when_no_serial() {
+        let json = serde_json::json!({
+            "brand": "TestBrand",
+            "material": "PLA",
+            "confidence": 0.5
+        });
+
+        // No serial key and filament_name has no serial portion → defaults to "Basic"
+        let specs = map_response_to_specs(&json, "TestBrand PLA").unwrap();
+        assert_eq!(specs.serial, "Basic");
     }
 }

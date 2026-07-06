@@ -259,7 +259,11 @@ pub fn extract_specs_from_profile(profile: &FilamentProfile) -> FilamentSpecs {
     };
 
     FilamentSpecs {
-        name: profile.name().unwrap_or("").to_string(),
+        serial: {
+            // Derive serial from full profile name by stripping brand+material
+            let full_name = profile.name().unwrap_or("").to_string();
+            crate::scraper::html_extractor::infer_serial(&full_name)
+        },
         brand: get_str("filament_vendor"),
         material: get_str("filament_type"),
 
@@ -337,7 +341,7 @@ pub fn generate_profile(
 
     debug!(
         "Generating profile for {} {} (material={:?}, base={})",
-        specs.brand, specs.name, material, base_name
+        specs.brand, specs.serial, material, base_name
     );
 
     // 1. Find and resolve the base profile
@@ -351,10 +355,11 @@ pub fn generate_profile(
 
     // 2. Set identity fields
     let printer = target_printer.unwrap_or("Bambu Lab H2C 0.4 nozzle");
-    let profile_name = format!(
-        "{} {} {} @{}",
-        specs.brand, specs.material, specs.name, printer
-    );
+    let profile_name = if specs.serial.is_empty() {
+        format!("{} {} @{}", specs.brand, specs.material, printer)
+    } else {
+        format!("{} {} {} @{}", specs.brand, specs.material, specs.serial, printer)
+    };
 
     profile.set_string("name", profile_name.clone());
     profile.set_string("inherits", String::new()); // Fully flattened
@@ -387,10 +392,11 @@ pub fn generate_profile(
     };
 
     // 7. Generate filename
-    let filename = format!(
-        "{} {} {} @{}.json",
-        specs.brand, specs.material, specs.name, printer
-    );
+    let filename = if specs.serial.is_empty() {
+        format!("{} {} @{}.json", specs.brand, specs.material, printer)
+    } else {
+        format!("{} {} {} @{}.json", specs.brand, specs.material, specs.serial, printer)
+    };
 
     debug!(
         "Generated profile '{}' with {} fields (base: {})",

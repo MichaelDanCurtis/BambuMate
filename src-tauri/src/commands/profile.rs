@@ -341,7 +341,7 @@ pub async fn generate_profile_from_specs(
 ) -> Result<GenerateResult, String> {
     info!(
         "generate_profile_from_specs called for: {} {}",
-        specs.brand, specs.name
+        specs.brand, specs.serial
     );
 
     // Detect Bambu Studio paths
@@ -713,10 +713,18 @@ pub fn save_profile_specs(
     // Apply specs to the existing profile (overwrites only the mapped fields)
     generator::apply_specs_to_profile(&mut profile, &specs);
 
-    // Also update the profile name if provided
-    if !specs.name.is_empty() {
-        profile.set_string("name", specs.name.clone());
-    }
+    // Recompose the full profile name from brand + material + serial, preserving @printer suffix
+    let existing_name = profile.name().unwrap_or("").to_string();
+    let printer_suffix = existing_name
+        .find(" @")
+        .map(|i| existing_name[i..].to_string())
+        .unwrap_or_default();
+    let new_name = if specs.serial.is_empty() {
+        format!("{} {}{}", specs.brand, specs.material, printer_suffix)
+    } else {
+        format!("{} {} {}{}", specs.brand, specs.material, specs.serial, printer_suffix)
+    };
+    profile.set_string("name", new_name);
 
     write_profile_atomic(&profile, file_path)
         .map_err(|e| format!("Failed to write profile: {}", e))?;

@@ -79,7 +79,7 @@ pub fn FilamentCard(
             <div class="filament-card-header">
                 <div class="filament-card-title">
                     <span class="filament-brand">{specs.brand.clone()}</span>
-                    <span class="filament-name">{specs.name.clone()}</span>
+                    <span class="filament-name">{specs.serial.clone()}</span>
                 </div>
                 <span class="filament-material">{specs.material.clone()}</span>
             </div>

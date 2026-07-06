@@ -199,7 +199,7 @@ mod tests {
 
     fn make_pla_specs() -> FilamentSpecs {
         FilamentSpecs {
-            name: "Test PLA".to_string(),
+            serial: "".to_string(),
             brand: "TestBrand".to_string(),
             material: "PLA".to_string(),
             nozzle_temp_min: Some(190),
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn test_null_fields_no_warnings() {
         let specs = FilamentSpecs {
-            name: "Test PLA".to_string(),
+            serial: "".to_string(),
             brand: "TestBrand".to_string(),
             material: "PLA".to_string(),
             nozzle_temp_min: None,
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn test_other_material_permissive_ranges() {
         let specs = FilamentSpecs {
-            name: "Test Wood Fill".to_string(),
+            serial: "".to_string(),
             brand: "TestBrand".to_string(),
             material: "Wood Fill".to_string(),
             nozzle_temp_min: Some(170),

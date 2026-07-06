@@ -18,9 +18,9 @@ pub fn filament_specs_json_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "name": {
+            "serial": {
                 "type": "string",
-                "description": "Full filament product name"
+                "description": "Product serial/model identifier — everything after brand and material (e.g., 'High Flow' from 'Sunlu PLA High Flow', 'Basic' from 'Bambu Lab PLA Basic'). Empty string if there is no distinct serial."
             },
             "brand": {
                 "type": "string",
@@ -172,7 +172,7 @@ pub fn filament_specs_json_schema() -> serde_json::Value {
             }
         },
         "required": [
-            "name", "brand", "material",
+            "serial", "brand", "material",
             "nozzle_temp_min", "nozzle_temp_max",
             "bed_temp_min", "bed_temp_max",
             "max_speed_mm_s", "fan_speed_percent",
@@ -331,7 +331,7 @@ mod tests {
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
 
         // Original fields
-        assert!(required_strs.contains(&"name"));
+        assert!(required_strs.contains(&"serial"));
         assert!(required_strs.contains(&"brand"));
         assert!(required_strs.contains(&"material"));
         assert!(required_strs.contains(&"nozzle_temp_min"));
@@ -439,7 +439,7 @@ mod tests {
         let schema = filament_specs_json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
-        assert_eq!(properties["name"]["type"], "string");
+        assert_eq!(properties["serial"]["type"], "string");
         assert_eq!(properties["brand"]["type"], "string");
         assert_eq!(properties["material"]["type"], "string");
     }

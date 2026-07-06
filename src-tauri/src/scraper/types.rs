@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 /// parameters that vary meaningfully between filaments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct FilamentSpecs {
-    /// Filament name as provided by manufacturer
-    pub name: String,
+    /// Product serial/model identifier — the part after brand and material.
+    /// E.g., "High Flow" from "Sunlu PLA High Flow", or "Basic" from "Bambu Lab PLA Basic".
+    #[serde(alias = "name")]
+    pub serial: String,
     /// Brand/manufacturer name
     pub brand: String,
     /// Material type (PLA, PETG, ABS, TPU, etc.)
@@ -170,7 +172,7 @@ mod tests {
     #[test]
     fn test_filament_specs_serde_roundtrip() {
         let specs = FilamentSpecs {
-            name: "PolyLite PLA Pro".to_string(),
+            serial: "Pro".to_string(),
             brand: "Polymaker".to_string(),
             material: "PLA".to_string(),
             nozzle_temp_min: Some(190),
@@ -260,8 +262,9 @@ mod tests {
             "extraction_confidence": 0.3
         }"#;
 
+        // Test backward compat: old JSON with "name" key deserializes into serial
         let specs: FilamentSpecs = serde_json::from_str(json).unwrap();
-        assert_eq!(specs.name, "Test PLA");
+        assert_eq!(specs.serial, "Test PLA");
         assert_eq!(specs.nozzle_temp_min, None);
         assert_eq!(specs.nozzle_temp_max, Some(210));
         assert_eq!(specs.diameter_mm, Some(1.75));

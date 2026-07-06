@@ -53,7 +53,7 @@ pub fn extract(html: &str, filament_name: &str) -> FilamentSpecs {
     let text = html_to_text_simple(html);
 
     let mut specs = FilamentSpecs {
-        name: filament_name.to_string(),
+        serial: infer_serial(filament_name),
         ..Default::default()
     };
 
@@ -139,11 +139,11 @@ fn extract_from_json_ld_value(
     // Look for additionalProperty or description fields with temperature info
     let mut found = false;
 
-    // Try to get name
-    if specs.name.is_empty() || specs.name == "Unknown Filament" {
+    // Try to get serial from product name in JSON-LD
+    if specs.serial.is_empty() {
         if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
             if !name.is_empty() {
-                specs.name = name.to_string();
+                specs.serial = infer_serial(name);
             }
         }
     }
@@ -450,6 +450,43 @@ fn parse_temp_range(s: &str) -> Option<(u16, u16)> {
     None
 }
 
+/// Derive the serial (product identifier) from a filament name by stripping brand and material.
+///
+/// Serial is the product-specific part after brand and material tokens:
+/// - "Sunlu PLA High Flow" → "High Flow"
+/// - "Bambu Lab PLA Basic" → "Basic"
+/// - "eSUN PETG-CF"        → "" (no distinct serial)
+///
+/// Matching is word-based (splitting on whitespace) and case-insensitive.
+/// Material keywords are checked longest-first to avoid "PLA" matching inside "PLA-CF".
+pub fn infer_serial(filament_name: &str) -> String {
+    let words: Vec<&str> = filament_name.split_whitespace().collect();
+    // Ordered longest-first so compound materials match before their prefixes
+    let material_keywords: &[&str] = &[
+        "PETG-CF", "PLA-CF", "PC-ABS", "PA6-CF", "PA12",
+        "PA6", "PETG", "PLA+", "PLA", "ABS", "ASA", "TPU", "TPE",
+        "PA", "NYLON", "PC", "PVA", "HIPS",
+    ];
+
+    for (i, word) in words.iter().enumerate() {
+        let upper = word.to_uppercase();
+        let is_material = material_keywords.iter().any(|kw| {
+            upper == *kw
+                || (upper.starts_with(kw)
+                    && upper[kw.len()..].starts_with(['-', '+', '_']))
+        });
+        if is_material {
+            let after = words[i + 1..].join(" ");
+            return if after.is_empty() { "Basic".to_string() } else { after };
+        }
+    }
+
+    // No material keyword found — return everything after the first word (brand)
+    let fallback = words.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+    if fallback.is_empty() { "Basic".to_string() } else { fallback }
+}
+
+
 /// Derive material type string from filament name.
 fn infer_material(name: &str) -> String {
     let m = MaterialType::from_str(name);
@@ -530,9 +567,13 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_material() {
-        assert_eq!(infer_material("Polymaker PLA Pro"), "PLA");
-        assert_eq!(infer_material("eSUN PETG-CF"), "PETG");
-        assert_eq!(infer_material("Bambu Lab ABS"), "ABS");
+    fn test_infer_serial_strips_brand_and_material() {
+        assert_eq!(infer_serial("Sunlu PLA High Flow"), "High Flow");
+        assert_eq!(infer_serial("Bambu Lab PLA Basic"), "Basic");
+        assert_eq!(infer_serial("eSUN PETG-CF"), "Basic");
+        assert_eq!(infer_serial("Polymaker PolyLite PLA Pro"), "Pro");
+        assert_eq!(infer_serial("SUNLU PLA+"), "Basic");
+        assert_eq!(infer_serial("SUNLU PLA+ Matte"), "Matte");
+        assert_eq!(infer_serial("Generic PLA"), "Basic");
     }
 }
