@@ -57,6 +57,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
         signal::<Option<String>>(None);
     let (base_profile_specs, set_base_profile_specs) = signal::<Option<FilamentSpecs>>(None);
     let (show_merge_screen, set_show_merge_screen) = signal(false);
+    let (base_profile_search, set_base_profile_search) = signal(String::new());
 
     // Check catalog status on mount and load AI preference
     Effect::new(move |_| {
@@ -99,6 +100,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
             set_selected_base_profile_path.set(None);
             set_base_profile_specs.set(None);
             set_show_merge_screen.set(false);
+            set_base_profile_search.set(String::new());
             spawn_local(async move {
                 if let Ok(matches) =
                     commands::search_base_profiles("", Some(material.as_str())).await
@@ -361,6 +363,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_selected_base_profile_path.set(None);
         set_base_profile_specs.set(None);
         set_show_merge_screen.set(false);
+        set_base_profile_search.set(String::new());
     };
 
     // Handler for selecting a base profile to use as reference
@@ -642,6 +645,13 @@ pub fn FilamentSearchPage() -> impl IntoView {
                     return None;
                 }
                 let matches = base_profile_matches.get();
+                let query = base_profile_search.get().to_lowercase();
+                let filtered: Vec<_> = matches.iter().filter(|m| {
+                    query.is_empty()
+                        || m.name.to_lowercase().contains(&query)
+                        || m.filament_type.as_deref().unwrap_or("").to_lowercase().contains(&query)
+                }).cloned().collect();
+                let no_results = filtered.is_empty() && !is_searching_base.get() && !query.is_empty();
                 Some(view! {
                     <div class="base-profiles-section">
                         <h4>"Base Profile (Installed in Bambu Studio)"</h4>
@@ -652,30 +662,43 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             <span class="mini-spinner"></span>
                             " Searching installed profiles..."
                         </Show>
-                        <div class="base-profiles-list">
-                            <div
-                                class=move || {
-                                    if selected_base_profile_path.get().is_none() {
-                                        "base-profile-item selected".to_string()
-                                    } else {
-                                        "base-profile-item".to_string()
-                                    }
+                        <Show when=move || !is_searching_base.get() && !base_profile_matches.get().is_empty()>
+                            <input
+                                type="text"
+                                class="base-profile-search-input"
+                                placeholder="Search profiles..."
+                                prop:value=move || base_profile_search.get()
+                                on:input=move |e| {
+                                    set_base_profile_search.set(event_target_value(&e));
                                 }
-                                on:click=move |_| on_use_default_base()
-                            >
-                                <span class="base-profile-name">"Default base"</span>
-                                <span class="base-profile-type">"Material generic"</span>
-                                <span class="base-profile-action">
-                                    {move || {
+                            />
+                        </Show>
+                        <div class="base-profiles-list">
+                            <Show when=move || base_profile_search.get().is_empty()>
+                                <div
+                                    class=move || {
                                         if selected_base_profile_path.get().is_none() {
-                                            "Selected"
+                                            "base-profile-item selected".to_string()
                                         } else {
-                                            "Use default base"
+                                            "base-profile-item".to_string()
                                         }
-                                    }}
-                                </span>
-                            </div>
-                            {matches.iter().map(|m| {
+                                    }
+                                    on:click=move |_| on_use_default_base()
+                                >
+                                    <span class="base-profile-name">"Default base"</span>
+                                    <span class="base-profile-type">"Material generic"</span>
+                                    <span class="base-profile-action">
+                                        {move || {
+                                            if selected_base_profile_path.get().is_none() {
+                                                "Selected"
+                                            } else {
+                                                "Use default base"
+                                            }
+                                        }}
+                                    </span>
+                                </div>
+                            </Show>
+                            {filtered.iter().map(|m| {
                                 let profile_click = m.clone();
                                 let name = m.name.clone();
                                 let path = m.path.clone();
@@ -709,6 +732,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                     </div>
                                 }
                             }).collect::<Vec<_>>()}
+                            <Show when=move || no_results>
+                                <p class="base-profile-no-results">"No profiles match your search."</p>
+                            </Show>
                         </div>
                         <Show when=move || matches.is_empty() && !is_searching_base.get()>
                             <p class="section-description">

@@ -816,10 +816,42 @@
     margin-bottom: 0.75rem;
 }
 
+.base-profile-search-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.4rem 0.75rem;
+    margin-bottom: 0.6rem;
+    font-size: 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text-primary);
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.base-profile-search-input:focus {
+    border-color: var(--accent);
+}
+
+.base-profile-search-input::placeholder {
+    color: var(--text-secondary);
+}
+
+.base-profile-no-results {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    padding: 0.5rem 0;
+    text-align: center;
+}
+
 .base-profiles-list {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    max-height: 260px;
+    overflow-y: auto;
+    padding-right: 4px;
 }
 
 .base-profile-item {
