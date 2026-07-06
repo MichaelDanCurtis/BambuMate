@@ -295,11 +295,19 @@ fn map_response_to_specs(
     json: &serde_json::Value,
     filament_name: &str,
 ) -> Result<FilamentSpecs, String> {
-    // Read "serial" from the LLM response; fall back to stripping brand+material from filament_name
-    let serial = json["serial"]
-        .as_str()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| crate::scraper::html_extractor::infer_serial(filament_name));
+    // Read "serial" from the LLM response; fall back to stripping brand+material from filament_name.
+    // infer_serial() always returns a non-empty value (defaults to "Basic").
+    let serial = {
+        let s = json["serial"]
+            .as_str()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if s.is_empty() {
+            crate::scraper::html_extractor::infer_serial(filament_name)
+        } else {
+            s
+        }
+    };
     let brand = json["brand"]
         .as_str()
         .ok_or("Missing 'brand' field")?
@@ -982,5 +990,18 @@ mod tests {
         // No "serial" key — fallback derives serial from filament_name by stripping brand+material
         let specs = map_response_to_specs(&json, "TestBrand PLA High Flow").unwrap();
         assert_eq!(specs.serial, "High Flow");
+    }
+
+    #[test]
+    fn test_map_response_uses_basic_fallback_when_no_serial() {
+        let json = serde_json::json!({
+            "brand": "TestBrand",
+            "material": "PLA",
+            "confidence": 0.5
+        });
+
+        // No serial key and filament_name has no serial portion → defaults to "Basic"
+        let specs = map_response_to_specs(&json, "TestBrand PLA").unwrap();
+        assert_eq!(specs.serial, "Basic");
     }
 }

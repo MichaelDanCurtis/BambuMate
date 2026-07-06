@@ -476,12 +476,14 @@ pub fn infer_serial(filament_name: &str) -> String {
                     && upper[kw.len()..].starts_with(['-', '+', '_']))
         });
         if is_material {
-            return words[i + 1..].join(" ");
+            let after = words[i + 1..].join(" ");
+            return if after.is_empty() { "Basic".to_string() } else { after };
         }
     }
 
     // No material keyword found — return everything after the first word (brand)
-    words.get(1..).map(|s| s.join(" ")).unwrap_or_default()
+    let fallback = words.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+    if fallback.is_empty() { "Basic".to_string() } else { fallback }
 }
 
 
@@ -568,10 +570,10 @@ mod tests {
     fn test_infer_serial_strips_brand_and_material() {
         assert_eq!(infer_serial("Sunlu PLA High Flow"), "High Flow");
         assert_eq!(infer_serial("Bambu Lab PLA Basic"), "Basic");
-        assert_eq!(infer_serial("eSUN PETG-CF"), "");
+        assert_eq!(infer_serial("eSUN PETG-CF"), "Basic");
         assert_eq!(infer_serial("Polymaker PolyLite PLA Pro"), "Pro");
-        assert_eq!(infer_serial("SUNLU PLA+"), "");
+        assert_eq!(infer_serial("SUNLU PLA+"), "Basic");
         assert_eq!(infer_serial("SUNLU PLA+ Matte"), "Matte");
-        assert_eq!(infer_serial("Generic PLA"), "");
+        assert_eq!(infer_serial("Generic PLA"), "Basic");
     }
 }
