@@ -138,6 +138,32 @@ pub fn resolve_inheritance(
         resolved.insert(key.clone(), value.clone());
     }
 
+    // Third pass: preserve nil-valued fields from the inheritance chain.
+    //
+    // A field set to `["nil", "nil"]` at every level means "use Bambu Studio's
+    // built-in engine default". These fields must still be present in the output
+    // JSON — omitting them entirely causes import failures in Bambu Studio because
+    // the schema validator expects them to exist.
+    //
+    // Iterating from root to leaf means we insert the root's nil value first; if a
+    // higher-priority level also has nil it is the same value so there is no harm in
+    // overwriting. We only ever insert when the key is NOT already resolved to a real
+    // value (the `!resolved.contains_key` guard).
+    //
+    // Forward-compatibility: when Bambu Studio ships a new version and adds a new
+    // field to `fdm_filament_common` with an initial nil placeholder, this pass will
+    // automatically include it — no code changes required.
+    for ancestor in chain.iter() {
+        for (key, value) in ancestor.raw() {
+            if SKIP_INHERIT_FIELDS.contains(&key.as_str()) {
+                continue;
+            }
+            if is_nil_value(value) && !resolved.contains_key(key) {
+                resolved.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
     Ok(FilamentProfile::from_map(resolved))
 }
 
@@ -167,5 +193,100 @@ pub fn is_fully_flattened(profile: &FilamentProfile) -> bool {
     match profile.inherits() {
         None => true,
         Some(s) => s.is_empty(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Map};
+
+    fn make_profile(name: &str, inherits: Option<&str>, extras: &[(&str, serde_json::Value)]) -> FilamentProfile {
+        let mut map = Map::new();
+        map.insert("name".into(), json!(name));
+        if let Some(p) = inherits {
+            map.insert("inherits".into(), json!(p));
+        }
+        for (k, v) in extras {
+            map.insert(k.to_string(), v.clone());
+        }
+        FilamentProfile::from_map(map)
+    }
+
+    fn registry_of(profiles: Vec<FilamentProfile>) -> ProfileRegistry {
+        let mut r = ProfileRegistry::new();
+        for p in profiles { r.insert(p); }
+        r
+    }
+
+    // -- nil preservation --
+
+    /// Fields that are nil at every level in the chain must still appear in the
+    /// resolved output so Bambu Studio doesn't reject the profile.
+    #[test]
+    fn nil_field_preserved_when_all_levels_nil() {
+        let base = make_profile("base", None, &[
+            ("real_field", json!(["200", "200"])),
+            ("nil_field",  json!(["nil", "nil"])),
+        ]);
+        let leaf = make_profile("leaf", Some("base"), &[]);
+
+        let registry = registry_of(vec![base]);
+        let resolved = resolve_inheritance(&leaf, &registry).unwrap();
+
+        assert!(resolved.raw().contains_key("nil_field"),
+            "nil-only field must be present in resolved output");
+        assert_eq!(resolved.raw()["nil_field"], json!(["nil", "nil"]));
+        assert_eq!(resolved.raw()["real_field"], json!(["200", "200"]));
+    }
+
+    /// A leaf with nil defers to the ancestor's real value (nil means
+    /// "use parent"). The ancestor value must not be replaced by nil.
+    #[test]
+    fn nil_in_leaf_does_not_overwrite_ancestor_real_value() {
+        let base = make_profile("base", None, &[
+            ("temp", json!(["220", "220"])),
+        ]);
+        let leaf = make_profile("leaf", Some("base"), &[
+            ("temp", json!(["nil", "nil"])),
+        ]);
+
+        let registry = registry_of(vec![base]);
+        let resolved = resolve_inheritance(&leaf, &registry).unwrap();
+
+        assert_eq!(resolved.raw()["temp"], json!(["220", "220"]),
+            "ancestor real value must survive leaf nil");
+    }
+
+    /// A leaf with a real value must override the ancestor's value.
+    #[test]
+    fn leaf_real_value_overrides_ancestor() {
+        let base = make_profile("base", None, &[
+            ("temp", json!(["200", "200"])),
+        ]);
+        let leaf = make_profile("leaf", Some("base"), &[
+            ("temp", json!(["240", "240"])),
+        ]);
+
+        let registry = registry_of(vec![base]);
+        let resolved = resolve_inheritance(&leaf, &registry).unwrap();
+
+        assert_eq!(resolved.raw()["temp"], json!(["240", "240"]));
+    }
+
+    /// Fields that only exist on the leaf (not the base) and carry nil must
+    /// also appear in the output.
+    #[test]
+    fn nil_field_only_on_leaf_is_preserved() {
+        let base = make_profile("base", None, &[]);
+        let leaf = make_profile("leaf", Some("base"), &[
+            ("leaf_only_nil", json!(["nil", "nil"])),
+        ]);
+
+        let registry = registry_of(vec![base]);
+        let resolved = resolve_inheritance(&leaf, &registry).unwrap();
+
+        assert!(resolved.raw().contains_key("leaf_only_nil"),
+            "nil field present only on the leaf must be preserved");
     }
 }

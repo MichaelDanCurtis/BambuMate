@@ -373,10 +373,14 @@ pub fn generate_profile(
     // 4. Apply scraped spec overrides
     apply_specs_to_profile(&mut profile, specs);
 
-    // 5. Set compatible_printers to empty array for universal compatibility
+    // 5. Apply compatibility defaults for fields required by newer Bambu Studio
+    //    versions that may be absent from older system profile installations.
+    apply_compat_defaults(&mut profile);
+
+    // 6. Set compatible_printers to empty array for universal compatibility
     profile.set_string_array("compatible_printers", vec![]);
 
-    // 6. Generate metadata
+    // 7. Generate metadata
     // user_id comes from BambuPaths.preset_folder in the calling context
     let paths = BambuPaths::detect().ok();
     let user_id = paths
@@ -391,7 +395,7 @@ pub fn generate_profile(
         updated_time: Utc::now().timestamp() as u64,
     };
 
-    // 7. Generate filename
+    // 8. Generate filename
     let filename = if specs.serial.is_empty() {
         format!("{} {} @{}.json", specs.brand, specs.material, printer)
     } else {
@@ -406,6 +410,98 @@ pub fn generate_profile(
     );
 
     Ok((profile, metadata, filename))
+}
+
+/// Apply compatibility fallback defaults for fields required by Bambu Studio 2.x.
+///
+/// Bambu Studio 2.x added several fields to `fdm_filament_common` that are absent
+/// from older installations. If a user generates a profile against an older install
+/// (or against system profiles that pre-date 2.x) these fields will be missing and
+/// BS will reject the profile on import.
+///
+/// **Priority order** (highest → lowest):
+/// 1. Values resolved from the installed system profile chain (set in step 1 of
+///    `generate_profile` via `resolve_inheritance`).
+/// 2. Values written by `apply_specs_to_profile` (scraped spec overrides).
+/// 3. The defaults in this function — only applied when the key is absent.
+///
+/// ### Forward-compatibility
+/// Most new fields added in future Bambu Studio versions are handled **automatically**
+/// through two other mechanisms:
+/// - Non-nil new fields in `fdm_filament_common` come through the ancestor merge in
+///   `resolve_inheritance`.
+/// - Nil-placeholder new fields in `fdm_filament_common` are preserved by the
+///   nil-preservation pass in `resolve_inheritance`.
+///
+/// Add an entry here **only** when a required field is completely absent from all
+/// levels of a system profile chain (i.e. it was back-ported as a new top-level
+/// requirement without a corresponding entry in older `fdm_filament_common` files).
+fn apply_compat_defaults(profile: &mut FilamentProfile) {
+    use serde_json::{json, Value};
+
+    // Fields added in Bambu Studio 2.x that may not appear in older system
+    // profiles. Values match the defaults shipped with BS 2.7.
+    let defaults = [
+        ("default_filament_colour",      json!([""])),
+        ("enable_overhang_bridge_fan",   json!(["1"])),
+        ("enable_pressure_advance",      json!(["0"])),
+        ("filament_change_length_nc",    json!(["4"])),
+        ("filament_notes",               Value::String(String::new())),
+        ("filament_wipe",                json!(["1", "1"])),
+        ("first_x_layer_fan_speed",      json!(["0"])),
+        ("first_x_layer_part_fan_speed", json!(["0"])),
+    ];
+
+    for (key, value) in defaults {
+        if !profile.raw().contains_key(key) {
+            profile.raw_mut().insert(key.to_string(), value);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn compat_defaults_added_when_fields_absent() {
+        let mut profile = FilamentProfile::from_map(serde_json::Map::new());
+        apply_compat_defaults(&mut profile);
+
+        for key in &[
+            "default_filament_colour",
+            "enable_overhang_bridge_fan",
+            "enable_pressure_advance",
+            "filament_change_length_nc",
+            "filament_notes",
+            "filament_wipe",
+            "first_x_layer_fan_speed",
+            "first_x_layer_part_fan_speed",
+        ] {
+            assert!(profile.raw().contains_key(*key),
+                "compat default for '{}' should be present", key);
+        }
+
+        assert_eq!(profile.raw()["enable_pressure_advance"], json!(["0"]));
+        assert_eq!(profile.raw()["filament_wipe"], json!(["1", "1"]));
+        assert_eq!(profile.raw()["first_x_layer_fan_speed"], json!(["0"]));
+    }
+
+    #[test]
+    fn compat_defaults_do_not_overwrite_system_or_spec_values() {
+        let mut profile = FilamentProfile::from_json(
+            r#"{"enable_pressure_advance": ["1"], "filament_wipe": ["0", "0"]}"#
+        ).unwrap();
+
+        apply_compat_defaults(&mut profile);
+
+        // Pre-existing values must not be touched
+        assert_eq!(profile.raw()["enable_pressure_advance"], json!(["1"]),
+            "system profile value must not be overwritten by compat default");
+        assert_eq!(profile.raw()["filament_wipe"], json!(["0", "0"]),
+            "spec-derived value must not be overwritten by compat default");
+    }
 }
 
 /// Check if Bambu Studio is currently running.
