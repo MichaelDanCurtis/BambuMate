@@ -455,14 +455,25 @@ fn parse_temp_range(s: &str) -> Option<(u16, u16)> {
 /// Serial is the product-specific part after brand and material tokens:
 /// - "Sunlu PLA High Flow" → "High Flow"
 /// - "Bambu Lab PLA Basic" → "Basic"
-/// - "eSUN PETG-CF"        → "" (no distinct serial)
+/// - "eSUN PETG-CF"        → "Basic" (no distinct serial)
+/// - "eSUN ePLA+ Silk"     → "Silk"
+/// - "eSUN ePLA-Silk"      → "Silk"
 ///
 /// Matching is word-based (splitting on whitespace) and case-insensitive.
 /// Material keywords are checked longest-first to avoid "PLA" matching inside "PLA-CF".
+/// The `@printer` suffix (e.g. "@Bambu Lab H2C 0.4 nozzle") is stripped before processing.
 pub fn infer_serial(filament_name: &str) -> String {
-    let words: Vec<&str> = filament_name.split_whitespace().collect();
-    // Ordered longest-first so compound materials match before their prefixes
+    // Strip the "@printer" suffix that Bambu Studio appends to profile names.
+    let name = match filament_name.find(" @") {
+        Some(idx) => &filament_name[..idx],
+        None => filament_name,
+    };
+
+    let words: Vec<&str> = name.split_whitespace().collect();
+    // Ordered longest-first so compound materials match before their prefixes.
+    // Includes eSUN "e"-prefixed variants (ePLA, ePLA+, ePETG-CF, …).
     let material_keywords: &[&str] = &[
+        "EPETG-CF", "EPLA-CF", "EPLA+", "EPLA",
         "PETG-CF", "PLA-CF", "PC-ABS", "PA6-CF", "PA12",
         "PA6", "PETG", "PLA+", "PLA", "ABS", "ASA", "TPU", "TPE",
         "PA", "NYLON", "PC", "PVA", "HIPS",
@@ -476,7 +487,36 @@ pub fn infer_serial(filament_name: &str) -> String {
                     && upper[kw.len()..].starts_with(['-', '+', '_']))
         });
         if is_material {
-            let after = words[i + 1..].join(" ");
+            // If the word itself encodes a variant after a hyphen (e.g. "ePLA-Silk"),
+            // extract that suffix — but only when no keyword exactly matches the whole
+            // word (so "PETG-CF" is not incorrectly split into "PETG" + "CF").
+            let exact_match = material_keywords.iter().any(|kw| upper == *kw);
+            let variant_in_word = if exact_match {
+                None
+            } else {
+                // Find the longest keyword that is a prefix of this word and is
+                // followed by '-<variant>'.
+                material_keywords.iter().find_map(|kw| {
+                    if upper.starts_with(kw) && upper.len() > kw.len() {
+                        let rest = &upper[kw.len()..];
+                        if rest.starts_with('-') && rest.len() > 1 {
+                            // e.g. "ePLA-Silk" with kw="EPLA" → variant = "Silk"
+                            let variant = word[kw.len() + 1..].to_string();
+                            if !variant.is_empty() {
+                                return Some(variant);
+                            }
+                        }
+                    }
+                    None
+                })
+            };
+
+            let rest_words = words[i + 1..].join(" ");
+            let after = match (variant_in_word, rest_words.as_str()) {
+                (Some(v), "") => v,
+                (Some(v), rest) => format!("{} {}", v, rest),
+                (None, rest) => rest.to_string(),
+            };
             return if after.is_empty() { "Basic".to_string() } else { after };
         }
     }
@@ -575,5 +615,24 @@ mod tests {
         assert_eq!(infer_serial("SUNLU PLA+"), "Basic");
         assert_eq!(infer_serial("SUNLU PLA+ Matte"), "Matte");
         assert_eq!(infer_serial("Generic PLA"), "Basic");
+    }
+
+    #[test]
+    fn test_infer_serial_silk_filaments() {
+        // Standard silk filament names
+        assert_eq!(infer_serial("eSUN PLA Silk"), "Silk");
+        assert_eq!(infer_serial("eSUN PLA+ Silk"), "Silk");
+        assert_eq!(infer_serial("Bambu Lab PLA Silk"), "Silk");
+        assert_eq!(infer_serial("Bambu Lab PLA+ Silk"), "Silk");
+        assert_eq!(infer_serial("Hatchbox PLA Silk"), "Silk");
+        assert_eq!(infer_serial("Sunlu PLA+ Silk"), "Silk");
+
+        // eSUN "ePLA+" / "ePLA-Silk" naming conventions
+        assert_eq!(infer_serial("eSUN ePLA+ Silk"), "Silk");
+        assert_eq!(infer_serial("eSUN ePLA-Silk"), "Silk");
+
+        // @printer suffix must be stripped, not included in the serial
+        assert_eq!(infer_serial("Bambu Lab PLA Silk @Bambu Lab H2C 0.4 nozzle"), "Silk");
+        assert_eq!(infer_serial("eSUN PLA+ Silk @Bambu Lab A1 0.4 nozzle"), "Silk");
     }
 }
