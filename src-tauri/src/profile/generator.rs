@@ -10,19 +10,24 @@ use super::types::{FilamentProfile, ProfileMetadata};
 use crate::scraper::types::{FilamentSpecs, MaterialType};
 
 /// Map a MaterialType to the corresponding Bambu Studio base profile name.
-/// These are the "Generic X" profiles that ship with Bambu Studio.
+///
+/// These are the intermediate `fdm_filament_*` system profiles shipped with
+/// Bambu Studio (found under `<config>/system/BBL/filament/`). We prefer
+/// these over the "Generic X" profiles because the material-family bases
+/// carry only chemistry-appropriate defaults without printer- or feature-
+/// specific tuning that a Generic profile layers on top.
 pub fn base_profile_name(material: &MaterialType) -> &'static str {
     match material {
-        MaterialType::PLA => "Generic PLA",
-        MaterialType::PETG => "Generic PETG",
-        MaterialType::ABS => "Generic ABS",
-        MaterialType::ASA => "Generic ASA",
-        MaterialType::TPU => "Generic TPU",
-        MaterialType::Nylon => "Generic PA",
-        MaterialType::PC => "Generic PC",
-        MaterialType::PVA => "Generic PVA",
-        MaterialType::HIPS => "Generic HIPS",
-        MaterialType::Other(_) => "Generic PLA", // Safe fallback
+        MaterialType::PLA => "fdm_filament_pla",
+        MaterialType::PETG => "fdm_filament_pet",
+        MaterialType::ABS => "fdm_filament_abs",
+        MaterialType::ASA => "fdm_filament_asa",
+        MaterialType::TPU => "fdm_filament_tpu",
+        MaterialType::Nylon => "fdm_filament_pa",
+        MaterialType::PC => "fdm_filament_pc",
+        MaterialType::PVA => "fdm_filament_pva",
+        MaterialType::HIPS => "fdm_filament_hips",
+        MaterialType::Other(_) => "fdm_filament_pla", // Safe fallback
     }
 }
 
@@ -386,10 +391,27 @@ pub fn generate_profile(
     //    no printer at all.
     profile.set_string_array("compatible_printers", vec![printer.to_string()]);
 
-    // 7. Generate metadata
-    // user_id comes from BambuPaths.preset_folder in the calling context
+    // 7. Detect BS paths once and reuse for both the version stamp and the
+    //    metadata below. `.ok()` here means the version stamp is best-effort:
+    //    if BS isn't installed we still generate a valid profile, just without
+    //    the schema version field (BS re-stamps it on save anyway).
     let paths = BambuPaths::detect().ok();
+
+    // Ensure the profile carries a `version` field. Bambu Studio stamps this
+    // onto every user profile it saves (schema/format marker like "2.7.0.7"),
+    // and imports without it can occasionally fail on newer BS builds. If the
+    // base already provided one via inheritance we keep it; otherwise fall
+    // back to the installed Bambu Studio's own version from `system/BBL.json`.
+    if !profile.raw().contains_key("version") {
+        if let Some(v) = paths.as_ref().and_then(|p| p.bambu_studio_version()) {
+            profile.set_string("version", v);
+        }
+    }
+
+    // 8. Generate metadata
+    // user_id comes from BambuPaths.preset_folder in the calling context
     let user_id = paths
+        .as_ref()
         .and_then(|p| p.preset_folder.clone())
         .unwrap_or_default();
 

@@ -186,4 +186,65 @@ impl BambuPaths {
     pub fn system_filament_dir(&self) -> PathBuf {
         self.system_filaments.clone()
     }
+
+    /// Detect the installed Bambu Studio schema/format version.
+    ///
+    /// Reads `system/BBL.json` (present in the user's BS config root on both
+    /// Windows and macOS) and returns the `version` field with leading zeros
+    /// stripped from each dotted component. That is, the raw value
+    /// `"02.07.00.07"` becomes `"2.7.0.7"` — the same shape Bambu Studio
+    /// itself stamps onto user profile JSONs when it saves them.
+    ///
+    /// Returns `None` if BBL.json is missing, unreadable, or malformed.
+    pub fn bambu_studio_version(&self) -> Option<String> {
+        let bbl_path = self.config_root.join("system").join("BBL.json");
+        let content = std::fs::read_to_string(&bbl_path).ok()?;
+        let conf: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let raw = conf.get("version")?.as_str()?;
+        Some(normalize_version(raw))
+    }
+}
+
+/// Strip leading zeros from each dotted component of a version string.
+///
+/// `"02.07.00.07"` → `"2.7.0.7"`. Empty components collapse to `"0"` so
+/// malformed input like `"..."` produces `"0.0.0.0"` rather than an empty
+/// string. Non-numeric components are passed through unchanged.
+fn normalize_version(raw: &str) -> String {
+    raw.split('.')
+        .map(|part| {
+            let trimmed = part.trim_start_matches('0');
+            if trimmed.is_empty() {
+                "0".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_version;
+
+    #[test]
+    fn strips_leading_zeros_from_each_component() {
+        assert_eq!(normalize_version("02.07.00.07"), "2.7.0.7");
+    }
+
+    #[test]
+    fn leaves_already_normalized_version_unchanged() {
+        assert_eq!(normalize_version("2.7.0.7"), "2.7.0.7");
+    }
+
+    #[test]
+    fn collapses_all_zero_component_to_single_zero() {
+        assert_eq!(normalize_version("00.00.00"), "0.0.0");
+    }
+
+    #[test]
+    fn preserves_non_numeric_components() {
+        assert_eq!(normalize_version("2.7.beta.01"), "2.7.beta.1");
+    }
 }
