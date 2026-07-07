@@ -6,7 +6,7 @@ pub mod registry;
 pub mod types;
 pub mod writer;
 
-pub use generator::{generate_profile, is_bambu_studio_running};
+pub use generator::{find_existing_filament_id, generate_profile, is_bambu_studio_running};
 pub use paths::BambuPaths;
 pub use registry::ProfileRegistry;
 pub use types::{FilamentProfile, ProfileMetadata};

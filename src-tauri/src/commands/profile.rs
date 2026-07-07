@@ -288,6 +288,7 @@ pub fn list_target_printer_options() -> Result<TargetPrinterOptions, String> {
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerateResult {
     pub profile_name: String,
+    pub filament_id: String,
     pub profile_json: String,
     pub metadata_info: String,
     pub filename: String,
@@ -333,11 +334,19 @@ pub struct InstallResult {
 ///
 /// Two-step flow: generate (preview) -> install (write) lets the UI show
 /// a preview before committing.
+///
+/// `existing_filament_id` — when the caller already knows the `filament_id`
+/// to use (e.g. the first profile in a multi-nozzle batch already resolved it),
+/// pass it here so all variants of the same filament share the same ID.
+/// When `None`, the command looks up the user filament directory for an existing
+/// profile with the same brand/material/serial and reuses its ID if found,
+/// falling back to generating a fresh ID only when none exists yet.
 #[tauri::command]
 pub async fn generate_profile_from_specs(
     specs: crate::scraper::types::FilamentSpecs,
     target_printer: Option<String>,
     base_profile_path: Option<String>,
+    existing_filament_id: Option<String>,
 ) -> Result<GenerateResult, String> {
     info!(
         "generate_profile_from_specs called for: {} {}",
@@ -363,13 +372,29 @@ pub async fn generate_profile_from_specs(
 
     let mut registry = ProfileRegistry::discover_system_profiles(&system_dir)
         .map_err(|e| format!("Failed to load system profiles: {}", e))?;
-    if let Some(user_dir) = paths.user_filament_dir() {
-        if user_dir.exists() {
+    let user_dir = paths.user_filament_dir();
+    if let Some(ref ud) = user_dir {
+        if ud.exists() {
             registry
-                .discover_user_profiles(&user_dir)
+                .discover_user_profiles(ud)
                 .map_err(|e| format!("Failed to load user profiles: {}", e))?;
         }
     }
+
+    // Determine the filament_id to use:
+    //   1. Caller-supplied (takes priority — already resolved for this batch)
+    //   2. Found on disk (same filament, different nozzle/printer already installed)
+    //   3. Fresh random ID (first time this filament is ever generated)
+    let resolved_filament_id = existing_filament_id.or_else(|| {
+        user_dir.as_ref().and_then(|ud| {
+            generator::find_existing_filament_id(
+                &specs.brand,
+                &specs.material,
+                &specs.serial,
+                ud,
+            )
+        })
+    });
 
     // Determine the base profile to use (selected path or default by material).
     let material = crate::scraper::types::MaterialType::from_str(&specs.material);
@@ -415,8 +440,15 @@ pub async fn generate_profile_from_specs(
         &registry,
         target_printer.as_deref(),
         Some(base_name.as_str()),
+        resolved_filament_id,
     )
     .map_err(|e| format!("Failed to generate profile: {}", e))?;
+
+    // Capture the filament_id that was used (for the caller to propagate in batches)
+    let filament_id = profile
+        .filament_id()
+        .unwrap_or("")
+        .to_string();
 
     // Compute diffs between base and generated profile
     let diffs = compute_profile_diffs(&base_resolved, &profile);
@@ -468,15 +500,17 @@ pub async fn generate_profile_from_specs(
     let profile_name = profile.name().unwrap_or("<unnamed>").to_string();
 
     info!(
-        "Generated profile '{}' with {} fields, {} diffs from base (base: {})",
+        "Generated profile '{}' with {} fields, {} diffs from base (base: {}, filament_id: {})",
         profile_name,
         profile.field_count(),
         diffs.len(),
-        base_name
+        base_name,
+        filament_id,
     );
 
     Ok(GenerateResult {
         profile_name,
+        filament_id,
         profile_json,
         metadata_info,
         filename,

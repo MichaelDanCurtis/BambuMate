@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Result};
 use chrono::Utc;
+use std::path::Path;
 use tracing::debug;
 
 use crate::process_command;
 use super::inheritance::resolve_inheritance;
 use super::paths::BambuPaths;
+use super::reader::read_profile;
 use super::registry::ProfileRegistry;
 use super::types::{FilamentProfile, ProfileMetadata};
 use crate::scraper::types::{FilamentSpecs, MaterialType};
@@ -48,6 +50,69 @@ pub fn generate_setting_id() -> String {
     let bytes: [u8; 7] = rand::random();
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     format!("PFUS{}", hex)
+}
+
+/// Search the user filament directory for an existing profile that belongs to the
+/// same filament (same brand + material + serial) and return its `filament_id`.
+///
+/// Profiles for the same physical filament should share a single `filament_id`
+/// regardless of target printer or nozzle size. This lets Bambu Studio group them
+/// together correctly in its UI.
+///
+/// The filename convention is:
+///   `{brand} {material} {serial} @{printer}.json`  (serial present)
+///   `{brand} {material} @{printer}.json`            (no serial)
+///
+/// We match by looking for files whose stem starts with the expected prefix
+/// `"{brand} {material} {serial} @"` (or `"{brand} {material} @"` when serial
+/// is empty), then read the first match to extract its `filament_id`.
+pub fn find_existing_filament_id(
+    brand: &str,
+    material: &str,
+    serial: &str,
+    user_dir: &Path,
+) -> Option<String> {
+    if !user_dir.exists() {
+        return None;
+    }
+
+    // Build the filename prefix that uniquely identifies this filament regardless
+    // of printer/nozzle. The "@" separator comes right after the identity portion.
+    let prefix = if serial.is_empty() {
+        format!("{} {} @", brand, material)
+    } else {
+        format!("{} {} {} @", brand, material, serial)
+    };
+
+    let entries = match std::fs::read_dir(user_dir) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if stem.starts_with(&prefix) {
+            // Read the profile and extract its filament_id
+            if let Ok(profile) = read_profile(&path) {
+                if let Some(id) = profile.filament_id() {
+                    debug!(
+                        "Reusing existing filament_id '{}' from {:?}",
+                        id, path
+                    );
+                    return Some(id.to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Apply scraped filament specs to a profile, overriding the base profile values.
@@ -335,12 +400,19 @@ pub fn extract_specs_from_profile(profile: &FilamentProfile) -> FilamentSpecs {
 /// 4. Apply scraped spec overrides (temperatures, speeds, etc.)
 /// 5. Generate metadata (.info file content)
 ///
+/// `existing_filament_id` — when `Some`, the supplied value is used for the
+/// `filament_id` field instead of generating a fresh random one. Pass this when
+/// generating multiple nozzle-size variants of the same physical filament so they
+/// all share the same identifier, which is required for Bambu Studio to group them
+/// correctly in the slicer UI.
+///
 /// Returns (profile, metadata, filename) tuple.
 pub fn generate_profile(
     specs: &FilamentSpecs,
     registry: &ProfileRegistry,
     target_printer: Option<&str>,
     base_profile_override: Option<&str>,
+    existing_filament_id: Option<String>,
 ) -> Result<(FilamentProfile, ProfileMetadata, String)> {
     let material = MaterialType::from_str(&specs.material);
     let default_base = base_profile_name(&material);
@@ -371,7 +443,8 @@ pub fn generate_profile(
     profile.set_string("name", profile_name.clone());
     profile.set_string("inherits", String::new()); // Fully flattened
     profile.set_string("from", "User".to_string());
-    profile.set_string("filament_id", generate_filament_id());
+    let filament_id = existing_filament_id.unwrap_or_else(generate_filament_id);
+    profile.set_string("filament_id", filament_id.clone());
     profile.set_string("instantiation", "true".to_string());
 
     // 3. Set display identifier (single element matching profile name)
