@@ -343,14 +343,24 @@ pub fn FilamentSearchPage() -> impl IntoView {
         spawn_local(async move {
             let mut results: Vec<(String, Result<GenerateResult, String>)> = Vec::new();
             let mut installs: Vec<GenerateResult> = Vec::new();
+            // Track the filament_id resolved by the first successful generation in
+            // this batch. All subsequent nozzle variants reuse the same ID so that
+            // profiles for the same physical filament are grouped correctly in
+            // Bambu Studio regardless of nozzle size.
+            let mut shared_filament_id: Option<String> = None;
             for printer in printers {
                 let result = commands::generate_profile(
                     &edited_specs,
                     Some(printer.clone()),
                     base_profile_path.clone(),
+                    shared_filament_id.clone(),
                 )
                 .await;
                 if let Ok(ref gen) = result {
+                    // Capture the filament_id from the first successful result
+                    if shared_filament_id.is_none() {
+                        shared_filament_id = Some(gen.filament_id.clone());
+                    }
                     installs.push(gen.clone());
                 }
                 results.push((printer, result));

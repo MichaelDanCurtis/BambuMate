@@ -543,6 +543,7 @@ pub struct ProfileDiff {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateResult {
     pub profile_name: String,
+    pub filament_id: String,
     pub profile_json: String,
     pub metadata_info: String,
     pub filename: String,
@@ -610,6 +611,7 @@ struct GenerateProfileArgs {
     specs: FilamentSpecs,
     target_printer: Option<String>,
     base_profile_path: Option<String>,
+    existing_filament_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -670,11 +672,13 @@ pub async fn generate_profile(
     specs: &FilamentSpecs,
     target_printer: Option<String>,
     base_profile_path: Option<String>,
+    existing_filament_id: Option<String>,
 ) -> Result<GenerateResult, String> {
     let args = serde_wasm_bindgen::to_value(&GenerateProfileArgs {
         specs: specs.clone(),
         target_printer,
         base_profile_path,
+        existing_filament_id,
     })
     .map_err(|e| e.to_string())?;
 
