@@ -59,6 +59,12 @@ pub fn FilamentSearchPage() -> impl IntoView {
     let (show_merge_screen, set_show_merge_screen) = signal(false);
     let (base_profile_search, set_base_profile_search) = signal(String::new());
 
+    // Guards the "reset base picker + re-search" Effect below so it only fires
+    // when specs come from a new fetch, not when the user completes the merge
+    // step (which also updates `current_specs` but must preserve the already-
+    // picked base profile so the backend uses it as the generation base).
+    let (specs_from_merge, set_specs_from_merge) = signal(false);
+
     // Check catalog status on mount and load AI preference
     Effect::new(move |_| {
         spawn_local(async move {
@@ -93,6 +99,14 @@ pub fn FilamentSearchPage() -> impl IntoView {
     Effect::new(move |_| {
         let specs = current_specs.get();
         if let Some(ref s) = specs {
+            // Skip the reset+re-search when the specs update came from the
+            // merge step: the user has already picked a base and we must not
+            // clear `selected_base_profile_path`, otherwise generation would
+            // silently fall back to the default (Generic PLA) base.
+            if specs_from_merge.get_untracked() {
+                set_specs_from_merge.set(false);
+                return;
+            }
             let material = s.material.clone();
             set_is_searching_base.set(true);
             set_base_profile_matches.set(vec![]);
@@ -387,8 +401,11 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_show_merge_screen.set(false);
     };
 
-    // Handler for completing the merge (user selected which settings to use)
+    // Handler for completing the merge (user selected which settings to use).
+    // Set the merge flag BEFORE updating current_specs so the auto-search
+    // Effect skips its reset pass and preserves the selected base profile.
     let on_merge_complete = move |merged_specs: FilamentSpecs| {
+        set_specs_from_merge.set(true);
         set_current_specs.set(Some(merged_specs));
         set_show_merge_screen.set(false);
         set_show_editor.set(true);
