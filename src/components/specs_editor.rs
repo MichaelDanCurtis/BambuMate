@@ -21,7 +21,7 @@ pub const PRINTER_OPTIONS: &[&str] = &[
 #[component]
 pub fn SpecsEditor(
     specs: FilamentSpecs,
-    #[prop(into)] on_generate: Callback<(FilamentSpecs, String)>,
+    #[prop(into)] on_generate: Callback<(FilamentSpecs, Vec<String>)>,
     #[prop(into)] on_cancel: Callback<()>,
     #[prop(default = "Generate Profile")] action_label: &'static str,
     #[prop(default = "Back")] cancel_label: &'static str,
@@ -41,15 +41,15 @@ pub fn SpecsEditor(
         signal::<TargetPrinterOptions>(fallback_target_printers.clone());
     let (selected_printer_model, set_selected_printer_model) =
         signal(fallback_target_printers.default_printer_model.clone());
-    let (selected_nozzle_size, set_selected_nozzle_size) =
-        signal(fallback_target_printers.default_nozzle_size.clone());
+    let (selected_nozzle_sizes, set_selected_nozzle_sizes) =
+        signal::<Vec<String>>(vec![fallback_target_printers.default_nozzle_size.clone()]);
 
     if show_printer {
         Effect::new(move |_| {
             spawn_local(async move {
                 if let Ok(options) = commands::list_target_printer_options().await {
                     let current_printer = selected_printer_model.get_untracked();
-                    let current_nozzle = selected_nozzle_size.get_untracked();
+                    let current_nozzles = selected_nozzle_sizes.get_untracked();
 
                     if !options
                         .printer_models
@@ -59,12 +59,15 @@ pub fn SpecsEditor(
                         set_selected_printer_model.set(options.default_printer_model.clone());
                     }
 
-                    if !options
-                        .nozzle_sizes
-                        .iter()
-                        .any(|nozzle| nozzle == &current_nozzle)
-                    {
-                        set_selected_nozzle_size.set(options.default_nozzle_size.clone());
+                    // Keep nozzles that are still valid; fall back to default if none remain.
+                    let valid_nozzles: Vec<String> = current_nozzles
+                        .into_iter()
+                        .filter(|n| options.nozzle_sizes.contains(n))
+                        .collect();
+                    if valid_nozzles.is_empty() {
+                        set_selected_nozzle_sizes.set(vec![options.default_nozzle_size.clone()]);
+                    } else {
+                        set_selected_nozzle_sizes.set(valid_nozzles);
                     }
 
                     set_target_printer_options.set(options);
@@ -364,7 +367,7 @@ pub fn SpecsEditor(
         );
         let defaults = target_printer_options.get_untracked();
         set_selected_printer_model.set(defaults.default_printer_model);
-        set_selected_nozzle_size.set(defaults.default_nozzle_size);
+        set_selected_nozzle_sizes.set(vec![defaults.default_nozzle_size]);
     };
 
     // Build edited specs
@@ -416,13 +419,16 @@ pub fn SpecsEditor(
         edited.filament_cost = parse_f32(&filament_cost.get());
         edited.temperature_vitrification = parse_u16(&temperature_vitrification.get());
 
-        on_generate.run((
-            edited,
-            commands::format_target_printer_label(
-                &selected_printer_model.get(),
-                &selected_nozzle_size.get(),
-            ),
-        ));
+        let nozzles = selected_nozzle_sizes.get();
+        if nozzles.is_empty() {
+            return;
+        }
+        let printer_model = selected_printer_model.get();
+        let printer_labels: Vec<String> = nozzles
+            .iter()
+            .map(|n| commands::format_target_printer_label(&printer_model, n))
+            .collect();
+        on_generate.run((edited, printer_labels));
     };
 
     view! {
@@ -467,32 +473,61 @@ pub fn SpecsEditor(
                                     .collect::<Vec<_>>()}
                             </select>
                         </div>
-                        <div class="spec-field">
-                            <label class="spec-field-label">"Nozzle size"</label>
-                            <select
-                                class="spec-field-select"
-                                prop:value=move || selected_nozzle_size.get()
-                                on:change=move |ev| set_selected_nozzle_size.set(event_target_value(&ev))
-                            >
+                        <div class="spec-field full-width">
+                            <label class="spec-field-label">"Nozzle sizes"</label>
+                            <div class="nozzle-checkboxes">
                                 {move || target_printer_options
                                     .get()
                                     .nozzle_sizes
                                     .into_iter()
-                                    .map(|nozzle| view! { <option value={nozzle.clone()}>{format!("{} mm", nozzle)}</option> })
+                                    .map(|nozzle| {
+                                        let nozzle_for_check = nozzle.clone();
+                                        let nozzle_for_change = nozzle.clone();
+                                        let label = format!("{} mm", nozzle);
+                                        view! {
+                                            <label class="nozzle-checkbox-item">
+                                                <input
+                                                    type="checkbox"
+                                                    prop:checked=move || selected_nozzle_sizes.get().contains(&nozzle_for_check)
+                                                    on:change=move |ev| {
+                                                        let checked = checkbox_checked(&ev);
+                                                        let mut current = selected_nozzle_sizes.get();
+                                                        if checked {
+                                                            if !current.contains(&nozzle_for_change) {
+                                                                current.push(nozzle_for_change.clone());
+                                                            }
+                                                        } else {
+                                                            current.retain(|n| n != &nozzle_for_change);
+                                                        }
+                                                        set_selected_nozzle_sizes.set(current);
+                                                    }
+                                                />
+                                                {label}
+                                            </label>
+                                        }
+                                    })
                                     .collect::<Vec<_>>()}
-                            </select>
+                            </div>
                         </div>
                     </div>
                     <div class="spec-field full-width">
-                        <label class="spec-field-label">"Profile target"</label>
+                        <label class="spec-field-label">"Profile targets"</label>
                         <input
                             class="spec-field-input"
                             type="text"
                             readonly=true
-                            prop:value=move || commands::format_target_printer_label(
-                                &selected_printer_model.get(),
-                                &selected_nozzle_size.get(),
-                            )
+                            prop:value=move || {
+                                let nozzles = selected_nozzle_sizes.get();
+                                let printer = selected_printer_model.get();
+                                if nozzles.is_empty() {
+                                    "No nozzle selected — check at least one above".to_string()
+                                } else {
+                                    nozzles.iter()
+                                        .map(|n| commands::format_target_printer_label(&printer, n))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                }
+                            }
                         />
                     </div>
                 </div>
@@ -603,6 +638,14 @@ pub fn SpecsEditor(
             </div>
         </div>
     }
+}
+
+fn checkbox_checked(ev: &leptos::ev::Event) -> bool {
+    use wasm_bindgen::JsCast;
+    ev.target()
+        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .map(|e| e.checked())
+        .unwrap_or(false)
 }
 
 fn spec_input(

@@ -57,14 +57,14 @@ pub fn FilamentSearchPage() -> impl IntoView {
     let (show_editor, set_show_editor) = signal(false);
 
     // Generate state
-    let (generate_result, set_generate_result) =
-        signal::<Option<Result<GenerateResult, String>>>(None);
+    let (generate_results, set_generate_results) =
+        signal::<Vec<(String, Result<GenerateResult, String>)>>(vec![]);
     let (is_generating, set_is_generating) = signal(false);
-    let (current_generate, set_current_generate) = signal::<Option<GenerateResult>>(None);
+    let (pending_installs, set_pending_installs) = signal::<Vec<GenerateResult>>(vec![]);
 
     // Install state
-    let (install_result, set_install_result) =
-        signal::<Option<Result<InstallResult, String>>>(None);
+    let (install_results, set_install_results) =
+        signal::<Vec<(String, Result<InstallResult, String>)>>(vec![]);
     let (is_installing, set_is_installing) = signal(false);
 
     // Base profile reference state
@@ -187,9 +187,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
         // Clear previous results
         set_current_specs.set(None);
-        set_generate_result.set(None);
-        set_install_result.set(None);
-        set_current_generate.set(None);
+        set_generate_results.set(vec![]);
+        set_install_results.set(vec![]);
+        set_pending_installs.set(vec![]);
         set_fetch_error.set(None);
         set_show_editor.set(false);
 
@@ -222,9 +222,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
         set_show_suggestions.set(false);
         set_current_specs.set(None);
-        set_generate_result.set(None);
-        set_install_result.set(None);
-        set_current_generate.set(None);
+        set_generate_results.set(vec![]);
+        set_install_results.set(vec![]);
+        set_pending_installs.set(vec![]);
         set_fetch_error.set(None);
         set_show_editor.set(false);
 
@@ -253,9 +253,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
         set_show_suggestions.set(false);
         set_current_specs.set(None);
-        set_generate_result.set(None);
-        set_install_result.set(None);
-        set_current_generate.set(None);
+        set_generate_results.set(vec![]);
+        set_install_results.set(vec![]);
+        set_pending_installs.set(vec![]);
         set_fetch_error.set(None);
         set_show_editor.set(false);
 
@@ -305,9 +305,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
         set_show_url_input.set(false);
         set_current_specs.set(None);
-        set_generate_result.set(None);
-        set_install_result.set(None);
-        set_current_generate.set(None);
+        set_generate_results.set(vec![]);
+        set_install_results.set(vec![]);
+        set_pending_installs.set(vec![]);
         set_fetch_error.set(None);
         set_show_editor.set(false);
 
@@ -331,48 +331,64 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_show_editor.set(true);
     };
 
-    // Generate handler — now takes edited specs and printer from SpecsEditor
-    let do_generate_with_specs = move |(edited_specs, printer): (FilamentSpecs, String)| {
-        set_generate_result.set(None);
-        set_install_result.set(None);
-        set_current_generate.set(None);
+    // Generate handler — takes edited specs and a list of printer labels from SpecsEditor.
+    // Generates one profile per selected nozzle type sequentially.
+    let do_generate_with_specs = move |(edited_specs, printers): (FilamentSpecs, Vec<String>)| {
+        set_generate_results.set(vec![]);
+        set_install_results.set(vec![]);
+        set_pending_installs.set(vec![]);
 
         set_is_generating.set(true);
         let base_profile_path = selected_base_profile_path.get();
         spawn_local(async move {
-            let result =
-                commands::generate_profile(&edited_specs, Some(printer), base_profile_path).await;
-            if let Ok(ref gen) = result {
-                set_current_generate.set(Some(gen.clone()));
+            let mut results: Vec<(String, Result<GenerateResult, String>)> = Vec::new();
+            let mut installs: Vec<GenerateResult> = Vec::new();
+            for printer in printers {
+                let result = commands::generate_profile(
+                    &edited_specs,
+                    Some(printer.clone()),
+                    base_profile_path.clone(),
+                )
+                .await;
+                if let Ok(ref gen) = result {
+                    installs.push(gen.clone());
+                }
+                results.push((printer, result));
             }
-            set_generate_result.set(Some(result));
+            set_pending_installs.set(installs);
+            set_generate_results.set(results);
             set_is_generating.set(false);
         });
     };
 
-    // Install handler
+    // Install handler — installs all successfully generated profiles.
     let do_install = move || {
-        let gen = match current_generate.get() {
-            Some(g) => g,
-            None => return,
-        };
-
+        let installs = pending_installs.get();
+        if installs.is_empty() {
+            return;
+        }
         set_is_installing.set(true);
-        let profile_json = gen.profile_json.clone();
-        let metadata_info = gen.metadata_info.clone();
-        let filename = gen.filename.clone();
-
         spawn_local(async move {
-            let result =
-                commands::install_profile(&profile_json, &metadata_info, &filename, true).await;
-            set_install_result.set(Some(result));
+            let mut results: Vec<(String, Result<InstallResult, String>)> = Vec::new();
+            for gen in installs {
+                let profile_name = gen.profile_name.clone();
+                let result = commands::install_profile(
+                    &gen.profile_json,
+                    &gen.metadata_info,
+                    &gen.filename,
+                    true,
+                )
+                .await;
+                results.push((profile_name, result));
+            }
+            set_install_results.set(results);
             set_is_installing.set(false);
         });
     };
 
     let cancel_generate = move || {
-        set_generate_result.set(None);
-        set_current_generate.set(None);
+        set_generate_results.set(vec![]);
+        set_pending_installs.set(vec![]);
     };
 
     let cancel_editor = move || {
@@ -386,9 +402,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_show_url_input.set(false);
         set_url_input.set(String::new());
         set_current_specs.set(None);
-        set_generate_result.set(None);
-        set_install_result.set(None);
-        set_current_generate.set(None);
+        set_generate_results.set(vec![]);
+        set_install_results.set(vec![]);
+        set_pending_installs.set(vec![]);
         set_fetch_error.set(None);
         set_show_editor.set(false);
         set_base_profile_matches.set(vec![]);
@@ -658,7 +674,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
             // Specs display (FilamentCard) — shown when specs exist and editor is not shown
             {move || {
                 if let Some(specs) = current_specs.get() {
-                    if show_editor.get() || generate_result.get().is_some() || show_merge_screen.get() {
+                    if show_editor.get() || !generate_results.get().is_empty() || show_merge_screen.get() {
                         return None;
                     }
                     Some(view! {
@@ -677,7 +693,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
             // Base profile reference matches — shown after specs are fetched
             {move || {
-                if current_specs.get().is_none() || show_editor.get() || generate_result.get().is_some() || show_merge_screen.get() {
+                if current_specs.get().is_none() || show_editor.get() || !generate_results.get().is_empty() || show_merge_screen.get() {
                     return None;
                 }
                 let matches = base_profile_matches.get();
@@ -815,12 +831,12 @@ pub fn FilamentSearchPage() -> impl IntoView {
             // Specs Editor — shown between FilamentCard and ProfilePreview
             {move || {
                 if let Some(specs) = current_specs.get() {
-                    if show_editor.get() && generate_result.get().is_none() {
+                    if show_editor.get() && generate_results.get().is_empty() {
                         return Some(view! {
                             <div class="editor-section">
                                 <SpecsEditor
                                     specs=specs
-                                    on_generate=move |data: (FilamentSpecs, String)| do_generate_with_specs(data)
+                                    on_generate=move |data: (FilamentSpecs, Vec<String>)| do_generate_with_specs(data)
                                     on_cancel=move |_| cancel_editor()
                                 />
                             </div>
@@ -834,92 +850,177 @@ pub fn FilamentSearchPage() -> impl IntoView {
             <Show when=move || is_generating.get()>
                 <div class="loading-spinner">
                     <div class="spinner"></div>
-                    <span>"Generating profile..."</span>
+                    <span>"Generating profile(s)..."</span>
                 </div>
             </Show>
 
-            // Generate error
+            // Generate results: errors, single preview, or multi-profile table
             {move || {
-                if let Some(Err(e)) = generate_result.get() {
-                    Some(view! {
-                        <div class="error-message">
-                            <strong>"Generation failed: "</strong>{e}
-                        </div>
-                    })
-                } else {
-                    None
+                let results = generate_results.get();
+                if results.is_empty() {
+                    return None;
                 }
-            }}
 
-            // Profile preview
-            {move || {
-                if let Some(Ok(gen)) = generate_result.get() {
-                    if install_result.get().is_some_and(|r| r.is_ok()) {
-                        return None;
-                    }
-                    Some(view! {
-                        <div class="generate-section">
-                            <ProfilePreview
-                                result=gen
-                                on_install=move |_| do_install()
-                                on_cancel=move |_| cancel_generate()
-                                installing=is_installing.get()
-                            />
-                        </div>
-                    })
-                } else {
-                    None
+                // Hide once all installs are done
+                if !install_results.get().is_empty() {
+                    return None;
                 }
-            }}
 
-            // Install error
-            {move || {
-                if let Some(Err(e)) = install_result.get() {
-                    Some(view! {
-                        <div class="error-message">
-                            <strong>"Installation failed: "</strong>{e}
-                        </div>
-                    })
-                } else {
-                    None
-                }
-            }}
+                let gen_errors: Vec<(String, String)> = results
+                    .iter()
+                    .filter_map(|(label, r)| r.as_ref().err().map(|e| (label.clone(), e.clone())))
+                    .collect();
+                let successes: Vec<GenerateResult> = results
+                    .into_iter()
+                    .filter_map(|(_, r)| r.ok())
+                    .collect();
+                let success_count = successes.len();
 
-            // Install success
-            {move || {
-                if let Some(Ok(result)) = install_result.get() {
-                    Some(view! {
-                        <div class="success-message">
-                            <div class="success-header">"✓ Profile Installed"</div>
-                            <div class="success-details">
-                                <p><strong>"Profile: "</strong>{result.profile_name}</p>
-                                <p><strong>"Location: "</strong><code>{result.installed_path}</code></p>
-                                {result.bambu_studio_was_running.then(|| view! {
-                                    <p class="warning-text">
-                                        "Restart Bambu Studio to see the new profile."
-                                    </p>
-                                })}
+                Some(view! {
+                    <div class="generate-section">
+                        // Per-nozzle generation errors
+                        {gen_errors.into_iter().map(|(label, e)| view! {
+                            <div class="error-message">
+                                <strong>{format!("Generation failed ({}): ", label)}</strong>{e}
                             </div>
-                            <div class="success-actions">
-                                <button
-                                    class="btn btn-primary"
-                                    on:click=move |_| {
-                                        spawn_local(async move {
-                                            let _ = commands::launch_bambu_studio(None, None).await;
-                                        });
-                                    }
-                                >
-                                    "Open Bambu Studio"
-                                </button>
-                                <button class="btn btn-secondary" on:click=move |_| reset_search()>
-                                    "Search Another"
-                                </button>
-                            </div>
-                        </div>
-                    })
-                } else {
-                    None
+                        }).collect::<Vec<_>>()}
+
+                        // Single profile → full ProfilePreview with diff table
+                        {if success_count == 1 {
+                            let gen = successes.into_iter().next().unwrap();
+                            view! {
+                                <ProfilePreview
+                                    result=gen
+                                    on_install=move |_| do_install()
+                                    on_cancel=move |_| cancel_generate()
+                                    installing=is_installing.get()
+                                />
+                            }.into_any()
+                        } else if success_count > 1 {
+                            // Multiple profiles → compact summary table + Install All
+                            view! {
+                                <div class="multi-profile-results">
+                                    <h3 class="multi-profile-title">
+                                        {format!("{} Profiles Ready to Install", success_count)}
+                                    </h3>
+                                    <table class="multi-profile-table">
+                                        <thead>
+                                            <tr>
+                                                <th>"Profile Name"</th>
+                                                <th>"Base Profile"</th>
+                                                <th>"Fields"</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {successes.iter().map(|gen| view! {
+                                                <tr>
+                                                    <td class="profile-name">{gen.profile_name.clone()}</td>
+                                                    <td>{gen.base_profile_used.clone()}</td>
+                                                    <td>{gen.field_count}</td>
+                                                </tr>
+                                            }).collect::<Vec<_>>()}
+                                        </tbody>
+                                    </table>
+                                    <div class="multi-profile-actions">
+                                        <button
+                                            class="btn btn-secondary"
+                                            on:click=move |_| cancel_generate()
+                                            disabled=move || is_installing.get()
+                                        >
+                                            "Cancel"
+                                        </button>
+                                        <button
+                                            class="btn btn-primary"
+                                            on:click=move |_| do_install()
+                                            disabled=move || is_installing.get()
+                                        >
+                                            {move || if is_installing.get() {
+                                                format!("Installing {} profiles...", success_count)
+                                            } else {
+                                                format!("Install All {} Profiles", success_count)
+                                            }}
+                                        </button>
+                                    </div>
+                                </div>
+                            }.into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }}
+                    </div>
+                })
+            }}
+
+            // Install results: success summary + errors
+            {move || {
+                let results = install_results.get();
+                if results.is_empty() {
+                    return None;
                 }
+
+                let ok_installs: Vec<InstallResult> = results
+                    .iter()
+                    .filter_map(|(_, r)| r.as_ref().ok().cloned())
+                    .collect();
+                let inst_errors: Vec<(String, String)> = results
+                    .into_iter()
+                    .filter_map(|(name, r)| r.err().map(|e| (name, e)))
+                    .collect();
+                let ok_count = ok_installs.len();
+                let any_bs_running = ok_installs.iter().any(|r| r.bambu_studio_was_running);
+
+                Some(view! {
+                    <div class="success-message">
+                        {if ok_count > 0 {
+                            view! {
+                                <div class="success-header">
+                                    {format!("✓ {} Profile{} Installed",
+                                        ok_count,
+                                        if ok_count == 1 { "" } else { "s" })}
+                                </div>
+                                <div class="success-details">
+                                    {ok_installs.iter().map(|r| view! {
+                                        <p>
+                                            <strong>"Profile: "</strong>{r.profile_name.clone()}
+                                        </p>
+                                        <p>
+                                            <strong>"Location: "</strong>
+                                            <code>{r.installed_path.clone()}</code>
+                                        </p>
+                                    }).collect::<Vec<_>>()}
+                                    {any_bs_running.then(|| view! {
+                                        <p class="warning-text">
+                                            "Restart Bambu Studio to see the new profile(s)."
+                                        </p>
+                                    })}
+                                </div>
+                            }.into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }}
+
+                        {inst_errors.into_iter().map(|(name, e)| view! {
+                            <div class="error-message">
+                                <strong>{format!("Installation failed ({}): ", name)}</strong>{e}
+                            </div>
+                        }).collect::<Vec<_>>()}
+
+                        <div class="success-actions">
+                            <button
+                                class="btn btn-primary"
+                                on:click=move |_| {
+                                    spawn_local(async move {
+                                        let _ = commands::launch_bambu_studio(None, None).await;
+                                    });
+                                }
+                            >
+                                "Open Bambu Studio"
+                            </button>
+                            <button class="btn btn-secondary" on:click=move |_| reset_search()>
+                                "Search Another"
+                            </button>
+                        </div>
+                    </div>
+                })
             }}
         </div>
     }
