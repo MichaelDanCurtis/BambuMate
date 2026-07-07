@@ -217,9 +217,11 @@ pub fn apply_specs_to_profile(profile: &mut FilamentProfile, specs: &FilamentSpe
         set_dual(profile, "filament_cost", format!("{:.2}", cost));
     }
 
-    // Material identity (always set, not optional)
-    set_dual(profile, "filament_type", specs.material.clone());
-    set_dual(profile, "filament_vendor", specs.brand.clone());
+    // Material identity fields. Bambu Studio profiles store these as
+    // single-element string arrays — NOT per-extruder duplicates — so use
+    // `set_string_array` rather than `set_dual` to avoid `["X", "X"]` output.
+    profile.set_string_array("filament_type", vec![specs.material.clone()]);
+    profile.set_string_array("filament_vendor", vec![specs.brand.clone()]);
 }
 
 /// Extract FilamentSpecs from an existing Bambu Studio profile.
@@ -377,8 +379,12 @@ pub fn generate_profile(
     //    versions that may be absent from older system profile installations.
     apply_compat_defaults(&mut profile);
 
-    // 6. Set compatible_printers to empty array for universal compatibility
-    profile.set_string_array("compatible_printers", vec![]);
+    // 6. Set compatible_printers to the target printer (e.g.
+    //    "Bambu Lab H2C 0.4 nozzle"). This matches what Bambu Studio itself
+    //    writes for user profiles and ensures the filament shows up under the
+    //    correct printer in the UI instead of being marked as compatible with
+    //    no printer at all.
+    profile.set_string_array("compatible_printers", vec![printer.to_string()]);
 
     // 7. Generate metadata
     // user_id comes from BambuPaths.preset_folder in the calling context
