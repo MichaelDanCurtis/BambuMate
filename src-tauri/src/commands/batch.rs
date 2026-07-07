@@ -4,8 +4,32 @@ use tracing::{info, warn};
 
 use crate::profile::generator;
 use crate::profile::paths::BambuPaths;
+use crate::profile::reader::read_profile;
 use crate::profile::registry::ProfileRegistry;
 use crate::profile::writer::write_profile_with_metadata;
+
+/// Default target printer label used when the caller doesn't specify one.
+/// Must match `generator::generate_profile`'s internal default so the filename
+/// we predict for on-disk lookups is identical to the one the generator writes.
+const DEFAULT_TARGET_PRINTER: &str = "Bambu Lab H2C 0.4 nozzle";
+
+/// Compute the on-disk filename the generator will produce for a given filament +
+/// target printer. Mirrors the format used inside `generator::generate_profile`.
+fn expected_profile_filename(
+    brand: &str,
+    material: &str,
+    serial: &str,
+    target_printer: &str,
+) -> String {
+    if serial.is_empty() {
+        format!("{} {} @{}.json", brand, material, target_printer)
+    } else {
+        format!(
+            "{} {} {} @{}.json",
+            brand, material, serial, target_printer
+        )
+    }
+}
 
 /// A single entry in the batch generation results.
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +123,18 @@ pub async fn batch_generate_brand(
         None
     };
 
+    // Even when we're not installing, look up the user filament directory so we
+    // can reuse existing filament IDs. This keeps IDs stable across regenerations
+    // and across nozzle/printer variants of the same physical filament, matching
+    // the behavior of single-filament generation.
+    let user_dir_lookup: Option<std::path::PathBuf> = user_dir
+        .clone()
+        .or_else(|| paths.user_filament_dir());
+
+    let effective_target_printer = target_printer
+        .as_deref()
+        .unwrap_or(DEFAULT_TARGET_PRINTER);
+
     for entry in &entries {
         let filament_name = format!("{} {}", entry.brand, entry.name);
         info!("  Generating profile for: {}", filament_name);
@@ -113,7 +149,48 @@ pub async fn batch_generate_brand(
             ..Default::default()
         };
 
-        match generator::generate_profile(&specs, &registry, target_printer.as_deref(), None, None) {
+        // Resolve the filament_id to use (priority order):
+        //   1. If the exact target file (same filament + same printer/nozzle)
+        //      already exists on disk, reuse its filament_id verbatim. This
+        //      preserves the ID when the user regenerates to update settings.
+        //   2. If any other variant of this filament (different printer/nozzle)
+        //      exists on disk, reuse that ID so all variants share one identifier
+        //      (matches how single-profile generation works).
+        //   3. Otherwise, let the generator create a fresh random ID.
+        let resolved_filament_id = user_dir_lookup.as_ref().and_then(|ud| {
+            let expected_filename = expected_profile_filename(
+                &specs.brand,
+                &specs.material,
+                &specs.serial,
+                effective_target_printer,
+            );
+            let target_path = ud.join(&expected_filename);
+            if target_path.exists() {
+                if let Ok(existing) = read_profile(&target_path) {
+                    if let Some(id) = existing.filament_id() {
+                        info!(
+                            "  Reusing filament_id '{}' from existing target file {:?}",
+                            id, target_path
+                        );
+                        return Some(id.to_string());
+                    }
+                }
+            }
+            generator::find_existing_filament_id(
+                &specs.brand,
+                &specs.material,
+                &specs.serial,
+                ud,
+            )
+        });
+
+        match generator::generate_profile(
+            &specs,
+            &registry,
+            target_printer.as_deref(),
+            None,
+            resolved_filament_id,
+        ) {
             Ok((profile, metadata, filename)) => {
                 let profile_name = profile.name().unwrap_or("<unnamed>").to_string();
 
