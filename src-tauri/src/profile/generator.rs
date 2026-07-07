@@ -10,19 +10,24 @@ use super::types::{FilamentProfile, ProfileMetadata};
 use crate::scraper::types::{FilamentSpecs, MaterialType};
 
 /// Map a MaterialType to the corresponding Bambu Studio base profile name.
-/// These are the "Generic X" profiles that ship with Bambu Studio.
+///
+/// These are the intermediate `fdm_filament_*` system profiles shipped with
+/// Bambu Studio (found under `<config>/system/BBL/filament/`). We prefer
+/// these over the "Generic X" profiles because the material-family bases
+/// carry only chemistry-appropriate defaults without printer- or feature-
+/// specific tuning that a Generic profile layers on top.
 pub fn base_profile_name(material: &MaterialType) -> &'static str {
     match material {
-        MaterialType::PLA => "Generic PLA",
-        MaterialType::PETG => "Generic PETG",
-        MaterialType::ABS => "Generic ABS",
-        MaterialType::ASA => "Generic ASA",
-        MaterialType::TPU => "Generic TPU",
-        MaterialType::Nylon => "Generic PA",
-        MaterialType::PC => "Generic PC",
-        MaterialType::PVA => "Generic PVA",
-        MaterialType::HIPS => "Generic HIPS",
-        MaterialType::Other(_) => "Generic PLA", // Safe fallback
+        MaterialType::PLA => "fdm_filament_pla",
+        MaterialType::PETG => "fdm_filament_pet",
+        MaterialType::ABS => "fdm_filament_abs",
+        MaterialType::ASA => "fdm_filament_asa",
+        MaterialType::TPU => "fdm_filament_tpu",
+        MaterialType::Nylon => "fdm_filament_pa",
+        MaterialType::PC => "fdm_filament_pc",
+        MaterialType::PVA => "fdm_filament_pva",
+        MaterialType::HIPS => "fdm_filament_hips",
+        MaterialType::Other(_) => "fdm_filament_pla", // Safe fallback
     }
 }
 
@@ -217,9 +222,11 @@ pub fn apply_specs_to_profile(profile: &mut FilamentProfile, specs: &FilamentSpe
         set_dual(profile, "filament_cost", format!("{:.2}", cost));
     }
 
-    // Material identity (always set, not optional)
-    set_dual(profile, "filament_type", specs.material.clone());
-    set_dual(profile, "filament_vendor", specs.brand.clone());
+    // Material identity fields. Bambu Studio profiles store these as
+    // single-element string arrays — NOT per-extruder duplicates — so use
+    // `set_string_array` rather than `set_dual` to avoid `["X", "X"]` output.
+    profile.set_string_array("filament_type", vec![specs.material.clone()]);
+    profile.set_string_array("filament_vendor", vec![specs.brand.clone()]);
 }
 
 /// Extract FilamentSpecs from an existing Bambu Studio profile.
@@ -373,13 +380,38 @@ pub fn generate_profile(
     // 4. Apply scraped spec overrides
     apply_specs_to_profile(&mut profile, specs);
 
-    // 5. Set compatible_printers to empty array for universal compatibility
-    profile.set_string_array("compatible_printers", vec![]);
+    // 5. Apply compatibility defaults for fields required by newer Bambu Studio
+    //    versions that may be absent from older system profile installations.
+    apply_compat_defaults(&mut profile);
 
-    // 6. Generate metadata
-    // user_id comes from BambuPaths.preset_folder in the calling context
+    // 6. Set compatible_printers to the target printer (e.g.
+    //    "Bambu Lab H2C 0.4 nozzle"). This matches what Bambu Studio itself
+    //    writes for user profiles and ensures the filament shows up under the
+    //    correct printer in the UI instead of being marked as compatible with
+    //    no printer at all.
+    profile.set_string_array("compatible_printers", vec![printer.to_string()]);
+
+    // 7. Detect BS paths once and reuse for both the version stamp and the
+    //    metadata below. `.ok()` here means the version stamp is best-effort:
+    //    if BS isn't installed we still generate a valid profile, just without
+    //    the schema version field (BS re-stamps it on save anyway).
     let paths = BambuPaths::detect().ok();
+
+    // Ensure the profile carries a `version` field. Bambu Studio stamps this
+    // onto every user profile it saves (schema/format marker like "2.7.0.7"),
+    // and imports without it can occasionally fail on newer BS builds. If the
+    // base already provided one via inheritance we keep it; otherwise fall
+    // back to the installed Bambu Studio's own version from `system/BBL.json`.
+    if !profile.raw().contains_key("version") {
+        if let Some(v) = paths.as_ref().and_then(|p| p.bambu_studio_version()) {
+            profile.set_string("version", v);
+        }
+    }
+
+    // 8. Generate metadata
+    // user_id comes from BambuPaths.preset_folder in the calling context
     let user_id = paths
+        .as_ref()
         .and_then(|p| p.preset_folder.clone())
         .unwrap_or_default();
 
@@ -391,7 +423,7 @@ pub fn generate_profile(
         updated_time: Utc::now().timestamp() as u64,
     };
 
-    // 7. Generate filename
+    // 8. Generate filename
     let filename = if specs.serial.is_empty() {
         format!("{} {} @{}.json", specs.brand, specs.material, printer)
     } else {
@@ -406,6 +438,98 @@ pub fn generate_profile(
     );
 
     Ok((profile, metadata, filename))
+}
+
+/// Apply compatibility fallback defaults for fields required by Bambu Studio 2.x.
+///
+/// Bambu Studio 2.x added several fields to `fdm_filament_common` that are absent
+/// from older installations. If a user generates a profile against an older install
+/// (or against system profiles that pre-date 2.x) these fields will be missing and
+/// BS will reject the profile on import.
+///
+/// **Priority order** (highest → lowest):
+/// 1. Values resolved from the installed system profile chain (set in step 1 of
+///    `generate_profile` via `resolve_inheritance`).
+/// 2. Values written by `apply_specs_to_profile` (scraped spec overrides).
+/// 3. The defaults in this function — only applied when the key is absent.
+///
+/// ### Forward-compatibility
+/// Most new fields added in future Bambu Studio versions are handled **automatically**
+/// through two other mechanisms:
+/// - Non-nil new fields in `fdm_filament_common` come through the ancestor merge in
+///   `resolve_inheritance`.
+/// - Nil-placeholder new fields in `fdm_filament_common` are preserved by the
+///   nil-preservation pass in `resolve_inheritance`.
+///
+/// Add an entry here **only** when a required field is completely absent from all
+/// levels of a system profile chain (i.e. it was back-ported as a new top-level
+/// requirement without a corresponding entry in older `fdm_filament_common` files).
+fn apply_compat_defaults(profile: &mut FilamentProfile) {
+    use serde_json::{json, Value};
+
+    // Fields added in Bambu Studio 2.x that may not appear in older system
+    // profiles. Values match the defaults shipped with BS 2.7.
+    let defaults = [
+        ("default_filament_colour",      json!([""])),
+        ("enable_overhang_bridge_fan",   json!(["1"])),
+        ("enable_pressure_advance",      json!(["0"])),
+        ("filament_change_length_nc",    json!(["4"])),
+        ("filament_notes",               Value::String(String::new())),
+        ("filament_wipe",                json!(["1", "1"])),
+        ("first_x_layer_fan_speed",      json!(["0"])),
+        ("first_x_layer_part_fan_speed", json!(["0"])),
+    ];
+
+    for (key, value) in defaults {
+        if !profile.raw().contains_key(key) {
+            profile.raw_mut().insert(key.to_string(), value);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn compat_defaults_added_when_fields_absent() {
+        let mut profile = FilamentProfile::from_map(serde_json::Map::new());
+        apply_compat_defaults(&mut profile);
+
+        for key in &[
+            "default_filament_colour",
+            "enable_overhang_bridge_fan",
+            "enable_pressure_advance",
+            "filament_change_length_nc",
+            "filament_notes",
+            "filament_wipe",
+            "first_x_layer_fan_speed",
+            "first_x_layer_part_fan_speed",
+        ] {
+            assert!(profile.raw().contains_key(*key),
+                "compat default for '{}' should be present", key);
+        }
+
+        assert_eq!(profile.raw()["enable_pressure_advance"], json!(["0"]));
+        assert_eq!(profile.raw()["filament_wipe"], json!(["1", "1"]));
+        assert_eq!(profile.raw()["first_x_layer_fan_speed"], json!(["0"]));
+    }
+
+    #[test]
+    fn compat_defaults_do_not_overwrite_system_or_spec_values() {
+        let mut profile = FilamentProfile::from_json(
+            r#"{"enable_pressure_advance": ["1"], "filament_wipe": ["0", "0"]}"#
+        ).unwrap();
+
+        apply_compat_defaults(&mut profile);
+
+        // Pre-existing values must not be touched
+        assert_eq!(profile.raw()["enable_pressure_advance"], json!(["1"]),
+            "system profile value must not be overwritten by compat default");
+        assert_eq!(profile.raw()["filament_wipe"], json!(["0", "0"]),
+            "spec-derived value must not be overwritten by compat default");
+    }
 }
 
 /// Check if Bambu Studio is currently running.

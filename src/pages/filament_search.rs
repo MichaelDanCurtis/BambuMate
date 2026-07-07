@@ -11,6 +11,25 @@ use crate::components::profile_preview::ProfilePreview;
 use crate::components::settings_merge::SettingsMerge;
 use crate::components::specs_editor::SpecsEditor;
 
+/// Return the default Bambu Studio base profile name for a given material
+/// string, matching the mapping in `generator::base_profile_name` on the
+/// backend. Case-insensitive; unknown materials fall back to PLA.
+fn default_base_profile_name(material: Option<&str>) -> &'static str {
+    let m = material.unwrap_or("").trim().to_ascii_uppercase();
+    match m.as_str() {
+        "PLA" => "fdm_filament_pla",
+        "PETG" | "PET" | "PCTG" => "fdm_filament_pet",
+        "ABS" => "fdm_filament_abs",
+        "ASA" => "fdm_filament_asa",
+        "TPU" => "fdm_filament_tpu",
+        "PA" | "NYLON" => "fdm_filament_pa",
+        "PC" => "fdm_filament_pc",
+        "PVA" => "fdm_filament_pva",
+        "HIPS" => "fdm_filament_hips",
+        _ => "fdm_filament_pla",
+    }
+}
+
 #[component]
 pub fn FilamentSearchPage() -> impl IntoView {
     // Catalog state
@@ -59,6 +78,12 @@ pub fn FilamentSearchPage() -> impl IntoView {
     let (show_merge_screen, set_show_merge_screen) = signal(false);
     let (base_profile_search, set_base_profile_search) = signal(String::new());
 
+    // Guards the "reset base picker + re-search" Effect below so it only fires
+    // when specs come from a new fetch, not when the user completes the merge
+    // step (which also updates `current_specs` but must preserve the already-
+    // picked base profile so the backend uses it as the generation base).
+    let (specs_from_merge, set_specs_from_merge) = signal(false);
+
     // Check catalog status on mount and load AI preference
     Effect::new(move |_| {
         spawn_local(async move {
@@ -93,6 +118,14 @@ pub fn FilamentSearchPage() -> impl IntoView {
     Effect::new(move |_| {
         let specs = current_specs.get();
         if let Some(ref s) = specs {
+            // Skip the reset+re-search when the specs update came from the
+            // merge step: the user has already picked a base and we must not
+            // clear `selected_base_profile_path`, otherwise generation would
+            // silently fall back to the default (Generic PLA) base.
+            if specs_from_merge.get_untracked() {
+                set_specs_from_merge.set(false);
+                return;
+            }
             let material = s.material.clone();
             set_is_searching_base.set(true);
             set_base_profile_matches.set(vec![]);
@@ -387,8 +420,11 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_show_merge_screen.set(false);
     };
 
-    // Handler for completing the merge (user selected which settings to use)
+    // Handler for completing the merge (user selected which settings to use).
+    // Set the merge flag BEFORE updating current_specs so the auto-search
+    // Effect skips its reset pass and preserves the selected base profile.
     let on_merge_complete = move |merged_specs: FilamentSpecs| {
+        set_specs_from_merge.set(true);
         set_current_specs.set(Some(merged_specs));
         set_show_merge_screen.set(false);
         set_show_editor.set(true);
@@ -685,8 +721,12 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                     }
                                     on:click=move |_| on_use_default_base()
                                 >
-                                    <span class="base-profile-name">"Default base"</span>
-                                    <span class="base-profile-type">"Material generic"</span>
+                                    <span class="base-profile-name">
+                                        {move || default_base_profile_name(
+                                            current_specs.get().map(|s| s.material).as_deref()
+                                        )}
+                                    </span>
+                                    <span class="base-profile-type">"Material family base"</span>
                                     <span class="base-profile-action">
                                         {move || {
                                             if selected_base_profile_path.get().is_none() {
