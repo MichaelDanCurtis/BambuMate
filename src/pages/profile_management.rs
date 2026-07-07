@@ -244,7 +244,7 @@ pub fn ProfileManagementPage() -> impl IntoView {
     };
 
     // Save edited specs back to profile
-    let save_specs = move |(specs, _printer): (FilamentSpecs, String)| {
+    let save_specs = move |(specs, _printers): (FilamentSpecs, Vec<String>)| {
         let path = match selected_path.get() {
             Some(p) => p,
             None => return,
