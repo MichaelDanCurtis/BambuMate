@@ -11,6 +11,25 @@ use crate::components::profile_preview::ProfilePreview;
 use crate::components::settings_merge::SettingsMerge;
 use crate::components::specs_editor::SpecsEditor;
 
+/// Return the default Bambu Studio base profile name for a given material
+/// string, matching the mapping in `generator::base_profile_name` on the
+/// backend. Case-insensitive; unknown materials fall back to PLA.
+fn default_base_profile_name(material: Option<&str>) -> &'static str {
+    let m = material.unwrap_or("").trim().to_ascii_uppercase();
+    match m.as_str() {
+        "PLA" => "fdm_filament_pla",
+        "PETG" | "PET" | "PCTG" => "fdm_filament_pet",
+        "ABS" => "fdm_filament_abs",
+        "ASA" => "fdm_filament_asa",
+        "TPU" => "fdm_filament_tpu",
+        "PA" | "NYLON" => "fdm_filament_pa",
+        "PC" => "fdm_filament_pc",
+        "PVA" => "fdm_filament_pva",
+        "HIPS" => "fdm_filament_hips",
+        _ => "fdm_filament_pla",
+    }
+}
+
 #[component]
 pub fn FilamentSearchPage() -> impl IntoView {
     // Catalog state
@@ -702,8 +721,12 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                     }
                                     on:click=move |_| on_use_default_base()
                                 >
-                                    <span class="base-profile-name">"Default base"</span>
-                                    <span class="base-profile-type">"Material generic"</span>
+                                    <span class="base-profile-name">
+                                        {move || default_base_profile_name(
+                                            current_specs.get().map(|s| s.material).as_deref()
+                                        )}
+                                    </span>
+                                    <span class="base-profile-type">"Material family base"</span>
                                     <span class="base-profile-action">
                                         {move || {
                                             if selected_base_profile_path.get().is_none() {
