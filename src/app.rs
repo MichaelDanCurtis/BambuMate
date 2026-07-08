@@ -64,12 +64,22 @@ pub fn App() -> impl IntoView {
 
     let on_wizard_complete = Callback::new(move |()| {
         setup_complete.set(Some(true));
+        // Refresh feature flags: the newly-selected model determines whether
+        // analysis is available.
+        spawn_local(async move {
+            if let Ok(flags) = commands::get_feature_flags().await {
+                set_flags.set(flags);
+            }
+        });
     });
 
     let on_wizard_cancel = Callback::new(move |()| {
         setup_complete.set(Some(true));
         spawn_local(async move {
             let _ = commands::set_preference("setup_complete", "true").await;
+            if let Ok(flags) = commands::get_feature_flags().await {
+                set_flags.set(flags);
+            }
         });
     });
 

@@ -109,10 +109,10 @@ pub fn ApiKeyForm(
         set_test_message.set(Some("Testing key...".to_string()));
         spawn_local(async move {
             match commands::list_models(provider).await {
-                Ok(models) => {
+                Ok(response) => {
                     set_test_message.set(Some(format!(
                         "API key works ({} models returned)",
-                        models.len()
+                        response.models.len()
                     )));
                 }
                 Err(e) => {

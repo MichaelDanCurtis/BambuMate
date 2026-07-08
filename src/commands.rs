@@ -85,6 +85,42 @@ pub struct ModelInfo {
     pub id: String,
     pub name: String,
     pub recommended: bool,
+    #[serde(default)]
+    pub vision: bool,
+    #[serde(default)]
+    pub is_preview: bool,
+    #[serde(default)]
+    pub input_cost: Option<f32>,
+    #[serde(default)]
+    pub output_cost: Option<f32>,
+    #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
+    pub context: Option<u32>,
+    #[serde(default)]
+    pub quality_tier: u8,
+    #[serde(default)]
+    pub unverified: bool,
+}
+
+/// Response from `list_models` — see backend `commands::models::ModelListResponse`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelListResponse {
+    pub models: Vec<ModelInfo>,
+    pub vision_available: bool,
+    #[serde(default)]
+    pub recommended_id: Option<String>,
+}
+
+/// AI capability summary used to gate analysis features.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AiCapabilities {
+    pub provider: Option<String>,
+    pub model_id: Option<String>,
+    pub text: bool,
+    pub vision: bool,
+    #[serde(default)]
+    pub vision_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -194,7 +230,7 @@ pub async fn get_preference(key: &str) -> Result<Option<String>, String> {
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
 
-pub async fn list_models(provider: &str) -> Result<Vec<ModelInfo>, String> {
+pub async fn list_models(provider: &str) -> Result<ModelListResponse, String> {
     let args = serde_wasm_bindgen::to_value(&ListModelsArgs {
         provider: provider.to_string(),
     })
@@ -204,6 +240,25 @@ pub async fn list_models(provider: &str) -> Result<Vec<ModelInfo>, String> {
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+pub async fn get_ai_capabilities() -> Result<AiCapabilities, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+    let result = invoke("get_ai_capabilities", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+pub async fn refresh_model_catalog(provider: &str) -> Result<usize, String> {
+    let args = serde_wasm_bindgen::to_value(&ListModelsArgs {
+        provider: provider.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+    let result = invoke("refresh_model_catalog", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
 

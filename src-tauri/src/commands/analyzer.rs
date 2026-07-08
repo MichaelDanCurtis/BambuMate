@@ -114,6 +114,18 @@ pub async fn analyze_print(
 ) -> Result<AnalyzeResponse, String> {
     info!("Starting print analysis");
 
+    // Defense in depth: refuse to run when the currently configured model
+    // does not support vision. The UI already hides analysis features, but
+    // background jobs (e.g. STL watcher) or direct command invocations must
+    // also fail cleanly rather than sending garbage to a text-only endpoint.
+    let caps = crate::commands::models::get_ai_capabilities(app.clone()).await;
+    if !caps.vision {
+        let reason = caps
+            .vision_reason
+            .unwrap_or_else(|| "Vision is not available on the selected model.".to_string());
+        return Err(reason);
+    }
+
     // Decode base64 image
     let image_bytes = base64::engine::general_purpose::STANDARD
         .decode(&request.image_base64)

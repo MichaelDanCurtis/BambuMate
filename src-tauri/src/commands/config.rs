@@ -47,21 +47,17 @@ pub fn set_preference(app: AppHandle, key: &str, value: &str) -> Result<(), Stri
 }
 
 /// Returns the current feature flags.
-/// Analysis requires AI — it is disabled when `filament_search_use_ai` is `"false"`.
+/// Analysis requires AI vision — it is disabled when AI is turned off, when
+/// no model is configured, or when the selected model has no vision support
+/// per the model catalog (with a per-model probe override honored).
 #[tauri::command]
-pub fn get_feature_flags(app: AppHandle) -> Result<FeatureFlags, String> {
-    let store = app.store("preferences.json").map_err(|e| {
-        warn!("Failed to open store: {}", e);
-        e.to_string()
-    })?;
-
+pub async fn get_feature_flags(app: AppHandle) -> Result<FeatureFlags, String> {
     let profiles_enabled = true;
 
-    // Analysis requires AI vision models; disabled when user opted out of AI.
-    let analysis_enabled = store
-        .get("filament_search_use_ai")
-        .and_then(|v| v.as_str().map(|s| s != "false"))
-        .unwrap_or(true);
+    // Delegate to the same capability resolver used by the frontend so the
+    // gate is consistent everywhere.
+    let caps = crate::commands::models::get_ai_capabilities(app).await;
+    let analysis_enabled = caps.text && caps.vision;
 
     Ok(FeatureFlags {
         profiles_enabled,
