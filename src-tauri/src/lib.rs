@@ -5,6 +5,7 @@ mod commands;
 mod error;
 pub mod history;
 pub mod mapper;
+pub mod model_catalog;
 mod process_command;
 pub mod profile;
 pub mod scraper;
@@ -40,6 +41,8 @@ pub fn run() {
             commands::health::pick_config_folder,
             commands::models::list_models,
             commands::models::validate_model,
+            commands::models::get_ai_capabilities,
+            commands::models::refresh_model_catalog,
             commands::profile::list_profiles,
             commands::profile::list_system_profiles,
             commands::profile::read_profile_command,

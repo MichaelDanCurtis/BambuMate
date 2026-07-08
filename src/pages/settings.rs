@@ -19,6 +19,9 @@ pub fn SettingsPage() -> impl IntoView {
     let (models, set_models) = signal::<Vec<ModelInfo>>(vec![]);
     let (models_loading, set_models_loading) = signal(false);
     let (models_error, set_models_error) = signal::<Option<String>>(None);
+    let (vision_available, set_vision_available) = signal::<bool>(true);
+    let (show_all_models, set_show_all_models) = signal::<bool>(false);
+    let (catalog_recommended, set_catalog_recommended) = signal::<Option<String>>(None);
     let (model_checking, set_model_checking) = signal(false);
     let (prefs_loaded, set_prefs_loaded) = signal(false);
     let (local_url, set_local_url) = signal("http://localhost:1234".to_string());
@@ -106,8 +109,10 @@ pub fn SettingsPage() -> impl IntoView {
         set_models.set(vec![]);
         spawn_local(async move {
             match commands::list_models(&provider).await {
-                Ok(model_list) => {
-                    set_models.set(model_list);
+                Ok(response) => {
+                    set_vision_available.set(response.vision_available);
+                    set_catalog_recommended.set(response.recommended_id);
+                    set_models.set(response.models);
                     set_models_loading.set(false);
                 }
                 Err(e) => {
@@ -228,6 +233,10 @@ pub fn SettingsPage() -> impl IntoView {
                 (Ok(()), Ok(())) => {
                     set_model_status
                         .set(Some("Model configuration saved and validated.".to_string()));
+                    // Refresh feature flags so analysis-gated UI updates immediately.
+                    if let Ok(flags) = commands::get_feature_flags().await {
+                        ff_ctx.set_flags.set(flags);
+                    }
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     set_model_status.set(Some(format!("Failed to save: {}", e)));
@@ -243,9 +252,12 @@ pub fn SettingsPage() -> impl IntoView {
         set_models_error.set(None);
         set_model_status.set(None);
         spawn_local(async move {
+            let _ = commands::refresh_model_catalog(&provider).await;
             match commands::list_models(&provider).await {
-                Ok(model_list) => {
-                    set_models.set(model_list);
+                Ok(response) => {
+                    set_vision_available.set(response.vision_available);
+                    set_catalog_recommended.set(response.recommended_id);
+                    set_models.set(response.models);
                     set_models_loading.set(false);
                     let selected_model = ai_model.get_untracked();
                     if !selected_model.is_empty() {
@@ -532,6 +544,30 @@ pub fn SettingsPage() -> impl IntoView {
 
                 <div class="form-group">
                     <label for="ai-model">"Model"</label>
+                    <Show when=move || !vision_available.get() && !models_loading.get() && models_error.get().is_none()>
+                        <div class="status-text status-error" style="margin-bottom: 0.5rem;">
+                            <strong>"⚠ No vision-capable model on this account. "</strong>
+                            "Print analysis and defect detection are disabled. "
+                            "Enable \"Show all models\" to pick a text-only model for filament search, or switch providers."
+                        </div>
+                    </Show>
+                    <Show when=move || catalog_recommended.get().is_some() && vision_available.get()>
+                        <div class="status-text" style="margin-bottom: 0.5rem;">
+                            "⭐ Recommended: latest non-preview vision model, cheapest in its release cohort."
+                        </div>
+                    </Show>
+                    <label class="checkbox-label" style="margin-bottom: 0.5rem; display: inline-flex; gap: 0.4rem;">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || show_all_models.get()
+                            on:change=move |ev| {
+                                use wasm_bindgen::JsCast;
+                                let target = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>();
+                                set_show_all_models.set(target.checked());
+                            }
+                        />
+                        "Show all models (include text-only)"
+                    </label>
                     <div class="input-row">
                         <Show
                             when=move || !models_loading.get() && models_error.get().is_none() && !models.get().is_empty()
@@ -590,18 +626,31 @@ pub fn SettingsPage() -> impl IntoView {
                             >
                                 <option value="">"-- Select a model --"</option>
                                 {move || {
-                                    models.get().into_iter().map(|m| {
+                                    let show_all = show_all_models.get();
+                                    models.get().into_iter().filter(|m| show_all || m.vision).map(|m| {
                                         let id = m.id.clone();
                                         let display_base = if m.name != m.id {
                                             format!("{} ({})", m.name, m.id)
                                         } else {
                                             m.id.clone()
                                         };
-                                        let display = if m.recommended {
+                                        let mut display = if m.recommended {
                                             format!("⭐ Recommended — {}", display_base)
                                         } else {
                                             display_base
                                         };
+                                        if !m.vision {
+                                            display.push_str(" · text-only");
+                                        }
+                                        if m.is_preview {
+                                            display.push_str(" · preview");
+                                        }
+                                        if let (Some(inp), Some(out)) = (m.input_cost, m.output_cost) {
+                                            display.push_str(&format!(" · ${:.2}/${:.2} per Mtok", inp, out));
+                                        }
+                                        if m.unverified {
+                                            display.push_str(" · unverified");
+                                        }
                                         let is_selected = ai_model.get() == id;
                                         view! {
                                             <option value={id} selected=is_selected>{display}</option>

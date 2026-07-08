@@ -1,0 +1,18 @@
+# Manual alias overlay for Moonshot / Kimi.
+#
+# Maps identifiers returned by the Moonshot `/v1/models` endpoint to their
+# equivalent canonical ID in the models.dev catalog. Fuzzy matching handles
+# the common cases (case, date suffixes, `-latest`, `-preview`); this file
+# is only needed for known-good manual mappings that fuzzy matching cannot
+# reasonably infer.
+#
+# Format: `endpoint_id = "catalog_id"`  (both lowercase).
+# Endpoint id is matched case-insensitively.
+
+[aliases]
+# Legacy Moonshot text-only IDs — no vision equivalent; do NOT alias.
+# "moonshot-v1-8k" is intentionally omitted so it stays text-only.
+
+# When Moonshot adds a vision variant under a preview name, alias it here.
+# Example (uncomment when observed in the wild):
+# "moonshot-v1-128k-vision-preview" = "kimi-k2.5"

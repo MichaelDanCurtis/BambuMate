@@ -70,6 +70,8 @@ pub fn SetupWizard(
     let local_url_input = RwSignal::new("http://localhost:1234".to_string());
     let selected_model = RwSignal::new(String::new());
     let available_models = RwSignal::new(Vec::<commands::ModelInfo>::new());
+    let vision_available = RwSignal::new(true);
+    let show_all_models = RwSignal::new(false);
     let is_loading_models = RwSignal::new(false);
     let model_error = RwSignal::new(String::new());
     let saving = RwSignal::new(false);
@@ -216,8 +218,13 @@ pub fn SetupWizard(
         selected_model.set(String::new());
         spawn_local(async move {
             match commands::list_models(&provider).await {
-                Ok(models) => {
-                    available_models.set(models);
+                Ok(response) => {
+                    vision_available.set(response.vision_available);
+                    // Preselect the backend-recommended model when possible.
+                    if let Some(rec) = response.recommended_id.clone() {
+                        selected_model.set(rec);
+                    }
+                    available_models.set(response.models);
                 }
                 Err(e) => {
                     model_error.set(e);
@@ -742,6 +749,32 @@ pub fn SetupWizard(
                             </Show>
 
                             <Show when=move || !is_loading_models.get() && model_error.get().is_empty()>
+                                <Show when=move || !vision_available.get()>
+                                    <div class="wizard-status wizard-status-warning">
+                                        <strong>"⚠ No vision-capable model on this account."</strong>
+                                        <p>
+                                            "BambuMate's print analysis and defect detection features need image input. "
+                                            "You can still use this provider for text-only features (filament search, profile generation), "
+                                            "but analysis will stay disabled until you pick a vision-capable model or switch providers."
+                                        </p>
+                                    </div>
+                                </Show>
+
+                                <div class="form-group form-group-inline">
+                                    <label class="checkbox-label">
+                                        <input
+                                            type="checkbox"
+                                            prop:checked=move || show_all_models.get()
+                                            on:change=move |ev| {
+                                                use wasm_bindgen::JsCast;
+                                                let target = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>();
+                                                show_all_models.set(target.checked());
+                                            }
+                                        />
+                                        "Show all models (include text-only)"
+                                    </label>
+                                </div>
+
                                 <div class="form-group">
                                     <label>"Model"</label>
                                     <select
@@ -754,15 +787,24 @@ pub fn SetupWizard(
                                         }
                                     >
                                         <option value="">"-- Select a model --"</option>
-                                        {move || available_models.get().iter().map(|m| {
+                                        {move || available_models.get().iter().filter(|m| show_all_models.get() || m.vision).map(|m| {
                                             let id = m.id.clone();
-                                            let name = if m.recommended {
+                                            let mut label = if m.recommended {
                                                 format!("⭐ Recommended — {}", m.name)
                                             } else {
                                                 m.name.clone()
                                             };
+                                            if !m.vision {
+                                                label.push_str(" · text-only");
+                                            }
+                                            if m.is_preview {
+                                                label.push_str(" · preview");
+                                            }
+                                            if let (Some(inp), Some(out)) = (m.input_cost, m.output_cost) {
+                                                label.push_str(&format!(" · ${:.2}/${:.2} per Mtok", inp, out));
+                                            }
                                             view! {
-                                                <option value={id.clone()}>{name}</option>
+                                                <option value={id.clone()}>{label}</option>
                                             }
                                         }).collect::<Vec<_>>()}
                                     </select>
