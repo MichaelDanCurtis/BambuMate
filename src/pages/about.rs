@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, UpdateInfo};
+use crate::components::branding::BrandMark;
 
 #[component]
 pub fn AboutPage() -> impl IntoView {
@@ -45,7 +46,7 @@ pub fn AboutPage() -> impl IntoView {
         <div class="page about-page">
             <div class="about-header">
                 <div class="about-logo">
-                    <span class="about-logo-emoji">"🐼"</span>
+                    <BrandMark />
                 </div>
                 <h2 class="about-title">"BambuMate"</h2>
                 <p class="about-subtitle">"Studio-inspired filament workflow"</p>

@@ -1396,9 +1396,16 @@ select.input option {
 }
 
 .about-logo {
-    font-size: 56px;
-    line-height: 1;
+    display: flex;
+    justify-content: center;
     margin-bottom: 12px;
+}
+
+.about-logo .brand-mark {
+    width: 72px;
+    height: 72px;
+    flex: 0 0 72px;
+    border-radius: 20px;
 }
 
 .about-title {
