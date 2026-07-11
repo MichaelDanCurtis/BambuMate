@@ -410,7 +410,7 @@ pub fn SettingsPage() -> impl IntoView {
                             on:change=on_theme_change
                             prop:value=move || theme_ctx.theme.get()
                         >
-                            <option value="bambu" selected=move || theme_ctx.theme.get() == "bambu">"Bambu Studio Light"</option>
+                            <option value="bambu" selected=move || theme_ctx.theme.get() == "bambu">"Light"</option>
                             <option value="dark" selected=move || theme_ctx.theme.get() == "dark">"Dark"</option>
                         </select>
                     </div>
@@ -422,8 +422,8 @@ pub fn SettingsPage() -> impl IntoView {
                             on:click=on_bambu_theme
                         >
                             <span class="theme-preview-header">
-                                <span>"Bambu Studio"</span>
-                                <span class="theme-preview-badge">"Light"</span>
+                            <span>"Light"</span>
+                                <span class="theme-preview-badge">"Theme"</span>
                             </span>
                             <span class="theme-preview-frame theme-preview-frame-light">
                                 <span class="theme-preview-sidebar"></span>
