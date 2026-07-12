@@ -1135,7 +1135,8 @@ pub async fn analyze_print(
 
     invoke(
         "analyze_print",
-        serde_wasm_bindgen::to_value(&args).unwrap(),
+        serde_wasm_bindgen::to_value(&args)
+            .map_err(|e| format!("Failed to serialise analyze args: {}", e))?,
     )
     .await
     .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))
@@ -1281,7 +1282,8 @@ pub async fn apply_recommendations(
 
     invoke(
         "apply_recommendations",
-        serde_wasm_bindgen::to_value(&args).unwrap(),
+        serde_wasm_bindgen::to_value(&args)
+            .map_err(|e| format!("Failed to serialise apply args: {}", e))?,
     )
     .await
     .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))

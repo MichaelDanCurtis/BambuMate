@@ -12,11 +12,15 @@
 
 use scraper::{Html, Selector};
 use serde_json::Value;
+use std::sync::LazyLock;
 use tracing::info;
 
 use super::types::{FilamentSpecs, MaterialType};
 
 // ─── Regex patterns ────────────────────────────────────────────────────────
+//
+// All patterns are compiled once via `LazyLock<Regex>` so extraction does
+// not pay the ~100–500 µs compilation cost per call.
 
 /// Range: "200-230°C", "200 ~ 230 °C", "200°C to 230°C", "200 to 230°C"
 const NOZZLE_RANGE_RE: &str = r"(?i)(?:nozzle|print(?:ing)?|extrusion|hotend)[^\d]{0,30}?(\d{3})\s*[-–~to°]+\s*(\d{3})\s*°?\s*[Cc]";
@@ -32,6 +36,27 @@ const BED_SINGLE_RE: &str =
 const DENSITY_RE: &str = r"(\d+\.\d+)\s*g/cm[³3]";
 /// Diameter: "1.75 mm" near diameter context
 const DIAMETER_RE: &str = r"(?i)diam(?:eter)?[^\d]{0,10}?(\d\.\d+)\s*mm";
+/// Bare temperature range like "200-230°C" used by `parse_temp_range`.
+const BARE_RANGE_RE: &str = r"(\d{2,3})\s*[-–~to°]+\s*(\d{2,3})\s*°?\s*[Cc]?";
+/// Bare single temperature like "210°C" used by `parse_temp_range`.
+const BARE_SINGLE_RE: &str = r"(\d{2,3})\s*°?\s*[Cc]";
+
+static NOZZLE_RANGE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(NOZZLE_RANGE_RE).expect("valid regex"));
+static NOZZLE_SINGLE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(NOZZLE_SINGLE_RE).expect("valid regex"));
+static BED_RANGE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(BED_RANGE_RE).expect("valid regex"));
+static BED_SINGLE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(BED_SINGLE_RE).expect("valid regex"));
+static DENSITY: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(DENSITY_RE).expect("valid regex"));
+static DIAMETER: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(DIAMETER_RE).expect("valid regex"));
+static BARE_RANGE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(BARE_RANGE_RE).expect("valid regex"));
+static BARE_SINGLE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(BARE_SINGLE_RE).expect("valid regex"));
 
 /// Attempt to parse the re-encoded text for nozzle/bed numbers.
 /// Returns `(min, max)` or `(single, single)`.
@@ -314,19 +339,15 @@ fn apply_label_value(label: &str, value: &str, specs: &mut FilamentSpecs, confid
 // ─── Regex fallback ──────────────────────────────────────────────────────────
 
 fn try_regex(text: &str, specs: &mut FilamentSpecs, confidence: &mut f32) {
-    use regex::Regex;
-
     // Nozzle range
     if specs.nozzle_temp_min.is_none() {
-        if let Ok(re) = Regex::new(NOZZLE_RANGE_RE) {
-            if let Some(cap) = re.captures(text) {
-                if let Some((lo, hi)) = parse_range(&cap, 1, 2) {
-                    if lo >= 140 && hi <= 340 {
-                        specs.nozzle_temp_min = Some(lo);
-                        specs.nozzle_temp_max = Some(hi);
-                        specs.nozzle_temperature = Some((lo + hi) / 2);
-                        *confidence += 0.15;
-                    }
+        if let Some(cap) = NOZZLE_RANGE.captures(text) {
+            if let Some((lo, hi)) = parse_range(&cap, 1, 2) {
+                if lo >= 140 && hi <= 340 {
+                    specs.nozzle_temp_min = Some(lo);
+                    specs.nozzle_temp_max = Some(hi);
+                    specs.nozzle_temperature = Some((lo + hi) / 2);
+                    *confidence += 0.15;
                 }
             }
         }
@@ -334,15 +355,13 @@ fn try_regex(text: &str, specs: &mut FilamentSpecs, confidence: &mut f32) {
 
     // Nozzle single fallback
     if specs.nozzle_temp_min.is_none() {
-        if let Ok(re) = Regex::new(NOZZLE_SINGLE_RE) {
-            if let Some(cap) = re.captures(text) {
-                if let Some(t) = cap.get(1).and_then(|m| m.as_str().parse::<u16>().ok()) {
-                    if t >= 140 && t <= 340 {
-                        specs.nozzle_temperature = Some(t);
-                        specs.nozzle_temp_min = Some(t.saturating_sub(10));
-                        specs.nozzle_temp_max = Some(t + 10);
-                        *confidence += 0.10;
-                    }
+        if let Some(cap) = NOZZLE_SINGLE.captures(text) {
+            if let Some(t) = cap.get(1).and_then(|m| m.as_str().parse::<u16>().ok()) {
+                if t >= 140 && t <= 340 {
+                    specs.nozzle_temperature = Some(t);
+                    specs.nozzle_temp_min = Some(t.saturating_sub(10));
+                    specs.nozzle_temp_max = Some(t + 10);
+                    *confidence += 0.10;
                 }
             }
         }
@@ -350,17 +369,15 @@ fn try_regex(text: &str, specs: &mut FilamentSpecs, confidence: &mut f32) {
 
     // Bed range
     if specs.bed_temp_min.is_none() {
-        if let Ok(re) = Regex::new(BED_RANGE_RE) {
-            if let Some(cap) = re.captures(text) {
-                if let Some((lo, hi)) = parse_range(&cap, 1, 2) {
-                    if lo <= 130 && hi <= 130 {
-                        specs.bed_temp_min = Some(lo);
-                        specs.bed_temp_max = Some(hi);
-                        let mid = (lo + hi) / 2;
-                        specs.hot_plate_temp = Some(mid);
-                        specs.textured_plate_temp = Some(mid);
-                        *confidence += 0.08;
-                    }
+        if let Some(cap) = BED_RANGE.captures(text) {
+            if let Some((lo, hi)) = parse_range(&cap, 1, 2) {
+                if lo <= 130 && hi <= 130 {
+                    specs.bed_temp_min = Some(lo);
+                    specs.bed_temp_max = Some(hi);
+                    let mid = (lo + hi) / 2;
+                    specs.hot_plate_temp = Some(mid);
+                    specs.textured_plate_temp = Some(mid);
+                    *confidence += 0.08;
                 }
             }
         }
@@ -368,16 +385,14 @@ fn try_regex(text: &str, specs: &mut FilamentSpecs, confidence: &mut f32) {
 
     // Bed single fallback
     if specs.bed_temp_min.is_none() {
-        if let Ok(re) = Regex::new(BED_SINGLE_RE) {
-            if let Some(cap) = re.captures(text) {
-                if let Some(t) = cap.get(1).and_then(|m| m.as_str().parse::<u16>().ok()) {
-                    if t <= 130 {
-                        specs.hot_plate_temp = Some(t);
-                        specs.textured_plate_temp = Some(t);
-                        specs.bed_temp_min = Some(t.saturating_sub(5));
-                        specs.bed_temp_max = Some(t + 5);
-                        *confidence += 0.05;
-                    }
+        if let Some(cap) = BED_SINGLE.captures(text) {
+            if let Some(t) = cap.get(1).and_then(|m| m.as_str().parse::<u16>().ok()) {
+                if t <= 130 {
+                    specs.hot_plate_temp = Some(t);
+                    specs.textured_plate_temp = Some(t);
+                    specs.bed_temp_min = Some(t.saturating_sub(5));
+                    specs.bed_temp_max = Some(t + 5);
+                    *confidence += 0.05;
                 }
             }
         }
@@ -385,12 +400,10 @@ fn try_regex(text: &str, specs: &mut FilamentSpecs, confidence: &mut f32) {
 
     // Density
     if specs.density_g_cm3.is_none() {
-        if let Ok(re) = Regex::new(DENSITY_RE) {
-            if let Some(cap) = re.captures(text) {
-                if let Some(d) = cap.get(1).and_then(|m| m.as_str().parse::<f32>().ok()) {
-                    if d > 0.5 && d < 3.0 {
-                        specs.density_g_cm3 = Some(d);
-                    }
+        if let Some(cap) = DENSITY.captures(text) {
+            if let Some(d) = cap.get(1).and_then(|m| m.as_str().parse::<f32>().ok()) {
+                if d > 0.5 && d < 3.0 {
+                    specs.density_g_cm3 = Some(d);
                 }
             }
         }
@@ -398,12 +411,10 @@ fn try_regex(text: &str, specs: &mut FilamentSpecs, confidence: &mut f32) {
 
     // Diameter
     if specs.diameter_mm.is_none() {
-        if let Ok(re) = Regex::new(DIAMETER_RE) {
-            if let Some(cap) = re.captures(text) {
-                if let Some(d) = cap.get(1).and_then(|m| m.as_str().parse::<f32>().ok()) {
-                    if (d - 1.75_f32).abs() < 0.1 || (d - 2.85_f32).abs() < 0.1 {
-                        specs.diameter_mm = Some(d);
-                    }
+        if let Some(cap) = DIAMETER.captures(text) {
+            if let Some(d) = cap.get(1).and_then(|m| m.as_str().parse::<f32>().ok()) {
+                if (d - 1.75_f32).abs() < 0.1 || (d - 2.85_f32).abs() < 0.1 {
+                    specs.diameter_mm = Some(d);
                 }
             }
         }
@@ -425,11 +436,8 @@ fn try_regex(text: &str, specs: &mut FilamentSpecs, confidence: &mut f32) {
 /// Parse a temperature range from a string like "200-230°C", "200 to 230 °C", "210°C".
 /// Returns (lo, hi). If single value, returns (val, val).
 fn parse_temp_range(s: &str) -> Option<(u16, u16)> {
-    use regex::Regex;
-
     // Range
-    let range_re = Regex::new(r"(\d{2,3})\s*[-–~to°]+\s*(\d{2,3})\s*°?\s*[Cc]?").ok()?;
-    if let Some(cap) = range_re.captures(s) {
+    if let Some(cap) = BARE_RANGE.captures(s) {
         let a: u16 = cap.get(1)?.as_str().parse().ok()?;
         let b: u16 = cap.get(2)?.as_str().parse().ok()?;
         if a >= 20 && b <= 400 {
@@ -439,8 +447,7 @@ fn parse_temp_range(s: &str) -> Option<(u16, u16)> {
     }
 
     // Single
-    let single_re = Regex::new(r"(\d{2,3})\s*°?\s*[Cc]").ok()?;
-    if let Some(cap) = single_re.captures(s) {
+    if let Some(cap) = BARE_SINGLE.captures(s) {
         let t: u16 = cap.get(1)?.as_str().parse().ok()?;
         if t >= 20 && t <= 400 {
             return Some((t, t));

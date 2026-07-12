@@ -2,7 +2,6 @@
 
 pub mod analyzer;
 mod commands;
-mod error;
 pub mod history;
 pub mod mapper;
 pub mod model_catalog;
@@ -10,6 +9,7 @@ mod process_command;
 pub mod profile;
 pub mod scraper;
 pub mod stl_watcher;
+pub mod str_utils;
 
 pub use history::{AppliedChange, RefinementHistory, SessionDetail, SessionSummary};
 

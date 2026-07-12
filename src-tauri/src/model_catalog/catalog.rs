@@ -181,7 +181,18 @@ fn disk_save(app: &AppHandle, provider: &str, entries: &[CatalogEntry]) -> Resul
         entries: entries.to_vec(),
     };
     let raw = serde_json::to_string(&cache).map_err(|e| e.to_string())?;
-    std::fs::write(&path, raw).map_err(|e| e.to_string())?;
+    // Atomic write: write to a temp file in the same directory, then persist
+    // (rename) into place. If we crash mid-write, the existing cache stays
+    // intact instead of being truncated.
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("no parent dir for cache path {:?}", path))?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    tmp.write_all(raw.as_bytes()).map_err(|e| e.to_string())?;
+    tmp.flush().map_err(|e| e.to_string())?;
+    tmp.persist(&path).map_err(|e| e.to_string())?;
     debug!("Saved {} entries to disk cache for {}", entries.len(), provider);
     Ok(())
 }

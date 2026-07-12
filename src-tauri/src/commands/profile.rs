@@ -601,6 +601,57 @@ pub async fn install_generated_profile(
     })
 }
 
+/// Assert that `path` resolves to a location inside the user filament
+/// directory. Rejects both `..` traversal and absolute paths outside the
+/// allowed root. Returns the canonical target path on success.
+///
+/// Used by all mutation commands (`update_profile_field`, `save_profile_specs`,
+/// `duplicate_profile`, `delete_profile`) to prevent a compromised renderer
+/// or a frontend bug from rewriting arbitrary files on disk.
+///
+/// If `must_exist` is false the target itself is allowed to be missing (used
+/// by `duplicate_profile` writing a new file); the parent directory is
+/// canonicalised instead.
+fn assert_in_user_filament_dir(
+    file_path: &std::path::Path,
+    must_exist: bool,
+) -> Result<std::path::PathBuf, String> {
+    let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
+    let user_dir = paths
+        .user_filament_dir()
+        .ok_or_else(|| "User filament directory not found".to_string())?;
+    let canonical_user_dir = user_dir
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve user directory: {}", e))?;
+
+    let canonical = if must_exist {
+        file_path
+            .canonicalize()
+            .map_err(|e| format!("Invalid path: {}", e))?
+    } else {
+        // Canonicalise the parent + append the filename so a not-yet-existing
+        // target still lands under user_dir.
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| "Target has no parent directory".to_string())?;
+        let name = file_path
+            .file_name()
+            .ok_or_else(|| "Target has no filename".to_string())?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|e| format!("Invalid parent path: {}", e))?;
+        canonical_parent.join(name)
+    };
+
+    if !canonical.starts_with(&canonical_user_dir) {
+        return Err(format!(
+            "Refusing to touch path outside the user filament directory: {:?}",
+            file_path
+        ));
+    }
+    Ok(canonical)
+}
+
 /// Delete a user filament profile and its companion .info file.
 ///
 /// Safety: Validates that the path is within the user filament directory
@@ -608,23 +659,7 @@ pub async fn install_generated_profile(
 #[tauri::command]
 pub fn delete_profile(path: String) -> Result<(), String> {
     let file_path = std::path::Path::new(&path);
-
-    // Safety check: path must be within user filament directory
-    let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
-    let user_dir = paths
-        .user_filament_dir()
-        .ok_or_else(|| "User filament directory not found".to_string())?;
-
-    let canonical_path = file_path
-        .canonicalize()
-        .map_err(|e| format!("Invalid path: {}", e))?;
-    let canonical_user_dir = user_dir
-        .canonicalize()
-        .map_err(|e| format!("Cannot resolve user directory: {}", e))?;
-
-    if !canonical_path.starts_with(&canonical_user_dir) {
-        return Err("Cannot delete profiles outside the user filament directory".to_string());
-    }
+    assert_in_user_filament_dir(file_path, true)?;
 
     // Delete the JSON file
     std::fs::remove_file(&file_path).map_err(|e| format!("Failed to delete profile: {}", e))?;
@@ -652,6 +687,7 @@ pub fn update_profile_field(
     value: String,
 ) -> Result<ProfileDetail, String> {
     let file_path = std::path::Path::new(&path);
+    assert_in_user_filament_dir(file_path, true)?;
 
     let mut profile = read_profile(file_path).map_err(|e| e.to_string())?;
 
@@ -703,6 +739,10 @@ pub fn duplicate_profile(path: String, new_name: String) -> Result<ProfileDetail
 
     let filename = format!("{}.json", new_id);
     let target_path = user_dir.join(&filename);
+    // Even though we construct target_path ourselves from user_dir, run it
+    // through the shared guard so any future refactor that lets a caller
+    // pass in a target path stays safe.
+    assert_in_user_filament_dir(&target_path, false)?;
 
     // Create metadata
     let metadata = ProfileMetadata {
@@ -741,6 +781,7 @@ pub fn save_profile_specs(
     specs: crate::scraper::types::FilamentSpecs,
 ) -> Result<ProfileDetail, String> {
     let file_path = std::path::Path::new(&path);
+    assert_in_user_filament_dir(file_path, true)?;
 
     let mut profile = read_profile(file_path).map_err(|e| e.to_string())?;
 

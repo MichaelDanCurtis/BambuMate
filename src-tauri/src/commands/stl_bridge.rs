@@ -3,6 +3,10 @@ use tracing::info;
 
 use crate::stl_watcher::{StlFile, StlWatcherState};
 
+fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Set the STL watch directory and start watching.
 #[tauri::command]
 pub async fn set_stl_watch_dir(app: tauri::AppHandle, path: String) -> Result<(), String> {
@@ -25,7 +29,7 @@ pub async fn set_stl_watch_dir(app: tauri::AppHandle, path: String) -> Result<()
 #[tauri::command]
 pub async fn get_stl_watch_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let state = app.state::<StlWatcherState>();
-    let dir = state.watch_dir.lock().unwrap().clone();
+    let dir = lock_recover(&state.watch_dir).clone();
     Ok(dir)
 }
 
@@ -33,7 +37,7 @@ pub async fn get_stl_watch_dir(app: tauri::AppHandle) -> Result<Option<String>, 
 #[tauri::command]
 pub async fn list_received_stls(app: tauri::AppHandle) -> Result<Vec<StlFile>, String> {
     let state = app.state::<StlWatcherState>();
-    let files = state.received_files.lock().unwrap().clone();
+    let files = lock_recover(&state.received_files).snapshot();
     Ok(files)
 }
 
@@ -41,7 +45,7 @@ pub async fn list_received_stls(app: tauri::AppHandle) -> Result<Vec<StlFile>, S
 #[tauri::command]
 pub async fn clear_received_stls(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<StlWatcherState>();
-    state.received_files.lock().unwrap().clear();
+    lock_recover(&state.received_files).clear();
     Ok(())
 }
 
@@ -49,7 +53,6 @@ pub async fn clear_received_stls(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn dismiss_stl(app: tauri::AppHandle, path: String) -> Result<(), String> {
     let state = app.state::<StlWatcherState>();
-    let mut files = state.received_files.lock().unwrap();
-    files.retain(|f| f.path != path);
+    lock_recover(&state.received_files).remove(&path);
     Ok(())
 }

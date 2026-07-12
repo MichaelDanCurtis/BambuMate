@@ -23,11 +23,16 @@ pub async fn list_history_sessions(
         .app_data_dir()
         .map_err(|e| format!("Failed to get data dir: {}", e))?;
     let db_path = data_dir.join("refinement_history.db");
+    let profile_path_clone = profile_path.clone();
 
-    let history =
-        RefinementHistory::new(&db_path).map_err(|e| format!("Failed to open history: {}", e))?;
+    let sessions = tokio::task::spawn_blocking(move || -> Result<Vec<SessionSummary>, String> {
+        let history = RefinementHistory::new(&db_path)
+            .map_err(|e| format!("Failed to open history: {}", e))?;
+        history.list_sessions(&profile_path_clone)
+    })
+    .await
+    .map_err(|e| format!("history join error: {}", e))??;
 
-    let sessions = history.list_sessions(&profile_path)?;
     info!(
         "Listed {} sessions for profile: {}",
         sessions.len(),
@@ -50,10 +55,14 @@ pub async fn get_history_session(
         .map_err(|e| format!("Failed to get data dir: {}", e))?;
     let db_path = data_dir.join("refinement_history.db");
 
-    let history =
-        RefinementHistory::new(&db_path).map_err(|e| format!("Failed to open history: {}", e))?;
+    let session = tokio::task::spawn_blocking(move || -> Result<SessionDetail, String> {
+        let history = RefinementHistory::new(&db_path)
+            .map_err(|e| format!("Failed to open history: {}", e))?;
+        history.get_session(session_id)
+    })
+    .await
+    .map_err(|e| format!("history join error: {}", e))??;
 
-    let session = history.get_session(session_id)?;
     info!("Retrieved session {}", session_id);
     Ok(session)
 }
@@ -70,10 +79,13 @@ pub async fn revert_to_backup(app: tauri::AppHandle, session_id: i64) -> Result<
         .map_err(|e| format!("Failed to get data dir: {}", e))?;
     let db_path = data_dir.join("refinement_history.db");
 
-    let history =
-        RefinementHistory::new(&db_path).map_err(|e| format!("Failed to open history: {}", e))?;
-
-    let session = history.get_session(session_id)?;
+    let session = tokio::task::spawn_blocking(move || -> Result<SessionDetail, String> {
+        let history = RefinementHistory::new(&db_path)
+            .map_err(|e| format!("Failed to open history: {}", e))?;
+        history.get_session(session_id)
+    })
+    .await
+    .map_err(|e| format!("history join error: {}", e))??;
 
     let backup_path = session
         .backup_path
@@ -86,8 +98,14 @@ pub async fn revert_to_backup(app: tauri::AppHandle, session_id: i64) -> Result<
         return Err(format!("Backup file not found: {}", backup_path));
     }
 
-    crate::profile::writer::restore_from_backup(backup, profile_path)
-        .map_err(|e| format!("Failed to restore: {}", e))?;
+    let backup_owned = backup.to_path_buf();
+    let profile_owned = profile_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::profile::writer::restore_from_backup(&backup_owned, &profile_owned)
+            .map_err(|e| format!("Failed to restore: {}", e))
+    })
+    .await
+    .map_err(|e| format!("restore join error: {}", e))??;
 
     info!(
         "Reverted profile {} from backup {}",

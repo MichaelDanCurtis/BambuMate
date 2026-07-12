@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 /// A single option in the searchable select.
 #[derive(Debug, Clone, PartialEq)]
@@ -90,25 +91,47 @@ pub fn SearchableSelect(
         set_search_text.set(String::new());
     };
 
-    // Close dropdown when clicking outside
+    // Close dropdown when clicking outside.
+    //
+    // Bug fix: previously this used `closure.forget()` for every open/close
+    // toggle, leaking a fresh `mousedown` listener into `window` on each pass.
+    // We now stash the current closure in a `StoredValue` (LocalStorage variant
+    // since `Closure` is not Send) and clean up the previous listener before
+    // installing a new one (and again on unmount).
     let container_ref = NodeRef::<leptos::html::Div>::new();
 
+    use wasm_bindgen::closure::Closure as WbClosure;
+    let listener: StoredValue<Option<WbClosure<dyn Fn(web_sys::MouseEvent)>>, LocalStorage> =
+        StoredValue::new_local(None);
+
+    let cleanup_listener = move || {
+        listener.update_value(|slot| {
+            if let Some(closure) = slot.take() {
+                if let Some(win) = web_sys::window() {
+                    let _ = win.remove_event_listener_with_callback(
+                        "mousedown",
+                        closure.as_ref().unchecked_ref(),
+                    );
+                }
+                drop(closure);
+            }
+        });
+    };
+
     Effect::new(move |_| {
-        use wasm_bindgen::prelude::*;
-        use wasm_bindgen::JsCast;
+        // Always tear down any stale listener from the previous run.
+        cleanup_listener();
 
         if !is_open.get() {
             return;
         }
 
-        let el = container_ref.get();
-        if el.is_none() {
+        let Some(container) = container_ref.get() else {
             return;
-        }
-        let container = el.unwrap();
+        };
 
         let closure =
-            Closure::<dyn Fn(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
+            WbClosure::<dyn Fn(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
                 if let Some(target) = ev.target() {
                     if let Some(node) = target.dyn_ref::<web_sys::Node>() {
                         if !container.contains(Some(node)) {
@@ -118,11 +141,18 @@ pub fn SearchableSelect(
                 }
             });
 
-        let window = web_sys::window().unwrap();
-        let _ =
-            window.add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref());
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback(
+                "mousedown",
+                closure.as_ref().unchecked_ref(),
+            );
+        }
 
-        closure.forget();
+        listener.update_value(|slot| *slot = Some(closure));
+    });
+
+    on_cleanup(move || {
+        cleanup_listener();
     });
 
     let dropdown_id = format!("{}-dropdown", id);

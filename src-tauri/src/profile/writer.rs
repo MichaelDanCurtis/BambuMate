@@ -187,6 +187,18 @@ pub fn register_filament_in_conf(config_root: &Path, profile_name: &str) -> Resu
         profile_name
     );
 
+    // Safety net: keep a one-time `.conf.bak` alongside the conf so users can
+    // recover if a future write ever corrupts it. Only created if missing.
+    let backup_path = conf_path.with_extension("conf.bak");
+    if !backup_path.exists() {
+        if let Err(e) = std::fs::copy(&conf_path, &backup_path) {
+            warn!(
+                "Failed to create BambuStudio.conf.bak safety backup: {}",
+                e
+            );
+        }
+    }
+
     // Write back (serde_json::to_string_pretty uses 2-space indentation)
     let output = serde_json::to_string_pretty(&conf)?;
 
@@ -210,14 +222,35 @@ pub fn register_filament_in_conf(config_root: &Path, profile_name: &str) -> Resu
 }
 
 /// Strip the MD5 checksum comment line that BambuStudio appends on Windows.
-/// The checksum line starts with "# MD5 checksum " and appears after the JSON.
+/// The checksum line starts with `# MD5 checksum ` and appears on its own
+/// line after the JSON. Using `rfind('}')` was unsafe: any `}` inside a
+/// filament name or URL would truncate the JSON. This version scans lines
+/// and cuts before the first checksum line, preserving the entire JSON.
 fn strip_md5_checksum(content: &str) -> &str {
-    // Find the last '}' which ends the JSON object
-    if let Some(pos) = content.rfind('}') {
-        &content[..=pos]
-    } else {
-        content
+    // Scan for a line that starts with the marker (only whitespace before it
+    // on that line). Iterating over line boundaries avoids false positives
+    // when the marker text appears inside a JSON string.
+    const MARKER: &str = "# MD5 checksum";
+    let bytes = content.as_bytes();
+    let mut line_start = 0usize;
+    for i in 0..=bytes.len() {
+        let at_line_break = i == bytes.len() || bytes[i] == b'\n';
+        if !at_line_break {
+            continue;
+        }
+        let line = &content[line_start..i];
+        if line.trim_start().starts_with(MARKER) {
+            // Cut before the newline that begins this line (if any).
+            let cut = if line_start > 0 {
+                line_start - 1
+            } else {
+                line_start
+            };
+            return &content[..cut];
+        }
+        line_start = i + 1;
     }
+    content
 }
 
 /// Compute the MD5 checksum line that BambuStudio expects on Windows.
@@ -301,5 +334,83 @@ mod tests {
         // Verify restored content matches backup
         let restored = std::fs::read_to_string(&profile_path).unwrap();
         assert!(restored.contains("test123"));
+    }
+
+    #[test]
+    fn test_strip_md5_checksum_removes_trailing_line() {
+        let input = "{\n  \"filaments\": []\n}\n# MD5 checksum abcdef0123456789\n";
+        let stripped = strip_md5_checksum(input);
+        assert!(stripped.ends_with("}"));
+        assert!(!stripped.contains("MD5"));
+        // Must be valid JSON after stripping.
+        let _: serde_json::Value = serde_json::from_str(stripped).unwrap();
+    }
+
+    #[test]
+    fn test_strip_md5_checksum_preserves_braces_in_strings() {
+        // A filament name containing "}" must not confuse the stripper.
+        let input =
+            "{\n  \"filaments\": [\"PLA }experimental\"]\n}\n# MD5 checksum deadbeef\n";
+        let stripped = strip_md5_checksum(input);
+        let parsed: serde_json::Value = serde_json::from_str(stripped).unwrap();
+        assert_eq!(parsed["filaments"][0], "PLA }experimental");
+    }
+
+    #[test]
+    fn test_strip_md5_checksum_noop_when_absent() {
+        let input = "{\n  \"filaments\": [\"PLA\"]\n}";
+        assert_eq!(strip_md5_checksum(input), input);
+    }
+
+    #[test]
+    fn test_strip_md5_checksum_ignores_marker_inside_json() {
+        // If the marker appears mid-string it should be ignored (not at line-start).
+        let input =
+            "{\n  \"notes\": \"# MD5 checksum inside string\"\n}\n# MD5 checksum realone\n";
+        let stripped = strip_md5_checksum(input);
+        // The real MD5 line should be gone, but the JSON must still parse.
+        let parsed: serde_json::Value = serde_json::from_str(stripped).unwrap();
+        assert_eq!(parsed["notes"], "# MD5 checksum inside string");
+    }
+
+    #[test]
+    fn test_register_filament_in_conf_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let conf_path = dir.path().join("BambuStudio.conf");
+        let original = "{\n  \"filaments\": [\"Existing PLA\"]\n}\n";
+        std::fs::write(&conf_path, original).unwrap();
+
+        register_filament_in_conf(dir.path(), "New Filament").unwrap();
+
+        // Backup file should now exist.
+        assert!(dir.path().join("BambuStudio.conf.bak").exists());
+
+        // Re-read and verify the JSON portion.
+        let content = std::fs::read_to_string(&conf_path).unwrap();
+        let json_slice = strip_md5_checksum(&content);
+        let parsed: serde_json::Value = serde_json::from_str(json_slice).unwrap();
+        let names: Vec<String> = parsed["filaments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"Existing PLA".to_string()));
+        assert!(names.contains(&"New Filament".to_string()));
+    }
+
+    #[test]
+    fn test_register_filament_in_conf_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let conf_path = dir.path().join("BambuStudio.conf");
+        std::fs::write(&conf_path, "{\n  \"filaments\": []\n}\n").unwrap();
+
+        register_filament_in_conf(dir.path(), "Same Name").unwrap();
+        register_filament_in_conf(dir.path(), "Same Name").unwrap();
+
+        let content = std::fs::read_to_string(&conf_path).unwrap();
+        let json_slice = strip_md5_checksum(&content);
+        let parsed: serde_json::Value = serde_json::from_str(json_slice).unwrap();
+        assert_eq!(parsed["filaments"].as_array().unwrap().len(), 1);
     }
 }

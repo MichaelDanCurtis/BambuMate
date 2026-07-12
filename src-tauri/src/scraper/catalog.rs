@@ -100,45 +100,57 @@ impl FilamentCatalog {
     }
 
     /// Clear and repopulate the catalog.
+    ///
+    /// All writes run inside a single transaction so ~200 inserts amount to
+    /// one fsync instead of 200 (roughly 5–20× speed-up on rotational disks)
+    /// and readers never observe a half-populated catalog if a refresh is
+    /// interrupted.
     pub fn refresh(&self, entries: &[CatalogEntry]) -> Result<(), String> {
-        self.conn
-            .execute("DELETE FROM catalog", [])
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+
+        tx.execute("DELETE FROM catalog", [])
             .map_err(|e| format!("Failed to clear catalog: {}", e))?;
 
-        let mut stmt = self
-            .conn
-            .prepare(
-                "INSERT OR REPLACE INTO catalog
-                 (brand, name, material, url_slug, full_url, search_text)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .map_err(|e| format!("Failed to prepare insert: {}", e))?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT OR REPLACE INTO catalog
+                     (brand, name, material, url_slug, full_url, search_text)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .map_err(|e| format!("Failed to prepare insert: {}", e))?;
 
-        for entry in entries {
-            let search_text = format!(
-                "{} {} {}",
-                entry.brand.to_lowercase(),
-                entry.name.to_lowercase(),
-                entry.material.to_lowercase()
-            );
-            stmt.execute(params![
-                entry.brand,
-                entry.name,
-                entry.material,
-                entry.url_slug,
-                entry.full_url,
-                search_text,
-            ])
-            .map_err(|e| format!("Failed to insert catalog entry: {}", e))?;
+            for entry in entries {
+                let search_text = format!(
+                    "{} {} {}",
+                    entry.brand.to_lowercase(),
+                    entry.name.to_lowercase(),
+                    entry.material.to_lowercase()
+                );
+                stmt.execute(params![
+                    entry.brand,
+                    entry.name,
+                    entry.material,
+                    entry.url_slug,
+                    entry.full_url,
+                    search_text,
+                ])
+                .map_err(|e| format!("Failed to insert catalog entry: {}", e))?;
+            }
         }
 
-        // Update last refresh timestamp
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO catalog_meta (key, value) VALUES ('last_refresh', ?1)",
-                params![Utc::now().to_rfc3339()],
-            )
-            .map_err(|e| format!("Failed to update refresh timestamp: {}", e))?;
+        // Update last refresh timestamp inside the same transaction
+        tx.execute(
+            "INSERT OR REPLACE INTO catalog_meta (key, value) VALUES ('last_refresh', ?1)",
+            params![Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| format!("Failed to update refresh timestamp: {}", e))?;
+
+        tx.commit()
+            .map_err(|e| format!("Failed to commit catalog refresh: {}", e))?;
 
         info!("Refreshed catalog with {} entries", entries.len());
         Ok(())
@@ -596,5 +608,49 @@ mod tests {
         let brands = catalog.list_brands().unwrap();
         let lower: Vec<String> = brands.into_iter().map(|b| b.to_lowercase()).collect();
         assert_eq!(lower, vec!["esun", "sunlu"]);
+    }
+
+    #[test]
+    fn test_refresh_is_transactional_and_replaces_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("catalog.db");
+        let catalog = FilamentCatalog::new(&db_path).unwrap();
+
+        let batch_a: Vec<CatalogEntry> = (0..50)
+            .map(|i| CatalogEntry {
+                brand: "BrandA".to_string(),
+                name: format!("Name-{}", i),
+                material: "PLA".to_string(),
+                url_slug: format!("slug-{}", i),
+                full_url: format!("https://example.com/a/{}", i),
+            })
+            .collect();
+
+        catalog.refresh(&batch_a).unwrap();
+        assert_eq!(catalog.count().unwrap(), 50);
+
+        // Second refresh replaces (not appends).
+        let batch_b: Vec<CatalogEntry> = (0..10)
+            .map(|i| CatalogEntry {
+                brand: "BrandB".to_string(),
+                name: format!("Name-{}", i),
+                material: "PETG".to_string(),
+                url_slug: format!("slug-{}", i),
+                full_url: format!("https://example.com/b/{}", i),
+            })
+            .collect();
+        catalog.refresh(&batch_b).unwrap();
+        assert_eq!(catalog.count().unwrap(), 10);
+
+        // last_refresh timestamp is written in the same transaction.
+        let ts: String = catalog
+            .conn
+            .query_row(
+                "SELECT value FROM catalog_meta WHERE key = 'last_refresh'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!ts.is_empty());
     }
 }

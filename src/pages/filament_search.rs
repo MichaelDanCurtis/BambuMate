@@ -145,13 +145,32 @@ pub fn FilamentSearchPage() -> impl IntoView {
         }
     });
 
-    // Debounced autocomplete search
+    // Debounced autocomplete search.
+    //
+    // Bug fix: this used to call `callback.forget()` for every keystroke,
+    // leaking a Closure into WASM memory on each character typed.
+    // We now retain the current closure in a `StoredValue` (LocalStorage
+    // since `Closure` isn't Send) so it drops when replaced.
     let search_timeout = StoredValue::new(None::<i32>);
+    let search_callback: StoredValue<
+        Option<wasm_bindgen::closure::Closure<dyn FnMut()>>,
+        LocalStorage,
+    > = StoredValue::new_local(None);
+    let blur_callback: StoredValue<
+        Option<wasm_bindgen::closure::Closure<dyn FnMut()>>,
+        LocalStorage,
+    > = StoredValue::new_local(None);
 
     let do_autocomplete = move |query: String| {
         if let Some(id) = search_timeout.get_value() {
-            let _ = web_sys::window().unwrap().clear_timeout_with_handle(id);
+            if let Some(win) = web_sys::window() {
+                win.clear_timeout_with_handle(id);
+            }
         }
+        // Drop the previous closure (if any) before installing a new one.
+        search_callback.update_value(|slot| {
+            *slot = None;
+        });
 
         if query.len() < 2 {
             set_suggestions.set(vec![]);
@@ -159,7 +178,8 @@ pub fn FilamentSearchPage() -> impl IntoView {
             return;
         }
 
-        let callback = wasm_bindgen::closure::Closure::once(move || {
+        let callback = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            let query = query.clone();
             spawn_local(async move {
                 if let Ok(matches) = commands::search_catalog(&query, Some(6)).await {
                     set_suggestions.set(matches);
@@ -168,14 +188,17 @@ pub fn FilamentSearchPage() -> impl IntoView {
             });
         });
 
-        let id = web_sys::window()
-            .unwrap()
-            .set_timeout_with_callback_and_timeout_and_arguments_0(
-                callback.as_ref().unchecked_ref(),
-                150,
-            )
-            .unwrap();
-        callback.forget();
+        let Some(win) = web_sys::window() else {
+            return;
+        };
+        let id = match win.set_timeout_with_callback_and_timeout_and_arguments_0(
+            callback.as_ref().unchecked_ref(),
+            150,
+        ) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        search_callback.update_value(|slot| *slot = Some(callback));
         search_timeout.set_value(Some(id));
     };
 
@@ -516,16 +539,21 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             }
                         }
                         on:blur=move |_| {
-                            let callback = wasm_bindgen::closure::Closure::once(move || {
+                            // Bug fix: previously called `.forget()` on every blur,
+                            // leaking a closure per unfocus. We now retain the
+                            // closure in a `StoredValue` (LocalStorage) so it
+                            // drops on the next blur.
+                            let cb = wasm_bindgen::closure::Closure::once(move || {
                                 set_show_suggestions.set(false);
                             });
-                            let _ = web_sys::window()
-                                .unwrap()
-                                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                                    callback.as_ref().unchecked_ref(),
-                                    200,
-                                );
-                            callback.forget();
+                            if let Some(win) = web_sys::window() {
+                                let _ = win
+                                    .set_timeout_with_callback_and_timeout_and_arguments_0(
+                                        cb.as_ref().unchecked_ref(),
+                                        200,
+                                    );
+                            }
+                            blur_callback.update_value(|slot| *slot = Some(cb));
                         }
                         disabled=move || is_refreshing_catalog.get() || is_fetching.get()
                     />

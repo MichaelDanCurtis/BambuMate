@@ -166,7 +166,7 @@ pub async fn extract_specs_from_url(
     );
 
     let cache_dir = get_cache_dir(&app)?;
-    let http_client = crate::scraper::http_client::ScraperHttpClient::new();
+    let http_client = crate::scraper::http_client::ScraperHttpClient::shared();
 
     let html = http_client.fetch_page(&url).await?;
     if html.trim().is_empty() || html.len() < 100 {
@@ -292,10 +292,10 @@ pub async fn refresh_catalog(app: tauri::AppHandle) -> Result<CatalogStatus, Str
     info!("refresh_catalog called - fetching from SpoolScout");
 
     let db_path = get_catalog_path(&app)?;
-    let http_client = ScraperHttpClient::new();
+    let http_client = ScraperHttpClient::shared();
 
     // Fetch catalog entries from SpoolScout
-    let entries = crate::scraper::catalog::fetch_catalog(&http_client).await?;
+    let entries = crate::scraper::catalog::fetch_catalog(http_client).await?;
 
     // Store in database
     let entry_count = entries.len();
@@ -420,7 +420,7 @@ pub async fn fetch_filament_from_catalog(
         return Ok(specs);
     }
 
-    let http_client = ScraperHttpClient::new();
+    let http_client = ScraperHttpClient::shared();
     let html = http_client.fetch_page(&entry.full_url).await?;
     if html.trim().is_empty() {
         return Err(format!("Empty page content from {}", entry.full_url));

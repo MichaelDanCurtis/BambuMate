@@ -211,7 +211,17 @@ pub fn SettingsPage() -> impl IntoView {
             set_model_status.set(Some("Checking model compatibility...".to_string()));
             let check = commands::validate_model(&provider, &model).await;
             match check {
+                // Vision + text OK: save silently and continue.
                 Ok(result) if result.text_ok && result.vision_ok => {}
+                // Bug fix: previously a text-only-capable model could never be
+                // saved because both flags were required. Text-capable models
+                // are now saved with a warning explaining vision is unavailable.
+                Ok(result) if result.text_ok => {
+                    set_model_status.set(Some(format!(
+                        "Saved. Note: vision is unavailable for this model ({}). Analysis-based features stay disabled.",
+                        result.vision_message
+                    )));
+                }
                 Ok(result) => {
                     set_model_status.set(Some(format!(
                         "{} {}",
@@ -312,19 +322,28 @@ pub fn SettingsPage() -> impl IntoView {
     let set_filament_ai_mode = move |enabled: bool| {
         let value = if enabled { "true" } else { "false" };
         set_filament_ai_enabled.set(enabled);
-        // Also update the feature flags context so Print Analysis locks/unlocks immediately.
-        let mut new_flags = ff_ctx.flags.get();
-        new_flags.analysis_enabled = enabled;
-        ff_ctx.set_flags.set(new_flags);
         spawn_local(async move {
             match commands::set_preference("filament_search_use_ai", value).await {
-                Ok(()) => set_filament_ai_status.set(Some(if enabled {
-                    "AI enabled — Print Analysis is available.".to_string()
-                } else {
-                    "Web-only mode — specs pulled from manufacturer sites. Print Analysis disabled."
-                        .to_string()
-                })),
-                Err(e) => set_filament_ai_status.set(Some(format!("Failed to save: {}", e))),
+                Ok(()) => {
+                    // Bug fix: previously we mutated the local flags copy
+                    // synchronously, so the UI could unlock analysis even
+                    // when the backend rejected the change or vision was
+                    // missing. Re-fetch canonical flags from the backend.
+                    if let Ok(flags) = commands::get_feature_flags().await {
+                        ff_ctx.set_flags.set(flags);
+                    }
+                    set_filament_ai_status.set(Some(if enabled {
+                        "AI enabled — Print Analysis is available.".to_string()
+                    } else {
+                        "Web-only mode — specs pulled from manufacturer sites. Print Analysis disabled."
+                            .to_string()
+                    }));
+                }
+                Err(e) => {
+                    // Roll the checkbox back if the backend rejected the change.
+                    set_filament_ai_enabled.set(!enabled);
+                    set_filament_ai_status.set(Some(format!("Failed to save: {}", e)));
+                }
             }
         });
     };

@@ -196,14 +196,13 @@ pub fn ProfileManagementPage() -> impl IntoView {
 
         set_editing_field.set(None);
 
-        // Wrap plain strings in quotes for valid JSON
-        let json_val = if val.starts_with('[')
-            || val.starts_with('{')
-            || val.starts_with('"')
-            || val == "true"
-            || val == "false"
-            || val == "null"
-            || val.parse::<f64>().is_ok()
+        // Bug fix: previously the auto-JSON heuristic parsed *any* input that
+        // happened to look like JSON — booleans, `null`, or a number written
+        // as plain text — and stored it as raw JSON. That silently converted
+        // string fields like a filament name of "true" or "123" into the
+        // wrong type. Only auto-treat obvious container/quoted-string tokens
+        // as raw JSON. Everything else is escaped as a JSON string.
+        let json_val = if val.starts_with('[') || val.starts_with('{') || val.starts_with('"')
         {
             val
         } else {
