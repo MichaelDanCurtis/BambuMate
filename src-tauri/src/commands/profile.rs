@@ -1,5 +1,7 @@
 use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -601,6 +603,57 @@ pub async fn install_generated_profile(
     })
 }
 
+/// Assert that `path` resolves to a location inside the user filament
+/// directory. Rejects both `..` traversal and absolute paths outside the
+/// allowed root. Returns the canonical target path on success.
+///
+/// Used by all mutation commands (`update_profile_field`, `save_profile_specs`,
+/// `duplicate_profile`, `delete_profile`) to prevent a compromised renderer
+/// or a frontend bug from rewriting arbitrary files on disk.
+///
+/// If `must_exist` is false the target itself is allowed to be missing (used
+/// by `duplicate_profile` writing a new file); the parent directory is
+/// canonicalised instead.
+fn assert_in_user_filament_dir(
+    file_path: &std::path::Path,
+    must_exist: bool,
+) -> Result<std::path::PathBuf, String> {
+    let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
+    let user_dir = paths
+        .user_filament_dir()
+        .ok_or_else(|| "User filament directory not found".to_string())?;
+    let canonical_user_dir = user_dir
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve user directory: {}", e))?;
+
+    let canonical = if must_exist {
+        file_path
+            .canonicalize()
+            .map_err(|e| format!("Invalid path: {}", e))?
+    } else {
+        // Canonicalise the parent + append the filename so a not-yet-existing
+        // target still lands under user_dir.
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| "Target has no parent directory".to_string())?;
+        let name = file_path
+            .file_name()
+            .ok_or_else(|| "Target has no filename".to_string())?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|e| format!("Invalid parent path: {}", e))?;
+        canonical_parent.join(name)
+    };
+
+    if !canonical.starts_with(&canonical_user_dir) {
+        return Err(format!(
+            "Refusing to touch path outside the user filament directory: {:?}",
+            file_path
+        ));
+    }
+    Ok(canonical)
+}
+
 /// Delete a user filament profile and its companion .info file.
 ///
 /// Safety: Validates that the path is within the user filament directory
@@ -608,23 +661,7 @@ pub async fn install_generated_profile(
 #[tauri::command]
 pub fn delete_profile(path: String) -> Result<(), String> {
     let file_path = std::path::Path::new(&path);
-
-    // Safety check: path must be within user filament directory
-    let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
-    let user_dir = paths
-        .user_filament_dir()
-        .ok_or_else(|| "User filament directory not found".to_string())?;
-
-    let canonical_path = file_path
-        .canonicalize()
-        .map_err(|e| format!("Invalid path: {}", e))?;
-    let canonical_user_dir = user_dir
-        .canonicalize()
-        .map_err(|e| format!("Cannot resolve user directory: {}", e))?;
-
-    if !canonical_path.starts_with(&canonical_user_dir) {
-        return Err("Cannot delete profiles outside the user filament directory".to_string());
-    }
+    assert_in_user_filament_dir(file_path, true)?;
 
     // Delete the JSON file
     std::fs::remove_file(&file_path).map_err(|e| format!("Failed to delete profile: {}", e))?;
@@ -652,6 +689,7 @@ pub fn update_profile_field(
     value: String,
 ) -> Result<ProfileDetail, String> {
     let file_path = std::path::Path::new(&path);
+    assert_in_user_filament_dir(file_path, true)?;
 
     let mut profile = read_profile(file_path).map_err(|e| e.to_string())?;
 
@@ -703,6 +741,10 @@ pub fn duplicate_profile(path: String, new_name: String) -> Result<ProfileDetail
 
     let filename = format!("{}.json", new_id);
     let target_path = user_dir.join(&filename);
+    // Even though we construct target_path ourselves from user_dir, run it
+    // through the shared guard so any future refactor that lets a caller
+    // pass in a target path stays safe.
+    assert_in_user_filament_dir(&target_path, false)?;
 
     // Create metadata
     let metadata = ProfileMetadata {
@@ -741,6 +783,7 @@ pub fn save_profile_specs(
     specs: crate::scraper::types::FilamentSpecs,
 ) -> Result<ProfileDetail, String> {
     let file_path = std::path::Path::new(&path);
+    assert_in_user_filament_dir(file_path, true)?;
 
     let mut profile = read_profile(file_path).map_err(|e| e.to_string())?;
 
@@ -990,6 +1033,12 @@ pub struct BaseProfileMatch {
 
 /// Search Bambu Studio's system profiles for filaments matching a query string.
 /// Searches by name and material type. Returns up to 20 matches.
+///
+/// Performance: results are served from an in-memory index of every filament
+/// profile on disk (system + user). The index is built once on first use and
+/// reused for 5 minutes; subsequent calls skip disk I/O entirely and only
+/// filter/sort the cached entries. Call `refresh_base_profile_index` after
+/// installing/removing profiles to force an immediate rebuild.
 #[tauri::command]
 pub fn search_base_profiles(
     query: String,
@@ -1000,54 +1049,50 @@ pub fn search_base_profiles(
         query, material_type
     );
 
-    let paths = match BambuPaths::detect() {
-        Ok(p) => p,
-        Err(_) => {
-            return Ok(Vec::new());
-        }
-    };
+    let index = get_or_build_base_profile_index()?;
 
-    let mut combined = Vec::new();
+    let query_lower = query.to_lowercase();
+    let material_lower = material_type.as_deref().map(|m| m.to_lowercase());
 
-    let system_filament_dir = paths
-        .config_root
-        .join("system")
-        .join("BBL")
-        .join("filament");
-    if system_filament_dir.exists() {
-        combined.extend(search_profiles_in_dir(
-            &system_filament_dir,
-            &query,
-            material_type.as_deref(),
-        )?);
-    } else {
-        // Also try without BBL for some installations
-        let alt_dir = paths.config_root.join("system").join("filament");
-        if alt_dir.exists() {
-            combined.extend(search_profiles_in_dir(
-                &alt_dir,
-                &query,
-                material_type.as_deref(),
-            )?);
-        }
-    }
+    let mut matches: Vec<BaseProfileMatch> = index
+        .iter()
+        .filter(|e| match material_lower.as_deref() {
+            Some(m) if !m.is_empty() => e.ftype_lower.contains(m),
+            _ => true,
+        })
+        .filter(|e| {
+            query_lower.is_empty()
+                || e.name_lower.contains(&query_lower)
+                || e.ftype_lower.contains(&query_lower)
+        })
+        .map(|e| BaseProfileMatch {
+            name: e.name.clone(),
+            path: e.path.clone(),
+            filament_type: e.filament_type.clone(),
+        })
+        .collect();
 
-    if let Some(user_dir) = paths.user_filament_dir() {
-        if user_dir.exists() {
-            combined.extend(search_profiles_in_dir(
-                &user_dir,
-                &query,
-                material_type.as_deref(),
-            )?);
-        }
-    }
-
+    // Dedupe by path (user dir can shadow a system profile with the same name).
     let mut seen_paths = HashSet::new();
-    combined.retain(|m| seen_paths.insert(m.path.clone()));
-    combined.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    combined.truncate(20);
+    matches.retain(|m| seen_paths.insert(m.path.clone()));
 
-    Ok(combined)
+    matches.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    matches.truncate(20);
+
+    info!("Found {} matching base profiles", matches.len());
+    Ok(matches)
+}
+
+/// Force a rebuild of the base-profile index on the next `search_base_profiles`
+/// call. Cheap to call — this only drops the cache; the next search will
+/// rebuild lazily.
+#[tauri::command]
+pub fn refresh_base_profile_index() -> Result<(), String> {
+    if let Ok(mut guard) = base_profile_cache().lock() {
+        *guard = None;
+        info!("Base-profile index invalidated");
+    }
+    Ok(())
 }
 
 fn collect_target_printer_labels(dir: &std::path::Path, labels: &mut HashSet<String>) {
@@ -1134,14 +1179,112 @@ fn prioritize_default(mut values: Vec<String>, default: &str) -> Vec<String> {
     values
 }
 
-fn search_profiles_in_dir(
-    dir: &std::path::Path,
-    query: &str,
-    material_type: Option<&str>,
-) -> Result<Vec<BaseProfileMatch>, String> {
-    let query_lower = query.to_lowercase();
-    let mut matches = Vec::new();
+// ---------------------------------------------------------------------------
+// Base-profile index (in-memory cache)
+// ---------------------------------------------------------------------------
 
+/// One row in the base-profile index. Pre-lowercased fields let each
+/// keystroke do only string contains-checks instead of allocating.
+#[derive(Debug, Clone)]
+struct BaseProfileIndexEntry {
+    name: String,
+    name_lower: String,
+    filament_type: Option<String>,
+    ftype_lower: String,
+    path: String,
+}
+
+struct BaseProfileCache {
+    entries: Vec<BaseProfileIndexEntry>,
+    built_at: Instant,
+}
+
+/// Rebuild the cache if it's older than this. Keeps long-running sessions
+/// picking up newly-installed system profiles without a manual refresh.
+const BASE_PROFILE_CACHE_TTL: Duration = Duration::from_secs(300);
+
+fn base_profile_cache() -> &'static Mutex<Option<BaseProfileCache>> {
+    static CACHE: std::sync::OnceLock<Mutex<Option<BaseProfileCache>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Return a snapshot of the base-profile index, rebuilding if empty or stale.
+/// Cloned so the mutex isn't held while callers filter (keeps concurrent
+/// searches from serialising on the lock).
+fn get_or_build_base_profile_index() -> Result<Vec<BaseProfileIndexEntry>, String> {
+    // Fast path: fresh cache, take a clone and go.
+    {
+        let guard = base_profile_cache()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(cache) = guard.as_ref() {
+            if cache.built_at.elapsed() < BASE_PROFILE_CACHE_TTL {
+                return Ok(cache.entries.clone());
+            }
+        }
+    }
+
+    // Slow path: rebuild.
+    let entries = build_base_profile_index()?;
+    {
+        let mut guard = base_profile_cache()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *guard = Some(BaseProfileCache {
+            entries: entries.clone(),
+            built_at: Instant::now(),
+        });
+    }
+    Ok(entries)
+}
+
+/// One-shot walk of the two filament-profile roots. Callers should not hit
+/// this in hot loops — use `get_or_build_base_profile_index` instead.
+fn build_base_profile_index() -> Result<Vec<BaseProfileIndexEntry>, String> {
+    let started = Instant::now();
+    let paths = match BambuPaths::detect() {
+        Ok(p) => p,
+        Err(_) => {
+            info!("Bambu Studio not detected, base-profile index is empty");
+            return Ok(Vec::new());
+        }
+    };
+
+    let mut roots: Vec<std::path::PathBuf> = Vec::with_capacity(2);
+    let bbl_dir = paths
+        .config_root
+        .join("system")
+        .join("BBL")
+        .join("filament");
+    if bbl_dir.exists() {
+        roots.push(bbl_dir);
+    } else {
+        let alt = paths.config_root.join("system").join("filament");
+        if alt.exists() {
+            roots.push(alt);
+        }
+    }
+    if let Some(user_dir) = paths.user_filament_dir() {
+        if user_dir.exists() {
+            roots.push(user_dir);
+        }
+    }
+
+    let mut entries = Vec::new();
+    for root in &roots {
+        index_dir_into(root, &mut entries);
+    }
+
+    info!(
+        "Built base-profile index: {} entries from {} root(s) in {:?}",
+        entries.len(),
+        roots.len(),
+        started.elapsed()
+    );
+    Ok(entries)
+}
+
+fn index_dir_into(dir: &std::path::Path, out: &mut Vec<BaseProfileIndexEntry>) {
     for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
@@ -1150,50 +1293,79 @@ fn search_profiles_in_dir(
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-
-        match read_profile(path) {
-            Ok(profile) => {
-                let name = profile.name().unwrap_or("").to_string();
-                let ftype = profile.filament_type().map(|s| s.to_string());
-
-                // Filter by material type if specified
-                if let Some(mat) = material_type {
-                    let mat_lower = mat.to_lowercase();
-                    let ftype_lower = ftype.as_deref().unwrap_or("").to_lowercase();
-                    if !ftype_lower.contains(&mat_lower) {
-                        continue;
-                    }
-                }
-
-                // Match against query (by name or filament type)
-                let name_lower = name.to_lowercase();
-                let ftype_lower = ftype.as_deref().unwrap_or("").to_lowercase();
-                if name_lower.contains(&query_lower) || ftype_lower.contains(&query_lower) {
-                    matches.push(BaseProfileMatch {
-                        name,
-                        path: path.to_string_lossy().to_string(),
-                        filament_type: ftype,
-                    });
-                }
-            }
-            Err(_) => continue,
+        let Ok(profile) = read_profile(path) else {
+            continue;
+        };
+        let name = profile.name().unwrap_or("").to_string();
+        // Skip nameless profiles — they'd never match a user query anyway.
+        if name.is_empty() {
+            continue;
         }
+        let filament_type = profile.filament_type().map(|s| s.to_string());
+        let name_lower = name.to_lowercase();
+        let ftype_lower = filament_type.as_deref().unwrap_or("").to_lowercase();
+        out.push(BaseProfileIndexEntry {
+            name,
+            name_lower,
+            filament_type,
+            ftype_lower,
+            path: path.to_string_lossy().to_string(),
+        });
     }
+}
 
-    // Sort by name and truncate to 20 results
+/// Filter a pre-built index the same way `search_base_profiles` does.
+/// Extracted so unit tests can exercise the query semantics without touching
+/// disk or the global cache.
+#[cfg(test)]
+fn filter_base_profile_index(
+    index: &[BaseProfileIndexEntry],
+    query: &str,
+    material_type: Option<&str>,
+) -> Vec<BaseProfileMatch> {
+    let query_lower = query.to_lowercase();
+    let material_lower = material_type.map(|m| m.to_lowercase());
+    let mut matches: Vec<BaseProfileMatch> = index
+        .iter()
+        .filter(|e| match material_lower.as_deref() {
+            Some(m) if !m.is_empty() => e.ftype_lower.contains(m),
+            _ => true,
+        })
+        .filter(|e| {
+            query_lower.is_empty()
+                || e.name_lower.contains(&query_lower)
+                || e.ftype_lower.contains(&query_lower)
+        })
+        .map(|e| BaseProfileMatch {
+            name: e.name.clone(),
+            path: e.path.clone(),
+            filament_type: e.filament_type.clone(),
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    matches.retain(|m| seen.insert(m.path.clone()));
     matches.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     matches.truncate(20);
-    info!("Found {} matching system profiles", matches.len());
-    Ok(matches)
+    matches
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_target_printer_options, parse_target_printer_label, DEFAULT_NOZZLE_SIZE,
-        DEFAULT_TARGET_PRINTER_MODEL,
+        build_target_printer_options, filter_base_profile_index, parse_target_printer_label,
+        BaseProfileIndexEntry, DEFAULT_NOZZLE_SIZE, DEFAULT_TARGET_PRINTER_MODEL,
     };
     use std::collections::HashSet;
+
+    fn entry(name: &str, ftype: &str, path: &str) -> BaseProfileIndexEntry {
+        BaseProfileIndexEntry {
+            name: name.to_string(),
+            name_lower: name.to_lowercase(),
+            filament_type: Some(ftype.to_string()),
+            ftype_lower: ftype.to_lowercase(),
+            path: path.to_string(),
+        }
+    }
 
     #[test]
     fn parses_bambu_printer_label() {
@@ -1221,5 +1393,74 @@ mod tests {
         assert_eq!(options.nozzle_sizes.first().map(String::as_str), Some("0.4"));
         assert!(options.printer_models.iter().any(|printer| printer == "A1"));
         assert!(options.nozzle_sizes.iter().any(|nozzle| nozzle == "0.8"));
+    }
+
+    #[test]
+    fn empty_query_returns_everything_up_to_20() {
+        let idx: Vec<_> = (0..30)
+            .map(|i| entry(&format!("PLA {}", i), "PLA", &format!("/tmp/p{}.json", i)))
+            .collect();
+        let hits = filter_base_profile_index(&idx, "", None);
+        assert_eq!(hits.len(), 20);
+    }
+
+    #[test]
+    fn query_is_case_insensitive_on_name_and_type() {
+        let idx = vec![
+            entry("Bambu PLA Basic", "PLA", "/a.json"),
+            entry("Overture PETG", "PETG", "/b.json"),
+            entry("Polymaker ASA", "ASA", "/c.json"),
+        ];
+        let by_name = filter_base_profile_index(&idx, "OVERTURE", None);
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].name, "Overture PETG");
+
+        let by_type = filter_base_profile_index(&idx, "pla", None);
+        assert_eq!(by_type.len(), 1);
+        assert_eq!(by_type[0].name, "Bambu PLA Basic");
+    }
+
+    #[test]
+    fn material_filter_narrows_results() {
+        let idx = vec![
+            entry("Bambu PLA Basic", "PLA", "/a.json"),
+            entry("Bambu PETG HF", "PETG", "/b.json"),
+            entry("Bambu PLA Matte", "PLA", "/c.json"),
+        ];
+        let hits = filter_base_profile_index(&idx, "bambu", Some("PLA"));
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|m| m.filament_type.as_deref() == Some("PLA")));
+    }
+
+    #[test]
+    fn duplicates_by_path_are_removed() {
+        let idx = vec![
+            entry("Bambu PLA Basic", "PLA", "/same.json"),
+            entry("Bambu PLA Basic", "PLA", "/same.json"),
+        ];
+        let hits = filter_base_profile_index(&idx, "", None);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn results_are_sorted_case_insensitively_by_name() {
+        let idx = vec![
+            entry("zeta", "PLA", "/z.json"),
+            entry("Alpha", "PLA", "/a.json"),
+            entry("beta", "PLA", "/b.json"),
+        ];
+        let hits = filter_base_profile_index(&idx, "", None);
+        let names: Vec<&str> = hits.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "beta", "zeta"]);
+    }
+
+    #[test]
+    fn empty_material_filter_is_ignored() {
+        let idx = vec![
+            entry("Bambu PLA Basic", "PLA", "/a.json"),
+            entry("Overture PETG", "PETG", "/b.json"),
+        ];
+        let hits = filter_base_profile_index(&idx, "", Some(""));
+        assert_eq!(hits.len(), 2);
     }
 }

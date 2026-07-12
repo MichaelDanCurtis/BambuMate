@@ -1,6 +1,8 @@
 use serde::Serialize;
 use tracing::info;
 
+use crate::str_utils::truncate_with_ellipsis;
+
 /// Information about the current app version and any available update.
 #[derive(Debug, Clone, Serialize)]
 pub struct VersionInfo {
@@ -75,14 +77,9 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
         .unwrap_or("https://github.com/MichaelDanCurtis/BambuMate/releases")
         .to_string();
 
-    let release_notes = body["body"].as_str().map(|s| {
-        // Truncate very long release notes for display
-        if s.len() > 500 {
-            format!("{}…", &s[..500])
-        } else {
-            s.to_string()
-        }
-    });
+    let release_notes = body["body"]
+        .as_str()
+        .map(|s| truncate_with_ellipsis(s, 500, "…"));
 
     let latest_clean = tag_name.trim_start_matches('v');
     let current_clean = env!("CARGO_PKG_VERSION");

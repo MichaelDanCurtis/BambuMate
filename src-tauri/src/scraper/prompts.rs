@@ -230,13 +230,10 @@ SOURCE TEXT:
 /// meta tags, JSON-LD, spec lists) so the LLM can parse structured data directly.
 /// The HTML is truncated to stay within reasonable token limits.
 pub fn build_html_extraction_prompt(filament_name: &str, html: &str) -> String {
-    // Truncate HTML to ~50K chars to stay within context limits
+    // Truncate HTML to ~50K bytes to stay within context limits. Use a
+    // char-boundary-safe truncate so non-ASCII HTML never panics here.
     let max_len = 50_000;
-    let truncated = if html.len() > max_len {
-        &html[..max_len]
-    } else {
-        html
-    };
+    let truncated = crate::str_utils::safe_prefix(html, max_len);
 
     let schema = filament_specs_schema_text();
     format!(

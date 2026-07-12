@@ -2,7 +2,6 @@
 
 pub mod analyzer;
 mod commands;
-mod error;
 pub mod history;
 pub mod mapper;
 pub mod model_catalog;
@@ -10,6 +9,7 @@ mod process_command;
 pub mod profile;
 pub mod scraper;
 pub mod stl_watcher;
+pub mod str_utils;
 
 pub use history::{AppliedChange, RefinementHistory, SessionDetail, SessionSummary};
 
@@ -56,6 +56,7 @@ pub fn run() {
             commands::profile::save_profile_specs,
             commands::profile::compare_profiles,
             commands::profile::search_base_profiles,
+            commands::profile::refresh_base_profile_index,
             commands::profile::list_target_printer_options,
             commands::scraper::search_filament,
             commands::scraper::get_cached_filament,

@@ -18,7 +18,7 @@ use tauri_plugin_store::StoreExt;
 use tracing::{info, warn};
 
 use crate::analyzer::{analyze_image, DefectReport};
-use crate::history::{AppliedChange, RefinementHistory};
+use crate::history::{AppliedChange, RefinementHistory, SessionDetail};
 use crate::mapper::{default_rules, Conflict, RuleEngine};
 use crate::profile::FilamentProfile;
 use crate::scraper::types::MaterialType;
@@ -171,50 +171,59 @@ pub async fn analyze_print(
         evaluation.conflicts.len()
     );
 
-    // Record analysis session in history
+    // Record analysis session in history (blocking rusqlite off the async runtime)
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get data dir: {}", e))?;
     let db_path = data_dir.join("refinement_history.db");
 
-    let mut session_id: Option<i64> = None;
+    // Build response JSON for storage (without session_id to avoid recursion)
+    let analysis_for_storage = serde_json::json!({
+        "defect_report": defect_report,
+        "recommendations": recommendations,
+        "conflicts": evaluation.conflicts,
+        "current_values": current_values,
+        "material_type": material_type,
+    });
+    let analysis_json = serde_json::to_string(&analysis_for_storage).unwrap_or_default();
 
-    if let Ok(history) = RefinementHistory::new(&db_path) {
-        // Profile path or "no_profile" for material-only analysis
-        let profile_for_history = request
-            .profile_path
-            .clone()
-            .unwrap_or_else(|| "no_profile".to_string());
+    let profile_for_history = request
+        .profile_path
+        .clone()
+        .unwrap_or_else(|| "no_profile".to_string());
+    // Store image only if profile was provided (for profile-specific history)
+    let image_for_history: Option<String> = if request.profile_path.is_some() {
+        Some(request.image_base64.clone())
+    } else {
+        None
+    };
 
-        // Build response JSON for storage (without session_id to avoid recursion)
-        let analysis_for_storage = serde_json::json!({
-            "defect_report": defect_report,
-            "recommendations": recommendations,
-            "conflicts": evaluation.conflicts,
-            "current_values": current_values,
-            "material_type": material_type,
-        });
-        let analysis_json = serde_json::to_string(&analysis_for_storage).unwrap_or_default();
-
-        // Store image only if profile was provided (for profile-specific history)
-        let image_for_history = if request.profile_path.is_some() {
-            Some(request.image_base64.as_str())
-        } else {
-            None // Skip image storage for profile-less analysis
+    let session_id: Option<i64> = tokio::task::spawn_blocking(move || -> Option<i64> {
+        let history = match RefinementHistory::new(&db_path) {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("Failed to open history: {}", e);
+                return None;
+            }
         };
-
-        match history.record_analysis(&profile_for_history, image_for_history, &analysis_json) {
+        match history.record_analysis(
+            &profile_for_history,
+            image_for_history.as_deref(),
+            &analysis_json,
+        ) {
             Ok(id) => {
-                session_id = Some(id);
                 info!("Recorded analysis session {}", id);
+                Some(id)
             }
             Err(e) => {
                 warn!("Failed to record analysis history: {}", e);
-                // Non-fatal - don't fail the analysis
+                None
             }
         }
-    }
+    })
+    .await
+    .unwrap_or(None);
 
     Ok(AnalyzeResponse {
         defect_report,
@@ -240,17 +249,21 @@ pub async fn apply_recommendations(
         request.session_id, request.profile_path
     );
 
-    // 1. Get history store to retrieve analysis results
+    // 1. Get history store to retrieve analysis results (off the async runtime)
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get data dir: {}", e))?;
     let db_path = data_dir.join("refinement_history.db");
-    let history =
-        RefinementHistory::new(&db_path).map_err(|e| format!("Failed to open history: {}", e))?;
-
-    // 2. Get the session to retrieve analysis results
-    let session = history.get_session(request.session_id)?;
+    let session_id_val = request.session_id;
+    let db_path_read = db_path.clone();
+    let session = tokio::task::spawn_blocking(move || -> Result<SessionDetail, String> {
+        let history = RefinementHistory::new(&db_path_read)
+            .map_err(|e| format!("Failed to open history: {}", e))?;
+        history.get_session(session_id_val)
+    })
+    .await
+    .map_err(|e| format!("history join error: {}", e))??;
     let analysis: AnalyzeResponse = serde_json::from_str(&session.analysis_json)
         .map_err(|e| format!("Failed to parse analysis: {}", e))?;
 
@@ -289,12 +302,17 @@ pub async fn apply_recommendations(
     crate::profile::writer::write_profile_atomic(&modified, profile_path)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
 
-    // 7. Record apply in history
-    history.record_apply(
-        request.session_id,
-        &changes,
-        backup_path.to_string_lossy().as_ref(),
-    )?;
+    // 7. Record apply in history (blocking rusqlite off the async runtime)
+    let backup_path_string = backup_path.to_string_lossy().to_string();
+    let changes_clone = changes.clone();
+    let backup_path_history = backup_path_string.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let history = RefinementHistory::new(&db_path)
+            .map_err(|e| format!("Failed to open history: {}", e))?;
+        history.record_apply(session_id_val, &changes_clone, &backup_path_history)
+    })
+    .await
+    .map_err(|e| format!("history join error: {}", e))??;
 
     info!(
         "Applied {} changes to profile, backup at {:?}",

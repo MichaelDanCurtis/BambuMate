@@ -11,6 +11,7 @@ use super::image_prep::{image_media_type, prepare_image};
 use super::prompts::{build_defect_analysis_prompt, defect_report_schema};
 use super::types::DefectReport;
 use crate::mapper::DetectedDefect;
+use crate::str_utils::truncate_with_ellipsis;
 
 /// Analyze an image for print defects using the specified AI provider.
 ///
@@ -77,11 +78,7 @@ pub async fn analyze_image(
 /// Parse the raw JSON response into a DefectReport.
 fn parse_defect_report(response_text: &str) -> Result<DefectReport, String> {
     let json: serde_json::Value = serde_json::from_str(response_text).map_err(|e| {
-        let truncated = if response_text.len() > 500 {
-            format!("{}...", &response_text[..500])
-        } else {
-            response_text.to_string()
-        };
+        let truncated = truncate_with_ellipsis(response_text, 500, "...");
         format!(
             "Failed to parse defect report JSON: {}. Response: {}",
             e, truncated
@@ -117,11 +114,22 @@ fn parse_defect_report(response_text: &str) -> Result<DefectReport, String> {
 }
 
 /// Build a reqwest client with timeout for vision API calls.
+///
+/// Vision calls need longer than text calls, so this client uses a 90 s
+/// default. A `OnceLock` gives us process-wide reuse of the connection
+/// pool and TLS state — every vision request formerly built a fresh
+/// client and paid the ~50–200 ms TLS handshake.
 fn build_api_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(90)) // Vision calls take longer
+    static SHARED: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(c) = SHARED.get() {
+        return Ok(c.clone());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    let _ = SHARED.set(client.clone());
+    Ok(SHARED.get().cloned().unwrap_or(client))
 }
 
 /// Handle API response status and extract body.
@@ -135,11 +143,7 @@ async fn handle_api_response(
             .text()
             .await
             .unwrap_or_else(|_| "<failed to read>".to_string());
-        let truncated = if body.len() > 1024 {
-            format!("{}...", &body[..1024])
-        } else {
-            body
-        };
+        let truncated = truncate_with_ellipsis(&body, 1024, "...");
         return Err(format!(
             "Vision API error: {} from {} - {}",
             status, provider, truncated

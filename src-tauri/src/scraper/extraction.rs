@@ -9,6 +9,7 @@ use super::prompts::{
 };
 use super::types::FilamentSpecs;
 use super::validation::validate_specs;
+use crate::str_utils::truncate_with_ellipsis;
 
 /// Extract filament specifications from page text using an LLM provider.
 ///
@@ -65,11 +66,7 @@ pub async fn extract_specs(
     // Parse LLM response into intermediate JSON first
     let response_text = strip_markdown_json(&response_text);
     let response_json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-        let truncated = if response_text.len() > 500 {
-            format!("{}...", &response_text[..500])
-        } else {
-            response_text.clone()
-        };
+        let truncated = truncate_with_ellipsis(&response_text, 500, "...");
         let msg = format!(
             "Failed to parse LLM response as JSON: {}. Raw response (first 500 chars): {}",
             e, truncated
@@ -152,11 +149,7 @@ pub async fn extract_specs_from_html(
     // Parse LLM response into intermediate JSON
     let response_text = strip_markdown_json(&response_text);
     let response_json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-        let truncated = if response_text.len() > 500 {
-            format!("{}...", &response_text[..500])
-        } else {
-            response_text.clone()
-        };
+        let truncated = truncate_with_ellipsis(&response_text, 500, "...");
         let msg = format!(
             "Failed to parse LLM response as JSON: {}. Raw response (first 500 chars): {}",
             e, truncated
@@ -243,11 +236,7 @@ pub async fn generate_specs_from_knowledge(
     // Parse LLM response into intermediate JSON
     let response_text = strip_markdown_json(&response_text);
     let response_json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-        let truncated = if response_text.len() > 500 {
-            format!("{}...", &response_text[..500])
-        } else {
-            response_text.clone()
-        };
+        let truncated = truncate_with_ellipsis(&response_text, 500, "...");
         let msg = format!(
             "Failed to parse LLM response as JSON: {}. Raw response: {}",
             e, truncated
@@ -419,12 +408,23 @@ fn strip_markdown_json(text: &str) -> String {
     }
 }
 
-/// Build a reqwest client with a 60-second timeout for LLM API calls.
+/// Return a process-wide shared reqwest client tuned for LLM API calls.
+///
+/// A single client shares the connection pool + TLS state across every LLM
+/// request. Individual callers may still tighten the per-request timeout
+/// via `RequestBuilder::timeout` if needed.
 fn build_api_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    static SHARED: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(c) = SHARED.get() {
+        return Ok(c.clone());
+    }
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    // If two threads race here, only one wins — cheap.
+    let _ = SHARED.set(client.clone());
+    Ok(SHARED.get().cloned().unwrap_or(client))
 }
 
 /// Handle API response: check status and extract body text.
@@ -438,11 +438,7 @@ async fn handle_api_response(
             .text()
             .await
             .unwrap_or_else(|_| "<failed to read body>".to_string());
-        let truncated = if body.len() > 1024 {
-            format!("{}...", &body[..1024])
-        } else {
-            body
-        };
+        let truncated = truncate_with_ellipsis(&body, 1024, "...");
         let msg = format!(
             "LLM API error: {} from {} - {}",
             status, provider, truncated

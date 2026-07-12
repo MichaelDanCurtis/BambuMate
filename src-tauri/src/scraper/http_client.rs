@@ -14,7 +14,15 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
+    /// Create a new rate limiter allowing `requests_per_second` requests per
+    /// domain. Values `<= 0.0` are rejected via a panic — this only happens
+    /// at construction time and never on user input.
     pub fn new(requests_per_second: f64) -> Self {
+        assert!(
+            requests_per_second > 0.0 && requests_per_second.is_finite(),
+            "requests_per_second must be positive and finite, got {}",
+            requests_per_second
+        );
         Self {
             last_request: Mutex::new(HashMap::new()),
             min_interval: Duration::from_secs_f64(1.0 / requests_per_second),
@@ -24,6 +32,10 @@ impl RateLimiter {
     /// Wait until enough time has elapsed since the last request to the same domain.
     /// If `extra_delay` is provided and greater than `min_interval`, use it instead
     /// (this supports crawl-delay from robots.txt).
+    ///
+    /// Concurrency: reserves the next-allowed timeslot **before** sleeping, so
+    /// two concurrent callers racing on the same domain will serialise rather
+    /// than both proceeding immediately when the last recorded time is stale.
     pub async fn wait_for_domain(
         &self,
         url: &str,
@@ -40,27 +52,28 @@ impl RateLimiter {
             _ => self.min_interval,
         };
 
-        let sleep_duration = {
-            let map = self.last_request.lock().unwrap();
-            if let Some(last) = map.get(&domain) {
-                let elapsed = last.elapsed();
-                if elapsed < effective_interval {
-                    Some(effective_interval - elapsed)
-                } else {
-                    None
+        // Reserve the slot atomically: compute the next-allowed instant while
+        // holding the lock, insert it, and only then release the lock and
+        // sleep. A concurrent caller will see the reserved time and defer.
+        let (sleep_duration, reserved_at) = {
+            let mut map = self.last_request.lock().unwrap_or_else(|p| p.into_inner());
+            let now = Instant::now();
+            let next_allowed = match map.get(&domain) {
+                Some(last) if now.duration_since(*last) < effective_interval => {
+                    *last + effective_interval
                 }
-            } else {
-                None
-            }
+                _ => now,
+            };
+            let wait = next_allowed.saturating_duration_since(now);
+            map.insert(domain.clone(), next_allowed);
+            (wait, next_allowed)
         };
 
-        if let Some(duration) = sleep_duration {
-            tokio::time::sleep(duration).await;
+        if !sleep_duration.is_zero() {
+            tokio::time::sleep(sleep_duration).await;
         }
-
-        // Update last request time after waiting
-        let mut map = self.last_request.lock().unwrap();
-        map.insert(domain, Instant::now());
+        // reserved_at is captured for debugging; the map already reflects it.
+        let _ = reserved_at;
         Ok(())
     }
 
@@ -200,6 +213,17 @@ impl ScraperHttpClient {
             rate_limiter: RateLimiter::new(1.0),
             robots_cache: RobotsCache::new(),
         }
+    }
+
+    /// Return the process-wide shared `ScraperHttpClient`. Reusing a single
+    /// instance means:
+    /// - the robots.txt cache actually caches (a fresh instance would have
+    ///   forced a fetch on every scrape);
+    /// - the per-domain rate limiter is respected across commands;
+    /// - the underlying `reqwest::Client` reuses its connection pool.
+    pub fn shared() -> &'static ScraperHttpClient {
+        static SHARED: std::sync::OnceLock<ScraperHttpClient> = std::sync::OnceLock::new();
+        SHARED.get_or_init(ScraperHttpClient::new)
     }
 
     /// Fetch a page's HTML content.
@@ -448,6 +472,48 @@ mod tests {
         assert!(
             elapsed >= Duration::from_millis(400),
             "Extra delay should be respected, only waited {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requests_per_second must be positive")]
+    fn test_rate_limiter_rejects_zero() {
+        let _ = RateLimiter::new(0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "requests_per_second must be positive")]
+    fn test_rate_limiter_rejects_negative() {
+        let _ = RateLimiter::new(-1.0);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_serialises_concurrent_callers() {
+        use std::sync::Arc;
+
+        // 5 concurrent tasks against the same domain with 200 ms interval
+        // must complete in >= ~800 ms (4 intervals), not zero — proving that
+        // reserving the slot before sleeping (rather than after) prevents the
+        // previous TOCTOU race where all callers observed "no wait needed".
+        let limiter = Arc::new(RateLimiter::new(5.0)); // 200 ms interval
+        let url = "https://example.com/x";
+
+        let start = Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let limiter = Arc::clone(&limiter);
+            handles.push(tokio::spawn(async move {
+                limiter.wait_for_domain(url, None).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(700),
+            "5 concurrent requests should serialise to ~800 ms, got {:?}",
             elapsed
         );
     }

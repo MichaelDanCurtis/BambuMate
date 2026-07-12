@@ -124,7 +124,7 @@ pub async fn search_filament(
             scout.resolve_urls(name)
         };
 
-        let http_client = ScraperHttpClient::new();
+        let http_client = ScraperHttpClient::shared();
 
         // Try each URL with raw HTML extraction
         for url in &urls {
@@ -378,7 +378,7 @@ pub async fn search_filament_web_only(
         Err(e) => warn!("Cache lookup failed for '{}': {}", name, e),
     }
 
-    let http_client = ScraperHttpClient::new();
+    let http_client = ScraperHttpClient::shared();
     let mut best_specs: Option<FilamentSpecs> = None;
 
     // Step 2: Brand adapter or SpoolScout URLs
