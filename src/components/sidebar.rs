@@ -1,12 +1,13 @@
 use leptos::prelude::*;
 
-use crate::app::FeatureFlagsContext;
+use crate::app::{FeatureFlagsContext, UpdateContext};
 use crate::components::branding::BrandMark;
 use crate::components::stl_indicator::StlIndicator;
 
 #[component]
 pub fn Sidebar() -> impl IntoView {
     let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
+    let update_ctx = use_context::<UpdateContext>().expect("UpdateContext not provided");
 
     view! {
         <nav class="sidebar">
@@ -57,7 +58,12 @@ pub fn Sidebar() -> impl IntoView {
                     <a href="/health" class="nav-link">"Health Check"</a>
                 </li>
                 <li class="nav-item">
-                    <a href="/about" class="nav-link">"About"</a>
+                    <a href="/about" class="nav-link">
+                        "About"
+                        <Show when=move || update_ctx.update_info.get().map(|i| i.has_update).unwrap_or(false)>
+                            <span class="nav-update-badge" title="Update available">" ✨"</span>
+                        </Show>
+                    </a>
                 </li>
             </ul>
             <div class="sidebar-footer">
