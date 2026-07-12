@@ -56,6 +56,7 @@ pub fn run() {
             commands::profile::save_profile_specs,
             commands::profile::compare_profiles,
             commands::profile::search_base_profiles,
+            commands::profile::refresh_base_profile_index,
             commands::profile::list_target_printer_options,
             commands::scraper::search_filament,
             commands::scraper::get_cached_filament,
