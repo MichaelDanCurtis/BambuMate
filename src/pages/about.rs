@@ -1,23 +1,30 @@
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::app::UpdateContext;
 use crate::commands::{self, UpdateInfo};
 use crate::components::branding::BrandMark;
 
 #[component]
 pub fn AboutPage() -> impl IntoView {
+    let update_ctx = use_context::<UpdateContext>().expect("UpdateContext not provided");
+
     let (current_version, set_current_version) = signal(String::from("…"));
     let (update_info, set_update_info) = signal::<Option<UpdateInfo>>(None);
     let (checking, set_checking) = signal(false);
     let (check_error, set_check_error) = signal::<Option<String>>(None);
 
-    // Load current version on mount
+    // Load current version and seed update state from the startup check on mount
     Effect::new(move |_| {
         spawn_local(async move {
             if let Ok(info) = commands::get_app_version().await {
                 set_current_version.set(info.current_version);
             }
         });
+        // Pre-populate with whatever the startup check already found
+        if let Some(info) = update_ctx.update_info.get_untracked() {
+            set_update_info.set(Some(info));
+        }
     });
 
     let check_updates = move |_| {
@@ -26,7 +33,10 @@ pub fn AboutPage() -> impl IntoView {
         set_update_info.set(None);
         spawn_local(async move {
             match commands::check_for_updates().await {
-                Ok(info) => set_update_info.set(Some(info)),
+                Ok(info) => {
+                    update_ctx.update_info.set(Some(info.clone()));
+                    set_update_info.set(Some(info));
+                }
                 Err(e) => set_check_error.set(Some(e)),
             }
             set_checking.set(false);

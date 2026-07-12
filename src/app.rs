@@ -3,7 +3,7 @@ use leptos_router::components::*;
 use leptos_router::path;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::commands::{self, FeatureFlags};
+use crate::commands::{self, FeatureFlags, UpdateInfo};
 use crate::components::sidebar::Sidebar;
 use crate::pages::about::AboutPage;
 use crate::pages::batch_generate::BatchGeneratePage;
@@ -24,10 +24,19 @@ pub struct FeatureFlagsContext {
     pub set_flags: WriteSignal<FeatureFlags>,
 }
 
+/// Shared context for the startup update check result.
+#[derive(Clone)]
+pub struct UpdateContext {
+    pub update_info: RwSignal<Option<UpdateInfo>>,
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let (theme, set_theme) = signal(String::from("bambu"));
     provide_context(ThemeContext { theme, set_theme });
+
+    let update_info = RwSignal::new(Option::<UpdateInfo>::None);
+    provide_context(UpdateContext { update_info });
 
     // Feature flags with both enabled by default
     let (flags, set_flags) = signal(FeatureFlags {
@@ -52,6 +61,10 @@ pub fn App() -> impl IntoView {
             match commands::check_setup_complete().await {
                 Ok(status) => setup_complete.set(Some(status.setup_complete)),
                 Err(_) => setup_complete.set(Some(false)),
+            }
+            // Run update check in background; errors are silently ignored on startup
+            if let Ok(info) = commands::check_for_updates().await {
+                update_info.set(Some(info));
             }
         });
     });
