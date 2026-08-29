@@ -165,6 +165,40 @@ pub struct ValidationWarning {
     pub value: String,
 }
 
+/// A single setting changed by the per-nozzle review.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NozzleTuningChange {
+    /// `FilamentSpecs` field name that changed.
+    pub field: String,
+    /// Value before tuning (`"unset"` when the field had no value).
+    pub from: String,
+    /// Value after tuning.
+    pub to: String,
+    /// Where the change came from: `"ai"` or `"limit"` (deterministic cap).
+    pub source: String,
+}
+
+/// Result of reviewing a spec sheet for one specific nozzle diameter.
+///
+/// Scraped and AI-generated specs describe the *filament*, and are effectively
+/// always quoted for a 0.4 mm nozzle. This carries the per-nozzle corrected
+/// specs plus an audit trail of what changed and why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NozzleTuning {
+    /// Specs adjusted for the target nozzle.
+    pub specs: FilamentSpecs,
+    /// Nozzle diameter these specs were tuned for, in mm.
+    pub nozzle_diameter: f32,
+    /// Hard volumetric flow ceiling enforced for this nozzle (mm³/s).
+    pub flow_cap: f32,
+    /// Every setting that differs from the input specs.
+    pub changes: Vec<NozzleTuningChange>,
+    /// Human-readable explanations for the UI.
+    pub notes: Vec<String>,
+    /// Model confidence in the adjustments, 0.0-1.0.
+    pub confidence: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

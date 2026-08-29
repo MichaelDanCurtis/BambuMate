@@ -5,6 +5,7 @@ use tracing::debug;
 
 use crate::process_command;
 use super::inheritance::resolve_inheritance;
+use super::nozzle::{apply_nozzle_limits, parse_nozzle_diameter};
 use super::paths::BambuPaths;
 use super::reader::read_profile;
 use super::registry::ProfileRegistry;
@@ -453,18 +454,31 @@ pub fn generate_profile(
     // 4. Apply scraped spec overrides
     apply_specs_to_profile(&mut profile, specs);
 
-    // 5. Apply compatibility defaults for fields required by newer Bambu Studio
+    // 5. Clamp nozzle-dependent settings to what the target hot end can
+    //    physically do. Scraped/AI specs describe the filament and are almost
+    //    always quoted for a 0.4 mm nozzle, so a 0.2 mm profile would otherwise
+    //    inherit a volumetric flow it can never reach.
+    if let Some(diameter) = parse_nozzle_diameter(printer) {
+        for adjustment in apply_nozzle_limits(&mut profile, diameter) {
+            debug!(
+                "Nozzle limit ({}mm): {} {} -> {}",
+                diameter, adjustment.field, adjustment.from, adjustment.to
+            );
+        }
+    }
+
+    // 6. Apply compatibility defaults for fields required by newer Bambu Studio
     //    versions that may be absent from older system profile installations.
     apply_compat_defaults(&mut profile);
 
-    // 6. Set compatible_printers to the target printer (e.g.
+    // 7. Set compatible_printers to the target printer (e.g.
     //    "Bambu Lab H2C 0.4 nozzle"). This matches what Bambu Studio itself
     //    writes for user profiles and ensures the filament shows up under the
     //    correct printer in the UI instead of being marked as compatible with
     //    no printer at all.
     profile.set_string_array("compatible_printers", vec![printer.to_string()]);
 
-    // 7. Detect BS paths once and reuse for both the version stamp and the
+    // 8. Detect BS paths once and reuse for both the version stamp and the
     //    metadata below. `.ok()` here means the version stamp is best-effort:
     //    if BS isn't installed we still generate a valid profile, just without
     //    the schema version field (BS re-stamps it on save anyway).
@@ -481,7 +495,7 @@ pub fn generate_profile(
         }
     }
 
-    // 8. Generate metadata
+    // 9. Generate metadata
     // user_id comes from BambuPaths.preset_folder in the calling context
     let user_id = paths
         .as_ref()
@@ -496,7 +510,7 @@ pub fn generate_profile(
         updated_time: Utc::now().timestamp() as u64,
     };
 
-    // 8. Generate filename
+    // 10. Generate filename
     let filename = if specs.serial.is_empty() {
         format!("{} {} @{}.json", specs.brand, specs.material, printer)
     } else {

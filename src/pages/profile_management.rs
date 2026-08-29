@@ -243,7 +243,8 @@ pub fn ProfileManagementPage() -> impl IntoView {
     };
 
     // Save edited specs back to profile
-    let save_specs = move |(specs, _printers): (FilamentSpecs, Vec<String>)| {
+    let save_specs = move |request: crate::components::specs_editor::GenerateRequest| {
+        let specs = request.specs;
         let path = match selected_path.get() {
             Some(p) => p,
             None => return,

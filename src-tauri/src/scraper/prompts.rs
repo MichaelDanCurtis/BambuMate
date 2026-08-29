@@ -317,6 +317,162 @@ Return a JSON object matching this schema:
     )
 }
 
+/// Fields the per-nozzle AI review is allowed to adjust.
+///
+/// Deliberately limited to settings whose correct value genuinely depends on
+/// the nozzle diameter. Identity, physical properties (density, cost, diameter)
+/// and bed temperatures are nozzle-independent and are never touched.
+pub const NOZZLE_TUNABLE_FIELDS: &[&str] = &[
+    "max_volumetric_speed",
+    "nozzle_temperature",
+    "nozzle_temperature_initial_layer",
+    "filament_flow_ratio",
+    "pressure_advance",
+    "fan_min_speed",
+    "fan_max_speed",
+    "overhang_fan_speed",
+    "slow_down_layer_time",
+    "slow_down_min_speed",
+    "retraction_distance_mm",
+    "retraction_speed_mm_s",
+    "deretraction_speed_mm_s",
+    "bridge_speed",
+];
+
+/// JSON schema for the per-nozzle tuning response.
+///
+/// Every setting is nullable: the model returns `null` for anything that should
+/// keep the value it already has, so we can apply a sparse patch rather than
+/// letting a review rewrite the whole spec sheet.
+pub fn nozzle_tuning_json_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "max_volumetric_speed": {
+                "type": ["number", "null"],
+                "description": "Maximum volumetric flow in mm\u{00b3}/s achievable with THIS nozzle diameter. Small nozzles are limited by melt pressure, not just area: a 0.2mm nozzle rarely exceeds 2."
+            },
+            "nozzle_temperature": {
+                "type": ["integer", "null"],
+                "description": "Printing temperature in Celsius adjusted for this nozzle. Larger nozzles usually need a few degrees more to melt the higher throughput; smaller nozzles need less."
+            },
+            "nozzle_temperature_initial_layer": {
+                "type": ["integer", "null"],
+                "description": "First layer temperature in Celsius adjusted for this nozzle."
+            },
+            "filament_flow_ratio": {
+                "type": ["number", "null"],
+                "description": "Flow ratio for this nozzle. Typically 0.9-1.05."
+            },
+            "pressure_advance": {
+                "type": ["number", "null"],
+                "description": "Pressure advance for this nozzle. Smaller nozzles generally need a higher value than larger ones."
+            },
+            "fan_min_speed": {
+                "type": ["integer", "null"],
+                "description": "Minimum part cooling fan speed 0-100% for this nozzle."
+            },
+            "fan_max_speed": {
+                "type": ["integer", "null"],
+                "description": "Maximum part cooling fan speed 0-100% for this nozzle."
+            },
+            "overhang_fan_speed": {
+                "type": ["integer", "null"],
+                "description": "Overhang fan speed 0-100% for this nozzle."
+            },
+            "slow_down_layer_time": {
+                "type": ["integer", "null"],
+                "description": "Minimum layer time in seconds. Small nozzles produce short layers that need more cooling time."
+            },
+            "slow_down_min_speed": {
+                "type": ["integer", "null"],
+                "description": "Minimum print speed in mm/s when slowing down for cooling."
+            },
+            "retraction_distance_mm": {
+                "type": ["number", "null"],
+                "description": "Retraction distance in mm for this nozzle. Larger nozzles hold more melt and need more retraction."
+            },
+            "retraction_speed_mm_s": {
+                "type": ["integer", "null"],
+                "description": "Retraction speed in mm/s for this nozzle."
+            },
+            "deretraction_speed_mm_s": {
+                "type": ["integer", "null"],
+                "description": "De-retraction speed in mm/s for this nozzle."
+            },
+            "bridge_speed": {
+                "type": ["integer", "null"],
+                "description": "Bridge print speed in mm/s for this nozzle."
+            },
+            "notes": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "One short sentence per change explaining why the value differs for this nozzle size. Empty array if nothing changed."
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence in these nozzle adjustments, 0.0-1.0."
+            }
+        },
+        "required": [
+            "max_volumetric_speed",
+            "nozzle_temperature", "nozzle_temperature_initial_layer",
+            "filament_flow_ratio", "pressure_advance",
+            "fan_min_speed", "fan_max_speed", "overhang_fan_speed",
+            "slow_down_layer_time", "slow_down_min_speed",
+            "retraction_distance_mm", "retraction_speed_mm_s", "deretraction_speed_mm_s",
+            "bridge_speed",
+            "notes", "confidence"
+        ],
+        "additionalProperties": false
+    })
+}
+
+/// Build the prompt asking the model to review nozzle-dependent settings.
+///
+/// `current_settings` is a JSON object holding the values the profile would get
+/// today (which were sourced for a standard 0.4 mm nozzle), and `flow_cap` is
+/// the hard ceiling the app enforces afterwards regardless of the answer — it
+/// is included so the model does not propose something that will be clamped.
+pub fn build_nozzle_tuning_prompt(
+    filament_name: &str,
+    material: &str,
+    nozzle_diameter: f32,
+    flow_cap: f32,
+    current_settings: &serde_json::Value,
+) -> String {
+    let schema = serde_json::to_string_pretty(&nozzle_tuning_json_schema())
+        .unwrap_or_else(|_| "{}".to_string());
+    let current = serde_json::to_string_pretty(current_settings)
+        .unwrap_or_else(|_| "{}".to_string());
+
+    format!(
+        r#"You are tuning a Bambu Studio filament profile for a specific nozzle size.
+
+FILAMENT: {filament_name}
+MATERIAL: {material}
+TARGET NOZZLE DIAMETER: {nozzle_diameter} mm
+
+The settings below were sourced from the manufacturer or from general knowledge, which almost always assumes a standard 0.4 mm nozzle. Review them for a {nozzle_diameter} mm nozzle.
+
+CURRENT SETTINGS (for a 0.4 mm nozzle):
+{current}
+
+RULES:
+- Return a value ONLY for settings that should change for a {nozzle_diameter} mm nozzle. Return null for every setting that should keep its current value.
+- Do NOT restate a current value; that counts as no change and must be null.
+- max_volumetric_speed must not exceed {flow_cap} mm3/s for this nozzle — the application enforces that ceiling anyway.
+- Small nozzles (0.2-0.25 mm) are limited by melt pressure far more than by area: flow collapses to roughly 1-3 mm3/s, pressure advance rises, and layers get short enough that minimum layer time matters more.
+- Large nozzles (0.6-0.8 mm) move much more material: they need more heat, more retraction, and usually more cooling headroom.
+- Keep every value physically safe for {material}. Never push a temperature outside the material's normal working range.
+- Add one short note per change, naming the setting and the reason.
+- Return an empty notes array and all-null settings if a {nozzle_diameter} mm nozzle needs no changes.
+
+Return a JSON object matching this schema:
+{schema}"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,6 +722,93 @@ mod tests {
         assert!(
             prompt.contains("Polymaker PLA Pro"),
             "Prompt should contain filament name"
+        );
+    }
+
+    #[test]
+    fn test_nozzle_tuning_schema_covers_all_tunable_fields() {
+        let schema = nozzle_tuning_json_schema();
+        let properties = schema["properties"].as_object().unwrap();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+
+        for field in NOZZLE_TUNABLE_FIELDS {
+            assert!(
+                properties.contains_key(*field),
+                "Tunable field '{}' missing from nozzle tuning schema",
+                field
+            );
+            assert!(
+                required.contains(field),
+                "Tunable field '{}' should be required so the model returns an explicit null",
+                field
+            );
+        }
+        assert!(required.contains(&"notes"));
+        assert!(required.contains(&"confidence"));
+    }
+
+    #[test]
+    fn test_nozzle_tuning_schema_fields_are_nullable() {
+        let schema = nozzle_tuning_json_schema();
+        let properties = schema["properties"].as_object().unwrap();
+
+        for field in NOZZLE_TUNABLE_FIELDS {
+            let types = properties[*field]["type"].as_array().unwrap();
+            assert!(
+                types.iter().any(|t| t.as_str() == Some("null")),
+                "Tunable field '{}' must allow null so unchanged settings stay untouched",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn test_nozzle_tuning_schema_excludes_nozzle_independent_fields() {
+        let schema = nozzle_tuning_json_schema();
+        let properties = schema["properties"].as_object().unwrap();
+
+        // Identity, physical properties and bed temps do not depend on the nozzle.
+        for field in [
+            "brand",
+            "material",
+            "density_g_cm3",
+            "filament_cost",
+            "diameter_mm",
+            "hot_plate_temp",
+            "bed_temp_max",
+        ] {
+            assert!(
+                !properties.contains_key(field),
+                "'{}' is nozzle-independent and must not be tunable",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn test_nozzle_tuning_prompt_states_nozzle_and_cap() {
+        let current = serde_json::json!({ "max_volumetric_speed": 21.0 });
+        let prompt = build_nozzle_tuning_prompt("Sunlu PLA Meta", "PLA", 0.2, 2.0, &current);
+
+        assert!(prompt.contains("Sunlu PLA Meta"));
+        assert!(prompt.contains("PLA"));
+        assert!(prompt.contains("0.2 mm"), "prompt must name the nozzle size");
+        assert!(
+            prompt.contains("must not exceed 2 mm3/s"),
+            "prompt must state the enforced flow ceiling"
+        );
+        assert!(
+            prompt.contains("21"),
+            "prompt must include the current settings"
+        );
+        assert!(
+            prompt.contains("Return null"),
+            "prompt must ask for a sparse patch"
         );
     }
 

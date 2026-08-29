@@ -67,6 +67,7 @@ pub fn run() {
             commands::scraper::search_catalog,
             commands::scraper::fetch_filament_from_catalog,
             commands::scraper::generate_specs_from_ai,
+            commands::scraper::tune_specs_for_nozzle,
             commands::analyzer::analyze_print,
             commands::analyzer::apply_recommendations,
             commands::history::list_history_sessions,
