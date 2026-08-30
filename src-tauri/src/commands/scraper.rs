@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 use crate::scraper::catalog::{CatalogEntry, CatalogMatch, FilamentCatalog};
 use crate::scraper::http_client::ScraperHttpClient;
-use crate::scraper::types::FilamentSpecs;
+use crate::scraper::types::{FilamentSpecs, NozzleTuning};
 
 /// Get the configured AI provider from preferences, defaulting to "claude".
 fn get_ai_provider(app: &tauri::AppHandle) -> Result<String, String> {
@@ -389,6 +389,54 @@ pub async fn generate_specs_from_ai(
     .await;
 
     Ok(specs)
+}
+
+/// Review a spec sheet for a specific nozzle size using the configured AI.
+///
+/// `target_printer` is a Bambu printer label such as
+/// `"Bambu Lab X1 Carbon 0.2 nozzle"`; the nozzle diameter is parsed from it.
+///
+/// Scraped specs describe the filament as measured on a standard 0.4 mm nozzle,
+/// so this asks the AI which nozzle-dependent settings should differ, then
+/// clamps the answer to the app's hard per-nozzle limits. The caller passes the
+/// returned specs to `generate_profile_from_specs` for that printer.
+#[tauri::command]
+pub async fn tune_specs_for_nozzle(
+    app: tauri::AppHandle,
+    specs: FilamentSpecs,
+    target_printer: String,
+) -> Result<NozzleTuning, String> {
+    let nozzle_diameter = crate::profile::nozzle::parse_nozzle_diameter(&target_printer)
+        .ok_or_else(|| {
+            format!(
+                "Could not determine a nozzle diameter from target printer '{}'",
+                target_printer
+            )
+        })?;
+
+    info!(
+        "tune_specs_for_nozzle called for {} {} at {}mm",
+        specs.brand, specs.serial, nozzle_diameter
+    );
+
+    let filament_name = format!("{} {} {}", specs.brand, specs.material, specs.serial)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let provider = get_ai_provider(&app)?;
+    let model = get_ai_model(&app)?;
+    let api_key = get_api_key_for_provider(&app, &provider)?;
+
+    crate::scraper::extraction::tune_specs_for_nozzle(
+        &specs,
+        &filament_name,
+        nozzle_diameter,
+        &provider,
+        &model,
+        &api_key,
+    )
+    .await
 }
 
 #[tauri::command]

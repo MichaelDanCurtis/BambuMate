@@ -9,7 +9,7 @@ use crate::commands::{
 use crate::components::filament_card::FilamentCard;
 use crate::components::profile_preview::ProfilePreview;
 use crate::components::settings_merge::SettingsMerge;
-use crate::components::specs_editor::SpecsEditor;
+use crate::components::specs_editor::{GenerateRequest, SpecsEditor};
 
 /// Return the default Bambu Studio base profile name for a given material
 /// string, matching the mapping in `generator::base_profile_name` on the
@@ -61,6 +61,8 @@ pub fn FilamentSearchPage() -> impl IntoView {
         signal::<Vec<(String, Result<GenerateResult, String>)>>(vec![]);
     let (is_generating, set_is_generating) = signal(false);
     let (pending_installs, set_pending_installs) = signal::<Vec<GenerateResult>>(vec![]);
+    // Per-nozzle AI tuning notes, keyed by target printer label.
+    let (tuning_notes, set_tuning_notes) = signal::<Vec<(String, Vec<String>)>>(vec![]);
 
     // Install state
     let (install_results, set_install_results) =
@@ -354,26 +356,62 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_show_editor.set(true);
     };
 
-    // Generate handler — takes edited specs and a list of printer labels from SpecsEditor.
-    // Generates one profile per selected nozzle type sequentially.
-    let do_generate_with_specs = move |(edited_specs, printers): (FilamentSpecs, Vec<String>)| {
+    // Generate handler — takes the edited specs, the target printer labels and
+    // the per-nozzle AI tuning choice from SpecsEditor. Generates one profile
+    // per selected nozzle type sequentially.
+    let do_generate_with_specs = move |request: GenerateRequest| {
         set_generate_results.set(vec![]);
         set_install_results.set(vec![]);
         set_pending_installs.set(vec![]);
+        set_tuning_notes.set(vec![]);
 
         set_is_generating.set(true);
         let base_profile_path = selected_base_profile_path.get();
         spawn_local(async move {
+            let GenerateRequest {
+                specs: edited_specs,
+                printers,
+                ai_tune_per_nozzle,
+            } = request;
+
             let mut results: Vec<(String, Result<GenerateResult, String>)> = Vec::new();
             let mut installs: Vec<GenerateResult> = Vec::new();
+            let mut notes_by_printer: Vec<(String, Vec<String>)> = Vec::new();
             // Track the filament_id resolved by the first successful generation in
             // this batch. All subsequent nozzle variants reuse the same ID so that
             // profiles for the same physical filament are grouped correctly in
             // Bambu Studio regardless of nozzle size.
             let mut shared_filament_id: Option<String> = None;
             for printer in printers {
+                // Opt-in per-nozzle AI review. A failure here is non-fatal: we
+                // fall back to the entered specs, which the backend still caps
+                // to the nozzle's physical flow limit.
+                let mut specs_for_printer = edited_specs.clone();
+                if ai_tune_per_nozzle {
+                    match commands::tune_specs_for_nozzle(&edited_specs, &printer).await {
+                        Ok(tuning) => {
+                            let mut notes: Vec<String> = tuning
+                                .changes
+                                .iter()
+                                .map(|c| format!("{}: {} → {}", c.field, c.from, c.to))
+                                .collect();
+                            notes.extend(tuning.notes.iter().cloned());
+                            if !notes.is_empty() {
+                                notes_by_printer.push((printer.clone(), notes));
+                            }
+                            specs_for_printer = tuning.specs;
+                        }
+                        Err(e) => {
+                            notes_by_printer.push((
+                                printer.clone(),
+                                vec![format!("AI nozzle review unavailable: {}", e)],
+                            ));
+                        }
+                    }
+                }
+
                 let result = commands::generate_profile(
-                    &edited_specs,
+                    &specs_for_printer,
                     Some(printer.clone()),
                     base_profile_path.clone(),
                     shared_filament_id.clone(),
@@ -388,6 +426,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 }
                 results.push((printer, result));
             }
+            set_tuning_notes.set(notes_by_printer);
             set_pending_installs.set(installs);
             set_generate_results.set(results);
             set_is_generating.set(false);
@@ -422,6 +461,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
     let cancel_generate = move || {
         set_generate_results.set(vec![]);
         set_pending_installs.set(vec![]);
+        set_tuning_notes.set(vec![]);
     };
 
     let cancel_editor = move || {
@@ -438,6 +478,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_generate_results.set(vec![]);
         set_install_results.set(vec![]);
         set_pending_installs.set(vec![]);
+        set_tuning_notes.set(vec![]);
         set_fetch_error.set(None);
         set_show_editor.set(false);
         set_base_profile_matches.set(vec![]);
@@ -874,7 +915,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             <div class="editor-section">
                                 <SpecsEditor
                                     specs=specs
-                                    on_generate=move |data: (FilamentSpecs, Vec<String>)| do_generate_with_specs(data)
+                                    on_generate=move |request: GenerateRequest| do_generate_with_specs(request)
                                     on_cancel=move |_| cancel_editor()
                                 />
                             </div>
@@ -891,6 +932,29 @@ pub fn FilamentSearchPage() -> impl IntoView {
                     <span>"Generating profile(s)..."</span>
                 </div>
             </Show>
+
+            // Per-nozzle AI tuning summary — what was changed for each nozzle
+            {move || {
+                let notes = tuning_notes.get();
+                if notes.is_empty() || !install_results.get().is_empty() {
+                    return None;
+                }
+                Some(view! {
+                    <div class="multi-profile-results">
+                        <h3 class="multi-profile-title">"Nozzle-Specific Adjustments"</h3>
+                        {notes.into_iter().map(|(printer, lines)| view! {
+                            <div class="spec-field full-width">
+                                <label class="spec-field-label">{printer}</label>
+                                <ul class="nozzle-tuning-notes">
+                                    {lines.into_iter()
+                                        .map(|line| view! { <li>{line}</li> })
+                                        .collect::<Vec<_>>()}
+                                </ul>
+                            </div>
+                        }).collect::<Vec<_>>()}
+                    </div>
+                })
+            }}
 
             // Generate results: errors, single preview, or multi-profile table
             {move || {

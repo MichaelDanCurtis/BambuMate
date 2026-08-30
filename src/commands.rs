@@ -652,6 +652,27 @@ pub struct TargetPrinterOptions {
     pub default_nozzle_size: String,
 }
 
+/// A single setting changed by the per-nozzle AI review.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NozzleTuningChange {
+    pub field: String,
+    pub from: String,
+    pub to: String,
+    /// `"ai"` for a model suggestion, `"limit"` for the enforced nozzle cap.
+    pub source: String,
+}
+
+/// Specs reviewed for one nozzle diameter, with an audit trail of changes.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NozzleTuning {
+    pub specs: FilamentSpecs,
+    pub nozzle_diameter: f32,
+    pub flow_cap: f32,
+    pub changes: Vec<NozzleTuningChange>,
+    pub notes: Vec<String>,
+    pub confidence: f32,
+}
+
 // -- Arg structs for filament/profile commands --
 
 #[derive(Serialize)]
@@ -667,6 +688,13 @@ struct GenerateProfileArgs {
     target_printer: Option<String>,
     base_profile_path: Option<String>,
     existing_filament_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TuneForNozzleArgs {
+    specs: FilamentSpecs,
+    target_printer: String,
 }
 
 #[derive(Serialize)]
@@ -738,6 +766,28 @@ pub async fn generate_profile(
     .map_err(|e| e.to_string())?;
 
     let result = invoke("generate_profile_from_specs", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Ask the AI to review nozzle-dependent settings for one target printer.
+///
+/// Specs are sourced for a standard 0.4 mm nozzle, so this returns a corrected
+/// copy for the given printer's nozzle plus notes describing what changed. The
+/// per-nozzle volumetric flow ceiling is enforced regardless of the AI answer.
+pub async fn tune_specs_for_nozzle(
+    specs: &FilamentSpecs,
+    target_printer: &str,
+) -> Result<NozzleTuning, String> {
+    let args = serde_wasm_bindgen::to_value(&TuneForNozzleArgs {
+        specs: specs.clone(),
+        target_printer: target_printer.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let result = invoke("tune_specs_for_nozzle", args)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 
