@@ -407,12 +407,19 @@ fn check_app_data_writable() -> CheckOutcome {
 
 /// Helper binaries this platform's code paths shell out to.
 ///
-/// `expect_success` is only set for invocations whose exit status is
-/// meaningful; `open -h` and `reg /?` exit non-zero by design.
+/// `accept_exit` lists the exit codes that mean "this tool is working". An
+/// empty slice accepts any status, for probes whose exit code carries no
+/// meaning (`open -h` and `reg /?` exit non-zero by design).
+///
+/// `pgrep` is the case that matters: it exits 1 for "no process matched",
+/// which is a normal answer rather than a malfunction, so only 2 (usage
+/// error) and 3 (fatal error) mean the tool is genuinely broken. Treating any
+/// non-zero status as failure warned spuriously on every machine where the
+/// probed process happened not to be running.
 struct ExternalTool {
     program: &'static str,
     args: &'static [&'static str],
-    expect_success: bool,
+    accept_exit: &'static [i32],
     used_for: &'static str,
 }
 
@@ -423,19 +430,20 @@ fn required_tools() -> &'static [ExternalTool] {
             ExternalTool {
                 program: "pgrep",
                 args: &["-x", "launchd"],
-                expect_success: true,
+                // 0 = matched, 1 = no match. Both prove pgrep works.
+                accept_exit: &[0, 1],
                 used_for: "detecting whether Bambu Studio is running",
             },
             ExternalTool {
                 program: "mdfind",
                 args: &["-name", "kMDItemFSName"],
-                expect_success: false,
+                accept_exit: &[],
                 used_for: "locating BambuStudio.app via Spotlight",
             },
             ExternalTool {
                 program: "open",
                 args: &["-h"],
-                expect_success: false,
+                accept_exit: &[],
                 used_for: "launching Bambu Studio",
             },
         ]
@@ -446,19 +454,19 @@ fn required_tools() -> &'static [ExternalTool] {
             ExternalTool {
                 program: "tasklist",
                 args: &["/NH", "/FI", "IMAGENAME eq nonexistent-probe.exe"],
-                expect_success: false,
+                accept_exit: &[],
                 used_for: "detecting whether Bambu Studio is running",
             },
             ExternalTool {
                 program: "reg",
                 args: &["/?"],
-                expect_success: false,
+                accept_exit: &[],
                 used_for: "locating Bambu Studio via the registry",
             },
             ExternalTool {
                 program: "where",
                 args: &["where"],
-                expect_success: true,
+                accept_exit: &[0],
                 used_for: "locating Bambu Studio on PATH",
             },
         ]
@@ -492,13 +500,21 @@ fn check_external_tools() -> CheckOutcome {
                 missing.push(format!("{} failed to spawn: {}", tool.program, e));
             }
             Ok(out) => {
-                if tool.expect_success && !out.status.success() {
+                // An empty accept list means the exit status is not meaningful
+                // for this probe. A signal death (code() == None) never counts
+                // as acceptable when specific codes were requested.
+                let acceptable = tool.accept_exit.is_empty()
+                    || out
+                        .status
+                        .code()
+                        .is_some_and(|code| tool.accept_exit.contains(&code));
+                if acceptable {
+                    ok.push(tool.program);
+                } else {
                     degraded.push(format!(
                         "{} spawned but exited {} (needed for {})",
                         tool.program, out.status, tool.used_for
                     ));
-                } else {
-                    ok.push(tool.program);
                 }
             }
         }
@@ -1471,5 +1487,43 @@ fn check_network(opts: DiagnosticsOptions) -> CheckOutcome {
             "Filament search, model refresh and print analysis all need outbound HTTPS. \
              On macOS check for a proxy, VPN or TLS-inspecting security agent.",
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `pgrep` exits 1 when nothing matched. That is the *normal* case on any
+    /// machine where Bambu Studio happens not to be running, so it must not be
+    /// reported as a degraded tool.
+    ///
+    /// Regression test: the probe originally demanded exit 0, which made
+    /// `env.external_tools` warn on every idle macOS machine and failed the
+    /// platform suite on CI runners.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pgrep_probe_accepts_no_match_exit_code() {
+        let pgrep = required_tools()
+            .iter()
+            .find(|t| t.program == "pgrep")
+            .expect("macOS probes pgrep");
+        assert!(
+            pgrep.accept_exit.contains(&1),
+            "exit 1 means 'no process matched', not a broken pgrep"
+        );
+        assert!(pgrep.accept_exit.contains(&0));
+    }
+
+    /// A healthy machine must report every helper binary as reachable. This is
+    /// the assertion that caught the pgrep probe above.
+    #[test]
+    fn external_tools_check_is_clean_on_a_healthy_machine() {
+        let outcome = check_external_tools();
+        assert!(
+            matches!(outcome.status, CheckStatus::Pass | CheckStatus::Skip),
+            "external tool probe should not warn or fail here: {:?}",
+            outcome.detail
+        );
     }
 }
