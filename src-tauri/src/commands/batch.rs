@@ -24,10 +24,7 @@ fn expected_profile_filename(
     if serial.is_empty() {
         format!("{} {} @{}.json", brand, material, target_printer)
     } else {
-        format!(
-            "{} {} {} @{}.json",
-            brand, material, serial, target_printer
-        )
+        format!("{} {} {} @{}.json", brand, material, serial, target_printer)
     }
 }
 
@@ -127,13 +124,10 @@ pub async fn batch_generate_brand(
     // can reuse existing filament IDs. This keeps IDs stable across regenerations
     // and across nozzle/printer variants of the same physical filament, matching
     // the behavior of single-filament generation.
-    let user_dir_lookup: Option<std::path::PathBuf> = user_dir
-        .clone()
-        .or_else(|| paths.user_filament_dir());
+    let user_dir_lookup: Option<std::path::PathBuf> =
+        user_dir.clone().or_else(|| paths.user_filament_dir());
 
-    let effective_target_printer = target_printer
-        .as_deref()
-        .unwrap_or(DEFAULT_TARGET_PRINTER);
+    let effective_target_printer = target_printer.as_deref().unwrap_or(DEFAULT_TARGET_PRINTER);
 
     for entry in &entries {
         let filament_name = format!("{} {}", entry.brand, entry.name);
@@ -176,12 +170,7 @@ pub async fn batch_generate_brand(
                     }
                 }
             }
-            generator::find_existing_filament_id(
-                &specs.brand,
-                &specs.material,
-                &specs.serial,
-                ud,
-            )
+            generator::find_existing_filament_id(&specs.brand, &specs.material, &specs.serial, ud)
         });
 
         match generator::generate_profile(

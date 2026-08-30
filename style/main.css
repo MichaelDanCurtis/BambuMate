@@ -128,6 +128,7 @@ body {
     display: flex;
     flex-direction: column;
     border-right: 1px solid var(--border-primary);
+    -webkit-user-select: none;
     user-select: none;
     box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.4);
 }
@@ -401,6 +402,10 @@ select.input {
     cursor: pointer;
 }
 
+/* Chromium/WebView2 only. macOS renders <select> popups as a native AppKit
+   NSPopUpButton, so option styling is ignored there — the popup follows the
+   `color-scheme` declared on :root / [data-theme] instead, which is why that
+   property is set above. Keep both in sync. */
 select.input option {
     background-color: var(--bg-input);
     color: var(--text-primary);
@@ -962,7 +967,13 @@ select.input option {
 
 .wizard-overlay {
     position: fixed;
-    inset: 0;
+    /* Longhands rather than `inset`, which Safari only supports from 14.1.
+       If the shorthand is dropped the whole setup wizard collapses to a
+       zero-size box and the app looks like it failed to start. */
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
     z-index: 1000;
     display: flex;
     align-items: flex-start;
@@ -1254,6 +1265,7 @@ select.input option {
     border-radius: 10px;
     cursor: pointer;
     transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+    -webkit-user-select: none;
     user-select: none;
 }
 
@@ -1546,4 +1558,113 @@ select.input option {
 
 .about-link-btn:hover {
     color: var(--accent-hover, #2563eb);
+}
+
+/* ===== Diagnostics panel (Health page) ===== */
+
+.diagnostics-panel {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border-primary);
+}
+
+.diagnostics-controls {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+.diagnostics-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.diagnostics-env {
+    margin: 0.5rem 0 1rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.diagnostics-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.diagnostics-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    background: var(--bg-card);
+}
+
+.diagnostics-row-fail {
+    border-color: var(--status-error, #d9534f);
+}
+
+.diagnostics-row-warn {
+    border-color: var(--status-warning, #d9a441);
+}
+
+.diagnostics-status {
+    flex: 0 0 auto;
+    min-width: 3.25rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding-top: 0.15rem;
+}
+
+/* `.status-pass` / `.status-fail` already exist as badge styles; `warn` and
+   `skip` are specific to diagnostics, so they are scoped here rather than
+   added to the global palette. */
+.diagnostics-status.status-warn {
+    color: var(--color-warning, #b8860b);
+}
+
+.diagnostics-status.status-skip {
+    color: var(--text-secondary);
+}
+
+.diagnostics-body {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.diagnostics-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    margin-right: 0.5rem;
+}
+
+.diagnostics-id {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.diagnostics-detail {
+    margin: 0.25rem 0 0;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    /* Long paths must wrap instead of forcing the panel to scroll sideways. */
+    overflow-wrap: anywhere;
+}
+
+.diagnostics-remedy {
+    margin: 0.35rem 0 0;
+    font-size: 0.82rem;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
 }

@@ -77,7 +77,12 @@
 /* --- Table --- */
 .diff-table {
     width: 100%;
-    border-collapse: collapse;
+    /* `separate` + zero spacing rather than `collapse`: WebKit does not clip
+       collapsed-border cell backgrounds to the table's border-radius, so on
+       macOS the header background squared off the rounded corners. Cells only
+       ever set `border-bottom`, so nothing doubles up under `separate`. */
+    border-collapse: separate;
+    border-spacing: 0;
     table-layout: fixed;
     border: 1px solid var(--border-primary);
     border-radius: 8px;
@@ -122,6 +127,7 @@
     padding: 0.55rem 0.75rem;
     background: var(--bg-hover);
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
     border-top: 1px solid var(--border-primary);
 }

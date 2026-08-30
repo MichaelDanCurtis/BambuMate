@@ -428,8 +428,8 @@ fn PhotoDropZone(
     let file_input_id = "photo-file-input";
 
     // Callback to process a loaded file
-    let handle_file_loaded = move |base64: String| {
-        set_image_preview.set(Some(format!("data:image/jpeg;base64,{}", base64.clone())));
+    let handle_file_loaded = move |(mime, base64): (String, String)| {
+        set_image_preview.set(Some(format!("data:{};base64,{}", mime, base64)));
         set_state.set(AnalysisState::Ready(base64));
     };
 
@@ -444,8 +444,8 @@ fn PhotoDropZone(
                     set_is_loading.set(true);
                     spawn_local(async move {
                         match read_file_as_base64(file).await {
-                            Ok(base64) => {
-                                handle_file_loaded(base64);
+                            Ok(loaded) => {
+                                handle_file_loaded(loaded);
                             }
                             Err(e) => {
                                 web_sys::console::error_1(
@@ -468,8 +468,8 @@ fn PhotoDropZone(
                 set_is_loading.set(true);
                 spawn_local(async move {
                     match read_file_as_base64(file).await {
-                        Ok(base64) => {
-                            handle_file_loaded(base64);
+                        Ok(loaded) => {
+                            handle_file_loaded(loaded);
                         }
                         Err(e) => {
                             web_sys::console::error_1(
@@ -526,8 +526,18 @@ fn PhotoDropZone(
     }
 }
 
-/// Read a File as base64 string.
-async fn read_file_as_base64(file: web_sys::File) -> Result<String, String> {
+/// Read a File as base64, together with the image MIME type sniffed from its
+/// magic bytes.
+///
+/// The MIME type matters for the preview `data:` URL. WKWebView (macOS)
+/// validates the declared type and silently refuses to render an image whose
+/// bytes do not match, whereas Chromium/WebView2 (Windows) content-sniffs and
+/// renders it anyway — so hardcoding `image/jpeg` produced a blank preview for
+/// PNG/WebP/HEIC screenshots on macOS only.
+///
+/// Magic bytes are used rather than `File.type()` because files arriving via
+/// drag-and-drop frequently report an empty type.
+async fn read_file_as_base64(file: web_sys::File) -> Result<(String, String), String> {
     use js_sys::{ArrayBuffer, Uint8Array};
     use wasm_bindgen_futures::JsFuture;
 
@@ -540,8 +550,55 @@ async fn read_file_as_base64(file: web_sys::File) -> Result<String, String> {
     let uint8_array = Uint8Array::new(&array_buffer);
     let bytes = uint8_array.to_vec();
 
-    // Base64 encode
-    Ok(base64_encode(&bytes))
+    if bytes.is_empty() {
+        return Err("The selected file is empty".to_string());
+    }
+
+    // Fall back to the browser-reported type only when sniffing fails.
+    let mime = detect_image_mime(&bytes)
+        .map(|m| m.to_string())
+        .or_else(|| {
+            let reported = file.type_();
+            if reported.starts_with("image/") {
+                Some(reported)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            "Unsupported file type — please choose a JPEG, PNG, WebP, GIF or HEIC image".to_string()
+        })?;
+
+    Ok((mime, base64_encode(&bytes)))
+}
+
+/// Identify an image format from its leading bytes.
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    // RIFF....WEBP
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    // ISO-BMFF: ....ftyp<brand>. iPhone screenshots and photos are HEIC.
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return match &bytes[8..12] {
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" => Some("image/heic"),
+            b"avif" | b"avis" => Some("image/avif"),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Simple base64 encoder (avoiding extra dependencies in WASM).

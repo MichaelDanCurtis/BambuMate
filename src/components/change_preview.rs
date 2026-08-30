@@ -60,12 +60,20 @@ pub fn ChangePreview(
                         let param = rec.parameter.clone();
                         let param_for_toggle = param.clone();
                         let param_for_check = param.clone();
+                        let param_for_class = param.clone();
                         let label = rec.parameter_label.clone();
                         let change = rec.change_display.clone();
                         let rationale = rec.rationale.clone();
 
                         view! {
-                            <div class="change-item">
+                            // The selected state is mirrored onto a class
+                            // because `:has()` is unsupported before Safari
+                            // 15.4 (macOS 12.3), where the highlight would
+                            // silently never appear.
+                            <div
+                                class="change-item"
+                                class:is-selected=move || selected.get().contains(&param_for_class)
+                            >
                                 <label class="change-checkbox">
                                     <input
                                         type="checkbox"

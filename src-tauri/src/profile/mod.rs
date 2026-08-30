@@ -12,7 +12,7 @@ pub use nozzle::{
     apply_nozzle_limits, clamp_volumetric_speed, max_volumetric_speed_cap, parse_nozzle_diameter,
     NozzleAdjustment,
 };
-pub use paths::BambuPaths;
+pub use paths::{config_root_override, set_config_root_override, BambuPaths};
 pub use registry::ProfileRegistry;
 pub use types::{FilamentProfile, ProfileMetadata};
 pub use writer::write_profile_atomic;

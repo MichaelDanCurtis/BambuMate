@@ -1,0 +1,211 @@
+name: Test
+
+# The build workflow compiles for macOS and Windows but runs no tests, so
+# platform-specific breakage only surfaced once users hit it. This workflow
+# runs the same suite on every target OS.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel the other legs: when a change breaks macOS we want to see
+      # whether Windows broke too.
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-14
+          # Intel coverage matters here: the older WebKit/Safari versions this
+          # app must tolerate are most likely to show up on Intel Macs.
+          # `macos-13` was retired in December 2025; `macos-15-intel` is the
+          # supported x86_64 image (available until August 2027).
+          - name: macOS (Intel)
+            os: macos-15-intel
+          - name: Windows
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      # Tauri needs GTK/WebKit headers on Linux only; macOS and Windows runners
+      # already ship everything the backend links against.
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            src-tauri
+
+      - name: Check formatting (frontend)
+        run: cargo fmt --check
+
+      - name: Check formatting (backend)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Clippy (backend)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Backend tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Frontend typecheck
+        run: cargo check --target wasm32-unknown-unknown
+
+      # The platform self-test. Network and keychain are disabled: hosted
+      # runners have no unlocked login keychain, and the suite must not depend
+      # on outbound connectivity. Bambu Studio is not installed on runners, so
+      # those checks degrade to warn/skip by design.
+      - name: Platform diagnostics
+        run: |
+          cargo run --quiet --manifest-path src-tauri/Cargo.toml \
+            --bin bambumate-doctor -- --no-keychain --no-live-bambu
+        shell: bash
+
+      - name: Capture diagnostics report
+        if: always()
+        run: |
+          cargo run --quiet --manifest-path src-tauri/Cargo.toml \
+            --bin bambumate-doctor -- --json --no-keychain --no-live-bambu \
+            > bambumate-report-${{ matrix.os }}.json
+        shell: bash
+
+      - name: Upload diagnostics report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.os }}
+          path: bambumate-report-${{ matrix.os }}.json
+          if-no-files-found: warn
+
+  # Exploratory macOS leg: installs the REAL Bambu Studio and runs the full
+  # suite against it, including the live-install and keychain checks the main
+  # matrix skips. The maintainer has no Mac, so this is the only way to observe
+  # the actual on-disk layout macOS builds use -- notably whether system preset
+  # profiles live inside BambuStudio.app/Contents/Resources or under
+  # ~/Library/Application Support, which paths.rs has to get right.
+  #
+  # Never blocks the build: it depends on a third-party download and on
+  # runner-image details that can shift underneath us.
+  macos-live:
+    name: macOS live install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15-intel]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Bambu Studio
+        id: install
+        run: |
+          # Not --quarantine: we only read the bundle, never launch it, and a
+          # hosted runner has no GUI session to answer a Gatekeeper prompt.
+          brew install --cask bambu-studio || echo "cask install failed"
+          # Must not fail the step when absent: `set -e` is on and the job is
+          # meant to report, not gate.
+          if [ -d /Applications/BambuStudio.app ]; then
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The payload. Everything below is diagnostic output the maintainer reads
+      # back from the artifact, since none of it can be observed from Windows.
+      - name: Probe real macOS layout
+        if: steps.install.outputs.installed == 'true'
+        run: |
+          {
+            echo "### Bundle layout"
+            find /Applications/BambuStudio.app -maxdepth 3 -type d 2>/dev/null | head -60
+            echo
+            echo "### Executable(s) in Contents/MacOS"
+            ls -la /Applications/BambuStudio.app/Contents/MacOS/ || true
+            echo
+            echo "### CFBundleExecutable / version"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+              /Applications/BambuStudio.app/Contents/Info.plist || true
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+              /Applications/BambuStudio.app/Contents/Info.plist || true
+            echo
+            echo "### Where do system filament profiles actually live?"
+            find /Applications/BambuStudio.app -type d -name filament 2>/dev/null | head -20
+            # BSD find wants -maxdepth before the tests.
+            find /Applications/BambuStudio.app -maxdepth 5 -name 'BBL*' 2>/dev/null | head -20
+            echo
+            echo "### User data dir (expected empty until first launch)"
+            ls -la "$HOME/Library/Application Support/BambuStudio" 2>&1 | head -30
+          } | tee macos-layout-${{ matrix.os }}.txt
+
+      - name: Full diagnostics against the real install
+        if: always()
+        run: |
+          cargo run --quiet --manifest-path src-tauri/Cargo.toml \
+            --bin bambumate-doctor -- --json \
+            > bambumate-live-${{ matrix.os }}.json || true
+          # Human-readable copy too, so failures are legible in the log.
+          cargo run --quiet --manifest-path src-tauri/Cargo.toml \
+            --bin bambumate-doctor || true
+
+      - name: Upload macOS findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-live-${{ matrix.os }}
+          path: |
+            macos-layout-${{ matrix.os }}.txt
+            bambumate-live-${{ matrix.os }}.json
+          if-no-files-found: warn
+
+  frontend-build:
+    name: Frontend build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      # Catches Leptos view! macro errors and asset-pipeline problems that a
+      # plain `cargo check` does not.
+      - name: Build frontend
+        run: trunk build

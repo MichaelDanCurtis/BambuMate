@@ -19,12 +19,9 @@ use tracing::{debug, info, warn};
 
 use super::recommend::classify_tier;
 
-const BUNDLED_MODELS_DEV: &str =
-    include_str!("../../resources/model_catalog/models_dev.json");
-const BUNDLED_OPENROUTER: &str =
-    include_str!("../../resources/model_catalog/openrouter.json");
-const BUNDLED_KIMI_ALIAS: &str =
-    include_str!("../../resources/model_catalog/kimi_alias.toml");
+const BUNDLED_MODELS_DEV: &str = include_str!("../../resources/model_catalog/models_dev.json");
+const BUNDLED_OPENROUTER: &str = include_str!("../../resources/model_catalog/openrouter.json");
+const BUNDLED_KIMI_ALIAS: &str = include_str!("../../resources/model_catalog/kimi_alias.toml");
 
 const DEFAULT_DISK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const KIMI_DISK_TTL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -170,7 +167,11 @@ fn disk_load(app: &AppHandle, provider: &str) -> Option<Vec<CatalogEntry>> {
         debug!("Disk cache expired for {}", provider);
         return None;
     }
-    debug!("Loaded {} entries from disk cache for {}", cache.entries.len(), provider);
+    debug!(
+        "Loaded {} entries from disk cache for {}",
+        cache.entries.len(),
+        provider
+    );
     Some(cache.entries)
 }
 
@@ -193,7 +194,11 @@ fn disk_save(app: &AppHandle, provider: &str, entries: &[CatalogEntry]) -> Resul
     tmp.write_all(raw.as_bytes()).map_err(|e| e.to_string())?;
     tmp.flush().map_err(|e| e.to_string())?;
     tmp.persist(&path).map_err(|e| e.to_string())?;
-    debug!("Saved {} entries to disk cache for {}", entries.len(), provider);
+    debug!(
+        "Saved {} entries to disk cache for {}",
+        entries.len(),
+        provider
+    );
     Ok(())
 }
 
@@ -205,6 +210,43 @@ fn bundled_snapshot(provider: &str) -> Vec<CatalogEntry> {
             parse_models_dev(BUNDLED_MODELS_DEV, key).unwrap_or_default()
         }
         _ => Vec::new(),
+    }
+}
+
+/// Providers whose bundled snapshot must be non-empty for the app to be able
+/// to offer model selection with no network access.
+pub const BUNDLED_PROVIDERS: [&str; 4] = ["openai", "claude", "kimi", "openrouter"];
+
+/// Parse every bundled catalog snapshot and report how many entries each
+/// provider yielded.
+///
+/// The snapshots are embedded with `include_str!`, so this exercises the
+/// compiled-in data rather than anything on disk — it is identical on every
+/// platform and catches a snapshot that was updated into an unparseable shape.
+/// Returns an error listing any provider that parsed to zero entries.
+pub fn bundled_catalog_summary() -> Result<Vec<(String, usize)>, String> {
+    let mut summary = Vec::with_capacity(BUNDLED_PROVIDERS.len());
+    let mut empty = Vec::new();
+
+    for provider in BUNDLED_PROVIDERS {
+        let count = bundled_snapshot(provider).len();
+        if count == 0 {
+            empty.push(provider);
+        }
+        summary.push((provider.to_string(), count));
+    }
+
+    if BUNDLED_KIMI_ALIAS.trim().is_empty() {
+        return Err("bundled kimi_alias.toml is empty".to_string());
+    }
+
+    if empty.is_empty() {
+        Ok(summary)
+    } else {
+        Err(format!(
+            "bundled catalog snapshot parsed to zero entries for: {}",
+            empty.join(", ")
+        ))
     }
 }
 
@@ -225,7 +267,10 @@ async fn fetch_live(provider: &str) -> Result<Vec<CatalogEntry>, String> {
                 .await
                 .map_err(|e| format!("openrouter body: {}", e))?;
             let entries = parse_openrouter(&body)?;
-            info!("Fetched {} openrouter models from live catalog", entries.len());
+            info!(
+                "Fetched {} openrouter models from live catalog",
+                entries.len()
+            );
             Ok(entries)
         }
         "openai" | "claude" | "kimi" => {
@@ -239,10 +284,17 @@ async fn fetch_live(provider: &str) -> Result<Vec<CatalogEntry>, String> {
                 .await
                 .map_err(|e| format!("models.dev body: {}", e))?;
             let entries = parse_models_dev(&body, key)?;
-            info!("Fetched {} {} models from live catalog", entries.len(), provider);
+            info!(
+                "Fetched {} {} models from live catalog",
+                entries.len(),
+                provider
+            );
             Ok(entries)
         }
-        _ => Err(format!("no live catalog source for provider '{}'", provider)),
+        _ => Err(format!(
+            "no live catalog source for provider '{}'",
+            provider
+        )),
     }
 }
 

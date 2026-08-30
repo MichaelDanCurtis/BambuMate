@@ -56,10 +56,7 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
     }
 
     if !response.status().is_success() {
-        return Err(format!(
-            "GitHub API returned status {}",
-            response.status()
-        ));
+        return Err(format!("GitHub API returned status {}", response.status()));
     }
 
     let body: serde_json::Value = response
@@ -103,10 +100,7 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
 /// Returns true if `candidate` is strictly newer than `current`.
 fn is_newer(candidate: &str, current: &str) -> bool {
     let parse = |v: &str| -> (u32, u32, u32) {
-        let parts: Vec<u32> = v
-            .split('.')
-            .filter_map(|p| p.parse().ok())
-            .collect();
+        let parts: Vec<u32> = v.split('.').filter_map(|p| p.parse().ok()).collect();
         (
             parts.first().copied().unwrap_or(0),
             parts.get(1).copied().unwrap_or(0),

@@ -6,6 +6,18 @@ use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
 use crate::theme::ThemeContext;
 
+/// Detect whether the app is running on macOS.
+///
+/// The frontend is compiled to `wasm32-unknown-unknown`, so `cfg!(target_os)`
+/// always reports `unknown` here — the host OS can only be determined at
+/// runtime from the webview's user agent.
+fn is_macos_host() -> bool {
+    web_sys::window()
+        .map(|w| w.navigator().user_agent().unwrap_or_default())
+        .map(|ua| ua.contains("Mac OS X") || ua.contains("Macintosh"))
+        .unwrap_or(false)
+}
+
 #[component]
 pub fn SettingsPage() -> impl IntoView {
     let (bambu_path, set_bambu_path) = signal(String::new());
@@ -704,12 +716,20 @@ pub fn SettingsPage() -> impl IntoView {
 
                 <div class="form-group">
                     <label for="bambu-path">"Bambu Studio Configuration Path"</label>
-                    <p class="section-description">"The folder where Bambu Studio stores profiles. On Windows: %APPDATA%\\BambuStudio"</p>
+                    <p class="section-description">
+                        "The folder where Bambu Studio stores profiles. On Windows: %APPDATA%\\BambuStudio. On macOS: ~/Library/Application Support/BambuStudio"
+                    </p>
                     <div class="input-with-buttons">
                         <input
                             id="bambu-path"
                             type="text"
-                            placeholder="e.g. C:\\Users\\You\\AppData\\Roaming\\BambuStudio"
+                            placeholder=move || {
+                                if is_macos_host() {
+                                    "e.g. /Users/you/Library/Application Support/BambuStudio"
+                                } else {
+                                    "e.g. C:\\Users\\You\\AppData\\Roaming\\BambuStudio"
+                                }
+                            }
                             class="input"
                             prop:value=move || bambu_path.get()
                             on:input=move |ev| {

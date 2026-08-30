@@ -504,7 +504,13 @@ fn apply_nozzle_tuning(
     patch_f32!("pressure_advance", pressure_advance, 0.0, 2.0);
     patch_f32!("retraction_distance_mm", retraction_distance_mm, 0.0, 10.0);
 
-    patch_int!("nozzle_temperature", nozzle_temperature, u16, temp_lo, temp_hi);
+    patch_int!(
+        "nozzle_temperature",
+        nozzle_temperature,
+        u16,
+        temp_lo,
+        temp_hi
+    );
     patch_int!(
         "nozzle_temperature_initial_layer",
         nozzle_temperature_initial_layer,
@@ -518,7 +524,13 @@ fn apply_nozzle_tuning(
     patch_int!("slow_down_layer_time", slow_down_layer_time, u8, 0, 255);
     patch_int!("slow_down_min_speed", slow_down_min_speed, u16, 0, 1000);
     patch_int!("retraction_speed_mm_s", retraction_speed_mm_s, u16, 0, 200);
-    patch_int!("deretraction_speed_mm_s", deretraction_speed_mm_s, u16, 0, 200);
+    patch_int!(
+        "deretraction_speed_mm_s",
+        deretraction_speed_mm_s,
+        u16,
+        0,
+        200
+    );
     patch_int!("bridge_speed", bridge_speed, u16, 0, 500);
 
     let notes = json["notes"]
@@ -553,7 +565,9 @@ fn format_number(value: f32) -> String {
 
 /// Render an optional float, using `"unset"` for `None`.
 fn opt_number(value: Option<f32>) -> String {
-    value.map(format_number).unwrap_or_else(|| "unset".to_string())
+    value
+        .map(format_number)
+        .unwrap_or_else(|| "unset".to_string())
 }
 
 /// Render an optional value, using `"unset"` for `None`.

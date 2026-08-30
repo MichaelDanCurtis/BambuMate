@@ -11,6 +11,7 @@
     align-items: center;
     justify-content: center;
     z-index: 1000;
+    -webkit-backdrop-filter: blur(4px);
     backdrop-filter: blur(4px);
 }
 
@@ -72,6 +73,15 @@
     border-radius: 8px;
     padding: 1rem;
     transition: border-color 0.15s ease;
+}
+
+/* Driven by a Leptos `class:is-selected` binding rather than
+   `:has(input:checked)`, which Safari only supports from 15.4 (macOS 12.3).
+   Kept as a separate rule, NOT a comma-separated group: a browser that cannot
+   parse `:has()` discards the entire selector list, which would take the
+   working class-based rule down with it. */
+.change-item.is-selected {
+    border-color: var(--accent);
 }
 
 .change-item:has(input:checked) {

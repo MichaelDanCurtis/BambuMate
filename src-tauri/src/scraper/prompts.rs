@@ -443,8 +443,8 @@ pub fn build_nozzle_tuning_prompt(
 ) -> String {
     let schema = serde_json::to_string_pretty(&nozzle_tuning_json_schema())
         .unwrap_or_else(|_| "{}".to_string());
-    let current = serde_json::to_string_pretty(current_settings)
-        .unwrap_or_else(|_| "{}".to_string());
+    let current =
+        serde_json::to_string_pretty(current_settings).unwrap_or_else(|_| "{}".to_string());
 
     format!(
         r#"You are tuning a Bambu Studio filament profile for a specific nozzle size.
@@ -797,7 +797,10 @@ mod tests {
 
         assert!(prompt.contains("Sunlu PLA Meta"));
         assert!(prompt.contains("PLA"));
-        assert!(prompt.contains("0.2 mm"), "prompt must name the nozzle size");
+        assert!(
+            prompt.contains("0.2 mm"),
+            "prompt must name the nozzle size"
+        );
         assert!(
             prompt.contains("must not exceed 2 mm3/s"),
             "prompt must state the enforced flow ceiling"

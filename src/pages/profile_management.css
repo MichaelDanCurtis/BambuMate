@@ -228,7 +228,13 @@
 /* Confirmation modal */
 .modal-overlay {
     position: fixed;
-    inset: 0;
+    /* Longhands rather than `inset`, which Safari only supports from 14.1.
+       On older macOS the shorthand is dropped and the overlay collapses to a
+       zero-size box, leaving the modal invisible but still blocking clicks. */
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
     background: rgba(0, 0, 0, 0.5);
     display: flex;
     align-items: center;

@@ -389,12 +389,7 @@ pub async fn generate_profile_from_specs(
     //   3. Fresh random ID (first time this filament is ever generated)
     let resolved_filament_id = existing_filament_id.or_else(|| {
         user_dir.as_ref().and_then(|ud| {
-            generator::find_existing_filament_id(
-                &specs.brand,
-                &specs.material,
-                &specs.serial,
-                ud,
-            )
+            generator::find_existing_filament_id(&specs.brand, &specs.material, &specs.serial, ud)
         })
     });
 
@@ -447,10 +442,7 @@ pub async fn generate_profile_from_specs(
     .map_err(|e| format!("Failed to generate profile: {}", e))?;
 
     // Capture the filament_id that was used (for the caller to propagate in batches)
-    let filament_id = profile
-        .filament_id()
-        .unwrap_or("")
-        .to_string();
+    let filament_id = profile.filament_id().unwrap_or("").to_string();
 
     // Compute diffs between base and generated profile
     let diffs = compute_profile_diffs(&base_resolved, &profile);
@@ -840,7 +832,10 @@ pub fn save_profile_specs(
     let new_name = if specs.serial.is_empty() {
         format!("{} {}{}", specs.brand, specs.material, printer_suffix)
     } else {
-        format!("{} {} {}{}", specs.brand, specs.material, specs.serial, printer_suffix)
+        format!(
+            "{} {} {}{}",
+            specs.brand, specs.material, specs.serial, printer_suffix
+        )
     };
     profile.set_string("name", new_name);
 
@@ -1411,10 +1406,7 @@ mod tests {
     #[test]
     fn parses_bambu_printer_label() {
         let parsed = parse_target_printer_label("Bambu Lab X1 Carbon 0.6 nozzle");
-        assert_eq!(
-            parsed,
-            Some(("X1 Carbon".to_string(), "0.6".to_string()))
-        );
+        assert_eq!(parsed, Some(("X1 Carbon".to_string(), "0.6".to_string())));
     }
 
     #[test]
@@ -1430,8 +1422,14 @@ mod tests {
 
         assert_eq!(options.default_printer_model, DEFAULT_TARGET_PRINTER_MODEL);
         assert_eq!(options.default_nozzle_size, DEFAULT_NOZZLE_SIZE);
-        assert_eq!(options.printer_models.first().map(String::as_str), Some("H2C"));
-        assert_eq!(options.nozzle_sizes.first().map(String::as_str), Some("0.4"));
+        assert_eq!(
+            options.printer_models.first().map(String::as_str),
+            Some("H2C")
+        );
+        assert_eq!(
+            options.nozzle_sizes.first().map(String::as_str),
+            Some("0.4")
+        );
         assert!(options.printer_models.iter().any(|printer| printer == "A1"));
         assert!(options.nozzle_sizes.iter().any(|nozzle| nozzle == "0.8"));
     }
@@ -1470,7 +1468,9 @@ mod tests {
         ];
         let hits = filter_base_profile_index(&idx, "bambu", Some("PLA"));
         assert_eq!(hits.len(), 2);
-        assert!(hits.iter().all(|m| m.filament_type.as_deref() == Some("PLA")));
+        assert!(hits
+            .iter()
+            .all(|m| m.filament_type.as_deref() == Some("PLA")));
     }
 
     #[test]

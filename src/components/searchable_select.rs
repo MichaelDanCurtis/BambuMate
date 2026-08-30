@@ -142,10 +142,8 @@ pub fn SearchableSelect(
             });
 
         if let Some(window) = web_sys::window() {
-            let _ = window.add_event_listener_with_callback(
-                "mousedown",
-                closure.as_ref().unchecked_ref(),
-            );
+            let _ = window
+                .add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref());
         }
 
         listener.update_value(|slot| *slot = Some(closure));

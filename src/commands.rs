@@ -206,6 +206,67 @@ pub async fn run_health_check() -> Result<HealthReport, String> {
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
 
+/// Result of a single diagnostics check.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckReport {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    /// One of `pass`, `warn`, `fail`, `skip`.
+    pub status: String,
+    pub detail: String,
+    pub remedy: Option<String>,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagnosticsSummary {
+    pub passed: usize,
+    pub warned: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagnosticsReport {
+    pub os: String,
+    pub arch: String,
+    pub app_version: String,
+    pub generated_at: String,
+    pub bundled: bool,
+    pub checks: Vec<CheckReport>,
+    pub summary: DiagnosticsSummary,
+}
+
+/// Args for [`run_diagnostics`].
+///
+/// A serde struct rather than `serde_json::json!`, because
+/// `serde_wasm_bindgen` serializes a JSON map to a JS `Map`, which Tauri
+/// cannot destructure into named command arguments. Tauri converts camelCase
+/// keys to the snake_case Rust parameter names.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunDiagnosticsArgs {
+    include_network: bool,
+}
+
+/// Run the built-in self-test suite.
+///
+/// Running this from inside the packaged app is the only way to observe the
+/// real runtime environment — a bundled macOS `.app` has a reduced `PATH`,
+/// sandbox/TCC prompts and signature-bound keychain access that a terminal
+/// build never reproduces.
+pub async fn run_diagnostics(include_network: bool) -> Result<DiagnosticsReport, String> {
+    let args = serde_wasm_bindgen::to_value(&RunDiagnosticsArgs { include_network })
+        .map_err(|e| e.to_string())?;
+
+    let result = invoke("run_diagnostics", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
 /// Open a native folder picker and return the selected path, or None if cancelled.
 pub async fn pick_config_folder() -> Result<Option<String>, String> {
     let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
