@@ -5,10 +5,11 @@ use tracing::{error, info, warn};
 
 use super::prompts::{
     build_extraction_prompt, build_html_extraction_prompt, build_knowledge_prompt,
-    filament_specs_json_schema,
+    build_nozzle_tuning_prompt, filament_specs_json_schema, nozzle_tuning_json_schema,
 };
-use super::types::FilamentSpecs;
-use super::validation::validate_specs;
+use super::types::{FilamentSpecs, MaterialType, NozzleTuning, NozzleTuningChange};
+use super::validation::{constraints_for_material, validate_specs};
+use crate::profile::nozzle::max_volumetric_speed_cap;
 use crate::str_utils::truncate_with_ellipsis;
 
 /// Extract filament specifications from page text using an LLM provider.
@@ -275,6 +276,305 @@ pub async fn generate_specs_from_knowledge(
     );
 
     Ok(specs)
+}
+
+/// Review a spec sheet for one specific nozzle diameter using the AI provider.
+///
+/// Manufacturer datasheets (and the AI's own knowledge) describe a filament for
+/// a standard 0.4 mm nozzle. Several profile settings are really properties of
+/// the *hot end*: volumetric flow above all, but also pressure advance,
+/// retraction, cooling and temperature. This asks the model for a sparse patch
+/// of only the settings that should differ for `nozzle_diameter`.
+///
+/// The response is treated as advisory:
+/// - values are clamped into physically safe ranges for the material,
+/// - `max_volumetric_speed` is clamped to the app's hard per-nozzle ceiling
+///   (see [`crate::profile::nozzle`]) whether the AI respected it or not, and
+/// - that ceiling is applied even when the AI proposes no change at all.
+///
+/// # Arguments
+/// * `specs` - Specs as sourced (assumed to target a 0.4 mm nozzle)
+/// * `filament_name` - Display name used in the prompt
+/// * `nozzle_diameter` - Target nozzle diameter in mm (e.g. 0.2)
+/// * `provider` / `model` / `api_key` - AI provider configuration
+pub async fn tune_specs_for_nozzle(
+    specs: &FilamentSpecs,
+    filament_name: &str,
+    nozzle_diameter: f32,
+    provider: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<NozzleTuning, String> {
+    let flow_cap = max_volumetric_speed_cap(nozzle_diameter);
+    let current = current_nozzle_settings(specs);
+    let prompt = build_nozzle_tuning_prompt(
+        filament_name,
+        &specs.material,
+        nozzle_diameter,
+        flow_cap,
+        &current,
+    );
+    let schema = nozzle_tuning_json_schema();
+
+    info!(
+        "Tuning specs for '{}' at {}mm nozzle (cap {} mm3/s) using provider '{}' model '{}'",
+        filament_name, nozzle_diameter, flow_cap, provider, model
+    );
+
+    let response_text = match provider {
+        "claude" => call_claude(api_key, model, &prompt, &schema).await?,
+        "openai" => call_openai(api_key, model, &prompt, &schema).await?,
+        "kimi" => call_kimi(api_key, model, &prompt).await?,
+        "openrouter" => call_openrouter(api_key, model, &prompt, &schema).await?,
+        "local" => call_local(api_key, model, &prompt).await?,
+        _ => {
+            let msg = format!(
+                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
+                provider
+            );
+            error!("{}", msg);
+            return Err(msg);
+        }
+    };
+
+    let response_text = strip_markdown_json(&response_text);
+    let response_json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
+        let truncated = truncate_with_ellipsis(&response_text, 500, "...");
+        let msg = format!(
+            "Failed to parse nozzle tuning response as JSON: {}. Raw response: {}",
+            e, truncated
+        );
+        error!("{}", msg);
+        msg
+    })?;
+
+    let mut tuning = apply_nozzle_tuning(specs, nozzle_diameter, &response_json);
+
+    // The AI's answer is advisory; the ceiling is not. Apply it last so a model
+    // that ignored (or never touched) the flow limit can't ship an impossible
+    // profile.
+    enforce_flow_cap(&mut tuning);
+
+    for w in validate_specs(&tuning.specs) {
+        // Only surface warnings caused by this review — the input specs may
+        // already carry unrelated out-of-range values.
+        if !tuning.changes.iter().any(|c| c.field == w.field) {
+            continue;
+        }
+        warn!(
+            "Nozzle tuning produced an out-of-range value for '{}': {} (field: {}, value: {})",
+            filament_name, w.message, w.field, w.value
+        );
+        tuning.notes.push(format!("Warning: {}", w.message));
+    }
+
+    info!(
+        "Nozzle tuning for '{}' at {}mm: {} change(s), confidence={}",
+        filament_name,
+        nozzle_diameter,
+        tuning.changes.len(),
+        tuning.confidence
+    );
+
+    Ok(tuning)
+}
+
+/// Apply the deterministic per-nozzle flow ceiling to already-tuned specs,
+/// recording it as a change when it actually bites.
+fn enforce_flow_cap(tuning: &mut NozzleTuning) {
+    let Some(value) = tuning.specs.max_volumetric_speed else {
+        return;
+    };
+    if value <= tuning.flow_cap {
+        return;
+    }
+
+    tuning.specs.max_volumetric_speed = Some(tuning.flow_cap);
+
+    // Fold into the AI's own change entry when it already touched this field,
+    // so the audit trail shows one final value rather than two.
+    if let Some(existing) = tuning
+        .changes
+        .iter_mut()
+        .find(|c| c.field == "max_volumetric_speed")
+    {
+        existing.to = format_number(tuning.flow_cap);
+        existing.source = "limit".to_string();
+    } else {
+        tuning.changes.push(NozzleTuningChange {
+            field: "max_volumetric_speed".to_string(),
+            from: format_number(value),
+            to: format_number(tuning.flow_cap),
+            source: "limit".to_string(),
+        });
+    }
+
+    tuning.notes.push(format!(
+        "Max volumetric flow capped at {} mm³/s — a {:.1} mm nozzle cannot sustain {} mm³/s.",
+        format_number(tuning.flow_cap),
+        tuning.nozzle_diameter,
+        format_number(value)
+    ));
+}
+
+/// Collect the current values of the nozzle-dependent settings for the prompt.
+fn current_nozzle_settings(specs: &FilamentSpecs) -> serde_json::Value {
+    serde_json::json!({
+        "max_volumetric_speed": specs.max_volumetric_speed,
+        "nozzle_temperature": specs.nozzle_temperature,
+        "nozzle_temperature_initial_layer": specs.nozzle_temperature_initial_layer,
+        "filament_flow_ratio": specs.filament_flow_ratio,
+        "pressure_advance": specs.pressure_advance,
+        "fan_min_speed": specs.fan_min_speed,
+        "fan_max_speed": specs.fan_max_speed,
+        "overhang_fan_speed": specs.overhang_fan_speed,
+        "slow_down_layer_time": specs.slow_down_layer_time,
+        "slow_down_min_speed": specs.slow_down_min_speed,
+        "retraction_distance_mm": specs.retraction_distance_mm,
+        "retraction_speed_mm_s": specs.retraction_speed_mm_s,
+        "deretraction_speed_mm_s": specs.deretraction_speed_mm_s,
+        "bridge_speed": specs.bridge_speed,
+    })
+}
+
+/// Apply a nozzle tuning response onto `specs` as a sparse patch.
+///
+/// Only non-null fields are applied, each clamped into a physically safe range.
+/// Values identical to the current one are not recorded as changes.
+fn apply_nozzle_tuning(
+    specs: &FilamentSpecs,
+    nozzle_diameter: f32,
+    json: &serde_json::Value,
+) -> NozzleTuning {
+    let mut tuned = specs.clone();
+    let mut changes: Vec<NozzleTuningChange> = Vec::new();
+
+    let constraints = constraints_for_material(&MaterialType::from_str(&specs.material));
+    // Allow the same headroom the generator uses for the BS temperature slider.
+    let temp_lo = constraints.nozzle_temp_min;
+    let temp_hi = constraints.nozzle_temp_max;
+
+    macro_rules! patch_f32 {
+        ($key:literal, $field:ident, $lo:expr, $hi:expr) => {
+            if let Some(raw) = json[$key].as_f64() {
+                let value = (raw as f32).clamp($lo, $hi);
+                let changed = match tuned.$field {
+                    Some(current) => (current - value).abs() > f32::EPSILON,
+                    None => true,
+                };
+                if changed {
+                    changes.push(NozzleTuningChange {
+                        field: $key.to_string(),
+                        from: opt_number(tuned.$field),
+                        to: format_number(value),
+                        source: "ai".to_string(),
+                    });
+                    tuned.$field = Some(value);
+                }
+            }
+        };
+    }
+
+    macro_rules! patch_int {
+        ($key:literal, $field:ident, $ty:ty, $lo:expr, $hi:expr) => {
+            if let Some(raw) = json[$key].as_f64() {
+                let value = (raw.round() as i64).clamp($lo as i64, $hi as i64) as $ty;
+                if tuned.$field != Some(value) {
+                    changes.push(NozzleTuningChange {
+                        field: $key.to_string(),
+                        from: opt_display(tuned.$field),
+                        to: value.to_string(),
+                        source: "ai".to_string(),
+                    });
+                    tuned.$field = Some(value);
+                }
+            }
+        };
+    }
+
+    // Flow: an upper bound of the per-nozzle cap is enforced separately, but
+    // clamp here too so the recorded change never shows an impossible value.
+    patch_f32!(
+        "max_volumetric_speed",
+        max_volumetric_speed,
+        0.1,
+        max_volumetric_speed_cap(nozzle_diameter)
+    );
+    patch_f32!("filament_flow_ratio", filament_flow_ratio, 0.5, 1.5);
+    patch_f32!("pressure_advance", pressure_advance, 0.0, 2.0);
+    patch_f32!("retraction_distance_mm", retraction_distance_mm, 0.0, 10.0);
+
+    patch_int!(
+        "nozzle_temperature",
+        nozzle_temperature,
+        u16,
+        temp_lo,
+        temp_hi
+    );
+    patch_int!(
+        "nozzle_temperature_initial_layer",
+        nozzle_temperature_initial_layer,
+        u16,
+        temp_lo,
+        temp_hi
+    );
+    patch_int!("fan_min_speed", fan_min_speed, u8, 0, 100);
+    patch_int!("fan_max_speed", fan_max_speed, u8, 0, 100);
+    patch_int!("overhang_fan_speed", overhang_fan_speed, u8, 0, 100);
+    patch_int!("slow_down_layer_time", slow_down_layer_time, u8, 0, 255);
+    patch_int!("slow_down_min_speed", slow_down_min_speed, u16, 0, 1000);
+    patch_int!("retraction_speed_mm_s", retraction_speed_mm_s, u16, 0, 200);
+    patch_int!(
+        "deretraction_speed_mm_s",
+        deretraction_speed_mm_s,
+        u16,
+        0,
+        200
+    );
+    patch_int!("bridge_speed", bridge_speed, u16, 0, 500);
+
+    let notes = json["notes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    NozzleTuning {
+        specs: tuned,
+        nozzle_diameter,
+        flow_cap: max_volumetric_speed_cap(nozzle_diameter),
+        changes,
+        notes,
+        confidence: json["confidence"].as_f64().unwrap_or(0.0) as f32,
+    }
+}
+
+/// Format a float the way the UI expects: integers without a trailing `.0`.
+fn format_number(value: f32) -> String {
+    if (value - value.round()).abs() < f32::EPSILON {
+        format!("{:.0}", value)
+    } else {
+        format!("{:.2}", value)
+    }
+}
+
+/// Render an optional float, using `"unset"` for `None`.
+fn opt_number(value: Option<f32>) -> String {
+    value
+        .map(format_number)
+        .unwrap_or_else(|| "unset".to_string())
+}
+
+/// Render an optional value, using `"unset"` for `None`.
+fn opt_display<T: std::fmt::Display>(value: Option<T>) -> String {
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "unset".to_string())
 }
 
 /// Map the raw LLM response JSON to our FilamentSpecs struct.
@@ -999,5 +1299,117 @@ mod tests {
         // No serial key and filament_name has no serial portion → defaults to "Basic"
         let specs = map_response_to_specs(&json, "TestBrand PLA").unwrap();
         assert_eq!(specs.serial, "Basic");
+    }
+
+    // === Per-nozzle tuning ===
+
+    /// Specs as they arrive from the scraper: quoted for a 0.4 mm nozzle.
+    fn pla_specs() -> FilamentSpecs {
+        FilamentSpecs {
+            brand: "TestBrand".to_string(),
+            material: "PLA".to_string(),
+            serial: "Basic".to_string(),
+            max_volumetric_speed: Some(21.0),
+            nozzle_temperature: Some(210),
+            pressure_advance: Some(0.02),
+            fan_max_speed: Some(100),
+            retraction_distance_mm: Some(0.8),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tuning_applies_only_non_null_fields() {
+        let specs = pla_specs();
+        let json = serde_json::json!({
+            "max_volumetric_speed": 2.0,
+            "pressure_advance": 0.045,
+            "nozzle_temperature": null,
+            "fan_max_speed": null,
+            "notes": ["Flow limited by melt pressure on a 0.2mm nozzle."],
+            "confidence": 0.8
+        });
+
+        let tuning = apply_nozzle_tuning(&specs, 0.2, &json);
+
+        assert_eq!(tuning.specs.max_volumetric_speed, Some(2.0));
+        assert_eq!(tuning.specs.pressure_advance, Some(0.045));
+        // Null fields keep their original values.
+        assert_eq!(tuning.specs.nozzle_temperature, Some(210));
+        assert_eq!(tuning.specs.fan_max_speed, Some(100));
+        assert_eq!(tuning.changes.len(), 2);
+        assert_eq!(tuning.notes.len(), 1);
+    }
+
+    #[test]
+    fn tuning_ignores_values_identical_to_current() {
+        let specs = pla_specs();
+        let json = serde_json::json!({
+            "max_volumetric_speed": 21.0,
+            "nozzle_temperature": 210,
+            "notes": [],
+            "confidence": 0.5
+        });
+
+        let tuning = apply_nozzle_tuning(&specs, 0.4, &json);
+        assert!(tuning.changes.is_empty());
+    }
+
+    #[test]
+    fn tuning_clamps_ai_values_into_safe_ranges() {
+        let specs = pla_specs();
+        let json = serde_json::json!({
+            // Wildly unsafe for PLA and far above what a 0.2mm nozzle can do.
+            "max_volumetric_speed": 40.0,
+            "nozzle_temperature": 400,
+            "fan_max_speed": 250,
+            "notes": [],
+            "confidence": 0.4
+        });
+
+        let tuning = apply_nozzle_tuning(&specs, 0.2, &json);
+        assert_eq!(tuning.specs.max_volumetric_speed, Some(2.0));
+        assert_eq!(tuning.specs.nozzle_temperature, Some(235)); // PLA constraint max
+        assert_eq!(tuning.specs.fan_max_speed, Some(100));
+    }
+
+    #[test]
+    fn flow_cap_is_enforced_when_ai_proposes_nothing() {
+        let specs = pla_specs();
+        let json = serde_json::json!({ "notes": [], "confidence": 0.0 });
+
+        let mut tuning = apply_nozzle_tuning(&specs, 0.2, &json);
+        assert!(tuning.changes.is_empty());
+
+        enforce_flow_cap(&mut tuning);
+
+        assert_eq!(tuning.specs.max_volumetric_speed, Some(2.0));
+        assert_eq!(tuning.changes.len(), 1);
+        assert_eq!(tuning.changes[0].field, "max_volumetric_speed");
+        assert_eq!(tuning.changes[0].from, "21");
+        assert_eq!(tuning.changes[0].to, "2");
+        assert_eq!(tuning.changes[0].source, "limit");
+        assert_eq!(tuning.notes.len(), 1);
+    }
+
+    #[test]
+    fn flow_cap_leaves_reasonable_values_alone() {
+        let specs = pla_specs();
+        let json = serde_json::json!({ "notes": [], "confidence": 0.0 });
+
+        let mut tuning = apply_nozzle_tuning(&specs, 0.4, &json);
+        enforce_flow_cap(&mut tuning);
+
+        assert_eq!(tuning.specs.max_volumetric_speed, Some(21.0));
+        assert!(tuning.changes.is_empty());
+        assert!(tuning.notes.is_empty());
+    }
+
+    #[test]
+    fn tuning_reports_the_cap_for_the_target_nozzle() {
+        let specs = pla_specs();
+        let json = serde_json::json!({ "notes": [], "confidence": 0.0 });
+        assert_eq!(apply_nozzle_tuning(&specs, 0.2, &json).flow_cap, 2.0);
+        assert_eq!(apply_nozzle_tuning(&specs, 0.2, &json).nozzle_diameter, 0.2);
     }
 }

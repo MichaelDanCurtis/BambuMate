@@ -1009,6 +1009,27 @@
     cursor: pointer;
 }
 
+/* Explanatory text under a spec field (e.g. the per-nozzle AI tuning toggle) */
+.spec-field-hint {
+    margin: 0.35rem 0 0;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    color: var(--text-secondary);
+}
+
+/* Per-nozzle AI tuning notes shown with generation results */
+.nozzle-tuning-notes {
+    margin: 0.4rem 0 0;
+    padding-left: 1.1rem;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
+.nozzle-tuning-notes li {
+    margin: 0.15rem 0;
+}
+
 /* Multi-profile results table */
 .multi-profile-results {
     background: var(--bg-card);

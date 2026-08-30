@@ -18,10 +18,22 @@ pub const PRINTER_OPTIONS: &[&str] = &[
     "Bambu Lab A1 mini 0.4 nozzle",
 ];
 
+/// What the editor hands back when the user confirms.
+#[derive(Debug, Clone)]
+pub struct GenerateRequest {
+    /// Specs as edited in the form.
+    pub specs: FilamentSpecs,
+    /// One target printer label per selected nozzle size.
+    pub printers: Vec<String>,
+    /// When true, ask the AI to review nozzle-dependent settings for each
+    /// selected nozzle before generating.
+    pub ai_tune_per_nozzle: bool,
+}
+
 #[component]
 pub fn SpecsEditor(
     specs: FilamentSpecs,
-    #[prop(into)] on_generate: Callback<(FilamentSpecs, Vec<String>)>,
+    #[prop(into)] on_generate: Callback<GenerateRequest>,
     #[prop(into)] on_cancel: Callback<()>,
     #[prop(default = "Generate Profile")] action_label: &'static str,
     #[prop(default = "Back")] cancel_label: &'static str,
@@ -43,6 +55,8 @@ pub fn SpecsEditor(
         signal(fallback_target_printers.default_printer_model.clone());
     let (selected_nozzle_sizes, set_selected_nozzle_sizes) =
         signal::<Vec<String>>(vec![fallback_target_printers.default_nozzle_size.clone()]);
+    // Opt-in AI review of nozzle-dependent settings (one call per nozzle size).
+    let (ai_tune_per_nozzle, set_ai_tune_per_nozzle) = signal(false);
 
     if show_printer {
         Effect::new(move |_| {
@@ -428,7 +442,11 @@ pub fn SpecsEditor(
             .iter()
             .map(|n| commands::format_target_printer_label(&printer_model, n))
             .collect();
-        on_generate.run((edited, printer_labels));
+        on_generate.run(GenerateRequest {
+            specs: edited,
+            printers: printer_labels,
+            ai_tune_per_nozzle: show_printer && ai_tune_per_nozzle.get(),
+        });
     };
 
     view! {
@@ -529,6 +547,23 @@ pub fn SpecsEditor(
                                 }
                             }
                         />
+                    </div>
+                    <div class="spec-field full-width">
+                        <label class="nozzle-checkbox-item">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || ai_tune_per_nozzle.get()
+                                on:change=move |ev| set_ai_tune_per_nozzle.set(checkbox_checked(&ev))
+                            />
+                            "AI-tune settings for each nozzle size"
+                        </label>
+                        <p class="spec-field-hint">
+                            "These specs describe the filament on a standard 0.4 mm nozzle. \
+                             Enable this to have the AI review flow, temperature, pressure advance, \
+                             retraction and cooling for every selected nozzle (one AI call per nozzle). \
+                             Volumetric flow is capped to what each nozzle can physically push either way — \
+                             0.2 mm never exceeds 2 mm³/s."
+                        </p>
                     </div>
                 </div>
             </Show>

@@ -465,6 +465,30 @@ pub async fn generate_profile_from_specs(
         );
     }
 
+    // Tell the user when the generator throttled flow for a small nozzle, so a
+    // profile that silently differs from the requested specs (or from the base
+    // profile it inherited from) is never a surprise.
+    if let Some(diameter) = target_printer
+        .as_deref()
+        .or(Some(DEFAULT_TARGET_PRINTER_LABEL))
+        .and_then(crate::profile::nozzle::parse_nozzle_diameter)
+    {
+        let cap = crate::profile::nozzle::max_volumetric_speed_cap(diameter);
+        let requested = specs.max_volumetric_speed.or_else(|| {
+            base_resolved
+                .get_first_array_value("filament_max_volumetric_speed")
+                .and_then(|v| v.trim().parse::<f32>().ok())
+        });
+        if let Some(requested) = requested {
+            if requested > cap {
+                warnings.push(format!(
+                    "Max volumetric flow reduced from {:.0} to {:.0} mm³/s — {:.1} mm nozzles cannot sustain more.",
+                    requested, cap, diameter
+                ));
+            }
+        }
+    }
+
     // Build specs summary for UI display
     let specs_applied = GeneratedSpecs {
         nozzle_temp: specs.nozzle_temp_max.map(|max| {
@@ -781,6 +805,23 @@ pub fn save_profile_specs(
 
     // Apply specs to the existing profile (overwrites only the mapped fields)
     generator::apply_specs_to_profile(&mut profile, &specs);
+
+    // The profile is already bound to a printer + nozzle, so re-apply the
+    // nozzle's physical limits: hand-edited specs describe the filament and can
+    // easily ask a small nozzle for a flow it cannot deliver.
+    let nozzle_label = profile
+        .compatible_printers()
+        .and_then(|printers| printers.first().map(|p| p.to_string()))
+        .or_else(|| profile.name().map(|n| n.to_string()))
+        .unwrap_or_default();
+    if let Some(diameter) = crate::profile::nozzle::parse_nozzle_diameter(&nozzle_label) {
+        for adjustment in crate::profile::nozzle::apply_nozzle_limits(&mut profile, diameter) {
+            info!(
+                "Clamped {} for {}mm nozzle: {} -> {}",
+                adjustment.field, diameter, adjustment.from, adjustment.to
+            );
+        }
+    }
 
     // Recompose the full profile name from brand + material + serial, preserving @printer suffix
     let existing_name = profile.name().unwrap_or("").to_string();
