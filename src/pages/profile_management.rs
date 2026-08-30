@@ -202,8 +202,7 @@ pub fn ProfileManagementPage() -> impl IntoView {
         // string fields like a filament name of "true" or "123" into the
         // wrong type. Only auto-treat obvious container/quoted-string tokens
         // as raw JSON. Everything else is escaped as a JSON string.
-        let json_val = if val.starts_with('[') || val.starts_with('{') || val.starts_with('"')
-        {
+        let json_val = if val.starts_with('[') || val.starts_with('{') || val.starts_with('"') {
             val
         } else {
             format!("\"{}\"", val.replace('\\', "\\\\").replace('"', "\\\""))

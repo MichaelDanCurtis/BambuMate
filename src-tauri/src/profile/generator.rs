@@ -3,12 +3,12 @@ use chrono::Utc;
 use std::path::Path;
 use tracing::debug;
 
-use crate::process_command;
 use super::inheritance::resolve_inheritance;
 use super::paths::BambuPaths;
 use super::reader::read_profile;
 use super::registry::ProfileRegistry;
 use super::types::{FilamentProfile, ProfileMetadata};
+use crate::process_command;
 use crate::scraper::types::{FilamentSpecs, MaterialType};
 
 /// Map a MaterialType to the corresponding Bambu Studio base profile name.
@@ -94,18 +94,12 @@ pub fn find_existing_filament_id(
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         if stem.starts_with(&prefix) {
             // Read the profile and extract its filament_id
             if let Ok(profile) = read_profile(&path) {
                 if let Some(id) = profile.filament_id() {
-                    debug!(
-                        "Reusing existing filament_id '{}' from {:?}",
-                        id, path
-                    );
+                    debug!("Reusing existing filament_id '{}' from {:?}", id, path);
                     return Some(id.to_string());
                 }
             }
@@ -437,7 +431,10 @@ pub fn generate_profile(
     let profile_name = if specs.serial.is_empty() {
         format!("{} {} @{}", specs.brand, specs.material, printer)
     } else {
-        format!("{} {} {} @{}", specs.brand, specs.material, specs.serial, printer)
+        format!(
+            "{} {} {} @{}",
+            specs.brand, specs.material, specs.serial, printer
+        )
     };
 
     profile.set_string("name", profile_name.clone());
@@ -500,7 +497,10 @@ pub fn generate_profile(
     let filename = if specs.serial.is_empty() {
         format!("{} {} @{}.json", specs.brand, specs.material, printer)
     } else {
-        format!("{} {} {} @{}.json", specs.brand, specs.material, specs.serial, printer)
+        format!(
+            "{} {} {} @{}.json",
+            specs.brand, specs.material, specs.serial, printer
+        )
     };
 
     debug!(
@@ -543,13 +543,13 @@ fn apply_compat_defaults(profile: &mut FilamentProfile) {
     // Fields added in Bambu Studio 2.x that may not appear in older system
     // profiles. Values match the defaults shipped with BS 2.7.
     let defaults = [
-        ("default_filament_colour",      json!([""])),
-        ("enable_overhang_bridge_fan",   json!(["1"])),
-        ("enable_pressure_advance",      json!(["0"])),
-        ("filament_change_length_nc",    json!(["4"])),
-        ("filament_notes",               Value::String(String::new())),
-        ("filament_wipe",                json!(["1", "1"])),
-        ("first_x_layer_fan_speed",      json!(["0"])),
+        ("default_filament_colour", json!([""])),
+        ("enable_overhang_bridge_fan", json!(["1"])),
+        ("enable_pressure_advance", json!(["0"])),
+        ("filament_change_length_nc", json!(["4"])),
+        ("filament_notes", Value::String(String::new())),
+        ("filament_wipe", json!(["1", "1"])),
+        ("first_x_layer_fan_speed", json!(["0"])),
         ("first_x_layer_part_fan_speed", json!(["0"])),
     ];
 
@@ -580,8 +580,11 @@ mod tests {
             "first_x_layer_fan_speed",
             "first_x_layer_part_fan_speed",
         ] {
-            assert!(profile.raw().contains_key(*key),
-                "compat default for '{}' should be present", key);
+            assert!(
+                profile.raw().contains_key(*key),
+                "compat default for '{}' should be present",
+                key
+            );
         }
 
         assert_eq!(profile.raw()["enable_pressure_advance"], json!(["0"]));
@@ -592,16 +595,23 @@ mod tests {
     #[test]
     fn compat_defaults_do_not_overwrite_system_or_spec_values() {
         let mut profile = FilamentProfile::from_json(
-            r#"{"enable_pressure_advance": ["1"], "filament_wipe": ["0", "0"]}"#
-        ).unwrap();
+            r#"{"enable_pressure_advance": ["1"], "filament_wipe": ["0", "0"]}"#,
+        )
+        .unwrap();
 
         apply_compat_defaults(&mut profile);
 
         // Pre-existing values must not be touched
-        assert_eq!(profile.raw()["enable_pressure_advance"], json!(["1"]),
-            "system profile value must not be overwritten by compat default");
-        assert_eq!(profile.raw()["filament_wipe"], json!(["0", "0"]),
-            "spec-derived value must not be overwritten by compat default");
+        assert_eq!(
+            profile.raw()["enable_pressure_advance"],
+            json!(["1"]),
+            "system profile value must not be overwritten by compat default"
+        );
+        assert_eq!(
+            profile.raw()["filament_wipe"],
+            json!(["0", "0"]),
+            "spec-derived value must not be overwritten by compat default"
+        );
     }
 }
 

@@ -480,18 +480,16 @@ pub fn infer_serial(filament_name: &str) -> String {
     // Ordered longest-first so compound materials match before their prefixes.
     // Includes eSUN "e"-prefixed variants (ePLA, ePLA+, ePETG-CF, …).
     let material_keywords: &[&str] = &[
-        "EPETG-CF", "EPLA-CF", "EPLA+", "EPLA",
-        "PETG-CF", "PLA-CF", "PC-ABS", "PA6-CF", "PA12",
-        "PA6", "PETG", "PLA+", "PLA", "ABS", "ASA", "TPU", "TPE",
-        "PA", "NYLON", "PC", "PVA", "HIPS",
+        "EPETG-CF", "EPLA-CF", "EPLA+", "EPLA", "PETG-CF", "PLA-CF", "PC-ABS", "PA6-CF", "PA12",
+        "PA6", "PETG", "PLA+", "PLA", "ABS", "ASA", "TPU", "TPE", "PA", "NYLON", "PC", "PVA",
+        "HIPS",
     ];
 
     for (i, word) in words.iter().enumerate() {
         let upper = word.to_uppercase();
         let is_material = material_keywords.iter().any(|kw| {
             upper == *kw
-                || (upper.starts_with(kw)
-                    && upper[kw.len()..].starts_with(['-', '+', '_']))
+                || (upper.starts_with(kw) && upper[kw.len()..].starts_with(['-', '+', '_']))
         });
         if is_material {
             // If the word itself encodes a variant after a hyphen (e.g. "ePLA-Silk"),
@@ -524,15 +522,22 @@ pub fn infer_serial(filament_name: &str) -> String {
                 (Some(v), rest) => format!("{} {}", v, rest),
                 (None, rest) => rest.to_string(),
             };
-            return if after.is_empty() { "Basic".to_string() } else { after };
+            return if after.is_empty() {
+                "Basic".to_string()
+            } else {
+                after
+            };
         }
     }
 
     // No material keyword found — return everything after the first word (brand)
     let fallback = words.get(1..).map(|s| s.join(" ")).unwrap_or_default();
-    if fallback.is_empty() { "Basic".to_string() } else { fallback }
+    if fallback.is_empty() {
+        "Basic".to_string()
+    } else {
+        fallback
+    }
 }
-
 
 /// Derive material type string from filament name.
 fn infer_material(name: &str) -> String {
@@ -639,7 +644,13 @@ mod tests {
         assert_eq!(infer_serial("eSUN ePLA-Silk"), "Silk");
 
         // @printer suffix must be stripped, not included in the serial
-        assert_eq!(infer_serial("Bambu Lab PLA Silk @Bambu Lab H2C 0.4 nozzle"), "Silk");
-        assert_eq!(infer_serial("eSUN PLA+ Silk @Bambu Lab A1 0.4 nozzle"), "Silk");
+        assert_eq!(
+            infer_serial("Bambu Lab PLA Silk @Bambu Lab H2C 0.4 nozzle"),
+            "Silk"
+        );
+        assert_eq!(
+            infer_serial("eSUN PLA+ Silk @Bambu Lab A1 0.4 nozzle"),
+            "Silk"
+        );
     }
 }

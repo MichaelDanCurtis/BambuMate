@@ -192,10 +192,7 @@ pub fn register_filament_in_conf(config_root: &Path, profile_name: &str) -> Resu
     let backup_path = conf_path.with_extension("conf.bak");
     if !backup_path.exists() {
         if let Err(e) = std::fs::copy(&conf_path, &backup_path) {
-            warn!(
-                "Failed to create BambuStudio.conf.bak safety backup: {}",
-                e
-            );
+            warn!("Failed to create BambuStudio.conf.bak safety backup: {}", e);
         }
     }
 
@@ -222,11 +219,17 @@ pub fn register_filament_in_conf(config_root: &Path, profile_name: &str) -> Resu
 }
 
 /// Strip the MD5 checksum comment line that BambuStudio appends on Windows.
+///
+/// Bambu Studio writes this line under `#ifdef WIN32` only (see
+/// `AppConfig::save` in the Bambu Studio source), so on macOS and Linux the
+/// conf is plain JSON and this is a no-op. It is still applied on every
+/// platform because a config file may have been copied across machines.
+///
 /// The checksum line starts with `# MD5 checksum ` and appears on its own
 /// line after the JSON. Using `rfind('}')` was unsafe: any `}` inside a
 /// filament name or URL would truncate the JSON. This version scans lines
 /// and cuts before the first checksum line, preserving the entire JSON.
-fn strip_md5_checksum(content: &str) -> &str {
+pub fn strip_md5_checksum(content: &str) -> &str {
     // Scan for a line that starts with the marker (only whitespace before it
     // on that line). Iterating over line boundaries avoids false positives
     // when the marker text appears inside a JSON string.
@@ -349,8 +352,7 @@ mod tests {
     #[test]
     fn test_strip_md5_checksum_preserves_braces_in_strings() {
         // A filament name containing "}" must not confuse the stripper.
-        let input =
-            "{\n  \"filaments\": [\"PLA }experimental\"]\n}\n# MD5 checksum deadbeef\n";
+        let input = "{\n  \"filaments\": [\"PLA }experimental\"]\n}\n# MD5 checksum deadbeef\n";
         let stripped = strip_md5_checksum(input);
         let parsed: serde_json::Value = serde_json::from_str(stripped).unwrap();
         assert_eq!(parsed["filaments"][0], "PLA }experimental");
@@ -365,8 +367,7 @@ mod tests {
     #[test]
     fn test_strip_md5_checksum_ignores_marker_inside_json() {
         // If the marker appears mid-string it should be ignored (not at line-start).
-        let input =
-            "{\n  \"notes\": \"# MD5 checksum inside string\"\n}\n# MD5 checksum realone\n";
+        let input = "{\n  \"notes\": \"# MD5 checksum inside string\"\n}\n# MD5 checksum realone\n";
         let stripped = strip_md5_checksum(input);
         // The real MD5 line should be gone, but the JSON must still parse.
         let parsed: serde_json::Value = serde_json::from_str(stripped).unwrap();

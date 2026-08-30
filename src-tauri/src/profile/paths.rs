@@ -1,6 +1,41 @@
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+use std::sync::RwLock;
+use tracing::{debug, info, warn};
+
+/// Process-wide override for the Bambu Studio config root.
+///
+/// The setup wizard and Settings both let the user pick their Bambu Studio
+/// configuration folder and store it under the `bambu_studio_path`
+/// preference. Every profile operation resolves paths through
+/// [`BambuPaths::detect`], so the override has to be visible there — and most
+/// of those call sites (`install_generated_profile`, `delete_profile`, ...)
+/// have no `AppHandle` to read the preference store from. Keeping the
+/// resolved value in one process-wide slot, populated at startup and refreshed
+/// whenever the preference changes, is what makes the picker actually take
+/// effect.
+static CONFIG_ROOT_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Install (or clear, with `None`) the user-configured config root.
+pub fn set_config_root_override(path: Option<PathBuf>) {
+    let normalized = path.filter(|p| !p.as_os_str().is_empty());
+    match &normalized {
+        Some(p) => info!("Using configured Bambu Studio config root: {:?}", p),
+        None => debug!("Cleared Bambu Studio config root override"),
+    }
+    match CONFIG_ROOT_OVERRIDE.write() {
+        Ok(mut slot) => *slot = normalized,
+        Err(poisoned) => *poisoned.into_inner() = normalized,
+    }
+}
+
+/// The currently configured config root, if any.
+pub fn config_root_override() -> Option<PathBuf> {
+    match CONFIG_ROOT_OVERRIDE.read() {
+        Ok(slot) => slot.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
 
 /// Resolved paths to Bambu Studio configuration and profile directories.
 pub struct BambuPaths {
@@ -17,11 +52,40 @@ pub struct BambuPaths {
 impl BambuPaths {
     /// Detect Bambu Studio paths on the current platform.
     ///
-    /// On macOS, looks for `~/Library/Application Support/BambuStudio/`.
-    /// On Windows, looks for `%APPDATA%\BambuStudio\`.
-    /// Reads `preset_folder` from `BambuStudio.conf` if available.
+    /// If the user configured a config folder (setup wizard or Settings), that
+    /// folder wins. Otherwise the platform default is used: on macOS
+    /// `~/Library/Application Support/BambuStudio/`, on Windows
+    /// `%APPDATA%\BambuStudio\`. Reads `preset_folder` from
+    /// `BambuStudio.conf` if available.
     pub fn detect() -> Result<Self> {
-        let config_root = Self::find_config_root()?;
+        Self::detect_with_override(config_root_override().as_deref())
+    }
+
+    /// Same as [`detect`](Self::detect) but with an explicit override, so the
+    /// resolution logic can be tested and diagnosed without touching global
+    /// state.
+    ///
+    /// An override that does not point at an existing directory is ignored
+    /// with a warning rather than being a hard failure — an external volume
+    /// may simply be unmounted, and falling back to the platform default is
+    /// more useful than refusing to work at all.
+    pub fn detect_with_override(override_root: Option<&Path>) -> Result<Self> {
+        let config_root = match override_root {
+            Some(p) if p.is_dir() => {
+                debug!("Using configured Bambu Studio config root: {:?}", p);
+                p.to_path_buf()
+            }
+            Some(p) => {
+                warn!(
+                    "Configured Bambu Studio config root {:?} is not a directory; \
+                     falling back to platform detection",
+                    p
+                );
+                Self::find_config_root()?
+            }
+            None => Self::find_config_root()?,
+        };
+
         let system_filaments = config_root.join("system").join("BBL").join("filament");
         let user_root = config_root.join("user");
 
@@ -130,6 +194,10 @@ impl BambuPaths {
     }
 
     /// Read the `preset_folder` value from BambuStudio.conf (JSON file).
+    ///
+    /// On Windows the file has a trailing `# MD5 checksum ...` line appended
+    /// after the JSON, so it must be stripped before parsing — otherwise this
+    /// always fails and callers silently fall back to scanning `user/`.
     fn read_preset_folder(config_root: &Path) -> Option<String> {
         let conf_path = config_root.join("BambuStudio.conf");
         let content = match std::fs::read_to_string(&conf_path) {
@@ -139,13 +207,14 @@ impl BambuPaths {
                 return None;
             }
         };
-        let conf: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("Could not parse BambuStudio.conf as JSON: {}", e);
-                return None;
-            }
-        };
+        let conf: serde_json::Value =
+            match serde_json::from_str(super::writer::strip_md5_checksum(&content)) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("Could not parse BambuStudio.conf as JSON: {}", e);
+                    return None;
+                }
+            };
         conf.get("preset_folder")?.as_str().map(|s| s.to_string())
     }
 
@@ -226,7 +295,7 @@ fn normalize_version(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_version;
+    use super::{normalize_version, BambuPaths};
 
     #[test]
     fn strips_leading_zeros_from_each_component() {
@@ -246,5 +315,86 @@ mod tests {
     #[test]
     fn preserves_non_numeric_components() {
         assert_eq!(normalize_version("2.7.beta.01"), "2.7.beta.1");
+    }
+
+    /// Build a minimal but realistic Bambu Studio config tree.
+    fn fake_config_root(dir: &std::path::Path, with_md5_line: bool) -> std::path::PathBuf {
+        let root = dir.join("BambuStudio");
+        std::fs::create_dir_all(root.join("system").join("BBL").join("filament")).unwrap();
+        std::fs::create_dir_all(
+            root.join("user")
+                .join("1881310893")
+                .join("filament")
+                .join("base"),
+        )
+        .unwrap();
+
+        let json = serde_json::to_string_pretty(&serde_json::json!({
+            "preset_folder": "1881310893",
+            "filaments": ["Bambu PLA Basic"],
+        }))
+        .unwrap();
+        let mut body = json.clone();
+        body.push('\n');
+        if with_md5_line {
+            body.push_str("# MD5 checksum 0123456789ABCDEF0123456789ABCDEF\n");
+        }
+        std::fs::write(root.join("BambuStudio.conf"), body).unwrap();
+        root
+    }
+
+    #[test]
+    fn override_is_used_instead_of_platform_default() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fake_config_root(tmp.path(), false);
+
+        let paths = BambuPaths::detect_with_override(Some(&root)).unwrap();
+
+        assert_eq!(paths.config_root, root);
+        assert_eq!(paths.preset_folder.as_deref(), Some("1881310893"));
+        assert_eq!(
+            paths.user_filament_dir(),
+            Some(
+                root.join("user")
+                    .join("1881310893")
+                    .join("filament")
+                    .join("base")
+            )
+        );
+        assert_eq!(
+            paths.system_filament_dir(),
+            root.join("system").join("BBL").join("filament")
+        );
+    }
+
+    /// Regression: on Windows the conf carries a trailing `# MD5 checksum`
+    /// line. Parsing it without stripping made `preset_folder` always `None`.
+    #[test]
+    fn preset_folder_is_read_even_with_a_trailing_md5_line() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fake_config_root(tmp.path(), true);
+
+        let paths = BambuPaths::detect_with_override(Some(&root)).unwrap();
+
+        assert_eq!(
+            paths.preset_folder.as_deref(),
+            Some("1881310893"),
+            "the MD5 checksum line must be stripped before parsing BambuStudio.conf"
+        );
+    }
+
+    /// An override pointing at a missing directory (unmounted volume, deleted
+    /// folder) must not hard-fail; it falls back to platform detection.
+    #[test]
+    fn missing_override_falls_back_to_platform_detection() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("definitely-not-here");
+
+        // Either the platform default exists (Bambu Studio installed on this
+        // machine) or detection errors — both are acceptable. What must not
+        // happen is silently returning the missing override.
+        if let Ok(paths) = BambuPaths::detect_with_override(Some(&missing)) {
+            assert_ne!(paths.config_root, missing);
+        }
     }
 }

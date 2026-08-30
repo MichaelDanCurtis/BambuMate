@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, HealthReport};
+use crate::components::diagnostics_panel::DiagnosticsPanel;
 use crate::components::status_badge::{CheckStatus, StatusBadge};
 
 #[component]
@@ -108,6 +109,8 @@ pub fn HealthPage() -> impl IntoView {
                     }
                 })
             }}
+
+            <DiagnosticsPanel />
         </div>
     }
 }

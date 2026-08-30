@@ -97,8 +97,8 @@ impl StlWatcherState {
 
         let files = self.received_files.clone();
 
-        let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-            match res {
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<Event, notify::Error>| match res {
                 Ok(event) => {
                     if matches!(event.kind, EventKind::Create(_)) {
                         for path in &event.paths {
@@ -130,9 +130,8 @@ impl StlWatcherState {
                 Err(e) => {
                     warn!("File watcher error: {}", e);
                 }
-            }
-        })
-        .map_err(|e| format!("Failed to create file watcher: {}", e))?;
+            })
+            .map_err(|e| format!("Failed to create file watcher: {}", e))?;
 
         watcher
             .watch(&dir_path, RecursiveMode::NonRecursive)

@@ -32,6 +32,27 @@ pub fn get_preference(app: AppHandle, key: &str) -> Result<Option<String>, Strin
     Ok(value)
 }
 
+/// The preference key holding the user-selected Bambu Studio config folder.
+pub const BAMBU_STUDIO_PATH_KEY: &str = "bambu_studio_path";
+
+/// Push the stored `bambu_studio_path` preference into the path resolver.
+///
+/// Called at startup and again whenever the preference changes. Without this
+/// the setup wizard and Settings would write the preference but nothing would
+/// ever read it, so every profile operation would keep using the platform
+/// default location.
+pub fn sync_bambu_studio_path_override(app: &AppHandle) {
+    let stored = app
+        .store("preferences.json")
+        .ok()
+        .and_then(|store| store.get(BAMBU_STUDIO_PATH_KEY))
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from);
+
+    crate::profile::set_config_root_override(stored);
+}
+
 #[tauri::command]
 pub fn set_preference(app: AppHandle, key: &str, value: &str) -> Result<(), String> {
     info!("Setting preference: {} = {}", key, value);
@@ -43,7 +64,13 @@ pub fn set_preference(app: AppHandle, key: &str, value: &str) -> Result<(), Stri
     store.save().map_err(|e| {
         warn!("Failed to save store: {}", e);
         e.to_string()
-    })
+    })?;
+
+    // Take effect immediately instead of only after the next app restart.
+    if key == BAMBU_STUDIO_PATH_KEY {
+        sync_bambu_studio_path_override(&app);
+    }
+    Ok(())
 }
 
 /// Returns the current feature flags.
@@ -166,6 +193,9 @@ pub fn reset_to_clean_install(app: AppHandle) -> Result<(), String> {
         warn!("Failed to save cleared store: {}", e);
         e.to_string()
     })?;
+    // The cleared store no longer has a configured path; drop the cached one
+    // too so path resolution goes back to platform defaults immediately.
+    crate::profile::set_config_root_override(None);
     info!("Preferences store cleared");
 
     // Delete all API keys from the system keychain

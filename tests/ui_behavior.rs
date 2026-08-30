@@ -29,7 +29,10 @@ fn encode_profile_field_value(val: &str) -> String {
 
 #[wasm_bindgen_test]
 fn plain_string_is_json_quoted() {
-    assert_eq!(encode_profile_field_value("Bambu PLA Basic"), "\"Bambu PLA Basic\"");
+    assert_eq!(
+        encode_profile_field_value("Bambu PLA Basic"),
+        "\"Bambu PLA Basic\""
+    );
 }
 
 #[wasm_bindgen_test]
@@ -57,7 +60,10 @@ fn json_arrays_and_objects_pass_through() {
     // users can still edit list/object fields directly.
     assert_eq!(encode_profile_field_value("[1,2,3]"), "[1,2,3]");
     assert_eq!(encode_profile_field_value("{\"a\":1}"), "{\"a\":1}");
-    assert_eq!(encode_profile_field_value("\"pre-quoted\""), "\"pre-quoted\"");
+    assert_eq!(
+        encode_profile_field_value("\"pre-quoted\""),
+        "\"pre-quoted\""
+    );
 }
 
 #[wasm_bindgen_test]

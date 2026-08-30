@@ -201,7 +201,11 @@ mod tests {
     use super::*;
     use serde_json::{json, Map};
 
-    fn make_profile(name: &str, inherits: Option<&str>, extras: &[(&str, serde_json::Value)]) -> FilamentProfile {
+    fn make_profile(
+        name: &str,
+        inherits: Option<&str>,
+        extras: &[(&str, serde_json::Value)],
+    ) -> FilamentProfile {
         let mut map = Map::new();
         map.insert("name".into(), json!(name));
         if let Some(p) = inherits {
@@ -215,7 +219,9 @@ mod tests {
 
     fn registry_of(profiles: Vec<FilamentProfile>) -> ProfileRegistry {
         let mut r = ProfileRegistry::new();
-        for p in profiles { r.insert(p); }
+        for p in profiles {
+            r.insert(p);
+        }
         r
     }
 
@@ -225,17 +231,23 @@ mod tests {
     /// resolved output so Bambu Studio doesn't reject the profile.
     #[test]
     fn nil_field_preserved_when_all_levels_nil() {
-        let base = make_profile("base", None, &[
-            ("real_field", json!(["200", "200"])),
-            ("nil_field",  json!(["nil", "nil"])),
-        ]);
+        let base = make_profile(
+            "base",
+            None,
+            &[
+                ("real_field", json!(["200", "200"])),
+                ("nil_field", json!(["nil", "nil"])),
+            ],
+        );
         let leaf = make_profile("leaf", Some("base"), &[]);
 
         let registry = registry_of(vec![base]);
         let resolved = resolve_inheritance(&leaf, &registry).unwrap();
 
-        assert!(resolved.raw().contains_key("nil_field"),
-            "nil-only field must be present in resolved output");
+        assert!(
+            resolved.raw().contains_key("nil_field"),
+            "nil-only field must be present in resolved output"
+        );
         assert_eq!(resolved.raw()["nil_field"], json!(["nil", "nil"]));
         assert_eq!(resolved.raw()["real_field"], json!(["200", "200"]));
     }
@@ -244,29 +256,24 @@ mod tests {
     /// "use parent"). The ancestor value must not be replaced by nil.
     #[test]
     fn nil_in_leaf_does_not_overwrite_ancestor_real_value() {
-        let base = make_profile("base", None, &[
-            ("temp", json!(["220", "220"])),
-        ]);
-        let leaf = make_profile("leaf", Some("base"), &[
-            ("temp", json!(["nil", "nil"])),
-        ]);
+        let base = make_profile("base", None, &[("temp", json!(["220", "220"]))]);
+        let leaf = make_profile("leaf", Some("base"), &[("temp", json!(["nil", "nil"]))]);
 
         let registry = registry_of(vec![base]);
         let resolved = resolve_inheritance(&leaf, &registry).unwrap();
 
-        assert_eq!(resolved.raw()["temp"], json!(["220", "220"]),
-            "ancestor real value must survive leaf nil");
+        assert_eq!(
+            resolved.raw()["temp"],
+            json!(["220", "220"]),
+            "ancestor real value must survive leaf nil"
+        );
     }
 
     /// A leaf with a real value must override the ancestor's value.
     #[test]
     fn leaf_real_value_overrides_ancestor() {
-        let base = make_profile("base", None, &[
-            ("temp", json!(["200", "200"])),
-        ]);
-        let leaf = make_profile("leaf", Some("base"), &[
-            ("temp", json!(["240", "240"])),
-        ]);
+        let base = make_profile("base", None, &[("temp", json!(["200", "200"]))]);
+        let leaf = make_profile("leaf", Some("base"), &[("temp", json!(["240", "240"]))]);
 
         let registry = registry_of(vec![base]);
         let resolved = resolve_inheritance(&leaf, &registry).unwrap();
@@ -279,14 +286,18 @@ mod tests {
     #[test]
     fn nil_field_only_on_leaf_is_preserved() {
         let base = make_profile("base", None, &[]);
-        let leaf = make_profile("leaf", Some("base"), &[
-            ("leaf_only_nil", json!(["nil", "nil"])),
-        ]);
+        let leaf = make_profile(
+            "leaf",
+            Some("base"),
+            &[("leaf_only_nil", json!(["nil", "nil"]))],
+        );
 
         let registry = registry_of(vec![base]);
         let resolved = resolve_inheritance(&leaf, &registry).unwrap();
 
-        assert!(resolved.raw().contains_key("leaf_only_nil"),
-            "nil field present only on the leaf must be preserved");
+        assert!(
+            resolved.raw().contains_key("leaf_only_nil"),
+            "nil field present only on the leaf must be preserved"
+        );
     }
 }

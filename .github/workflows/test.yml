@@ -1,0 +1,122 @@
+name: Test
+
+# The build workflow compiles for macOS and Windows but runs no tests, so
+# platform-specific breakage only surfaced once users hit it. This workflow
+# runs the same suite on every target OS.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel the other legs: when a change breaks macOS we want to see
+      # whether Windows broke too.
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-14
+          # Intel coverage matters here: the older WebKit/Safari versions this
+          # app must tolerate are most likely to show up on Intel Macs.
+          # `macos-13` was retired in December 2025; `macos-15-intel` is the
+          # supported x86_64 image (available until August 2027).
+          - name: macOS (Intel)
+            os: macos-15-intel
+          - name: Windows
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      # Tauri needs GTK/WebKit headers on Linux only; macOS and Windows runners
+      # already ship everything the backend links against.
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            src-tauri
+
+      - name: Check formatting (frontend)
+        run: cargo fmt --check
+
+      - name: Check formatting (backend)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Clippy (backend)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Backend tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Frontend typecheck
+        run: cargo check --target wasm32-unknown-unknown
+
+      # The platform self-test. Network and keychain are disabled: hosted
+      # runners have no unlocked login keychain, and the suite must not depend
+      # on outbound connectivity. Bambu Studio is not installed on runners, so
+      # those checks degrade to warn/skip by design.
+      - name: Platform diagnostics
+        run: |
+          cargo run --quiet --manifest-path src-tauri/Cargo.toml \
+            --bin bambumate-doctor -- --no-keychain --no-live-bambu
+        shell: bash
+
+      - name: Capture diagnostics report
+        if: always()
+        run: |
+          cargo run --quiet --manifest-path src-tauri/Cargo.toml \
+            --bin bambumate-doctor -- --json --no-keychain --no-live-bambu \
+            > bambumate-report-${{ matrix.os }}.json
+        shell: bash
+
+      - name: Upload diagnostics report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.os }}
+          path: bambumate-report-${{ matrix.os }}.json
+          if-no-files-found: warn
+
+  frontend-build:
+    name: Frontend build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      # Catches Leptos view! macro errors and asset-pipeline problems that a
+      # plain `cargo check` does not.
+      - name: Build frontend
+        run: trunk build

@@ -26,3 +26,6 @@ src-tauri/target/
 
 # Tauri generated
 src-tauri/gen/
+
+# Diagnostics reports produced by scripts/test-harness.* and bambumate-doctor
+bambumate-report*.json

@@ -46,9 +46,7 @@ pub fn classify_tier(provider_key: &str, id: &str, name: &str) -> u8 {
             if hay.contains("gpt-5") || hay.contains("gpt-6") || hay.contains("o1-pro") {
                 5
             } else if (hay.contains("gpt-4o") && !hay.contains("mini"))
-                || (hay.contains("gpt-4.1")
-                    && !hay.contains("mini")
-                    && !hay.contains("nano"))
+                || (hay.contains("gpt-4.1") && !hay.contains("mini") && !hay.contains("nano"))
                 || hay.contains("o1")
                 || hay.contains("o3")
                 || hay.contains("o4")
@@ -136,10 +134,7 @@ pub fn pick_recommended(candidates: &[CatalogEntry]) -> Option<String> {
             continue;
         }
         // Find latest release month present in the pool.
-        let latest = pool
-            .iter()
-            .filter_map(|e| release_month(e))
-            .max();
+        let latest = pool.iter().filter_map(|e| release_month(e)).max();
         let cohort: Vec<&CatalogEntry> = if let Some(target) = latest {
             pool.iter()
                 .copied()

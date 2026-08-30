@@ -1,6 +1,7 @@
 pub mod analyzer;
 pub mod batch;
 pub mod config;
+pub mod diagnostics;
 pub mod health;
 pub mod history;
 pub mod keychain;

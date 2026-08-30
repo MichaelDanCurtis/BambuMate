@@ -105,6 +105,7 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
+    -webkit-user-select: none;
     user-select: none;
 }
 

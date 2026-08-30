@@ -2,6 +2,7 @@
 
 pub mod analyzer;
 mod commands;
+pub mod diagnostics;
 pub mod history;
 pub mod mapper;
 pub mod model_catalog;
@@ -39,6 +40,7 @@ pub fn run() {
             commands::health::search_bambu_studio_config,
             commands::health::validate_bambu_studio_path,
             commands::health::pick_config_folder,
+            commands::diagnostics::run_diagnostics,
             commands::models::list_models,
             commands::models::validate_model,
             commands::models::get_ai_capabilities,
@@ -86,6 +88,10 @@ pub fn run() {
             commands::updater::check_for_updates,
         ])
         .setup(|app| {
+            // Apply the user-configured Bambu Studio config folder before any
+            // command can run, so path resolution honors it from the start.
+            commands::config::sync_bambu_studio_path_override(app.handle());
+
             // Restore STL watch directory from preferences
             use tauri::Manager;
             use tauri_plugin_store::StoreExt;

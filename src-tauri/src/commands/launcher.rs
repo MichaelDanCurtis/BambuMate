@@ -88,12 +88,22 @@ fn resolve_bs_path(_app: &tauri::AppHandle) -> Result<String, String> {
 
 /// Get the platform-specific default Bambu Studio path.
 #[cfg(target_os = "macos")]
-fn default_bs_path() -> Option<String> {
-    Some("/Applications/BambuStudio.app".to_string())
+pub(crate) fn default_bs_path() -> Option<String> {
+    // Bambu Studio installs to /Applications, but a per-user install under
+    // ~/Applications is common when the machine is managed or the user drags
+    // the app there. Check both before falling back to a Spotlight search.
+    let mut candidates = vec![std::path::PathBuf::from("/Applications/BambuStudio.app")];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Applications").join("BambuStudio.app"));
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
 }
 
 #[cfg(target_os = "windows")]
-fn default_bs_path() -> Option<String> {
+pub(crate) fn default_bs_path() -> Option<String> {
     // Common install locations on Windows.
     // Bambu Studio installs to "Bambu Studio" (with space) by default.
     let candidates = [
@@ -131,7 +141,7 @@ fn default_bs_path() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn default_bs_path() -> Option<String> {
+pub(crate) fn default_bs_path() -> Option<String> {
     let candidates = ["/usr/bin/BambuStudio", "/opt/BambuStudio/BambuStudio"];
     for path in &candidates {
         if std::path::Path::new(path).exists() {
@@ -142,13 +152,13 @@ fn default_bs_path() -> Option<String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn default_bs_path() -> Option<String> {
+pub(crate) fn default_bs_path() -> Option<String> {
     None
 }
 
 /// Platform-specific search for Bambu Studio.
 #[cfg(target_os = "macos")]
-fn search_bs_path() -> Option<String> {
+pub(crate) fn search_bs_path() -> Option<String> {
     // Spotlight search
     if let Ok(output) = std::process::Command::new("mdfind")
         .arg("kMDItemCFBundleIdentifier == 'com.bambulab.bambu-studio'")
@@ -168,7 +178,7 @@ fn search_bs_path() -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn search_bs_path() -> Option<String> {
+pub(crate) fn search_bs_path() -> Option<String> {
     // 1. Search Windows registry (most reliable for installed apps)
     if let Some(path) = search_registry_for_bs() {
         return Some(path);
@@ -323,7 +333,7 @@ fn search_registry_for_bs() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn search_bs_path() -> Option<String> {
+pub(crate) fn search_bs_path() -> Option<String> {
     if let Ok(output) = std::process::Command::new("which")
         .arg("BambuStudio")
         .output()
@@ -340,45 +350,66 @@ fn search_bs_path() -> Option<String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn search_bs_path() -> Option<String> {
+pub(crate) fn search_bs_path() -> Option<String> {
     None
 }
 
 /// Platform-specific application launch.
+///
+/// macOS goes through `/usr/bin/open` because the on-disk target is an
+/// application *bundle*, not an executable. Two things matter here:
+///
+/// 1. `open` is a launcher shim — `spawn()` returns `Ok` as soon as the shim
+///    starts, long before it decides whether the bundle is launchable. The
+///    original code therefore reported `launched: true` even when Bambu Studio
+///    was missing, damaged or quarantined. We wait for `open` and surface its
+///    stderr instead.
+/// 2. `--args` is only honoured when `open` actually starts a *new* instance.
+///    If Bambu Studio is already running, macOS just activates the existing
+///    instance and drops the arguments, so we tell the caller rather than
+///    silently doing nothing.
 #[cfg(target_os = "macos")]
 fn launch_platform(
     bs_path: &str,
     stl_path: Option<&str>,
     profile_path: Option<&str>,
 ) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("open");
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    // -a <bundle>; -W is deliberately NOT used so we don't block the UI.
     cmd.arg("-a").arg(bs_path);
 
-    let mut has_args = false;
-
+    let mut extra_args: Vec<&str> = Vec::new();
     if let Some(stl) = stl_path {
         if std::path::Path::new(stl).exists() {
-            if !has_args {
-                cmd.arg("--args");
-                has_args = true;
-            }
-            cmd.arg(stl);
+            extra_args.push(stl);
             info!("  with STL: {}", stl);
         }
     }
-
     if let Some(profile) = profile_path {
         if std::path::Path::new(profile).exists() {
-            if !has_args {
-                cmd.arg("--args");
-            }
-            cmd.arg("--load-filaments").arg(profile);
+            extra_args.push("--load-filaments");
+            extra_args.push(profile);
             info!("  with profile: {}", profile);
         }
     }
+    if !extra_args.is_empty() {
+        cmd.arg("--args");
+        cmd.args(&extra_args);
+    }
 
-    cmd.spawn()
-        .map_err(|e| format!("Failed to launch Bambu Studio: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run `open` to launch Bambu Studio: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        return Err(if detail.is_empty() {
+            format!("`open -a {}` failed with status {}", bs_path, output.status)
+        } else {
+            format!("Failed to launch Bambu Studio: {}", detail)
+        });
+    }
     Ok(())
 }
 

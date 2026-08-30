@@ -119,7 +119,10 @@ fn get_local_server_url(app: &AppHandle) -> String {
         .unwrap_or_else(|| "http://localhost:1234".to_string())
 }
 
-async fn fetch_provider_model_ids(app: &AppHandle, provider: &str) -> Result<Vec<ModelEntry>, String> {
+async fn fetch_provider_model_ids(
+    app: &AppHandle,
+    provider: &str,
+) -> Result<Vec<ModelEntry>, String> {
     if provider == "local" {
         return fetch_local_model_ids(app).await;
     }
@@ -275,7 +278,11 @@ fn build_model_info(
     match catalog {
         Some(c) => ModelInfo {
             id: id.to_string(),
-            name: if !c.name.is_empty() { c.name.clone() } else { display_name.to_string() },
+            name: if !c.name.is_empty() {
+                c.name.clone()
+            } else {
+                display_name.to_string()
+            },
             recommended: false,
             vision: c.supports_vision() || force_vision,
             is_preview: c.is_preview,
