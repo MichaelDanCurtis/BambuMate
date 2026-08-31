@@ -477,6 +477,13 @@ async function driveApp(browserType, engine, baseUrl) {
     return `${options} models`;
   });
 
+  // One ApiKeyForm per provider, rendered only while AI filament search is on.
+  await step(run, page, "an API key form renders per provider", async () => {
+    const rows = await page.locator(".settings-page .api-key-form").count();
+    if (rows !== 4) throw new Error(`expected 4 key forms, got ${rows}`);
+    return `${rows} providers`;
+  });
+
   await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });
 
   // -- health check ----------------------------------------------------------

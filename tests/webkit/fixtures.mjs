@@ -442,6 +442,9 @@ export const FIXTURES = {
   },
 
   // -- settings (/settings) --
+  // Option<String>: null is "no key stored", which is a real state and keeps
+  // anything secret-shaped out of the repo.
+  get_api_key: null,
   get_stl_watch_dir: null,
   set_stl_watch_dir: null,
   list_models: {
