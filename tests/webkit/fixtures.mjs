@@ -254,8 +254,12 @@ export const FIXTURES = {
     material_type: "PLA",
     session_id: 42,
   },
-  apply_recommendations: {
-    backup_path: `${USER_PROFILE_PATH}.bak`,
+  // The results screen loads prior refinement sessions for the chosen profile.
+  list_history_sessions: [
+    { id: 41, created_at: "2026-08-24T18:02:11Z", was_applied: true },
+    { id: 39, created_at: "2026-08-19T09:47:03Z", was_applied: false },
+  ],
+  apply_recommendations: {    backup_path: `${USER_PROFILE_PATH}.bak`,
     changes_applied: [
       { parameter: "nozzle_temperature", old_value: 225.0, new_value: 215.0 },
       { parameter: "retraction_distance_mm", old_value: 0.8, new_value: 1.2 },

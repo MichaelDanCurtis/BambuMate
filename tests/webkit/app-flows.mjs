@@ -177,16 +177,32 @@ async function driveApp(browserType, engine, baseUrl) {
       // mousedown. Playwright's click sends mousedown first, matching a user.
       await page.locator(".suggestion-item").first().click();
       await page.waitForSelector(".filament-card", { timeout: 20000 });
+      // Compared case-insensitively: .filament-brand is uppercased by CSS, and
+      // innerText reports what is rendered rather than the underlying value.
       const brand = await page.locator(".filament-brand").innerText();
-      if (!brand.includes("Polymaker")) throw new Error(`brand shows "${brand}"`);
+      if (!/polymaker/i.test(brand)) throw new Error(`brand shows "${brand}"`);
       return brand;
     });
 
+    // Proves the fixture actually reached the card rather than the card merely
+    // existing. Covers both paths: the populated fields render their values,
+    // and max_speed_mm_s -- deliberately null in the fixture -- renders the
+    // placeholder instead of "null" or an empty cell.
     await step(run, page, "spec values reach the card", async () => {
+      const text = (await page.locator(".filament-card-specs").innerText()).replace(/\s+/g, " ");
+      const expected = {
+        "nozzle range": /190\s*-\s*230/,
+        "bed range": /35\s*-\s*65/,
+        density: /1\.24/,
+        diameter: /1\.75/,
+        "placeholder for the absent max speed": /Max Speed\s*--/,
+      };
+      const missing = Object.entries(expected)
+        .filter(([, re]) => !re.test(text))
+        .map(([name]) => name);
+      if (missing.length) throw new Error(`${missing.join(", ")} not shown in: ${text}`);
       const rows = await page.locator(".filament-card .spec-row").count();
-      const text = await page.locator(".filament-card-specs").innerText();
-      if (!/220/.test(text)) throw new Error(`no nozzle temp in: ${text.replace(/\s+/g, " ")}`);
-      return `${rows} spec rows`;
+      return `${rows} spec rows, all values present`;
     });
 
     await step(run, page, "installed base profiles are offered", async () => {
