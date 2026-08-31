@@ -183,17 +183,31 @@ jobs:
             bambumate-live-${{ matrix.os }}.json
           if-no-files-found: warn
 
-  # Renders the app's CSS through the real WebKit engine. On macOS a Tauri
-  # window is a WKWebView, so CSS is parsed by WebKit rather than Chromium --
-  # and WebKit silently drops declarations and whole selector groups it cannot
-  # parse. Nothing else in this matrix can see that class of bug, because the
-  # Rust suite never renders anything.
+  # Renders the app through the real WebKit engine. On macOS a Tauri window is a
+  # WKWebView, so both the CSS and the running app are handled by WebKit rather
+  # than Chromium -- and WebKit silently drops declarations and whole selector
+  # groups it cannot parse, while a wasm code path that panics only there takes
+  # the UI down with no other signal. Nothing else in this matrix can see either
+  # class of bug, because the Rust suite never renders anything.
   webkit-ui:
     name: WebKit rendering (macos-14)
     runs-on: macos-14
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
 
       - uses: actions/setup-node@v4
         with:
@@ -218,6 +232,16 @@ jobs:
         working-directory: tests/webkit
         run: node layout.mjs ../..
 
+      # The flow tests drive the real wasm build, so they need the real build.
+      - name: Build frontend
+        if: ${{ !cancelled() }}
+        run: trunk build
+
+      - name: App flows
+        if: ${{ !cancelled() }}
+        working-directory: tests/webkit
+        run: node app-flows.mjs ../..
+
       - name: Upload WebKit findings
         if: always()
         uses: actions/upload-artifact@v4
@@ -226,6 +250,8 @@ jobs:
           path: |
             tests/webkit/webkit-css-report.json
             tests/webkit/overlay-*.png
+            tests/webkit/flow-*.png
+            tests/webkit/fail-*.png
           if-no-files-found: warn
 
   frontend-build:
