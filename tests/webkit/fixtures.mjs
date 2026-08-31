@@ -273,6 +273,229 @@ export const FIXTURES = {
   },
   revert_to_backup: null,
   launch_bambu_studio: null,
+
+  // -- profile management (/profiles) --
+  //
+  // read_profile is the one command whose invoke string does not match its
+  // wrapper name: commands::read_profile invokes "read_profile_command".
+  read_profile_command: {
+    name: "Polymaker PolyLite PLA @BBL X1C 0.4 nozzle",
+    filament_type: "PLA",
+    filament_id: "PA-PL-WHTPA0-01",
+    inherits: "fdm_filament_pla",
+    field_count: 42,
+    nozzle_temperature: ["220", "220"],
+    bed_temperature: ["35"],
+    compatible_printers: ["Bambu Lab X1 Carbon 0.4 nozzle"],
+    metadata: {
+      sync_info: "synced",
+      user_id: "00000001",
+      setting_id: "PFUSb4a1c2",
+      base_id: "GFL01",
+      updated_time: 1756400000,
+    },
+    raw_json: '{"name":"Polymaker PolyLite PLA","nozzle_temperature":["220","220"]}',
+  },
+  extract_specs_from_profile: SPECS,
+  update_profile_field: null,
+  duplicate_profile: null,
+  delete_profile: null,
+  save_profile_specs: null,
+
+  // -- compare profiles (/compare) --
+  //
+  // The picker groups user profiles under "My Profiles" and these under
+  // "Bambu Lab Factory Profiles", so both lists must be non-empty for the
+  // compare flow to have two sides to choose between.
+  list_system_profiles: [
+    {
+      name: "Bambu PLA Basic @BBL X1C",
+      filament_type: "PLA",
+      filament_id: "GFA00",
+      path: "/Applications/BambuStudio.app/Contents/Resources/profiles/BBL/filament/Bambu PLA Basic @BBL X1C.json",
+      is_user_profile: false,
+    },
+  ],
+  compare_profiles: {
+    profile_a_name: "Polymaker PolyLite PLA @BBL X1C 0.4 nozzle",
+    profile_b_name: "Bambu PLA Basic @BBL X1C",
+    categories: [
+      {
+        category: "Temperature",
+        diffs: [
+          {
+            key: "nozzle_temperature",
+            label: "Nozzle Temperature",
+            base_value: "220",
+            new_value: "215",
+          },
+          {
+            key: "hot_plate_temp",
+            label: "Bed Temperature",
+            base_value: "35",
+            new_value: "40",
+          },
+        ],
+      },
+      {
+        category: "Retraction",
+        diffs: [
+          {
+            key: "retraction_distance_mm",
+            label: "Retraction Distance",
+            base_value: "0.4",
+            new_value: "0.8",
+          },
+        ],
+      },
+    ],
+    total_fields: 42,
+    changed_fields: 3,
+  },
+
+  // -- batch generate (/batch) --
+  list_catalog_brands: ["Bambu Lab", "Polymaker", "Prusament"],
+  // One failure among the successes on purpose: it exercises the .row-fail
+  // branch and the error-hint span, which the all-success path never renders.
+  batch_generate_brand: {
+    total: 3,
+    completed: 3,
+    succeeded: 2,
+    failed: 1,
+    results: [
+      {
+        filament_name: "PolyLite PLA",
+        brand: "Polymaker",
+        material: "PLA",
+        success: true,
+        profile_name: "Polymaker PolyLite PLA @BBL X1C 0.4 nozzle",
+        error: null,
+      },
+      {
+        filament_name: "PolyTerra PLA",
+        brand: "Polymaker",
+        material: "PLA",
+        success: true,
+        profile_name: "Polymaker PolyTerra PLA @BBL X1C 0.4 nozzle",
+        error: null,
+      },
+      {
+        filament_name: "PolyMide PA6-CF",
+        brand: "Polymaker",
+        material: "PA-CF",
+        success: false,
+        profile_name: null,
+        error: "no base profile found for PA-CF on a 0.4 nozzle",
+      },
+    ],
+  },
+
+  // -- health check (/health) --
+  run_health_check: {
+    bambu_studio_installed: true,
+    bambu_studio_path: "/Applications/BambuStudio.app",
+    profile_dir_accessible: true,
+    profile_dir_path: "/Users/runner/Library/Application Support/BambuStudio",
+    claude_api_key_set: false,
+    openai_api_key_set: true,
+    kimi_api_key_set: false,
+    openrouter_api_key_set: false,
+  },
+  // status is a plain string the panel matches on: "pass" | "warn" | "fail",
+  // anything else renders as SKIP. One of each so every badge branch renders.
+  run_diagnostics: {
+    os: "macOS",
+    arch: "aarch64",
+    app_version: "1.3.0",
+    generated_at: "2026-08-31T09:52:25Z",
+    bundled: false,
+    checks: [
+      {
+        id: "bambu-studio-installed",
+        name: "Bambu Studio Installed",
+        category: "environment",
+        status: "pass",
+        detail: "Found at /Applications/BambuStudio.app",
+        remedy: null,
+        duration_ms: 12,
+      },
+      {
+        id: "profile-dir-writable",
+        name: "Profile Directory Writable",
+        category: "filesystem",
+        status: "warn",
+        detail: "Directory exists but no user profiles were found",
+        remedy: "Create a profile in Bambu Studio first.",
+        duration_ms: 4,
+      },
+      {
+        id: "network-catalog-reachable",
+        name: "Catalog Reachable",
+        category: "network",
+        status: "skip",
+        detail: "Network checks were not requested",
+        remedy: null,
+        duration_ms: 0,
+      },
+    ],
+    summary: { passed: 1, warned: 1, failed: 0, skipped: 1 },
+  },
+
+  // -- settings (/settings) --
+  get_stl_watch_dir: null,
+  set_stl_watch_dir: null,
+  list_models: {
+    models: [
+      {
+        id: "gpt-5.4",
+        name: "GPT-5.4",
+        recommended: true,
+        vision: true,
+        is_preview: false,
+        input_cost: 2.5,
+        output_cost: 10.0,
+        release_date: "2026-02-11",
+        context: 400000,
+        quality_tier: 1,
+        unverified: false,
+      },
+      {
+        id: "gpt-5-mini",
+        name: "GPT-5 mini",
+        recommended: false,
+        vision: true,
+        is_preview: false,
+        input_cost: 0.25,
+        output_cost: 2.0,
+        release_date: null,
+        context: null,
+        quality_tier: 2,
+        unverified: false,
+      },
+    ],
+    vision_available: true,
+    recommended_id: "gpt-5.4",
+  },
+  validate_model: {
+    text_ok: true,
+    vision_ok: true,
+    text_message: "Model supports text.",
+    vision_message: "Model supports vision.",
+  },
+  validate_bambu_studio_path: {
+    valid: true,
+    has_system_profiles: true,
+    has_config_file: true,
+    message: "Valid BambuStudio configuration directory",
+  },
+  search_bambu_studio_config: "/Users/runner/Library/Application Support/BambuStudio",
+  pick_config_folder: null,
+  refresh_model_catalog: 2,
+  reset_to_clean_install: null,
+
+  // -- about (/about) --
+  get_app_version: { current_version: "1.3.0" },
+  open_external_url: null,
 };
 
 // -- test images ------------------------------------------------------------

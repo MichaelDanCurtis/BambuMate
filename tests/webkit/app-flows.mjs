@@ -350,6 +350,176 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.screenshot({ path: `flow-${engine}-analysis.png`, fullPage: false });
   }
 
+  // -- profile management ----------------------------------------------------
+  //
+  // The apply dialog from the previous flow covers the whole viewport, so it
+  // would swallow the sidebar click that starts this section.
+  await step(run, page, "apply dialog can be dismissed", async () => {
+    await page
+      .locator(".change-preview-overlay")
+      .getByRole("button", { name: "Cancel" })
+      .click();
+    await page.waitForSelector(".change-preview-overlay", {
+      state: "detached",
+      timeout: 15000,
+    });
+  });
+
+  await step(run, page, "navigate to Profiles", async () => {
+    await page.click('a[href="/profiles"]');
+    await page.waitForSelector(".profile-management-page", { timeout: 15000 });
+    await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+    return `${await page.locator(".profile-list-item").count()} profiles listed`;
+  });
+
+  await step(run, page, "opening a profile shows its fields", async () => {
+    await page.locator(".profile-list-item").first().click();
+    await page.waitForSelector(".profile-detail-title", { timeout: 15000 });
+    await page.waitForSelector("table.profile-fields", { timeout: 15000 });
+    const title = (await page.locator(".profile-detail-title").first().innerText()).trim();
+    const subtitle = (await page.locator(".profile-detail-subtitle").first().innerText()).trim();
+    const keys = await page.locator("td.field-key").count();
+    if (keys === 0) throw new Error("fields table rendered with no rows");
+    return `${title} (${subtitle}), ${keys} field rows`;
+  });
+
+  // -- batch generate --------------------------------------------------------
+  await step(run, page, "navigate to Batch Generate", async () => {
+    await page.click('a[href="/batch"]');
+    await page.waitForSelector(".batch-generate-page", { timeout: 15000 });
+    // The real select replaces a disabled "Loading brands..." placeholder only
+    // once list_catalog_brands resolves.
+    await page.waitForSelector("select#brand-select", { timeout: 15000 });
+    return `${await page.locator("select#brand-select option").count()} brand options`;
+  });
+
+  await step(run, page, "batch run reports per-filament results", async () => {
+    // Index rather than value: option 0 is the "-- Select a brand --" prompt,
+    // so this picks Polymaker out of the fixture's three brands.
+    await page.selectOption("select#brand-select", { index: 2 });
+    const generate = page.locator(".batch-generate-page button.btn-primary").first();
+    if (await generate.isDisabled()) throw new Error("Generate stayed disabled after picking a brand");
+    await generate.click();
+    await page.waitForSelector(".batch-results", { timeout: 20000 });
+    const summary = (await page.locator(".batch-summary").first().innerText()).replace(/\s+/g, " ").trim();
+    const failed = await page.locator("tr.row-fail").count();
+    if (failed !== 1) throw new Error(`expected 1 failed row, got ${failed}`);
+    return summary;
+  });
+
+  // -- compare profiles ------------------------------------------------------
+  await step(run, page, "navigate to Compare Profiles", async () => {
+    await page.click('a[href="/compare"]');
+    await page.waitForSelector(".profile-diff-page", { timeout: 15000 });
+  });
+
+  // SearchableSelect commits on mousedown, like the filament autocomplete, so a
+  // blur handler cannot close the dropdown before the choice registers.
+  await step(run, page, "both diff pickers accept a profile", async () => {
+    const pick = async (index, text) => {
+      const group = page.locator(".diff-pickers .form-group").nth(index);
+      await group.locator(".ss-display").click();
+      const option = group.locator(".ss-option", { hasText: text }).first();
+      await option.waitFor({ timeout: 15000 });
+      await option.click();
+    };
+    await pick(0, "PolyLite");
+    await pick(1, "Bambu PLA Basic");
+    const shown = await page.locator(".diff-pickers .ss-display-text").allInnerTexts();
+    return shown.map((s) => s.trim()).join(" vs ");
+  });
+
+  await step(run, page, "compare renders a categorised diff", async () => {
+    await page.locator(".diff-actions button.btn-primary").first().click();
+    await page.waitForSelector(".diff-results", { timeout: 20000 });
+    const summary = (await page.locator(".diff-summary-text").first().innerText()).trim();
+    const categories = await page.locator(".diff-category-name").count();
+    const rows = await page.locator("tr.diff-row.changed").count();
+    if (categories !== 2) throw new Error(`expected 2 categories, got ${categories}`);
+    if (rows !== 3) throw new Error(`expected 3 changed rows, got ${rows}`);
+    return `${summary}, ${categories} categories`;
+  });
+
+  // .diff-table carries a border-collapse fix for WebKit. Counting rows would
+  // still pass if they collapsed to zero height, so measure one instead.
+  await step(run, page, "diff table rows have real height", async () => {
+    const box = await page.locator("tr.diff-row.changed").first().boundingBox();
+    if (!box) throw new Error("first diff row has no box");
+    if (box.height < 8) throw new Error(`first diff row is only ${box.height}px tall`);
+    return `row height ${Math.round(box.height)}px`;
+  });
+
+  // -- settings --------------------------------------------------------------
+  await step(run, page, "navigate to Settings", async () => {
+    await page.click('a[href="/settings"]');
+    await page.waitForSelector(".settings-page", { timeout: 15000 });
+  });
+
+  // The frontend compiles to wasm32, where cfg!(target_os) is "unknown", so the
+  // path hint is chosen at runtime from navigator.userAgent. Both engines report
+  // a Mac UA on this runner, so the macOS hint is the right answer for both.
+  // This is the one assertion here that no amount of Windows testing could make.
+  await step(run, page, "path hint matches the host platform", async () => {
+    await page.waitForSelector("#bambu-path", { timeout: 15000 });
+    const ua = await page.evaluate(() => navigator.userAgent);
+    if (!/Mac OS X|Macintosh/.test(ua)) throw new Error(`runner is not a Mac: ${ua}`);
+    const hint = await page.locator("#bambu-path").getAttribute("placeholder");
+    if (!hint.includes("/Users/") || !hint.includes("Library/Application Support")) {
+      throw new Error(`host is macOS but the hint reads "${hint}"`);
+    }
+    return hint;
+  });
+
+  await step(run, page, "model list populates from the provider", async () => {
+    await page.waitForSelector("#ai-model", { timeout: 20000 });
+    const options = await page.locator("#ai-model option").count();
+    if (options === 0) throw new Error("model select rendered empty");
+    return `${options} models`;
+  });
+
+  await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });
+
+  // -- health check ----------------------------------------------------------
+  await step(run, page, "navigate to Health Check", async () => {
+    await page.click('a[href="/health"]');
+    await page.waitForSelector(".health-page", { timeout: 15000 });
+    await page.waitForSelector(".health-results", { timeout: 20000 });
+    const items = await page.locator(".health-results .health-item").count();
+    if (items !== 6) throw new Error(`expected 6 health rows, got ${items}`);
+    return (await page.locator(".health-results .health-summary").first().innerText()).trim();
+  });
+
+  await step(run, page, "diagnostics panel badges each result", async () => {
+    await page.locator(".diagnostics-controls button.btn-primary").first().click();
+    await page.waitForSelector(".diagnostics-results", { timeout: 20000 });
+    const pass = await page.locator(".diagnostics-row-pass").count();
+    const warn = await page.locator(".diagnostics-row-warn").count();
+    if (pass < 1 || warn < 1) throw new Error(`pass=${pass}, warn=${warn}`);
+    // A remedy is rendered only for a non-passing check that carries one, so
+    // this covers the branch a report of all-passes would never reach.
+    const remedy = await page.locator(".diagnostics-remedy").count();
+    if (remedy < 1) throw new Error("the warned check rendered no remedy");
+    return `${pass} pass, ${warn} warn, ${remedy} remedy`;
+  });
+
+  await page.screenshot({ path: `flow-${engine}-health.png`, fullPage: false });
+
+  // -- about -----------------------------------------------------------------
+  await step(run, page, "navigate to About", async () => {
+    await page.click('a[href="/about"]');
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    const version = (await page.locator(".about-version-value").first().innerText()).trim();
+    if (!version.includes("1.3.0")) throw new Error(`version reads "${version}"`);
+    return version;
+  });
+
+  // update_info is seeded by the startup check, so this renders without the
+  // user pressing anything.
+  await step(run, page, "update state reports up to date", async () => {
+    await page.waitForSelector(".about-up-to-date", { timeout: 20000 });
+    return (await page.locator(".about-up-to-date").first().innerText()).replace(/\s+/g, " ").trim();
+  });
+
   run.unknown = await page.evaluate(() => [...new Set(window.__ipc.unknown)]).catch(() => []);
   await browser.close();
   return run;
