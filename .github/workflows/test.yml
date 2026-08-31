@@ -212,6 +212,9 @@ jobs:
         run: node css-compat.mjs ../..
 
       - name: Overlay geometry
+        # Run even when the CSS scan failed: the two checks look for different
+        # kinds of breakage and one run should report both.
+        if: ${{ !cancelled() }}
         working-directory: tests/webkit
         run: node layout.mjs ../..
 

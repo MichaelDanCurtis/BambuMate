@@ -41,14 +41,24 @@ const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, "");
  *
  * Deliberately a small scanner rather than a real CSS parser: it only needs to
  * recover the author's *intent* so we can ask WebKit whether each piece
- * survives. Anything guarded by `@supports` is skipped, since being
- * unsupported is the entire point of such a block.
+ * survives.
+ *
+ * Two things are deliberately *not* reported, because in both cases the
+ * author already said "I know WebKit may not take this":
+ *   - anything guarded by `@supports`, since being unsupported is the entire
+ *     point of such a block;
+ *   - a declaration whose block also carries the `-webkit-` prefixed spelling
+ *     of the same property and value. That pair is the correct progressive
+ *     enhancement idiom: WebKit consumes the prefixed one and drops the
+ *     standard one, every other engine does the reverse, and both end up
+ *     styled. Flagging it would be flagging the fix itself.
  */
 function extractRules(rawCss) {
   const css = stripComments(rawCss);
   const selectors = new Set();
-  const declarations = new Map(); // "prop: value" -> {prop, value}
+  const declarations = new Map(); // "prop: value" -> {prop, value, context}
   const stack = [];
+  const blocks = []; // declarations of each currently-open block
   let buf = "";
 
   const inKeyframes = () => stack.some((h) => /^@(-\w+-)?keyframes/i.test(h));
@@ -60,7 +70,7 @@ function extractRules(rawCss) {
     if (!text || stack.length === 0 || inSupports()) return;
     const idx = text.indexOf(":");
     if (idx <= 0) return;
-    const prop = text.slice(0, idx).trim();
+    const prop = text.slice(0, idx).trim().toLowerCase();
     let value = text.slice(idx + 1).trim();
     if (!prop || !value) return;
     // Custom properties accept literally any value, so testing them is noise.
@@ -68,7 +78,22 @@ function extractRules(rawCss) {
     if (!/^[a-zA-Z-]+$/.test(prop)) return;
     value = value.replace(/!\s*important$/i, "").trim();
     if (!value || value.includes("var(")) return; // var() defers validation
-    declarations.set(`${prop}: ${value}`, { prop, value });
+    blocks[blocks.length - 1].push({ prop, value });
+  };
+
+  const closeBlock = () => {
+    const decls = blocks.pop() ?? [];
+    const context = stack[stack.length - 1] ?? "";
+    const prefixed = new Set(
+      decls
+        .filter((d) => d.prop.startsWith("-webkit-"))
+        .map((d) => `${d.prop.slice("-webkit-".length)}: ${d.value}`)
+    );
+    for (const d of decls) {
+      const key = `${d.prop}: ${d.value}`;
+      if (prefixed.has(key)) continue;
+      if (!declarations.has(key)) declarations.set(key, { ...d, context });
+    }
   };
 
   for (const ch of css) {
@@ -79,8 +104,10 @@ function extractRules(rawCss) {
         selectors.add(head);
       }
       stack.push(head);
+      blocks.push([]);
     } else if (ch === "}") {
       flushDeclaration();
+      closeBlock();
       stack.pop();
     } else if (ch === ";") {
       flushDeclaration();
@@ -115,14 +142,13 @@ function probe({ selectors, declarations }) {
   return { badSelectors, badDeclarations };
 }
 
-async function analyse(browserType, files) {
+async function analyse(browserType, rulesByFile) {
   const browser = await browserType.launch();
   const page = await browser.newPage();
   await page.setContent("<!doctype html><html><body></body></html>");
   const results = {};
-  for (const file of files) {
-    const rules = extractRules(readFileSync(file, "utf8"));
-    results[relative(repoRoot, file).split("\\").join("/")] = await page.evaluate(probe, rules);
+  for (const [name, rules] of rulesByFile) {
+    results[name] = await page.evaluate(probe, rules);
   }
   await browser.close();
   return results;
@@ -133,13 +159,29 @@ if (files.length === 0) {
   console.error("No CSS files found under", repoRoot);
   process.exit(1);
 }
+
+// Parse once and hand the same extraction to both engines, so any difference in
+// the results is a difference between the engines and nothing else.
+const rulesByFile = new Map(
+  files.map((f) => [
+    relative(repoRoot, f).split("\\").join("/"),
+    extractRules(readFileSync(f, "utf8")),
+  ])
+);
+
 console.log(`Scanning ${files.length} stylesheets\n`);
 
-const wk = await analyse(webkit, files);
+const wk = await analyse(webkit, rulesByFile);
 // Chromium is the control: it is what the app renders in on Windows, so a
 // problem that shows up in both is a plain bug, while a WebKit-only problem is
 // the macOS-specific breakage this whole harness exists to catch.
-const cr = await analyse(chromium, files);
+const cr = await analyse(chromium, rulesByFile);
+
+// Point a finding back at the rule it came from, so the log says where to look.
+const where = (file, key) => {
+  const hit = rulesByFile.get(file).declarations.find((d) => `${d.prop}: ${d.value}` === key);
+  return hit?.context ? `${key}   (in ${hit.context})` : key;
+};
 
 let webkitOnly = 0;
 let both = 0;
@@ -167,9 +209,13 @@ for (const file of Object.keys(wk)) {
 
   console.log(file);
   for (const s of entry.webkitOnlySelectors) console.log(`  WEBKIT-ONLY selector    ${s}`);
-  for (const d of entry.webkitOnlyDeclarations) console.log(`  WEBKIT-ONLY declaration ${d}`);
+  for (const d of entry.webkitOnlyDeclarations) {
+    console.log(`  WEBKIT-ONLY declaration ${where(file, d)}`);
+  }
   for (const s of entry.bothSelectors) console.log(`  both engines  selector    ${s}`);
-  for (const d of entry.bothDeclarations) console.log(`  both engines  declaration ${d}`);
+  for (const d of entry.bothDeclarations) {
+    console.log(`  both engines  declaration ${where(file, d)}`);
+  }
   console.log("");
 }
 
