@@ -183,6 +183,48 @@ jobs:
             bambumate-live-${{ matrix.os }}.json
           if-no-files-found: warn
 
+  # Renders the app's CSS through the real WebKit engine. On macOS a Tauri
+  # window is a WKWebView, so CSS is parsed by WebKit rather than Chromium --
+  # and WebKit silently drops declarations and whole selector groups it cannot
+  # parse. Nothing else in this matrix can see that class of bug, because the
+  # Rust suite never renders anything.
+  webkit-ui:
+    name: WebKit rendering (macos-14)
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        working-directory: tests/webkit
+        run: |
+          npm install --no-audit --no-fund
+          # Chromium is the control engine: it is what the app renders in on
+          # Windows, so it distinguishes a macOS-only bug from a plain one.
+          npx playwright install webkit chromium
+
+      - name: CSS compatibility
+        working-directory: tests/webkit
+        run: node css-compat.mjs ../..
+
+      - name: Overlay geometry
+        working-directory: tests/webkit
+        run: node layout.mjs ../..
+
+      - name: Upload WebKit findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webkit-ui
+          path: |
+            tests/webkit/webkit-css-report.json
+            tests/webkit/overlay-*.png
+          if-no-files-found: warn
+
   frontend-build:
     name: Frontend build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
