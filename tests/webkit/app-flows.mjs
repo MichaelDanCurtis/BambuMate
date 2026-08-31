@@ -219,6 +219,19 @@ async function driveApp(browserType, engine, baseUrl) {
       return `${inputs} editable fields`;
     });
 
+    // The editor builds the target label by prepending "Bambu Lab " to the bare
+    // model name the backend sends. Checking the exact string guards both ends
+    // of that: a model name that already carries the prefix reads "Bambu Lab
+    // Bambu Lab X1 Carbon", and a formatter that stops prepending loses it.
+    await step(run, page, "target printer label is composed correctly", async () => {
+      const label = await page
+        .locator('xpath=//label[normalize-space()="Profile targets"]/following-sibling::input[1]')
+        .inputValue();
+      const expected = "Bambu Lab X1 Carbon 0.4 nozzle";
+      if (label !== expected) throw new Error(`reads "${label}", expected "${expected}"`);
+      return label;
+    });
+
     await page.screenshot({ path: `flow-${engine}-filament.png`, fullPage: true });
   }
 

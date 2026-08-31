@@ -110,10 +110,15 @@ export const FIXTURES = {
       filament_type: "PLA",
     },
   ],
+  // Model names are bare here because format_target_printer_label prepends
+  // "Bambu Lab " when building the display label. Mirrors the shape of
+  // default_target_printer_options in src/commands.rs; an earlier version of
+  // this fixture carried the prefix already and produced "Bambu Lab Bambu Lab
+  // X1 Carbon 0.4 nozzle" on screen.
   list_target_printer_options: {
-    printer_models: ["Bambu Lab X1 Carbon", "Bambu Lab P1S", "Bambu Lab A1 mini"],
-    nozzle_sizes: ["0.2", "0.4", "0.6", "0.8"],
-    default_printer_model: "Bambu Lab X1 Carbon",
+    printer_models: ["H2C", "H2D", "X1 Carbon", "X1E", "P1P", "P1S", "A1", "A1 mini"],
+    nozzle_sizes: ["0.4", "0.2", "0.6", "0.8"],
+    default_printer_model: "X1 Carbon",
     default_nozzle_size: "0.4",
   },
   tune_specs_for_nozzle: {
