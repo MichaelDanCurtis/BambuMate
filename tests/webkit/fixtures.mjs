@@ -118,7 +118,7 @@ export const FIXTURES = {
   list_target_printer_options: {
     printer_models: ["H2C", "H2D", "X1 Carbon", "X1E", "P1P", "P1S", "A1", "A1 mini"],
     nozzle_sizes: ["0.4", "0.2", "0.6", "0.8"],
-    default_printer_model: "X1 Carbon",
+    default_printer_model: "H2C",
     default_nozzle_size: "0.4",
   },
   tune_specs_for_nozzle: {

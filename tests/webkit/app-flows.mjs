@@ -220,14 +220,25 @@ async function driveApp(browserType, engine, baseUrl) {
     });
 
     // The editor builds the target label by prepending "Bambu Lab " to the bare
-    // model name the backend sends. Checking the exact string guards both ends
-    // of that: a model name that already carries the prefix reads "Bambu Lab
-    // Bambu Lab X1 Carbon", and a formatter that stops prepending loses it.
+    // model name the backend sends. Pinning the exact string guards both ends of
+    // that: a model name that already carries the prefix reads "Bambu Lab Bambu
+    // Lab H2C", and a formatter that stops prepending loses it entirely.
+    //
+    // The expected model is H2C rather than anything else because of how the
+    // editor seeds its selection: it starts from the frontend's hardcoded
+    // default_target_printer_options() and only overrides that from the backend
+    // when the seeded model is missing from the returned list. So the backend's
+    // default_printer_model is effectively ignored whenever the two agree, which
+    // they always do in production. Setting this fixture's default to a
+    // different valid model does not change what the editor shows. That is a
+    // latent inconsistency, not a visible bug, and not platform-specific -- left
+    // alone deliberately, since changing selection behaviour is out of scope for
+    // a test harness.
     await step(run, page, "target printer label is composed correctly", async () => {
       const label = await page
         .locator('xpath=//label[normalize-space()="Profile targets"]/following-sibling::input[1]')
         .inputValue();
-      const expected = "Bambu Lab X1 Carbon 0.4 nozzle";
+      const expected = "Bambu Lab H2C 0.4 nozzle";
       if (label !== expected) throw new Error(`reads "${label}", expected "${expected}"`);
       return label;
     });
