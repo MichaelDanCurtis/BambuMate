@@ -29,3 +29,11 @@ src-tauri/gen/
 
 # Diagnostics reports produced by scripts/test-harness.* and bambumate-doctor
 bambumate-report*.json
+
+# WebKit UI test harness
+tests/webkit/node_modules/
+tests/webkit/package-lock.json
+tests/webkit/webkit-css-report.json
+tests/webkit/overlay-*.png
+tests/webkit/flow-*.png
+tests/webkit/fail-*.png

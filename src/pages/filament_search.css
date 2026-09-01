@@ -188,11 +188,6 @@
     color: var(--text-secondary);
 }
 
-.ai-fallback-hint:has-text("Recommended") {
-    color: var(--accent);
-    font-weight: 500;
-}
-
 /* First ai-fallback-item (Ask AI) should be highlighted */
 .ai-fallback-item:first-of-type .ai-fallback-hint {
     color: var(--accent);
