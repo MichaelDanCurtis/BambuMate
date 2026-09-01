@@ -216,7 +216,7 @@ jobs:
       - name: Install Playwright
         working-directory: tests/webkit
         run: |
-          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund --no-save playwright@1.49.1
           # Chromium is the control engine: it is what the app renders in on
           # Windows, so it distinguishes a macOS-only bug from a plain one.
           npx playwright install webkit chromium
