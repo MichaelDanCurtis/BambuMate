@@ -70,6 +70,10 @@ impl AskBroker {
     pub fn cancel_session(&self, session_id: &str) {
         self.pending.lock().unwrap().retain(|_, (s, _)| s != session_id);
     }
+
+    pub fn emit(&self, event: AgentEvent) {
+        let _ = self.events.send(event);
+    }
 }
 
 #[cfg(test)]
