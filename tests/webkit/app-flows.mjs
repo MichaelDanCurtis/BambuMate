@@ -72,6 +72,7 @@ function serve() {
 function installTauriMock(fixtures) {
   const calls = [];
   const unknown = [];
+  const handlers = {};
   window.__ipc = { calls, unknown };
   const invoke = async (cmd, args) => {
     calls.push({ cmd, args });
@@ -81,7 +82,12 @@ function installTauriMock(fixtures) {
     }
     return structuredClone(fixtures[cmd]);
   };
-  window.__TAURI__ = { core: { invoke } };
+  const listen = async (name, cb) => {
+    (handlers[name] ||= []).push(cb);
+    return () => {};
+  };
+  window.__emit = (name, payload) => (handlers[name] || []).forEach((cb) => cb({ event: name, payload }));
+  window.__TAURI__ = { core: { invoke }, event: { listen } };
   window.__TAURI_INTERNALS__ = { invoke };
 }
 
@@ -526,6 +532,76 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".about-up-to-date", { timeout: 20000 });
     return (await page.locator(".about-up-to-date").first().innerText()).replace(/\s+/g, " ").trim();
   });
+
+  // -- agent drawer ------------------------------------------------------------
+  const emit = (payload) => page.evaluate((p) => window.__emit("agent://event", p), payload);
+  const called = (cmd) => page.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c), cmd);
+
+  await step(run, page, "agent drawer opens from the toggle", async () => {
+    await page.click(".agent-toggle");
+    await page.waitForSelector(".agent-drawer.open", { timeout: 5000 });
+    const box = await page.locator(".agent-drawer").boundingBox();
+    const vp = page.viewportSize();
+    if (box.x + box.width > vp.width + 1) throw new Error(`drawer overflows: ${JSON.stringify(box)}`);
+  });
+
+  await step(run, page, "drawer shows readiness and the default model", async () => {
+    await page.waitForFunction(() => document.querySelector(".ag-status")?.innerText.startsWith("READY"), null, { timeout: 5000 });
+    return (await page.locator(".ag-model").inputValue()) || "no model";
+  });
+
+  await step(run, page, "sending starts a session and a turn", async () => {
+    await page.fill(".ag-input", "Why is my PETG stringing?");
+    await page.press(".ag-input", "Enter");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "agent_send"), null, { timeout: 5000 });
+    const start = await called("agent_start");
+    if (start[0].args.provider !== "codex") throw new Error(`started ${JSON.stringify(start[0].args)}`);
+    await page.waitForSelector(".ag-user", { timeout: 2000 });
+  });
+
+  await step(run, page, "streamed text, tool activity and asks render", async () => {
+    await emit({ kind: "turn_started", session_id: "sess-1", seq: 1 });
+    await emit({ kind: "message_delta", session_id: "sess-1", item_id: "m1", text: "Checking your " });
+    await emit({ kind: "message_delta", session_id: "sess-1", item_id: "m1", text: "profile." });
+    await emit({ kind: "tool_call", session_id: "sess-1", call_id: "c1", name: "bm_read_profile", args: { path: "A.json" } });
+    await emit({ kind: "tool_result", session_id: "sess-1", call_id: "c1", ok: true, summary: "{\"name\":\"A\"}" });
+    await emit({
+      kind: "ask",
+      session_id: "sess-1",
+      request: { id: "a1", header: "Confirm", question: "Lower nozzle temp to 235?", options: [{ label: "Yes", description: "" }, { label: "No", description: "" }], allow_other: false },
+    });
+    const text = await page.locator(".ag-agent").innerText();
+    if (!text.includes("Checking your profile.")) throw new Error(`agent text: ${text}`);
+    const status = await page.locator(".ag-activity .ag-activity-status").innerText();
+    if (status !== "[OK]") throw new Error(`activity status: ${status}`);
+    if (await page.locator(".ag-stop").count() !== 1) throw new Error("stop button missing while running");
+  });
+
+  await step(run, page, "answering an ask calls agent_answer", async () => {
+    await page.click(".ag-ask button.ag-option:has-text('Yes')");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "agent_answer"), null, { timeout: 3000 });
+    const [ans] = await called("agent_answer");
+    if (ans.args.askId !== "a1" || ans.args.answers[0] !== "Yes") throw new Error(JSON.stringify(ans.args));
+  });
+
+  await step(run, page, "turn completes and rewind works", async () => {
+    await emit({ kind: "message_done", session_id: "sess-1", item_id: "m1", text: "Lowered to 235°C." });
+    await emit({ kind: "turn_done", session_id: "sess-1", seq: 1, status: "completed" });
+    await page.waitForSelector(".ag-send", { timeout: 2000 });
+    await page.click(".ag-rewind");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "agent_rewind"), null, { timeout: 3000 });
+    const [rw] = await called("agent_rewind");
+    if (rw.args.sessionId !== "sess-1" || rw.args.seq !== 1) throw new Error(JSON.stringify(rw.args));
+    if (await page.locator(".ag-user").count() !== 0) throw new Error("rewound message still shown");
+  });
+
+  await step(run, page, "invalid-profile warning is shown in accent", async () => {
+    await emit({ kind: "invalid_profiles", session_id: "sess-1", seq: 1, paths: ["/p/Broken.json"] });
+    const color = await page.locator(".ag-notice.ag-error").last().evaluate((el) => getComputedStyle(el).color);
+    if (!/215,\s*25,\s*33/.test(color)) throw new Error(`notice color ${color}`);
+  });
+
+  await page.screenshot({ path: `flow-${engine}-agent.png`, fullPage: false });
 
   run.unknown = await page.evaluate(() => [...new Set(window.__ipc.unknown)]).catch(() => []);
   await browser.close();

@@ -158,6 +158,15 @@ pub fn FilamentSearchPage() -> impl IntoView {
         Option<wasm_bindgen::closure::Closure<dyn FnMut()>>,
         LocalStorage,
     > = StoredValue::new_local(None);
+    // A pending blur closure must be cancelled with `clear_timeout_with_handle`
+    // before it is dropped: a `Closure::once` that is replaced (or dropped on
+    // unmount) while its `setTimeout` is still pending leaves the browser
+    // holding a callback into memory Rust has already freed. Invoking it then
+    // throws "closure invoked recursively or after being dropped" — this bit
+    // a real user whenever two blurs landed within the 200ms window (e.g.
+    // mousedown-selecting a suggestion right after a previous blur), so the
+    // id is tracked the same way `search_timeout` already is above.
+    let blur_timeout = StoredValue::new(None::<i32>);
     let blur_callback: StoredValue<
         Option<wasm_bindgen::closure::Closure<dyn FnMut()>>,
         LocalStorage,
@@ -203,6 +212,20 @@ pub fn FilamentSearchPage() -> impl IntoView {
         search_callback.update_value(|slot| *slot = Some(callback));
         search_timeout.set_value(Some(id));
     };
+
+    // Navigating away with either timer still pending would otherwise leave
+    // the browser holding a callback into a closure this component's
+    // disposal is about to drop; see the `on:blur` handler below.
+    on_cleanup(move || {
+        if let Some(win) = web_sys::window() {
+            if let Some(id) = search_timeout.try_get_value().flatten() {
+                win.clear_timeout_with_handle(id);
+            }
+            if let Some(id) = blur_timeout.try_get_value().flatten() {
+                win.clear_timeout_with_handle(id);
+            }
+        }
+    });
 
     // Handle catalog suggestion selection
     let select_suggestion = move |entry: CatalogEntry| {
@@ -584,15 +607,34 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             // leaking a closure per unfocus. We now retain the
                             // closure in a `StoredValue` (LocalStorage) so it
                             // drops on the next blur.
+                            //
+                            // The previous pending timer must be cancelled first:
+                            // dropping a `Closure::once` while its `setTimeout` is
+                            // still outstanding (e.g. a second blur landing inside
+                            // the 200ms window) leaves the browser holding a
+                            // callback into freed memory, and firing it throws
+                            // "closure invoked recursively or after being dropped".
+                            if let Some(id) = blur_timeout.get_value() {
+                                if let Some(win) = web_sys::window() {
+                                    win.clear_timeout_with_handle(id);
+                                }
+                            }
+                            blur_callback.update_value(|slot| {
+                                *slot = None;
+                            });
+
                             let cb = wasm_bindgen::closure::Closure::once(move || {
                                 set_show_suggestions.set(false);
                             });
                             if let Some(win) = web_sys::window() {
-                                let _ = win
+                                if let Ok(id) = win
                                     .set_timeout_with_callback_and_timeout_and_arguments_0(
                                         cb.as_ref().unchecked_ref(),
                                         200,
-                                    );
+                                    )
+                                {
+                                    blur_timeout.set_value(Some(id));
+                                }
                             }
                             blur_callback.update_value(|slot| *slot = Some(cb));
                         }

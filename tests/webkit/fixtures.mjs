@@ -499,6 +499,22 @@ export const FIXTURES = {
   // -- about (/about) --
   get_app_version: { current_version: "1.3.0" },
   open_external_url: null,
+
+  // -- agent panel --
+  agent_readiness: { state: "ready", detail: "test@example.com · plus" },
+  agent_models: [
+    { id: "gpt-test", display_name: "GPT Test", efforts: ["low", "medium"], is_default: true },
+  ],
+  agent_get_settings: { full_access: false, claude_auth_mode: "api_key", claude_auth_modes: ["api_key"] },
+  agent_set_settings: { full_access: false, claude_auth_mode: "api_key", claude_auth_modes: ["api_key"] },
+  agent_set_app_state: null,
+  agent_start: "sess-1",
+  agent_send: 1,
+  agent_answer: null,
+  agent_interrupt: null,
+  agent_rewind: true,
+  agent_stage_image: "/tmp/agent-upload.png",
+  agent_login: null,
 };
 
 // -- test images ------------------------------------------------------------
