@@ -225,6 +225,18 @@ impl AgentService {
         Ok(row)
     }
 
+    /// Undoes a reservation the backend didn't accept: puts `seq` back
+    /// (unless it's already moved on — e.g. a fast `TurnDone` let a new turn
+    /// start and reserve further before this rollback ran) and clears `busy`.
+    fn rollback_failed_send(&self, session_id: &str, seq: u32) {
+        if let Some(a) = self.active.lock().unwrap().get_mut(session_id) {
+            if a.seq == seq {
+                a.seq = seq - 1;
+            }
+            a.busy = false;
+        }
+    }
+
     pub async fn send(
         &self,
         session_id: &str,
@@ -239,8 +251,15 @@ impl AgentService {
             if a.busy {
                 return Err("a turn is already running".into());
             }
+            let seq = a.seq + 1;
             a.busy = true;
-            (a.provider, a.seq + 1)
+            // Reserve `seq` right now, not after the backend call returns: a
+            // fast backend can publish this turn's TurnDone (which clears
+            // `busy`) before `send` itself returns, and a second `send`
+            // racing in during that window must not be able to reserve the
+            // same seq.
+            a.seq = seq;
+            (a.provider, seq)
         };
         if let Ok(dir) = self.host.user_filament_dir() {
             if let Err(e) = self.snapshots.take(session_id, seq, &dir) {
@@ -261,7 +280,7 @@ impl AgentService {
         let backend = match self.backend(provider) {
             Ok(b) => b,
             Err(e) => {
-                self.clear_busy(session_id);
+                self.rollback_failed_send(session_id, seq);
                 return Err(e);
             }
         };
@@ -272,9 +291,7 @@ impl AgentService {
                 if note.is_some() {
                     self.notes.lock().unwrap().remove(session_id);
                 }
-                if let Some(a) = self.active.lock().unwrap().get_mut(session_id) {
-                    a.seq = seq;
-                }
+                // `seq` was already committed at reservation time above.
                 // `busy` stays true: it's cleared by `validator_loop` when
                 // this turn's TurnDone arrives, not here. The turn really
                 // started, so a failure to record it locally shouldn't be
@@ -290,7 +307,7 @@ impl AgentService {
                 Ok(seq)
             }
             Err(e) => {
-                self.clear_busy(session_id);
+                self.rollback_failed_send(session_id, seq);
                 Err(e)
             }
         }
@@ -312,24 +329,45 @@ impl AgentService {
     }
 
     pub async fn rewind(&self, session_id: &str, seq: u32) -> Result<bool, String> {
-        let (provider, current_seq) = {
-            let active = self.active.lock().unwrap();
-            let a = active.get(session_id).ok_or("unknown session")?;
+        // Claim `busy` for the whole rewind, not just check it: a rewind in
+        // flight must block a concurrent `send` (or another `rewind`) the
+        // same way an in-flight turn does, and every exit path below clears
+        // it again before returning.
+        let provider = {
+            let mut active = self.active.lock().unwrap();
+            let a = active.get_mut(session_id).ok_or("unknown session")?;
             if a.busy {
                 return Err("a turn is running".into());
             }
-            (a.provider, a.seq)
+            if seq < 1 || seq > a.seq {
+                return Err(format!(
+                    "seq {seq} is out of range: session is at turn {}",
+                    a.seq
+                ));
+            }
+            a.busy = true;
+            a.provider
         };
-        if seq < 1 || seq > current_seq {
-            return Err(format!(
-                "seq {seq} is out of range: session is at turn {current_seq}"
-            ));
+
+        let dir = match self.host.user_filament_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                self.clear_busy(session_id);
+                return Err(e);
+            }
+        };
+        if let Err(e) = self.snapshots.restore(session_id, seq, &dir) {
+            self.clear_busy(session_id);
+            return Err(e.to_string());
         }
-        let dir = self.host.user_filament_dir()?;
-        self.snapshots
-            .restore(session_id, seq, &dir)
-            .map_err(|e| e.to_string())?;
-        let conversation = match self.backend(provider)?.rewind(session_id, seq).await {
+        let backend = match self.backend(provider) {
+            Ok(b) => b,
+            Err(e) => {
+                self.clear_busy(session_id);
+                return Err(e);
+            }
+        };
+        let conversation = match backend.rewind(session_id, seq).await {
             Ok(ok) => ok,
             Err(e) => {
                 // Files are already restored above; the agent must be told
@@ -351,16 +389,17 @@ impl AgentService {
         if let Some(a) = self.active.lock().unwrap().get_mut(session_id) {
             a.seq = new_seq;
         }
-        self.store
-            .lock()
-            .unwrap()
-            .set_last_seq(session_id, new_seq)?;
+        if let Err(e) = self.store.lock().unwrap().set_last_seq(session_id, new_seq) {
+            self.clear_busy(session_id);
+            return Err(e);
+        }
         // Stale turns from the abandoned branch must not be resurrected if a
         // later turn reuses one of their sequence numbers.
         let _ = self.snapshots.delete_from(session_id, seq);
         self.host.emit_ui(UiCommand::Refresh {
             what: "profiles".into(),
         });
+        self.clear_busy(session_id);
         Ok(conversation)
     }
 
@@ -393,6 +432,24 @@ mod tests {
     use std::fs;
     use std::sync::Mutex as StdMutex;
 
+    /// Lets a test deterministically pause a `FakeBackend` call mid-flight:
+    /// the backend notifies `ready` right before parking on `proceed`, so a
+    /// test can wait for exactly the moment it needs (the call has done its
+    /// externally-visible side effect but hasn't returned yet) and then
+    /// release it — no guessing with `yield_now()` counts or sleep timings.
+    #[derive(Default)]
+    struct Gate {
+        ready: tokio::sync::Notify,
+        proceed: tokio::sync::Notify,
+    }
+
+    impl Gate {
+        async fn pause(&self) {
+            self.ready.notify_one();
+            self.proceed.notified().await;
+        }
+    }
+
     #[derive(Default)]
     struct FakeBackend {
         sends: StdMutex<Vec<(String, u32, Vec<UserInput>)>>,
@@ -403,6 +460,19 @@ mod tests {
         /// writes this content to this path before returning, so tests can
         /// prove a snapshot taken beforehand is unaffected.
         write_on_send: Option<(PathBuf, String)>,
+        /// When set, the *first* `send` call publishes this turn's own
+        /// `TurnDone` (as a real backend legitimately can, before its `send`
+        /// call itself returns) and then pauses on the paired `Gate` before
+        /// returning `Ok`, so a test can deterministically issue a second
+        /// `send` inside that race window. `take()`n on first use so a
+        /// second, concurrently-issued `send` (the one racing it) isn't also
+        /// gated.
+        race_turn_done: StdMutex<Option<(broadcast::Sender<AgentEvent>, Arc<Gate>)>>,
+        /// When set, `rewind` pauses on this `Gate` (after the service has
+        /// already claimed `busy` and restored files, right as it calls into
+        /// the backend) so a test can deterministically observe a concurrent
+        /// `send`/`rewind` racing an in-flight rewind.
+        rewind_gate: Option<Arc<Gate>>,
     }
 
     #[async_trait]
@@ -431,6 +501,9 @@ mod tests {
             if self.rewind_err {
                 return Err("backend rewind boom".into());
             }
+            if let Some(gate) = &self.rewind_gate {
+                gate.pause().await;
+            }
             Ok(self.rewind_ok)
         }
         async fn send(&self, sid: &str, seq: u32, input: Vec<UserInput>) -> Result<String, String> {
@@ -441,6 +514,20 @@ mod tests {
                 fs::write(path, content).unwrap();
             }
             self.sends.lock().unwrap().push((sid.into(), seq, input));
+            // `take()`: only the first call (the one under test) races a
+            // TurnDone against its own return; a second, concurrently-issued
+            // `send` must complete immediately like a normal fast backend.
+            // Taken into a local first so the `MutexGuard` (which is not
+            // `Send`) is dropped before the `.await` below.
+            let race = self.race_turn_done.lock().unwrap().take();
+            if let Some((tx, gate)) = race {
+                let _ = tx.send(AgentEvent::TurnDone {
+                    session_id: sid.to_string(),
+                    seq,
+                    status: TurnStatus::Completed,
+                });
+                gate.pause().await;
+            }
             Ok(format!("tu{seq}"))
         }
         async fn interrupt(&self, _s: &str) -> Result<(), String> {
@@ -478,9 +565,19 @@ mod tests {
     }
 
     fn rig_with(host: Arc<FakeHost>, backend: FakeBackend) -> Rig {
+        rig_with_channel(host, |_tx| backend)
+    }
+
+    /// Like `rig_with`, but lets the backend be built with a clone of the
+    /// service's own broadcast sender (needed for a `FakeBackend` that
+    /// publishes events itself, e.g. `race_turn_done`).
+    fn rig_with_channel(
+        host: Arc<FakeHost>,
+        make_backend: impl FnOnce(broadcast::Sender<AgentEvent>) -> FakeBackend,
+    ) -> Rig {
         let (tx, _) = broadcast::channel(256);
+        let backend = Arc::new(make_backend(tx.clone()));
         let asks = Arc::new(AskBroker::new(tx.clone()));
-        let backend = Arc::new(backend);
         let data = tempfile::tempdir().unwrap();
         let svc = AgentService::new(
             vec![backend.clone()],
@@ -723,6 +820,90 @@ mod tests {
         assert_eq!(r.backend.sends.lock().unwrap().last().unwrap().1, 1);
     }
 
+    // --- Fix round 2, item 1: a fast TurnDone must not open a seq-reuse
+    // window between reservation and the backend `send` call returning.
+
+    #[tokio::test]
+    async fn a_fast_turn_done_during_send_does_not_let_a_concurrent_send_reuse_the_seq() {
+        let gate = Arc::new(Gate::default());
+        let r = rig_with_channel(host_with_profile(), |tx| FakeBackend {
+            rewind_ok: true,
+            race_turn_done: StdMutex::new(Some((tx, gate.clone()))),
+            ..Default::default()
+        });
+        tokio::spawn(r.svc.validator_loop());
+        let sid = bounded(r.svc.start(Provider::Codex, None, None))
+            .await
+            .unwrap();
+
+        let svc = r.svc.clone();
+        let sid_for_first = sid.clone();
+        let first =
+            tokio::spawn(async move { svc.send(&sid_for_first, "one".to_string(), vec![]).await });
+
+        // Wait until the first turn's TurnDone has been published and its
+        // backend call is parked (busy already cleared by validator_loop,
+        // but `send`'s own await hasn't returned yet) — exactly the window
+        // this fix closes.
+        bounded(gate.ready.notified()).await;
+
+        let seq2 = bounded(send_when_free(&r.svc, &sid, "two")).await.unwrap();
+        assert_eq!(
+            seq2, 2,
+            "must not reuse turn 1's seq even though busy cleared early"
+        );
+
+        gate.proceed.notify_one();
+        let seq1 = bounded(first).await.unwrap().unwrap();
+        assert_eq!(seq1, 1);
+
+        let sends = r.backend.sends.lock().unwrap().clone();
+        assert_eq!(sends.len(), 2);
+        assert_eq!((sends[0].1, sends[1].1), (1, 2));
+    }
+
+    // --- Fix round 2, item 2: rewind claims `busy` for its own duration.
+
+    #[tokio::test]
+    async fn a_send_while_a_rewind_is_in_flight_fails_with_busy() {
+        let gate = Arc::new(Gate::default());
+        let r = rig_with(
+            host_with_profile(),
+            FakeBackend {
+                rewind_ok: true,
+                rewind_gate: Some(gate.clone()),
+                ..Default::default()
+            },
+        );
+        tokio::spawn(r.svc.validator_loop());
+        let sid = bounded(r.svc.start(Provider::Codex, None, None))
+            .await
+            .unwrap();
+        bounded(r.svc.send(&sid, "one".into(), vec![]))
+            .await
+            .unwrap();
+        r.events.send(turn_done(&sid, 1)).unwrap();
+
+        let svc = r.svc.clone();
+        let sid_for_rewind = sid.clone();
+        let rewind_task =
+            tokio::spawn(async move { rewind_when_free(&svc, &sid_for_rewind, 1).await });
+
+        // Wait until the rewind has gotten past its own busy/range checks,
+        // claimed `busy`, restored files, and is inside the (paused) backend
+        // call — so the concurrent send below deterministically races it.
+        bounded(gate.ready.notified()).await;
+
+        let err = bounded(r.svc.send(&sid, "two".into(), vec![]))
+            .await
+            .unwrap_err();
+        assert!(err.contains("running"), "unexpected error: {err}");
+
+        gate.proceed.notify_one();
+        let ok = bounded(rewind_task).await.unwrap().unwrap();
+        assert!(ok);
+    }
+
     // --- Item 2: rewind consistency ------------------------------------
 
     #[tokio::test]
@@ -736,6 +917,20 @@ mod tests {
             .await
             .unwrap();
         r.events.send(turn_done(&sid, 1)).unwrap();
+
+        // A failed second send still snapshots for seq 2 (snapshotting
+        // happens before the backend call), but rolls the reservation back,
+        // so the session's real last turn stays at 1. A snapshot therefore
+        // physically exists for seq 2 even though it's out of range — this
+        // proves rewind(2) is rejected by the explicit range check, not
+        // merely because no snapshot happens to exist for that seq.
+        r.backend.fail_send.store(true, Ordering::SeqCst);
+        let send_err = bounded(send_when_free(&r.svc, &sid, "two"))
+            .await
+            .unwrap_err();
+        assert!(send_err.contains("boom"));
+        r.backend.fail_send.store(false, Ordering::SeqCst);
+
         let before = fs::read_to_string(r.host.user_dir.path().join("A.json")).unwrap();
 
         let err_low = bounded(rewind_when_free(&r.svc, &sid, 0))
@@ -743,11 +938,15 @@ mod tests {
             .unwrap_err();
         assert!(!err_low.contains("already running") && !err_low.contains("a turn is running"));
         let err_high = bounded(r.svc.rewind(&sid, 2)).await.unwrap_err();
-        assert!(!err_high.contains("a turn is running"));
+        assert!(
+            !err_high.contains("a turn is running"),
+            "must be the range check firing, not a busy error"
+        );
 
         assert_eq!(
             fs::read_to_string(r.host.user_dir.path().join("A.json")).unwrap(),
-            before
+            before,
+            "a snapshot exists for seq 2 (from the failed send) but must not be restorable"
         );
         let row = r
             .svc

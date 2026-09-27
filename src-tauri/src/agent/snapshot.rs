@@ -60,12 +60,20 @@ impl Snapshots {
             fs::remove_dir_all(&dest)?;
         }
         fs::create_dir_all(&dest)?;
-        for src in profile_files(profile_dir)? {
+        // Don't leave a (possibly empty, possibly partial) snapshot dir
+        // behind on any failure past this point: a later `restore` must see
+        // "no snapshot" (NotFound), not silently wipe or misrepresent
+        // profiles using an incomplete or missing copy.
+        let files = match profile_files(profile_dir) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&dest);
+                return Err(e);
+            }
+        };
+        for src in files {
             if let Some(name) = src.file_name() {
                 if let Err(e) = fs::copy(&src, dest.join(name)) {
-                    // Don't leave a partial snapshot behind: a later `restore`
-                    // must see "no snapshot" (NotFound), not silently delete
-                    // profiles using an incomplete copy.
                     let _ = fs::remove_dir_all(&dest);
                     return Err(e);
                 }
@@ -296,6 +304,34 @@ mod tests {
         assert!(
             snaps.restore("s1", 7, profiles.path()).is_err(),
             "restore of a never-completed snapshot must be NotFound, not a silent wipe"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn take_removes_the_empty_turn_dir_when_listing_the_profile_dir_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (profiles, _root, snaps) = setup();
+        let mut perms = fs::metadata(profiles.path()).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(profiles.path(), perms).unwrap();
+
+        let result = snaps.take("s2", 1, profiles.path());
+
+        // Restore permissions so the TempDir's own cleanup doesn't fail.
+        let mut perms = fs::metadata(profiles.path()).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(profiles.path(), perms).unwrap();
+
+        assert!(
+            result.is_err(),
+            "listing the profile dir failing must surface as an error"
+        );
+        assert!(
+            !snaps.turn_dir("s2", 1).exists(),
+            "an empty turn dir must not be left behind when create_dir_all \
+             succeeded but listing the profile dir afterward failed"
         );
     }
 }
