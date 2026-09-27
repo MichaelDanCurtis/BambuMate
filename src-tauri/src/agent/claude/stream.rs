@@ -63,6 +63,14 @@ impl ClaudeDecoder {
         self.interrupted = true;
     }
 
+    pub fn seq(&self) -> u32 {
+        self.seq
+    }
+
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted
+    }
+
     pub fn decode_line(&mut self, line: &str) -> Decoded {
         let mut out = Decoded::default();
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
