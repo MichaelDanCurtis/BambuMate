@@ -16,6 +16,27 @@ use super::types::{
 #[derive(Clone, Copy)]
 pub struct AgentRefresh(pub RwSignal<u32>);
 
+/// Agent state that must outlive the drawer. `App` provides it once. The drawer
+/// sits inside a `<Show>` that can unmount and remount it (around the setup
+/// wizard), so the app-lifetime listeners in `AgentEvents` write here rather
+/// than into signals owned by one drawer instance.
+#[derive(Clone, Copy)]
+pub struct AgentShared {
+    pub chat: RwSignal<ChatState>,
+    pub open: RwSignal<bool>,
+    pub provider: RwSignal<Provider>,
+}
+
+impl Default for AgentShared {
+    fn default() -> Self {
+        Self {
+            chat: RwSignal::new(ChatState::default()),
+            open: RwSignal::new(false),
+            provider: RwSignal::new(Provider::Codex),
+        }
+    }
+}
+
 fn provider_label(p: Provider) -> &'static str {
     match p {
         Provider::Codex => "CODEX",
@@ -23,21 +44,14 @@ fn provider_label(p: Provider) -> &'static str {
     }
 }
 
+/// Registers the backend event listeners and the Cmd/Ctrl+K shortcut. None of
+/// them can be removed, so this must be mounted exactly once: inside `<Router>`
+/// (it uses `use_navigate`) and outside anything that can unmount.
 #[component]
-pub fn AgentDrawer() -> impl IntoView {
-    let open = RwSignal::new(false);
-    let show_settings = RwSignal::new(false);
-    let provider = RwSignal::new(Provider::Codex);
-    let readiness = RwSignal::new(None::<Readiness>);
-    let models = RwSignal::new(Vec::<AgentModel>::new());
-    let model = RwSignal::new(None::<String>);
-    let settings = RwSignal::new(None::<AgentSettings>);
-    let chat = RwSignal::new(ChatState::default());
-    let draft = RwSignal::new(String::new());
-    let attachments = RwSignal::new(Vec::<(String, String)>::new()); // (display name, staged path)
+pub fn AgentEvents() -> impl IntoView {
+    let AgentShared { chat, open, .. } = expect_context::<AgentShared>();
     let refresh = use_context::<AgentRefresh>();
 
-    // Backend events. The drawer mounts once, so these listeners live for the app's lifetime.
     bridge::listen::<AgentEvent>("agent://event", move |ev| chat.update(|c| c.apply(&ev)));
     let navigate = use_navigate();
     bridge::listen::<UiCommand>("agent://ui", move |cmd| match cmd {
@@ -48,6 +62,34 @@ pub fn AgentDrawer() -> impl IntoView {
             }
         }
     });
+
+    let _keys = window_event_listener(leptos::ev::keydown, move |e| {
+        if (e.meta_key() || e.ctrl_key()) && e.key().eq_ignore_ascii_case("k") {
+            e.prevent_default();
+            open.update(|o| *o = !*o);
+        }
+    });
+}
+
+#[component]
+pub fn AgentDrawer() -> impl IntoView {
+    let AgentShared {
+        chat,
+        open,
+        provider,
+    } = expect_context::<AgentShared>();
+    let show_settings = RwSignal::new(false);
+    let readiness = RwSignal::new(None::<Readiness>);
+    let models = RwSignal::new(Vec::<AgentModel>::new());
+    let model = RwSignal::new(None::<String>);
+    let settings = RwSignal::new(None::<AgentSettings>);
+    let draft = RwSignal::new(String::new());
+    let attachments = RwSignal::new(Vec::<(String, String)>::new()); // (display name, staged path)
+    let running = Signal::derive(move || chat.with(|c| c.running));
+
+    let notice = move |text: String, is_error: bool| {
+        chat.update(|c| c.entries.push(Entry::Notice { text, is_error }))
+    };
 
     // Tell the backend what the user is looking at.
     let location = use_location();
@@ -62,19 +104,7 @@ pub fn AgentDrawer() -> impl IntoView {
         });
     });
 
-    let _keys = window_event_listener(leptos::ev::keydown, move |e| {
-        if (e.meta_key() || e.ctrl_key()) && e.key().eq_ignore_ascii_case("k") {
-            e.prevent_default();
-            open.update(|o| *o = !*o);
-        }
-    });
-
-    // Readiness + models whenever the drawer opens or the provider changes.
-    Effect::new(move |_| {
-        if !open.get() {
-            return;
-        }
-        let p = provider.get();
+    let check_readiness = move |p: Provider| {
         readiness.set(None);
         spawn_local(async move {
             let r = bridge::readiness(p).await.ok();
@@ -94,27 +124,33 @@ pub fn AgentDrawer() -> impl IntoView {
                 settings.set(Some(s));
             }
         });
+    };
+
+    // Readiness + models whenever the drawer opens or the provider changes.
+    Effect::new(move |_| {
+        if open.get() {
+            check_readiness(provider.get());
+        }
     });
 
     let switch_provider = move |p: Provider| {
-        if provider.get_untracked() == p {
+        // A switch mid-turn would orphan the live session and its pending asks.
+        if provider.get_untracked() == p || running.get_untracked() {
             return;
         }
         provider.set(p);
         chat.set(ChatState::default());
-        chat.update(|c| {
-            c.entries.push(Entry::Notice {
-                text: format!("Switched to {}. New chat.", provider_label(p)),
-                is_error: false,
-            })
-        });
+        notice(
+            format!("Switched to {}. New chat.", provider_label(p)),
+            false,
+        );
     };
 
     let send = move || {
         let text = draft.get_untracked().trim().to_string();
         // Enter bypasses the disabled SEND button, so check readiness here too.
         let is_ready = readiness.with_untracked(|r| matches!(r, Some(Readiness::Ready { .. })));
-        if text.is_empty() || !is_ready || chat.with_untracked(|c| c.running) {
+        if text.is_empty() || !is_ready || running.get_untracked() {
             return;
         }
         let images: Vec<String> = attachments
@@ -135,24 +171,11 @@ pub fn AgentDrawer() -> impl IntoView {
                         chat.update(|c| c.session_id = Some(s.clone()));
                         s
                     }
-                    Err(e) => {
-                        chat.update(|c| {
-                            c.entries.push(Entry::Notice {
-                                text: e,
-                                is_error: true,
-                            })
-                        });
-                        return;
-                    }
+                    Err(e) => return notice(e, true),
                 },
             };
             if let Err(e) = bridge::send(sid, text, images).await {
-                chat.update(|c| {
-                    c.entries.push(Entry::Notice {
-                        text: e,
-                        is_error: true,
-                    })
-                });
+                notice(e, true);
             }
         });
     };
@@ -160,34 +183,33 @@ pub fn AgentDrawer() -> impl IntoView {
     let on_answer = Callback::new(move |(ask_id, answers): (String, Vec<String>)| {
         chat.update(|c| c.mark_answered(&ask_id, answers.clone()));
         spawn_local(async move {
-            let _ = bridge::answer(ask_id, answers).await;
+            if let Err(e) = bridge::answer(ask_id.clone(), answers).await {
+                // Let the user pick again; the backend is still waiting.
+                chat.update(|c| c.unmark_answered(&ask_id));
+                notice(e, true);
+            }
         });
     });
 
     let on_rewind = Callback::new(move |seq: u32| {
+        if running.get_untracked() {
+            return;
+        }
         let Some(sid) = chat.with_untracked(|c| c.session_id.clone()) else {
             return;
         };
         spawn_local(async move {
             match bridge::rewind(sid, seq).await {
-                Ok(conversation) => chat.update(|c| {
-                    c.rewind_to(seq);
+                Ok(conversation) => {
+                    chat.update(|c| c.rewind_to(seq));
                     let text = if conversation {
                         "Rewound profiles and conversation."
                     } else {
                         "Rewound profiles. The agent will be told on your next message."
                     };
-                    c.entries.push(Entry::Notice {
-                        text: text.into(),
-                        is_error: false,
-                    });
-                }),
-                Err(e) => chat.update(|c| {
-                    c.entries.push(Entry::Notice {
-                        text: e,
-                        is_error: true,
-                    })
-                }),
+                    notice(text.into(), false);
+                }
+                Err(e) => notice(e, true),
             }
         });
     });
@@ -200,19 +222,9 @@ pub fn AgentDrawer() -> impl IntoView {
                 match crate::pages::print_analysis::read_file_as_base64(file).await {
                     Ok((_mime, b64)) => match bridge::stage_image(name.clone(), b64).await {
                         Ok(path) => attachments.update(|a| a.push((name, path))),
-                        Err(e) => chat.update(|c| {
-                            c.entries.push(Entry::Notice {
-                                text: e,
-                                is_error: true,
-                            })
-                        }),
+                        Err(e) => notice(e, true),
                     },
-                    Err(e) => chat.update(|c| {
-                        c.entries.push(Entry::Notice {
-                            text: e,
-                            is_error: true,
-                        })
-                    }),
+                    Err(e) => notice(e, true),
                 }
             });
         }
@@ -251,6 +263,8 @@ pub fn AgentDrawer() -> impl IntoView {
                     {[Provider::Codex, Provider::Claude].into_iter().map(|p| view! {
                         <button data-provider=move || if p == Provider::Codex { "codex" } else { "claude" }
                             class="nd-label" class:active=move || provider.get() == p
+                            disabled=move || running.get()
+                            title=move || running.get().then_some("Stop the current turn first")
                             on:click=move |_| switch_provider(p)>{provider_label(p)}</button>
                     }).collect_view()}
                     <button class="ag-gear nd-label" on:click=move |_| show_settings.update(|s| *s = !*s)>"SETTINGS"</button>
@@ -262,7 +276,10 @@ pub fn AgentDrawer() -> impl IntoView {
                     <button class="ag-login" on:click=move |_| {
                         let p = provider.get_untracked();
                         spawn_local(async move {
-                            let _ = bridge::login(p).await;
+                            match bridge::login(p).await {
+                                Ok(_) => check_readiness(p),
+                                Err(e) => notice(e, true),
+                            }
                         });
                     }>"Sign in"</button>
                 </Show>
@@ -315,7 +332,7 @@ pub fn AgentDrawer() -> impl IntoView {
 
             <section class="ag-stream">
                 {move || chat.with(|c| c.entries.clone()).into_iter().map(|entry| view! {
-                    <EntryView entry=entry on_answer=on_answer on_rewind=on_rewind />
+                    <EntryView entry=entry on_answer=on_answer on_rewind=on_rewind busy=running />
                 }).collect_view()}
             </section>
 
@@ -353,13 +370,17 @@ pub fn AgentDrawer() -> impl IntoView {
                                 input.set_value("");
                             } />
                     </label>
-                    <Show when=move || chat.with(|c| c.running)
+                    <Show when=move || running.get()
                         fallback=move || view! {
                             <button class="ag-send" disabled=move || !ready() on:click=move |_| send()>"SEND"</button>
                         }>
                         <button class="ag-stop" on:click=move |_| {
                             if let Some(sid) = chat.with_untracked(|c| c.session_id.clone()) {
-                                spawn_local(async move { let _ = bridge::interrupt(sid).await; });
+                                spawn_local(async move {
+                                    if let Err(e) = bridge::interrupt(sid).await {
+                                        notice(e, true);
+                                    }
+                                });
                             }
                         }>"STOP"</button>
                     </Show>

@@ -20,6 +20,9 @@ pub fn EntryView(
     entry: Entry,
     on_answer: Callback<(String, Vec<String>)>,
     on_rewind: Callback<u32>,
+    /// A turn is running: rewinding is refused by the backend, so disable it.
+    #[prop(into)]
+    busy: Signal<bool>,
 ) -> impl IntoView {
     match entry {
         Entry::User { seq, text, images } => view! {
@@ -30,7 +33,7 @@ pub fn EntryView(
                 })}
                 {seq.map(|s| view! {
                     <button class="ag-rewind nd-label" title="Restore profiles and conversation to before this message"
-                        on:click=move |_| on_rewind.run(s)>"REWIND"</button>
+                        disabled=move || busy.get() on:click=move |_| on_rewind.run(s)>"REWIND"</button>
                 })}
             </div>
         }

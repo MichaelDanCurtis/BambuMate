@@ -3,7 +3,7 @@ use leptos_router::components::*;
 use leptos_router::path;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::agent::drawer::{AgentDrawer, AgentRefresh};
+use crate::agent::drawer::{AgentDrawer, AgentEvents, AgentRefresh, AgentShared};
 use crate::commands::{self, FeatureFlags, UpdateInfo};
 use crate::components::sidebar::Sidebar;
 use crate::pages::about::AboutPage;
@@ -39,6 +39,7 @@ pub fn App() -> impl IntoView {
     let update_info = RwSignal::new(Option::<UpdateInfo>::None);
     provide_context(UpdateContext { update_info });
     provide_context(AgentRefresh(RwSignal::new(0)));
+    provide_context(AgentShared::default());
 
     // Feature flags with both enabled by default
     let (flags, set_flags) = signal(FeatureFlags {
@@ -100,6 +101,9 @@ pub fn App() -> impl IntoView {
 
     view! {
         <Router>
+            // Mounted once, outside the Shows below: its listeners can't be removed.
+            <AgentEvents />
+
             // Show wizard overlay if setup is not complete
             <Show when=move || setup_complete.get() == Some(false)>
                 <SetupWizard on_complete=on_wizard_complete.clone() on_cancel=on_wizard_cancel.clone() />

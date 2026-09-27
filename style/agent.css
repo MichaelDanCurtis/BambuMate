@@ -48,6 +48,7 @@
     cursor: pointer;
 }
 .ag-provider button.active { background: var(--nd-text-display); color: var(--nd-black); border-color: var(--nd-text-display); }
+.ag-provider button:disabled { opacity: 0.4; cursor: default; }
 .ag-provider .ag-gear { margin-left: auto; }
 .ag-status { margin: 0; font-size: 12px; color: var(--nd-text-secondary); }
 .ag-login { justify-self: start; color: var(--nd-interactive); background: none; border: none; padding: 0; cursor: pointer; font: inherit; }
@@ -63,7 +64,8 @@
 .ag-user { align-self: flex-end; max-width: 85%; padding: var(--nd-space-sm) var(--nd-space-md); background: var(--nd-surface-raised); border-radius: 12px; }
 .ag-user-text { margin: 0; white-space: pre-wrap; }
 .ag-rewind { margin-top: var(--nd-space-xs); background: none; border: none; padding: 0; cursor: pointer; }
-.ag-rewind:hover { color: var(--nd-text-display); }
+.ag-rewind:hover:not(:disabled) { color: var(--nd-text-display); }
+.ag-rewind:disabled { opacity: 0.4; cursor: default; }
 .ag-agent { white-space: pre-wrap; line-height: 1.5; color: var(--nd-text-primary); }
 .ag-agent.ag-streaming::after { content: "▍"; color: var(--nd-text-disabled); }
 
@@ -89,6 +91,7 @@
 .ag-composer { padding: var(--nd-space-md); border-top: 1px solid var(--nd-border); display: grid; gap: var(--nd-space-sm); }
 .ag-attachments { margin: 0; }
 .ag-input { width: 100%; box-sizing: border-box; resize: vertical; padding: var(--nd-space-sm); border: 1px solid var(--nd-border-visible); border-radius: 8px; background: var(--nd-surface); color: var(--nd-text-primary); font-family: var(--nd-font-body); font-size: 14px; }
+.ag-input:focus { outline: none; border-color: var(--nd-text-primary); }
 .ag-actions { display: flex; justify-content: space-between; align-items: center; }
 .ag-attach { cursor: pointer; }
 .ag-send, .ag-stop { padding: 8px 20px; border-radius: 999px; border: 1px solid var(--nd-text-display); background: var(--nd-text-display); color: var(--nd-black); font-family: var(--nd-font-mono); letter-spacing: 0.08em; cursor: pointer; }

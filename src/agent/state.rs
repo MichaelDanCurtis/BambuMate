@@ -239,6 +239,17 @@ impl ChatState {
         }
     }
 
+    /// Undo `mark_answered` when delivering the answer failed, so the user can retry.
+    pub fn unmark_answered(&mut self, ask_id: &str) {
+        if let Some(Entry::Ask { answered, .. }) = self
+            .entries
+            .iter_mut()
+            .find(|e| matches!(e, Entry::Ask { request, .. } if request.id == ask_id))
+        {
+            *answered = None;
+        }
+    }
+
     pub fn rewind_to(&mut self, seq: u32) {
         if let Some(pos) = self
             .entries
@@ -349,6 +360,15 @@ mod tests {
         assert!(
             matches!(&s.entries[0], Entry::Ask { answered: Some(a), .. } if a == &vec!["Yes".to_string()])
         );
+    }
+
+    #[test]
+    fn failed_answer_reverts_the_ask_to_unanswered() {
+        let mut s = state();
+        s.apply(&ev(r#"{"kind":"ask","session_id":"s1","request":{"id":"a1","header":"Confirm","question":"Install?","options":[{"label":"Yes","description":""}],"allow_other":false}}"#));
+        s.mark_answered("a1", vec!["Yes".into()]);
+        s.unmark_answered("a1");
+        assert!(matches!(&s.entries[0], Entry::Ask { answered: None, .. }));
     }
 
     #[test]
