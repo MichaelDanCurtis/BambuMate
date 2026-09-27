@@ -6,6 +6,7 @@ pub mod backend;
 pub mod claude;
 pub mod codex;
 pub mod locate;
+pub mod service;
 pub mod snapshot;
 pub mod store;
 pub mod tools;

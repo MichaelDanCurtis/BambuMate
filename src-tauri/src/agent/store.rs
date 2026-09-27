@@ -57,6 +57,8 @@ impl SessionStore {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS agent_sessions (
                 id TEXT PRIMARY KEY,
