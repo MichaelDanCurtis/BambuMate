@@ -7,6 +7,7 @@ pub mod claude;
 pub mod codex;
 pub mod locate;
 pub mod snapshot;
+pub mod store;
 pub mod tools;
 pub mod types;
 pub mod validate;
