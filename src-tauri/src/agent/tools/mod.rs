@@ -37,13 +37,19 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     pub fn text(t: impl Into<String>) -> Self {
-        Self { ok: true, content: vec![ToolContent::Text(t.into())] }
+        Self {
+            ok: true,
+            content: vec![ToolContent::Text(t.into())],
+        }
     }
     pub fn json(v: &Value) -> Self {
         Self::text(serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()))
     }
     pub fn error(m: impl Into<String>) -> Self {
-        Self { ok: false, content: vec![ToolContent::Text(format!("error: {}", m.into()))] }
+        Self {
+            ok: false,
+            content: vec![ToolContent::Text(format!("error: {}", m.into()))],
+        }
     }
     pub fn summary(&self) -> String {
         let first = self
@@ -91,7 +97,11 @@ pub trait ToolHost: Send + Sync {
     ) -> Result<Value, String>;
     /// Installs a staged profile; returns JSON with `installed_path`.
     async fn install_staged(&self, staged_id: &str, force: bool) -> Result<Value, String>;
-    async fn run_analysis(&self, photo_path: &str, profile_path: Option<String>) -> Result<Value, String>;
+    async fn run_analysis(
+        &self,
+        photo_path: &str,
+        profile_path: Option<String>,
+    ) -> Result<Value, String>;
     async fn history(&self, profile_path: &str) -> Result<Value, String>;
     async fn launch_bambu_studio(&self, profile_path: Option<String>) -> Result<Value, String>;
 }
@@ -104,7 +114,10 @@ pub fn arg_str(args: &Value, key: &str) -> Result<String, ToolOutput> {
 }
 
 pub fn arg_opt_str(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()).filter(|s| !s.is_empty())
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[derive(Default)]
@@ -127,7 +140,12 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new(session_id: String, host: Arc<dyn ToolHost>, asks: Arc<AskBroker>) -> Self {
-        Self { session_id, host, asks, scope: Mutex::new(WriteScope::default()) }
+        Self {
+            session_id,
+            host,
+            asks,
+            scope: Mutex::new(WriteScope::default()),
+        }
     }
     pub fn session_id(&self) -> &str {
         &self.session_id
@@ -169,7 +187,11 @@ impl ToolRegistry {
     }
 
     pub fn mark_created(&self, path: &Path) {
-        self.scope.lock().unwrap().created.insert(path.to_path_buf());
+        self.scope
+            .lock()
+            .unwrap()
+            .created
+            .insert(path.to_path_buf());
     }
 
     /// Enforces the risky-write rules from the spec. Asks the user when needed.
@@ -177,7 +199,10 @@ impl ToolRegistry {
         if self.host.bambu_studio_running()
             && !self
                 .asks
-                .confirm(&self.session_id, &format!("Bambu Studio is running. Write {} anyway?", path.display()))
+                .confirm(
+                    &self.session_id,
+                    &format!("Bambu Studio is running. Write {} anyway?", path.display()),
+                )
                 .await
         {
             return Err("declined: Bambu Studio is running".into());
@@ -189,7 +214,10 @@ impl ToolRegistry {
         // time, and the second sees `confirmed` already set and skips asking.
         let lock = {
             let mut s = self.scope.lock().unwrap();
-            s.locks.entry(path.to_path_buf()).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
+            s.locks
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone()
         };
         let _path_guard = lock.lock().await;
         let needs_confirm = {
@@ -199,12 +227,19 @@ impl ToolRegistry {
         if needs_confirm {
             if !self
                 .asks
-                .confirm(&self.session_id, &format!("Modify existing profile {}?", path.display()))
+                .confirm(
+                    &self.session_id,
+                    &format!("Modify existing profile {}?", path.display()),
+                )
                 .await
             {
                 return Err("declined by user".into());
             }
-            self.scope.lock().unwrap().confirmed.insert(path.to_path_buf());
+            self.scope
+                .lock()
+                .unwrap()
+                .confirmed
+                .insert(path.to_path_buf());
         }
         Ok(())
     }

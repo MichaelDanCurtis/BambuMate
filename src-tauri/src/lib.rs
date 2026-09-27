@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 
-pub mod analyzer;
 pub mod agent;
+pub mod analyzer;
 mod commands;
 pub mod diagnostics;
 pub mod history;

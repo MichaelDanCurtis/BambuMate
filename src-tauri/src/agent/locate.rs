@@ -30,7 +30,11 @@ pub fn candidate_dirs(home: Option<&Path>, path_env: Option<&str>) -> Vec<PathBu
 
 pub fn find_in(program: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     let names: Vec<String> = if cfg!(windows) {
-        vec![format!("{program}.exe"), format!("{program}.cmd"), program.to_string()]
+        vec![
+            format!("{program}.exe"),
+            format!("{program}.cmd"),
+            program.to_string(),
+        ]
     } else {
         vec![program.to_string()]
     };
@@ -72,7 +76,10 @@ pub fn child_path_env(bin: &Path) -> OsString {
         dirs.push(parent.to_path_buf());
     }
     let path_env = std::env::var("PATH").ok();
-    dirs.extend(candidate_dirs(dirs::home_dir().as_deref(), path_env.as_deref()));
+    dirs.extend(candidate_dirs(
+        dirs::home_dir().as_deref(),
+        path_env.as_deref(),
+    ));
     let mut seen = HashSet::new();
     dirs.retain(|d| seen.insert(d.clone()));
     std::env::join_paths(dirs).unwrap_or_default()
@@ -85,7 +92,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn make_exe(dir: &Path, name: &str) -> PathBuf {
-        let p = dir.join(if cfg!(windows) { format!("{name}.exe") } else { name.to_string() });
+        let p = dir.join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        });
         fs::write(&p, b"#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {
@@ -127,7 +138,12 @@ mod tests {
             .unwrap();
         let dirs = candidate_dirs(Some(&home), Some(&path_env));
         assert_eq!(dirs[0], PathBuf::from("/usr/bin"));
-        assert_eq!(dirs.iter().filter(|d| **d == PathBuf::from("/usr/bin")).count(), 1);
+        assert_eq!(
+            dirs.iter()
+                .filter(|d| **d == PathBuf::from("/usr/bin"))
+                .count(),
+            1
+        );
         assert!(dirs.contains(&home.join(".local/bin")));
     }
 

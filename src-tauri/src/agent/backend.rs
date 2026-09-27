@@ -31,13 +31,23 @@ pub trait AgentBackend: Send + Sync {
     async fn login(&self) -> Result<Option<String>, String>;
     /// Returns the backend's own conversation id (Codex thread id / Claude session id).
     async fn start_session(&self, session_id: &str, opts: SessionOpts) -> Result<String, String>;
-    async fn resume_session(&self, session_id: &str, backend_id: &str, opts: SessionOpts) -> Result<(), String>;
+    async fn resume_session(
+        &self,
+        session_id: &str,
+        backend_id: &str,
+        opts: SessionOpts,
+    ) -> Result<(), String>;
     /// Drops conversation history from user message `to_seq` onward. Returns
     /// false when the backend cannot rewind its conversation. The service then
     /// rewinds files only and tells the agent so in the next message.
     async fn rewind(&self, session_id: &str, to_seq: u32) -> Result<bool, String>;
     /// Starts a turn and returns the backend's turn id. Progress arrives as AgentEvents.
-    async fn send(&self, session_id: &str, seq: u32, input: Vec<UserInput>) -> Result<String, String>;
+    async fn send(
+        &self,
+        session_id: &str,
+        seq: u32,
+        input: Vec<UserInput>,
+    ) -> Result<String, String>;
     async fn interrupt(&self, session_id: &str) -> Result<(), String>;
     async fn end_session(&self, session_id: &str);
 }

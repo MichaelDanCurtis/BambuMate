@@ -11,8 +11,14 @@ pub fn validate_profile_file(path: &Path) -> Result<(), String> {
         Some(n) if !n.trim().is_empty() => {}
         _ => return Err("missing or empty \"name\"".to_string()),
     }
-    let has_inherits = profile.inherits().map(|s| !s.trim().is_empty()).unwrap_or(false);
-    let has_id = profile.filament_id().map(|s| !s.trim().is_empty()).unwrap_or(false);
+    let has_inherits = profile
+        .inherits()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let has_id = profile
+        .filament_id()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
     if !has_inherits && !has_id {
         return Err("needs a non-empty \"inherits\" or \"filament_id\"".to_string());
     }
@@ -41,7 +47,11 @@ mod tests {
     #[test]
     fn accepts_a_minimal_user_profile() {
         let d = tempfile::tempdir().unwrap();
-        let p = write(d.path(), "ok.json", r#"{"name":"My PLA","inherits":"Generic PLA @BBL X1C","from":"User"}"#);
+        let p = write(
+            d.path(),
+            "ok.json",
+            r#"{"name":"My PLA","inherits":"Generic PLA @BBL X1C","from":"User"}"#,
+        );
         assert_eq!(validate_profile_file(&p), Ok(()));
     }
 
@@ -69,7 +79,11 @@ mod tests {
     #[test]
     fn invalid_profiles_ignores_info_files_and_reports_bad_json() {
         let d = tempfile::tempdir().unwrap();
-        let good = write(d.path(), "g.json", r#"{"name":"G","filament_id":"P1234567"}"#);
+        let good = write(
+            d.path(),
+            "g.json",
+            r#"{"name":"G","filament_id":"P1234567"}"#,
+        );
         let bad = write(d.path(), "b.json", "not json");
         let info = write(d.path(), "g.info", "garbage");
         let out = invalid_profiles(&[good, bad.clone(), info]);

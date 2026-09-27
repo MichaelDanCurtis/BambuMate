@@ -11,8 +11,15 @@ use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
-    Notification { method: String, params: Value },
-    Request { id: Value, method: String, params: Value },
+    Notification {
+        method: String,
+        params: Value,
+    },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -52,7 +59,9 @@ impl RpcConnection {
         let mut line = msg.to_string();
         line.push('\n');
         let mut w = self.writer.lock().await;
-        w.write_all(line.as_bytes()).await.map_err(|_| RpcError::Closed)?;
+        w.write_all(line.as_bytes())
+            .await
+            .map_err(|_| RpcError::Closed)?;
         w.flush().await.map_err(|_| RpcError::Closed)
     }
 
@@ -60,7 +69,10 @@ impl RpcConnection {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
-        if let Err(e) = self.write(&json!({"id": id, "method": method, "params": params})).await {
+        if let Err(e) = self
+            .write(&json!({"id": id, "method": method, "params": params}))
+            .await
+        {
             self.pending.lock().unwrap().remove(&id);
             return Err(e);
         }
@@ -80,7 +92,8 @@ impl RpcConnection {
     }
 
     pub async fn respond_error(&self, id: Value, code: i64, message: &str) -> Result<(), RpcError> {
-        self.write(&json!({"id": id, "error": {"code": code, "message": message}})).await
+        self.write(&json!({"id": id, "error": {"code": code, "message": message}}))
+            .await
     }
 }
 
@@ -100,7 +113,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
             tracing::debug!("codex: ignoring non-JSON line: {}", line.trim());
             continue;
         };
-        let method = msg.get("method").and_then(|m| m.as_str()).map(str::to_string);
+        let method = msg
+            .get("method")
+            .and_then(|m| m.as_str())
+            .map(str::to_string);
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         match (method, msg.get("id").cloned()) {
             (Some(method), Some(id)) => {
@@ -111,7 +127,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
             (None, Some(id)) => {
                 let Some(n) = id.as_u64() else { continue };
-                let Some(waiter) = pending.lock().unwrap().remove(&n) else { continue };
+                let Some(waiter) = pending.lock().unwrap().remove(&n) else {
+                    continue;
+                };
                 let result = match msg.get("error") {
                     Some(err) => Err(RpcError::Remote {
                         code: err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1),
@@ -164,12 +182,23 @@ mod tests {
         }
     }
 
-    fn pair() -> (Arc<RpcConnection>, mpsc::UnboundedReceiver<Incoming>, Server) {
+    fn pair() -> (
+        Arc<RpcConnection>,
+        mpsc::UnboundedReceiver<Incoming>,
+        Server,
+    ) {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = tokio::io::split(client);
         let (sr, sw) = tokio::io::split(server);
         let (conn, rx) = RpcConnection::start(cr, cw);
-        (conn, rx, Server { r: BufReader::new(sr), w: sw })
+        (
+            conn,
+            rx,
+            Server {
+                r: BufReader::new(sr),
+                w: sw,
+            },
+        )
     }
 
     #[tokio::test]
@@ -180,8 +209,12 @@ mod tests {
         let msg = srv.read().await;
         assert_eq!(msg["method"], "account/read");
         assert!(msg.get("jsonrpc").is_none());
-        srv.send(json!({"id": msg["id"], "result": {"account": null}})).await;
-        assert_eq!(with_timeout(call).await.unwrap().unwrap(), json!({"account": null}));
+        srv.send(json!({"id": msg["id"], "result": {"account": null}}))
+            .await;
+        assert_eq!(
+            with_timeout(call).await.unwrap().unwrap(),
+            json!({"account": null})
+        );
     }
 
     #[tokio::test]
@@ -190,33 +223,51 @@ mod tests {
         let c2 = conn.clone();
         let call = tokio::spawn(async move { c2.request("thread/start", json!({})).await });
         let msg = srv.read().await;
-        srv.send(json!({"id": msg["id"], "error": {"code": -32600, "message": "bad"}})).await;
+        srv.send(json!({"id": msg["id"], "error": {"code": -32600, "message": "bad"}}))
+            .await;
         assert_eq!(
             with_timeout(call).await.unwrap(),
-            Err(RpcError::Remote { code: -32600, message: "bad".into() })
+            Err(RpcError::Remote {
+                code: -32600,
+                message: "bad".into()
+            })
         );
     }
 
     #[tokio::test]
     async fn delivers_notifications_and_server_requests() {
         let (_conn, mut rx, mut srv) = pair();
-        srv.send(json!({"method":"turn/started","params":{"threadId":"t"}})).await;
-        srv.send(json!({"id": 7, "method":"item/tool/call","params":{"tool":"bm_app_state"}})).await;
+        srv.send(json!({"method":"turn/started","params":{"threadId":"t"}}))
+            .await;
+        srv.send(json!({"id": 7, "method":"item/tool/call","params":{"tool":"bm_app_state"}}))
+            .await;
         assert_eq!(
             with_timeout(rx.recv()).await.unwrap(),
-            Incoming::Notification { method: "turn/started".into(), params: json!({"threadId":"t"}) }
+            Incoming::Notification {
+                method: "turn/started".into(),
+                params: json!({"threadId":"t"})
+            }
         );
         assert_eq!(
             with_timeout(rx.recv()).await.unwrap(),
-            Incoming::Request { id: json!(7), method: "item/tool/call".into(), params: json!({"tool":"bm_app_state"}) }
+            Incoming::Request {
+                id: json!(7),
+                method: "item/tool/call".into(),
+                params: json!({"tool":"bm_app_state"})
+            }
         );
     }
 
     #[tokio::test]
     async fn respond_and_notify_write_expected_lines() {
         let (conn, _rx, mut srv) = pair();
-        conn.respond(json!(7), json!({"success": true})).await.unwrap();
-        assert_eq!(srv.read().await, json!({"id": 7, "result": {"success": true}}));
+        conn.respond(json!(7), json!({"success": true}))
+            .await
+            .unwrap();
+        assert_eq!(
+            srv.read().await,
+            json!({"id": 7, "result": {"success": true}})
+        );
         conn.notify("initialized", None).await.unwrap();
         assert_eq!(srv.read().await, json!({"method": "initialized"}));
     }

@@ -47,11 +47,19 @@ pub fn specs() -> Vec<ToolSpec> {
 /// Resolve `p` (absolute or relative) and require it to live inside `dir`.
 pub(crate) fn resolve_in(dir: &Path, p: &str) -> Result<PathBuf, String> {
     let raw = Path::new(p);
-    let joined = if raw.is_absolute() { raw.to_path_buf() } else { dir.join(raw) };
-    let canon_dir = dir.canonicalize().map_err(|e| format!("profile folder unavailable: {e}"))?;
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        dir.join(raw)
+    };
+    let canon_dir = dir
+        .canonicalize()
+        .map_err(|e| format!("profile folder unavailable: {e}"))?;
     let canon = joined.canonicalize().map_err(|e| format!("{p}: {e}"))?;
     if !canon.starts_with(&canon_dir) {
-        return Err(format!("{p} is outside the Bambu Studio user filament folder"));
+        return Err(format!(
+            "{p} is outside the Bambu Studio user filament folder"
+        ));
     }
     Ok(canon)
 }
@@ -90,9 +98,15 @@ pub async fn handle(reg: &ToolRegistry, name: &str, args: &Value) -> Option<Tool
 }
 
 fn list(reg: &ToolRegistry) -> ToolOutput {
-    let dir = match user_dir(reg) { Ok(d) => d, Err(e) => return e };
+    let dir = match user_dir(reg) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
     let mut rows = Vec::new();
-    let entries = match std::fs::read_dir(&dir) { Ok(e) => e, Err(e) => return ToolOutput::error(e.to_string()) };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) => return ToolOutput::error(e.to_string()),
+    };
     for p in entries.filter_map(|e| e.ok().map(|e| e.path())) {
         if p.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -109,13 +123,29 @@ fn list(reg: &ToolRegistry) -> ToolOutput {
 }
 
 fn read(reg: &ToolRegistry, args: &Value) -> ToolOutput {
-    let p = match arg_str(args, "path") { Ok(v) => v, Err(e) => return e };
-    let dir = match user_dir(reg) { Ok(d) => d, Err(e) => return e };
+    let p = match arg_str(args, "path") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let dir = match user_dir(reg) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
     let raw = Path::new(&p);
     // Reads may target system profiles too, so only relative paths are joined.
-    let path = if raw.is_absolute() { raw.to_path_buf() } else { dir.join(raw) };
-    let profile = match read_profile(&path) { Ok(p) => p, Err(e) => return ToolOutput::error(e.to_string()) };
-    let resolved = args.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
+    let path = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        dir.join(raw)
+    };
+    let profile = match read_profile(&path) {
+        Ok(p) => p,
+        Err(e) => return ToolOutput::error(e.to_string()),
+    };
+    let resolved = args
+        .get("resolved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if !resolved {
         return ToolOutput::json(&Value::Object(profile.raw().clone()));
     }
@@ -134,8 +164,14 @@ fn read(reg: &ToolRegistry, args: &Value) -> ToolOutput {
 }
 
 fn diff(args: &Value) -> ToolOutput {
-    let a = match arg_str(args, "path_a") { Ok(v) => v, Err(e) => return e };
-    let b = match arg_str(args, "path_b") { Ok(v) => v, Err(e) => return e };
+    let a = match arg_str(args, "path_a") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let b = match arg_str(args, "path_b") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     match crate::commands::profile::compare_profiles(a, b, false) {
         Ok(result) => ToolOutput::json(&serde_json::to_value(result).unwrap_or(Value::Null)),
         Err(e) => ToolOutput::error(e),
@@ -143,17 +179,32 @@ fn diff(args: &Value) -> ToolOutput {
 }
 
 async fn write(reg: &ToolRegistry, args: &Value) -> ToolOutput {
-    let p = match arg_str(args, "path") { Ok(v) => v, Err(e) => return e };
+    let p = match arg_str(args, "path") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let Some(changes) = args.get("changes").and_then(|v| v.as_object()).cloned() else {
         return ToolOutput::error("'changes' must be an object");
     };
-    let dir = match user_dir(reg) { Ok(d) => d, Err(e) => return e };
-    let path = match resolve_in(&dir, &p) { Ok(p) => p, Err(e) => return ToolOutput::error(e) };
+    let dir = match user_dir(reg) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let path = match resolve_in(&dir, &p) {
+        Ok(p) => p,
+        Err(e) => return ToolOutput::error(e),
+    };
     if let Err(e) = reg.ensure_write_allowed(&path).await {
         return ToolOutput::error(e);
     }
-    let mut profile = match read_profile(&path) { Ok(p) => p, Err(e) => return ToolOutput::error(e.to_string()) };
-    let backup = match backup_profile(&path) { Ok(b) => b, Err(e) => return ToolOutput::error(format!("backup failed: {e}")) };
+    let mut profile = match read_profile(&path) {
+        Ok(p) => p,
+        Err(e) => return ToolOutput::error(e.to_string()),
+    };
+    let backup = match backup_profile(&path) {
+        Ok(b) => b,
+        Err(e) => return ToolOutput::error(format!("backup failed: {e}")),
+    };
     let keys: Vec<String> = changes.keys().cloned().collect();
     let raw: &mut Map<String, Value> = profile.raw_mut();
     for (k, v) in changes {
@@ -164,17 +215,21 @@ async fn write(reg: &ToolRegistry, args: &Value) -> ToolOutput {
     }
     if let Err(reason) = crate::agent::validate::validate_profile_file(&path) {
         return match restore_from_backup(&backup, &path) {
-            Ok(()) => ToolOutput::error(format!("change rejected: {reason}; profile restored from backup")),
-            Err(re) => {
-                ToolOutput::error(format!("change rejected: {reason}; restoring the backup ALSO failed: {re}"))
-            }
+            Ok(()) => ToolOutput::error(format!(
+                "change rejected: {reason}; profile restored from backup"
+            )),
+            Err(re) => ToolOutput::error(format!(
+                "change rejected: {reason}; restoring the backup ALSO failed: {re}"
+            )),
         };
     }
     reg.host().emit_ui(UiCommand::Navigate {
         route: "/profiles".into(),
         profile_path: Some(path.to_string_lossy().into_owned()),
     });
-    ToolOutput::json(&json!({"path": path.to_string_lossy(), "changed_keys": keys, "backup_path": backup.to_string_lossy()}))
+    ToolOutput::json(
+        &json!({"path": path.to_string_lossy(), "changed_keys": keys, "backup_path": backup.to_string_lossy()}),
+    )
 }
 
 /// Require an explicit `backup_path` to live inside the profile's own
@@ -193,27 +248,52 @@ fn resolve_backup_path(profile_path: &Path, backup_path: &str) -> Result<PathBuf
         .canonicalize()
         .map_err(|e| format!("{backup_path}: {e}"))?;
     if !canon_backup.starts_with(&canon_backups_dir) {
-        return Err(format!("{backup_path} is outside the profile's backups folder"));
+        return Err(format!(
+            "{backup_path} is outside the profile's backups folder"
+        ));
     }
     Ok(canon_backup)
 }
 
 async fn rollback(reg: &ToolRegistry, args: &Value) -> ToolOutput {
-    let p = match arg_str(args, "path") { Ok(v) => v, Err(e) => return e };
-    let dir = match user_dir(reg) { Ok(d) => d, Err(e) => return e };
-    let path = match resolve_in(&dir, &p) { Ok(p) => p, Err(e) => return ToolOutput::error(e) };
+    let p = match arg_str(args, "path") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let dir = match user_dir(reg) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let path = match resolve_in(&dir, &p) {
+        Ok(p) => p,
+        Err(e) => return ToolOutput::error(e),
+    };
     let backup = match arg_opt_str(args, "backup_path") {
-        Some(b) => match resolve_backup_path(&path, &b) { Ok(p) => p, Err(e) => return ToolOutput::error(e) },
-        None => match latest_backup(&path) { Some(b) => b, None => return ToolOutput::error("no backup found") },
+        Some(b) => match resolve_backup_path(&path, &b) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e),
+        },
+        None => match latest_backup(&path) {
+            Some(b) => b,
+            None => return ToolOutput::error("no backup found"),
+        },
     };
     if reg.host().bambu_studio_running()
-        && !reg.asks().confirm(reg.session_id(), "Bambu Studio is running. Roll back anyway?").await
+        && !reg
+            .asks()
+            .confirm(
+                reg.session_id(),
+                "Bambu Studio is running. Roll back anyway?",
+            )
+            .await
     {
         return ToolOutput::error("declined: Bambu Studio is running");
     }
     match restore_from_backup(&backup, &path) {
         Ok(()) => {
-            reg.host().emit_ui(UiCommand::Refresh { what: "profiles".into() });
+            reg.host().emit_ui(UiCommand::Refresh {
+                what: "profiles".into(),
+            });
             ToolOutput::json(&json!({"restored_from": backup.to_string_lossy()}))
         }
         Err(e) => ToolOutput::error(e.to_string()),
@@ -221,12 +301,18 @@ async fn rollback(reg: &ToolRegistry, args: &Value) -> ToolOutput {
 }
 
 async fn install(reg: &ToolRegistry, args: &Value) -> ToolOutput {
-    let staged = match arg_str(args, "staged_id") { Ok(v) => v, Err(e) => return e };
+    let staged = match arg_str(args, "staged_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let running = reg.host().bambu_studio_running();
     if running
         && !reg
             .asks()
-            .confirm(reg.session_id(), "Bambu Studio is running and may overwrite the new profile. Install anyway?")
+            .confirm(
+                reg.session_id(),
+                "Bambu Studio is running and may overwrite the new profile. Install anyway?",
+            )
             .await
     {
         return ToolOutput::error("declined: Bambu Studio is running");
@@ -237,7 +323,9 @@ async fn install(reg: &ToolRegistry, args: &Value) -> ToolOutput {
                 let p = PathBuf::from(p);
                 reg.mark_created(&p.canonicalize().unwrap_or(p));
             }
-            reg.host().emit_ui(UiCommand::Refresh { what: "profiles".into() });
+            reg.host().emit_ui(UiCommand::Refresh {
+                what: "profiles".into(),
+            });
             ToolOutput::json(&v)
         }
         Err(e) => ToolOutput::error(e),
@@ -269,7 +357,11 @@ mod tests {
     /// Waits for the next `Ask` event and answers it. Wrapped in a timeout so
     /// a regression that stops emitting the expected `Ask` fails the test
     /// instead of hanging the suite forever.
-    async fn answer_next(rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>, reg: &crate::agent::tools::ToolRegistry, answer: &str) {
+    async fn answer_next(
+        rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
+        reg: &crate::agent::tools::ToolRegistry,
+        answer: &str,
+    ) {
         tokio::time::timeout(TEST_TIMEOUT, async {
             loop {
                 if let AgentEvent::Ask { request, .. } = rx.recv().await.unwrap() {
@@ -284,7 +376,9 @@ mod tests {
 
     /// Awaits a spawned tool call under a timeout, so a regression that never
     /// resolves the call fails fast instead of hanging the suite.
-    async fn await_timeout(handle: tokio::task::JoinHandle<super::ToolOutput>) -> super::ToolOutput {
+    async fn await_timeout(
+        handle: tokio::task::JoinHandle<super::ToolOutput>,
+    ) -> super::ToolOutput {
         tokio::time::timeout(TEST_TIMEOUT, handle)
             .await
             .expect("timed out waiting for the spawned tool call")
@@ -304,7 +398,9 @@ mod tests {
     async fn read_profile_returns_raw_json() {
         let h = host_with_profile();
         let (reg, _rx) = registry_with(h);
-        let out = reg.call("bm_read_profile", json!({"path":"My PLA.json"})).await;
+        let out = reg
+            .call("bm_read_profile", json!({"path":"My PLA.json"}))
+            .await;
         assert!(out.ok, "{}", out.summary());
         assert!(out.summary().contains("nozzle_temperature"));
     }
@@ -313,7 +409,12 @@ mod tests {
     async fn write_outside_user_dir_is_refused() {
         let h = host_with_profile();
         let (reg, _rx) = registry_with(h);
-        let out = reg.call("bm_write_profile", json!({"path":"/etc/hosts","changes":{"a":"b"}})).await;
+        let out = reg
+            .call(
+                "bm_write_profile",
+                json!({"path":"/etc/hosts","changes":{"a":"b"}}),
+            )
+            .await;
         assert!(!out.ok);
     }
 
@@ -324,15 +425,29 @@ mod tests {
         let reg = Arc::new(reg);
         let r2 = reg.clone();
         let t = tokio::spawn(async move {
-            r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"nozzle_temperature":["215"]}})).await
+            r2.call(
+                "bm_write_profile",
+                json!({"path":"My PLA.json","changes":{"nozzle_temperature":["215"]}}),
+            )
+            .await
         });
         answer_next(&mut rx, &reg, "Yes").await;
         let out = await_timeout(t).await;
         assert!(out.ok, "{}", out.summary());
         let body = fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap();
         assert!(body.contains("215"));
-        assert_eq!(fs::read_dir(h.user_dir.path().join(".backups")).unwrap().count(), 1);
-        assert!(h.ui.lock().unwrap().iter().any(|c| matches!(c, UiCommand::Navigate { .. })));
+        assert_eq!(
+            fs::read_dir(h.user_dir.path().join(".backups"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert!(h
+            .ui
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| matches!(c, UiCommand::Navigate { .. })));
     }
 
     #[tokio::test]
@@ -342,11 +457,18 @@ mod tests {
         let reg = Arc::new(reg);
         let r2 = reg.clone();
         let t = tokio::spawn(async move {
-            r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"nozzle_temperature":["199"]}})).await
+            r2.call(
+                "bm_write_profile",
+                json!({"path":"My PLA.json","changes":{"nozzle_temperature":["199"]}}),
+            )
+            .await
         });
         answer_next(&mut rx, &reg, "No").await;
         assert!(!await_timeout(t).await.ok);
-        assert_eq!(fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap(), PLA);
+        assert_eq!(
+            fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap(),
+            PLA
+        );
     }
 
     #[tokio::test]
@@ -356,7 +478,11 @@ mod tests {
         let reg = Arc::new(reg);
         let r2 = reg.clone();
         let t = tokio::spawn(async move {
-            r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"nozzle_temperature":["230"]}})).await
+            r2.call(
+                "bm_write_profile",
+                json!({"path":"My PLA.json","changes":{"nozzle_temperature":["230"]}}),
+            )
+            .await
         });
         answer_next(&mut rx, &reg, "Yes").await;
         assert!(await_timeout(t).await.ok);
@@ -370,11 +496,16 @@ mod tests {
     async fn install_marks_profile_created_so_later_writes_do_not_ask() {
         let h = Arc::new(FakeHost::new());
         let (reg, _rx) = registry_with(h.clone());
-        let out = reg.call("bm_install_profile", json!({"staged_id":"stg1"})).await;
+        let out = reg
+            .call("bm_install_profile", json!({"staged_id":"stg1"}))
+            .await;
         assert!(out.ok, "{}", out.summary());
         // No ask is pending, so this completes without anyone answering.
         let out = reg
-            .call("bm_write_profile", json!({"path":"Polymaker PLA.json","changes":{"filament_flow_ratio":["0.97"]}}))
+            .call(
+                "bm_write_profile",
+                json!({"path":"Polymaker PLA.json","changes":{"filament_flow_ratio":["0.97"]}}),
+            )
             .await;
         assert!(out.ok, "{}", out.summary());
     }
@@ -386,7 +517,10 @@ mod tests {
         let (reg, mut rx) = registry_with(h.clone());
         let reg = Arc::new(reg);
         let r2 = reg.clone();
-        let t = tokio::spawn(async move { r2.call("bm_install_profile", json!({"staged_id":"stg1"})).await });
+        let t = tokio::spawn(async move {
+            r2.call("bm_install_profile", json!({"staged_id":"stg1"}))
+                .await
+        });
         answer_next(&mut rx, &reg, "No").await;
         assert!(!await_timeout(t).await.ok);
         assert!(h.calls.lock().unwrap().is_empty(), "nothing installed");
@@ -405,10 +539,16 @@ mod tests {
         fs::write(&outside, r#"{"name":"Evil"}"#).unwrap();
         let (reg, _rx) = registry_with(h.clone());
         let out = reg
-            .call("bm_rollback", json!({"path":"My PLA.json","backup_path": outside.to_string_lossy()}))
+            .call(
+                "bm_rollback",
+                json!({"path":"My PLA.json","backup_path": outside.to_string_lossy()}),
+            )
             .await;
         assert!(!out.ok, "{}", out.summary());
-        assert_eq!(fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap(), PLA);
+        assert_eq!(
+            fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap(),
+            PLA
+        );
     }
 
     /// Fix 3: a write that produces an invalid profile (e.g. an empty name)
@@ -421,7 +561,11 @@ mod tests {
         let reg = Arc::new(reg);
         let r2 = reg.clone();
         let t = tokio::spawn(async move {
-            r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"name":""}})).await
+            r2.call(
+                "bm_write_profile",
+                json!({"path":"My PLA.json","changes":{"name":""}}),
+            )
+            .await
         });
         answer_next(&mut rx, &reg, "Yes").await;
         let out = await_timeout(t).await;
@@ -431,7 +575,10 @@ mod tests {
         // (same pattern as `rollback_restores_latest_backup` below).
         let body = fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap();
         let restored: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(restored["name"], "My PLA", "the original name must be restored, not the empty one");
+        assert_eq!(
+            restored["name"], "My PLA",
+            "the original name must be restored, not the empty one"
+        );
         assert_eq!(restored["nozzle_temperature"], json!(["220"]));
     }
 
@@ -481,7 +628,12 @@ mod tests {
         h.system_dir = Some(sys_dir.path().to_path_buf());
         let h = Arc::new(h);
         let (reg, _rx) = registry_with(h);
-        let out = reg.call("bm_read_profile", json!({"path":"My PLA.json","resolved":true})).await;
+        let out = reg
+            .call(
+                "bm_read_profile",
+                json!({"path":"My PLA.json","resolved":true}),
+            )
+            .await;
         assert!(out.ok, "{}", out.summary());
         assert!(
             out.summary().contains("filament_max_volumetric_speed"),
@@ -501,10 +653,18 @@ mod tests {
         let r1 = reg.clone();
         let r2 = reg.clone();
         let t1 = tokio::spawn(async move {
-            r1.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"nozzle_temperature":["215"]}})).await
+            r1.call(
+                "bm_write_profile",
+                json!({"path":"My PLA.json","changes":{"nozzle_temperature":["215"]}}),
+            )
+            .await
         });
         let t2 = tokio::spawn(async move {
-            r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"filament_flow_ratio":["0.97"]}})).await
+            r2.call(
+                "bm_write_profile",
+                json!({"path":"My PLA.json","changes":{"filament_flow_ratio":["0.97"]}}),
+            )
+            .await
         });
         answer_next(&mut rx, &reg, "Yes").await;
         let out1 = await_timeout(t1).await;
@@ -513,6 +673,9 @@ mod tests {
         assert!(out2.ok, "{}", out2.summary());
         // No second Ask should have been emitted for the other writer.
         let second_event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
-        assert!(second_event.is_err(), "expected no second Ask event, got {second_event:?}");
+        assert!(
+            second_event.is_err(),
+            "expected no second Ask event, got {second_event:?}"
+        );
     }
 }

@@ -22,9 +22,13 @@ pub enum Readiness {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserInput {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     /// Absolute path to a local image file.
-    Image { path: String },
+    Image {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,22 +65,81 @@ pub enum TurnStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentEvent {
-    SessionReady { session_id: String, provider: Provider },
-    TurnStarted { session_id: String, seq: u32 },
-    MessageDelta { session_id: String, item_id: String, text: String },
-    MessageDone { session_id: String, item_id: String, text: String },
-    ToolCall { session_id: String, call_id: String, name: String, args: serde_json::Value },
-    ToolResult { session_id: String, call_id: String, ok: bool, summary: String },
-    FileChange { session_id: String, path: String, diff: String },
-    Command { session_id: String, command: String, exit_code: Option<i32> },
-    WebSearch { session_id: String, query: String },
-    ImageGenerated { session_id: String, path: String },
-    Ask { session_id: String, request: AskRequest },
-    Todo { session_id: String, items: Vec<TodoItem> },
-    Usage { session_id: String, used_percent: Option<f64>, resets_at: Option<i64> },
-    TurnDone { session_id: String, seq: u32, status: TurnStatus },
-    InvalidProfiles { session_id: String, seq: u32, paths: Vec<String> },
-    Error { session_id: Option<String>, message: String },
+    SessionReady {
+        session_id: String,
+        provider: Provider,
+    },
+    TurnStarted {
+        session_id: String,
+        seq: u32,
+    },
+    MessageDelta {
+        session_id: String,
+        item_id: String,
+        text: String,
+    },
+    MessageDone {
+        session_id: String,
+        item_id: String,
+        text: String,
+    },
+    ToolCall {
+        session_id: String,
+        call_id: String,
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolResult {
+        session_id: String,
+        call_id: String,
+        ok: bool,
+        summary: String,
+    },
+    FileChange {
+        session_id: String,
+        path: String,
+        diff: String,
+    },
+    Command {
+        session_id: String,
+        command: String,
+        exit_code: Option<i32>,
+    },
+    WebSearch {
+        session_id: String,
+        query: String,
+    },
+    ImageGenerated {
+        session_id: String,
+        path: String,
+    },
+    Ask {
+        session_id: String,
+        request: AskRequest,
+    },
+    Todo {
+        session_id: String,
+        items: Vec<TodoItem>,
+    },
+    Usage {
+        session_id: String,
+        used_percent: Option<f64>,
+        resets_at: Option<i64>,
+    },
+    TurnDone {
+        session_id: String,
+        seq: u32,
+        status: TurnStatus,
+    },
+    InvalidProfiles {
+        session_id: String,
+        seq: u32,
+        paths: Vec<String>,
+    },
+    Error {
+        session_id: Option<String>,
+        message: String,
+    },
 }
 
 impl AgentEvent {
@@ -117,8 +180,13 @@ pub struct AppState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum UiCommand {
-    Navigate { route: String, profile_path: Option<String> },
-    Refresh { what: String },
+    Navigate {
+        route: String,
+        profile_path: Option<String>,
+    },
+    Refresh {
+        what: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,22 +210,32 @@ mod tests {
             text: "hi".into(),
         };
         let v = serde_json::to_value(&e).unwrap();
-        assert_eq!(v, json!({"kind":"message_delta","session_id":"s1","item_id":"i1","text":"hi"}));
+        assert_eq!(
+            v,
+            json!({"kind":"message_delta","session_id":"s1","item_id":"i1","text":"hi"})
+        );
     }
 
     #[test]
     fn readiness_uses_state_tag() {
         let v = serde_json::to_value(Readiness::NeedsApiKey).unwrap();
         assert_eq!(v, json!({"state":"needs_api_key"}));
-        let v = serde_json::to_value(Readiness::Ready { detail: "ok".into() }).unwrap();
+        let v = serde_json::to_value(Readiness::Ready {
+            detail: "ok".into(),
+        })
+        .unwrap();
         assert_eq!(v, json!({"state":"ready","detail":"ok"}));
     }
 
     #[test]
     fn user_input_round_trips() {
         let inputs = vec![
-            UserInput::Text { text: "fix stringing".into() },
-            UserInput::Image { path: "/tmp/p.jpg".into() },
+            UserInput::Text {
+                text: "fix stringing".into(),
+            },
+            UserInput::Image {
+                path: "/tmp/p.jpg".into(),
+            },
         ];
         let s = serde_json::to_string(&inputs).unwrap();
         assert_eq!(serde_json::from_str::<Vec<UserInput>>(&s).unwrap(), inputs);
@@ -170,12 +248,21 @@ mod tests {
             profile_path: None,
         })
         .unwrap();
-        assert_eq!(v, json!({"action":"navigate","route":"/profiles","profile_path":null}));
+        assert_eq!(
+            v,
+            json!({"action":"navigate","route":"/profiles","profile_path":null})
+        );
     }
 
     #[test]
     fn provider_is_lowercase() {
-        assert_eq!(serde_json::to_value(Provider::Codex).unwrap(), json!("codex"));
-        assert_eq!(serde_json::from_value::<Provider>(json!("claude")).unwrap(), Provider::Claude);
+        assert_eq!(
+            serde_json::to_value(Provider::Codex).unwrap(),
+            json!("codex")
+        );
+        assert_eq!(
+            serde_json::from_value::<Provider>(json!("claude")).unwrap(),
+            Provider::Claude
+        );
     }
 }

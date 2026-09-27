@@ -73,9 +73,16 @@ impl ToolHost for FakeHost {
         self.log(format!("catalog_search:{query}:{limit}"));
         Ok(json!([]))
     }
-    async fn generate_profile(&self, _specs: Value, tp: Option<String>, _b: Option<String>) -> Result<Value, String> {
+    async fn generate_profile(
+        &self,
+        _specs: Value,
+        tp: Option<String>,
+        _b: Option<String>,
+    ) -> Result<Value, String> {
         self.log(format!("generate_profile:{}", tp.unwrap_or_default()));
-        Ok(json!({"staged_id":"stg1","profile_name":"Polymaker PLA","filename":"Polymaker PLA.json"}))
+        Ok(
+            json!({"staged_id":"stg1","profile_name":"Polymaker PLA","filename":"Polymaker PLA.json"}),
+        )
     }
     async fn install_staged(&self, staged_id: &str, force: bool) -> Result<Value, String> {
         self.log(format!("install_staged:{staged_id}:{force}"));
@@ -84,7 +91,10 @@ impl ToolHost for FakeHost {
         Ok(json!({"installed_path": p.to_string_lossy()}))
     }
     async fn run_analysis(&self, photo: &str, profile: Option<String>) -> Result<Value, String> {
-        self.log(format!("run_analysis:{photo}:{}", profile.unwrap_or_default()));
+        self.log(format!(
+            "run_analysis:{photo}:{}",
+            profile.unwrap_or_default()
+        ));
         Ok(json!({"defect_report":{"defects":[]}}))
     }
     async fn history(&self, profile_path: &str) -> Result<Value, String> {

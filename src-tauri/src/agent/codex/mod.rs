@@ -50,7 +50,9 @@ impl CodexSpawner for ProcessSpawner {
             .kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000);
-        let mut child = cmd.spawn().map_err(|e| format!("failed to start codex app-server: {e}"))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to start codex app-server: {e}"))?;
         let stdout = child.stdout.take().ok_or("codex stdout unavailable")?;
         let stdin = child.stdin.take().ok_or("codex stdin unavailable")?;
         if let Some(stderr) = child.stderr.take() {
@@ -61,7 +63,11 @@ impl CodexSpawner for ProcessSpawner {
                 }
             });
         }
-        Ok(SpawnedCodex { reader: Box::new(stdout), writer: Box::new(stdin), child: Some(child) })
+        Ok(SpawnedCodex {
+            reader: Box::new(stdout),
+            writer: Box::new(stdin),
+            child: Some(child),
+        })
     }
 }
 
@@ -84,8 +90,22 @@ struct Session {
 }
 
 impl Session {
-    fn new(thread_id: String, seq: u32, seq_known: bool, generation: u64, opts: SessionOpts) -> Self {
-        Self { thread_id, seq, seq_known, in_flight: false, turn_id: None, generation, opts }
+    fn new(
+        thread_id: String,
+        seq: u32,
+        seq_known: bool,
+        generation: u64,
+        opts: SessionOpts,
+    ) -> Self {
+        Self {
+            thread_id,
+            seq,
+            seq_known,
+            in_flight: false,
+            turn_id: None,
+            generation,
+            opts,
+        }
     }
 }
 
@@ -123,7 +143,10 @@ pub struct CodexBackend {
 }
 
 fn text(v: &Value, key: &str) -> String {
-    v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string()
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn approval_policy(opts: &SessionOpts) -> &'static str {
@@ -142,7 +165,11 @@ fn thread_policy(opts: &SessionOpts) -> Map<String, Value> {
     p.insert("approvalPolicy".into(), json!(approval_policy(opts)));
     p.insert(
         "sandbox".into(),
-        json!(if opts.full_access { "danger-full-access" } else { "workspace-write" }),
+        json!(if opts.full_access {
+            "danger-full-access"
+        } else {
+            "workspace-write"
+        }),
     );
     p.insert("developerInstructions".into(), json!(AGENT_INSTRUCTIONS));
     p.insert("model".into(), json!(opts.model));
@@ -180,10 +207,18 @@ pub fn turn_start_params(thread_id: &str, input: &[UserInput], opts: &SessionOpt
 }
 
 impl CodexBackend {
-    pub fn new(spawner: Arc<dyn CodexSpawner>, events: broadcast::Sender<AgentEvent>, asks: Arc<AskBroker>) -> Self {
+    pub fn new(
+        spawner: Arc<dyn CodexSpawner>,
+        events: broadcast::Sender<AgentEvent>,
+        asks: Arc<AskBroker>,
+    ) -> Self {
         Self {
             spawner,
-            shared: Shared { events, asks, sessions: Arc::new(Mutex::new(HashMap::new())) },
+            shared: Shared {
+                events,
+                asks,
+                sessions: Arc::new(Mutex::new(HashMap::new())),
+            },
             live: Arc::new(AsyncMutex::new(None)),
             generation: AtomicU64::new(0),
         }
@@ -197,7 +232,12 @@ impl CodexBackend {
         }
         let spawned = self.spawner.spawn()?;
         let (rpc, rx) = RpcConnection::start(spawned.reader, spawned.writer);
-        tokio::spawn(dispatch(rx, rpc.clone(), self.shared.clone(), self.live.clone()));
+        tokio::spawn(dispatch(
+            rx,
+            rpc.clone(),
+            self.shared.clone(),
+            self.live.clone(),
+        ));
         let handshake = async {
             rpc.request(
                 "initialize",
@@ -220,19 +260,29 @@ impl CodexBackend {
             }
         }
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        *live = Some(Live { rpc: rpc.clone(), _child: spawned.child });
+        *live = Some(Live {
+            rpc: rpc.clone(),
+            _child: spawned.child,
+        });
         Ok((rpc, generation))
     }
 
     /// The connection plus the session's thread id and options. When the
     /// session's thread was opened on a process that has since exited, the
     /// thread is resumed on the current one first.
-    async fn session_rpc(&self, session_id: &str) -> Result<(Arc<RpcConnection>, String, SessionOpts), String> {
+    async fn session_rpc(
+        &self,
+        session_id: &str,
+    ) -> Result<(Arc<RpcConnection>, String, SessionOpts), String> {
         let (rpc, generation) = self.rpc().await?;
         let (thread_id, opts, stale) = {
             let s = self.shared.sessions.lock().unwrap();
             let s = s.get(session_id).ok_or("unknown session")?;
-            (s.thread_id.clone(), s.opts.clone(), s.generation != generation)
+            (
+                s.thread_id.clone(),
+                s.opts.clone(),
+                s.generation != generation,
+            )
         };
         if stale {
             rpc.request("thread/resume", thread_resume_params(&thread_id, &opts))
@@ -264,7 +314,10 @@ async fn dispatch(
     // The process exited. Forget it (only if it is still the current one) and fail active turns.
     {
         let mut l = live.lock().await;
-        if l.as_ref().map(|x| Arc::ptr_eq(&x.rpc, &rpc)).unwrap_or(false) {
+        if l.as_ref()
+            .map(|x| Arc::ptr_eq(&x.rpc, &rpc))
+            .unwrap_or(false)
+        {
             *l = None;
         }
     }
@@ -287,14 +340,23 @@ async fn dispatch(
             session_id: Some(sid.clone()),
             message: "Codex stopped unexpectedly. Send another message to restart it.".into(),
         });
-        shared.emit(AgentEvent::TurnDone { session_id: sid, seq, status: TurnStatus::Failed });
+        shared.emit(AgentEvent::TurnDone {
+            session_id: sid,
+            seq,
+            status: TurnStatus::Failed,
+        });
     }
 }
 
 fn on_notification(shared: &Shared, method: &str, params: &Value) {
     if method == "account/rateLimits/updated" {
-        let sessions: Vec<(String, u32)> =
-            shared.sessions.lock().unwrap().iter().map(|(k, s)| (k.clone(), s.seq)).collect();
+        let sessions: Vec<(String, u32)> = shared
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, s)| (k.clone(), s.seq))
+            .collect();
         for (sid, seq) in sessions {
             for e in translate::translate(&sid, seq, method, params) {
                 shared.emit(e);
@@ -302,7 +364,9 @@ fn on_notification(shared: &Shared, method: &str, params: &Value) {
         }
         return;
     }
-    let Some((sid, seq, _)) = shared.by_thread(params) else { return };
+    let Some((sid, seq, _)) = shared.by_thread(params) else {
+        return;
+    };
     if method == "turn/completed" {
         if let Some(s) = shared.sessions.lock().unwrap().get_mut(&sid) {
             s.in_flight = false;
@@ -316,32 +380,63 @@ fn on_notification(shared: &Shared, method: &str, params: &Value) {
 
 async fn on_request(rpc: &RpcConnection, shared: &Shared, id: Value, method: &str, params: &Value) {
     let Some((sid, _seq, registry)) = shared.by_thread(params) else {
-        let _ = rpc.respond_error(id, -32601, &format!("BambuMate does not handle {method}")).await;
+        let _ = rpc
+            .respond_error(id, -32601, &format!("BambuMate does not handle {method}"))
+            .await;
         return;
     };
     match method {
         "item/tool/call" => {
             let call_id = text(params, "callId");
             let tool = text(params, "tool");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            shared.emit(AgentEvent::ToolCall { session_id: sid.clone(), call_id: call_id.clone(), name: tool.clone(), args: args.clone() });
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            shared.emit(AgentEvent::ToolCall {
+                session_id: sid.clone(),
+                call_id: call_id.clone(),
+                name: tool.clone(),
+                args: args.clone(),
+            });
             let out = registry.call(&tool, args).await;
-            shared.emit(AgentEvent::ToolResult { session_id: sid, call_id, ok: out.ok, summary: out.summary() });
+            shared.emit(AgentEvent::ToolResult {
+                session_id: sid,
+                call_id,
+                ok: out.ok,
+                summary: out.summary(),
+            });
             let _ = rpc.respond(id, out.to_codex_response()).await;
         }
         "item/tool/requestUserInput" => {
             let mut answers = Map::new();
-            for q in params.get("questions").and_then(|q| q.as_array()).cloned().unwrap_or_default() {
+            for q in params
+                .get("questions")
+                .and_then(|q| q.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
                 let options: Vec<AskOption> = q
                     .get("options")
                     .cloned()
                     .and_then(|o| serde_json::from_value(o).ok())
                     .unwrap_or_default();
-                let allow_other = q.get("isOther").and_then(|v| v.as_bool()).unwrap_or(options.is_empty());
+                let allow_other = q
+                    .get("isOther")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(options.is_empty());
                 // A cancelled question (interrupt, end, crash) ends the request:
                 // answer with what was gathered instead of asking the rest.
-                let Ok(picked) =
-                    shared.asks.ask(&sid, &text(&q, "header"), &text(&q, "question"), options, allow_other).await
+                let Ok(picked) = shared
+                    .asks
+                    .ask(
+                        &sid,
+                        &text(&q, "header"),
+                        &text(&q, "question"),
+                        options,
+                        allow_other,
+                    )
+                    .await
                 else {
                     break;
                 };
@@ -350,22 +445,60 @@ async fn on_request(rpc: &RpcConnection, shared: &Shared, id: Value, method: &st
             let _ = rpc.respond(id, json!({"answers": answers})).await;
         }
         "item/commandExecution/requestApproval" => {
-            let what = params.get("command").and_then(|c| c.as_str()).map(str::to_string).unwrap_or_else(|| text(params, "reason"));
-            let ok = shared.asks.confirm(&sid, &format!("Allow Codex to run: {what}")).await;
-            let _ = rpc.respond(id, json!({"decision": if ok { "accept" } else { "decline" }})).await;
+            let what = params
+                .get("command")
+                .and_then(|c| c.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| text(params, "reason"));
+            let ok = shared
+                .asks
+                .confirm(&sid, &format!("Allow Codex to run: {what}"))
+                .await;
+            let _ = rpc
+                .respond(
+                    id,
+                    json!({"decision": if ok { "accept" } else { "decline" }}),
+                )
+                .await;
         }
         "item/fileChange/requestApproval" => {
             let reason = text(params, "reason");
-            let ok = shared.asks.confirm(&sid, &format!("Allow Codex to change files outside the profile folder? {reason}")).await;
-            let _ = rpc.respond(id, json!({"decision": if ok { "accept" } else { "decline" }})).await;
+            let ok = shared
+                .asks
+                .confirm(
+                    &sid,
+                    &format!("Allow Codex to change files outside the profile folder? {reason}"),
+                )
+                .await;
+            let _ = rpc
+                .respond(
+                    id,
+                    json!({"decision": if ok { "accept" } else { "decline" }}),
+                )
+                .await;
         }
         "item/permissions/requestApproval" => {
-            let ok = shared.asks.confirm(&sid, &format!("Grant Codex extra permissions? {}", text(params, "reason"))).await;
-            let granted = if ok { params.get("permissions").cloned().unwrap_or_else(|| json!({})) } else { json!({}) };
+            let ok = shared
+                .asks
+                .confirm(
+                    &sid,
+                    &format!("Grant Codex extra permissions? {}", text(params, "reason")),
+                )
+                .await;
+            let granted = if ok {
+                params
+                    .get("permissions")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}))
+            } else {
+                json!({})
+            };
             let _ = rpc.respond(id, json!({"permissions": granted})).await;
         }
         other => {
-            let _ = rpc.respond_error(id, -32601, &format!("BambuMate does not handle {other}")).await;
+            let _ = rpc
+                .respond_error(id, -32601, &format!("BambuMate does not handle {other}"))
+                .await;
         }
     }
 }
@@ -378,7 +511,9 @@ impl AgentBackend for CodexBackend {
 
     async fn readiness(&self) -> Readiness {
         if !self.spawner.installed() {
-            return Readiness::NotInstalled { hint: "Install the Codex CLI: npm install -g @openai/codex".into() };
+            return Readiness::NotInstalled {
+                hint: "Install the Codex CLI: npm install -g @openai/codex".into(),
+            };
         }
         let (rpc, _) = match self.rpc().await {
             Ok(r) => r,
@@ -386,19 +521,34 @@ impl AgentBackend for CodexBackend {
         };
         match rpc.request("account/read", json!({})).await {
             Ok(v) => match v.get("account").filter(|a| !a.is_null()) {
-                None => Readiness::NeedsLogin { hint: "Sign in with your ChatGPT account".into() },
-                Some(a) if a["type"] == "chatgpt" => Readiness::Ready {
-                    detail: format!("{} · {}", text(a, "email"), a.get("planType").and_then(|p| p.as_str()).unwrap_or("ChatGPT")),
+                None => Readiness::NeedsLogin {
+                    hint: "Sign in with your ChatGPT account".into(),
                 },
-                Some(_) => Readiness::Ready { detail: "API key".into() },
+                Some(a) if a["type"] == "chatgpt" => Readiness::Ready {
+                    detail: format!(
+                        "{} · {}",
+                        text(a, "email"),
+                        a.get("planType")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("ChatGPT")
+                    ),
+                },
+                Some(_) => Readiness::Ready {
+                    detail: "API key".into(),
+                },
             },
-            Err(e) => Readiness::NotInstalled { hint: e.to_string() },
+            Err(e) => Readiness::NotInstalled {
+                hint: e.to_string(),
+            },
         }
     }
 
     async fn models(&self) -> Result<Vec<AgentModel>, String> {
         let (rpc, _) = self.rpc().await?;
-        let v = rpc.request("model/list", json!({"includeHidden": false})).await.map_err(|e| e.to_string())?;
+        let v = rpc
+            .request("model/list", json!({"includeHidden": false}))
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(v.get("data")
             .and_then(|d| d.as_array())
             .cloned()
@@ -406,38 +556,72 @@ impl AgentBackend for CodexBackend {
             .into_iter()
             .filter(|m| !m.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false))
             .map(|m| AgentModel {
-                id: m.get("model").or_else(|| m.get("id")).and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+                id: m
+                    .get("model")
+                    .or_else(|| m.get("id"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 display_name: text(&m, "displayName"),
                 efforts: m
                     .get("supportedReasoningEfforts")
                     .and_then(|e| e.as_array())
-                    .map(|a| a.iter().filter_map(|o| o.get("reasoningEffort").and_then(|r| r.as_str()).map(str::to_string)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|o| {
+                                o.get("reasoningEffort")
+                                    .and_then(|r| r.as_str())
+                                    .map(str::to_string)
+                            })
+                            .collect()
+                    })
                     .unwrap_or_default(),
-                is_default: m.get("isDefault").and_then(|d| d.as_bool()).unwrap_or(false),
+                is_default: m
+                    .get("isDefault")
+                    .and_then(|d| d.as_bool())
+                    .unwrap_or(false),
             })
             .collect())
     }
 
     async fn login(&self) -> Result<Option<String>, String> {
         let (rpc, _) = self.rpc().await?;
-        let v = rpc.request("account/login/start", json!({"type":"chatgpt"})).await.map_err(|e| e.to_string())?;
-        Ok(v.get("authUrl").and_then(|u| u.as_str()).map(str::to_string))
+        let v = rpc
+            .request("account/login/start", json!({"type":"chatgpt"}))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(v.get("authUrl")
+            .and_then(|u| u.as_str())
+            .map(str::to_string))
     }
 
     async fn start_session(&self, session_id: &str, opts: SessionOpts) -> Result<String, String> {
         let (rpc, generation) = self.rpc().await?;
-        let v = rpc.request("thread/start", thread_start_params(&opts)).await.map_err(|e| e.to_string())?;
-        let thread_id = v["thread"]["id"].as_str().ok_or("thread/start returned no thread id")?.to_string();
-        self.shared
-            .sessions
-            .lock()
-            .unwrap()
-            .insert(session_id.to_string(), Session::new(thread_id.clone(), 0, true, generation, opts));
-        self.shared.emit(AgentEvent::SessionReady { session_id: session_id.to_string(), provider: Provider::Codex });
+        let v = rpc
+            .request("thread/start", thread_start_params(&opts))
+            .await
+            .map_err(|e| e.to_string())?;
+        let thread_id = v["thread"]["id"]
+            .as_str()
+            .ok_or("thread/start returned no thread id")?
+            .to_string();
+        self.shared.sessions.lock().unwrap().insert(
+            session_id.to_string(),
+            Session::new(thread_id.clone(), 0, true, generation, opts),
+        );
+        self.shared.emit(AgentEvent::SessionReady {
+            session_id: session_id.to_string(),
+            provider: Provider::Codex,
+        });
         Ok(thread_id)
     }
 
-    async fn resume_session(&self, session_id: &str, backend_id: &str, opts: SessionOpts) -> Result<(), String> {
+    async fn resume_session(
+        &self,
+        session_id: &str,
+        backend_id: &str,
+        opts: SessionOpts,
+    ) -> Result<(), String> {
         let (rpc, generation) = self.rpc().await?;
         let v = rpc
             .request("thread/resume", thread_resume_params(backend_id, &opts))
@@ -447,9 +631,18 @@ impl AgentBackend for CodexBackend {
         let turns = v["thread"]["turns"].as_array().map(|t| t.len() as u32);
         self.shared.sessions.lock().unwrap().insert(
             session_id.to_string(),
-            Session::new(backend_id.to_string(), turns.unwrap_or(0), turns.is_some(), generation, opts),
+            Session::new(
+                backend_id.to_string(),
+                turns.unwrap_or(0),
+                turns.is_some(),
+                generation,
+                opts,
+            ),
         );
-        self.shared.emit(AgentEvent::SessionReady { session_id: session_id.to_string(), provider: Provider::Codex });
+        self.shared.emit(AgentEvent::SessionReady {
+            session_id: session_id.to_string(),
+            provider: Provider::Codex,
+        });
         Ok(())
     }
 
@@ -466,16 +659,24 @@ impl AgentBackend for CodexBackend {
             return Err(format!("cannot rewind to message {to_seq}"));
         }
         let (rpc, thread_id, _) = self.session_rpc(session_id).await?;
-        rpc.request("thread/rollback", json!({"threadId": thread_id, "numTurns": current - to_seq + 1}))
-            .await
-            .map_err(|e| e.to_string())?;
+        rpc.request(
+            "thread/rollback",
+            json!({"threadId": thread_id, "numTurns": current - to_seq + 1}),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         if let Some(s) = self.shared.sessions.lock().unwrap().get_mut(session_id) {
             s.seq = to_seq - 1;
         }
         Ok(true)
     }
 
-    async fn send(&self, session_id: &str, seq: u32, input: Vec<UserInput>) -> Result<String, String> {
+    async fn send(
+        &self,
+        session_id: &str,
+        seq: u32,
+        input: Vec<UserInput>,
+    ) -> Result<String, String> {
         let (rpc, thread_id, opts) = self.session_rpc(session_id).await?;
         // Mark the turn in flight before sending turn/start: Codex may report
         // turn/completed before the turn/start response arrives, and that
@@ -489,13 +690,19 @@ impl AgentBackend for CodexBackend {
             s.turn_id = None;
             prev
         };
-        self.shared.emit(AgentEvent::TurnStarted { session_id: session_id.to_string(), seq });
+        self.shared.emit(AgentEvent::TurnStarted {
+            session_id: session_id.to_string(),
+            seq,
+        });
         let started = rpc
             .request("turn/start", turn_start_params(&thread_id, &input, &opts))
             .await
             .map_err(|e| e.to_string())
             .and_then(|v| {
-                v["turn"]["id"].as_str().map(str::to_string).ok_or_else(|| "turn/start returned no turn id".to_string())
+                v["turn"]["id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "turn/start returned no turn id".to_string())
             });
         match started {
             Ok(turn_id) => {
@@ -536,12 +743,17 @@ impl AgentBackend for CodexBackend {
             let s = s.get(session_id).ok_or("unknown session")?;
             (s.thread_id.clone(), s.turn_id.clone())
         };
-        let Some(turn_id) = turn_id else { return Ok(()) };
+        let Some(turn_id) = turn_id else {
+            return Ok(());
+        };
         let (rpc, _) = self.rpc().await?;
-        rpc.request("turn/interrupt", json!({"threadId": thread_id, "turnId": turn_id}))
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        rpc.request(
+            "turn/interrupt",
+            json!({"threadId": thread_id, "turnId": turn_id}),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     }
 
     async fn end_session(&self, session_id: &str) {
@@ -549,7 +761,6 @@ impl AgentBackend for CodexBackend {
         self.shared.sessions.lock().unwrap().remove(session_id);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -587,7 +798,9 @@ mod tests {
             m
         }
         async fn send(&mut self, v: Value) {
-            with_timeout(self.w.write_all(format!("{v}\n").as_bytes())).await.unwrap();
+            with_timeout(self.w.write_all(format!("{v}\n").as_bytes()))
+                .await
+                .unwrap();
         }
         async fn reply(&mut self, req: &Value, result: Value) {
             self.send(json!({"id": req["id"], "result": result})).await;
@@ -609,7 +822,11 @@ mod tests {
         }
         fn spawn(&self) -> Result<SpawnedCodex, String> {
             let mut q = self.queue.lock().unwrap();
-            if q.is_empty() { Err("no more fake processes".into()) } else { Ok(q.remove(0)) }
+            if q.is_empty() {
+                Err("no more fake processes".into())
+            } else {
+                Ok(q.remove(0))
+            }
         }
     }
 
@@ -618,8 +835,15 @@ mod tests {
         let (cr, cw) = tokio::io::split(client);
         let (sr, sw) = tokio::io::split(server);
         (
-            SpawnedCodex { reader: Box::new(cr), writer: Box::new(cw), child: None },
-            Server { r: BufReader::new(sr), w: sw },
+            SpawnedCodex {
+                reader: Box::new(cr),
+                writer: Box::new(cw),
+                child: None,
+            },
+            Server {
+                r: BufReader::new(sr),
+                w: sw,
+            },
         )
     }
 
@@ -633,8 +857,18 @@ mod tests {
     fn rig(processes: Vec<SpawnedCodex>) -> Rig {
         let (tx, rx) = broadcast::channel(256);
         let asks = Arc::new(AskBroker::new(tx.clone()));
-        let registry = Arc::new(ToolRegistry::new("s1".into(), Arc::new(FakeHost::new()), asks.clone()));
-        let backend = CodexBackend::new(Arc::new(FakeSpawner { queue: StdMutex::new(processes) }), tx, asks.clone());
+        let registry = Arc::new(ToolRegistry::new(
+            "s1".into(),
+            Arc::new(FakeHost::new()),
+            asks.clone(),
+        ));
+        let backend = CodexBackend::new(
+            Arc::new(FakeSpawner {
+                queue: StdMutex::new(processes),
+            }),
+            tx,
+            asks.clone(),
+        );
         let opts = SessionOpts {
             model: None,
             effort: None,
@@ -643,10 +877,18 @@ mod tests {
             writable_roots: vec![PathBuf::from("/tmp/profiles")],
             registry,
         };
-        Rig { backend, rx, opts, asks }
+        Rig {
+            backend,
+            rx,
+            opts,
+            asks,
+        }
     }
 
-    async fn next_matching(rx: &mut broadcast::Receiver<AgentEvent>, pred: impl Fn(&AgentEvent) -> bool) -> AgentEvent {
+    async fn next_matching(
+        rx: &mut broadcast::Receiver<AgentEvent>,
+        pred: impl Fn(&AgentEvent) -> bool,
+    ) -> AgentEvent {
         with_timeout(async {
             loop {
                 let e = rx.recv().await.unwrap();
@@ -667,7 +909,10 @@ mod tests {
             let ts = srv.expect("thread/start").await;
             assert_eq!(ts["params"]["dynamicTools"].as_array().unwrap().len(), 18);
             assert_eq!(ts["params"]["sandbox"], "workspace-write");
-            assert!(ts["params"]["developerInstructions"].as_str().unwrap().contains("BambuMate"));
+            assert!(ts["params"]["developerInstructions"]
+                .as_str()
+                .unwrap()
+                .contains("BambuMate"));
             srv.reply(&ts, json!({"thread":{"id":"th1"}})).await;
         };
         let (res, _) = with_timeout(async { tokio::join!(start, script) }).await;
@@ -692,8 +937,15 @@ mod tests {
         assert_eq!(resp["id"], 99);
         assert_eq!(resp["result"]["success"], true);
         assert_eq!(resp["result"]["contentItems"][0]["type"], "inputText");
-        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "bm_app_state")).await;
-        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::ToolResult { ok: true, .. })).await;
+        next_matching(
+            &mut r.rx,
+            |e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "bm_app_state"),
+        )
+        .await;
+        next_matching(&mut r.rx, |e| {
+            matches!(e, AgentEvent::ToolResult { ok: true, .. })
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -704,10 +956,15 @@ mod tests {
         srv.send(json!({"id": 5, "method":"item/tool/requestUserInput","params":{"threadId":"th1","turnId":"tu","itemId":"i",
             "questions":[{"id":"q1","header":"Nozzle","question":"Which nozzle?","options":[{"label":"0.4","description":"std"}]}]}})).await;
         let ask = next_matching(&mut r.rx, |e| matches!(e, AgentEvent::Ask { .. })).await;
-        let AgentEvent::Ask { request, .. } = ask else { unreachable!() };
+        let AgentEvent::Ask { request, .. } = ask else {
+            unreachable!()
+        };
         r.asks.answer(&request.id, vec!["0.4".into()]).unwrap();
         let resp = srv.read().await;
-        assert_eq!(resp["result"], json!({"answers":{"q1":{"answers":["0.4"]}}}));
+        assert_eq!(
+            resp["result"],
+            json!({"answers":{"q1":{"answers":["0.4"]}}})
+        );
     }
 
     #[tokio::test]
@@ -717,21 +974,50 @@ mod tests {
         started(&r, &mut srv).await;
         let b = &r.backend;
         let send = async {
-            b.send("s1", 1, vec![UserInput::Text { text: "why stringing?".into() }, UserInput::Image { path: "/tmp/p.jpg".into() }]).await
+            b.send(
+                "s1",
+                1,
+                vec![
+                    UserInput::Text {
+                        text: "why stringing?".into(),
+                    },
+                    UserInput::Image {
+                        path: "/tmp/p.jpg".into(),
+                    },
+                ],
+            )
+            .await
         };
         let script = async {
             let ts = srv.expect("turn/start").await;
             assert_eq!(ts["params"]["threadId"], "th1");
-            assert_eq!(ts["params"]["input"][1], json!({"type":"localImage","path":"/tmp/p.jpg"}));
+            assert_eq!(
+                ts["params"]["input"][1],
+                json!({"type":"localImage","path":"/tmp/p.jpg"})
+            );
             assert_eq!(ts["params"]["sandboxPolicy"]["type"], "workspaceWrite");
-            assert_eq!(ts["params"]["sandboxPolicy"]["writableRoots"][0], "/tmp/profiles");
-            srv.reply(&ts, json!({"turn":{"id":"tu1","items":[],"status":"inProgress"}})).await;
+            assert_eq!(
+                ts["params"]["sandboxPolicy"]["writableRoots"][0],
+                "/tmp/profiles"
+            );
+            srv.reply(
+                &ts,
+                json!({"turn":{"id":"tu1","items":[],"status":"inProgress"}}),
+            )
+            .await;
         };
         let (res, _) = with_timeout(async { tokio::join!(send, script) }).await;
         assert_eq!(res.unwrap(), "tu1");
         srv.send(json!({"method":"turn/completed","params":{"threadId":"th1","turn":{"id":"tu1","items":[],"status":"completed"}}})).await;
         let done = next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnDone { .. })).await;
-        assert_eq!(done, AgentEvent::TurnDone { session_id: "s1".into(), seq: 1, status: TurnStatus::Completed });
+        assert_eq!(
+            done,
+            AgentEvent::TurnDone {
+                session_id: "s1".into(),
+                seq: 1,
+                status: TurnStatus::Completed
+            }
+        );
     }
 
     #[tokio::test]
@@ -741,26 +1027,64 @@ mod tests {
         let mut r = rig(vec![p1, p2]);
         started(&r, &mut srv1).await;
         let b = &r.backend;
-        let (res, _) = with_timeout(async { tokio::join!(b.send("s1", 1, vec![UserInput::Text { text: "hi".into() }]), async {
-            let ts = srv1.expect("turn/start").await;
-            srv1.reply(&ts, json!({"turn":{"id":"tu1","items":[],"status":"inProgress"}})).await;
-        }) }).await;
+        let (res, _) = with_timeout(async {
+            tokio::join!(
+                b.send("s1", 1, vec![UserInput::Text { text: "hi".into() }]),
+                async {
+                    let ts = srv1.expect("turn/start").await;
+                    srv1.reply(
+                        &ts,
+                        json!({"turn":{"id":"tu1","items":[],"status":"inProgress"}}),
+                    )
+                    .await;
+                }
+            )
+        })
+        .await;
         res.unwrap();
         drop(srv1);
-        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnDone { status: TurnStatus::Failed, .. })).await;
+        next_matching(&mut r.rx, |e| {
+            matches!(
+                e,
+                AgentEvent::TurnDone {
+                    status: TurnStatus::Failed,
+                    ..
+                }
+            )
+        })
+        .await;
 
-        let (res, _) = with_timeout(async { tokio::join!(b.send("s1", 2, vec![UserInput::Text { text: "again".into() }]), async {
-            srv2.handshake().await;
-            let rs = srv2.expect("thread/resume").await;
-            assert_eq!(rs["params"]["threadId"], "th1");
-            assert_eq!(rs["params"]["sandbox"], "workspace-write");
-            assert_eq!(rs["params"]["approvalPolicy"], "on-request");
-            assert!(rs["params"]["developerInstructions"].as_str().unwrap().contains("BambuMate"));
-            assert!(rs["params"].get("dynamicTools").is_none());
-            srv2.reply(&rs, json!({"thread":{"id":"th1"}})).await;
-            let ts = srv2.expect("turn/start").await;
-            srv2.reply(&ts, json!({"turn":{"id":"tu2","items":[],"status":"inProgress"}})).await;
-        }) }).await;
+        let (res, _) = with_timeout(async {
+            tokio::join!(
+                b.send(
+                    "s1",
+                    2,
+                    vec![UserInput::Text {
+                        text: "again".into()
+                    }]
+                ),
+                async {
+                    srv2.handshake().await;
+                    let rs = srv2.expect("thread/resume").await;
+                    assert_eq!(rs["params"]["threadId"], "th1");
+                    assert_eq!(rs["params"]["sandbox"], "workspace-write");
+                    assert_eq!(rs["params"]["approvalPolicy"], "on-request");
+                    assert!(rs["params"]["developerInstructions"]
+                        .as_str()
+                        .unwrap()
+                        .contains("BambuMate"));
+                    assert!(rs["params"].get("dynamicTools").is_none());
+                    srv2.reply(&rs, json!({"thread":{"id":"th1"}})).await;
+                    let ts = srv2.expect("turn/start").await;
+                    srv2.reply(
+                        &ts,
+                        json!({"turn":{"id":"tu2","items":[],"status":"inProgress"}}),
+                    )
+                    .await;
+                }
+            )
+        })
+        .await;
         assert_eq!(res.unwrap(), "tu2");
     }
 
@@ -771,17 +1095,30 @@ mod tests {
         started(&r, &mut srv).await;
         let b = &r.backend;
         for (seq, tid) in [(1u32, "tu1"), (2, "tu2"), (3, "tu3")] {
-            let (res, _) = with_timeout(async { tokio::join!(b.send("s1", seq, vec![UserInput::Text { text: "x".into() }]), async {
-                let ts = srv.expect("turn/start").await;
-                srv.reply(&ts, json!({"turn":{"id":tid,"items":[],"status":"inProgress"}})).await;
-            }) }).await;
+            let (res, _) = with_timeout(async {
+                tokio::join!(
+                    b.send("s1", seq, vec![UserInput::Text { text: "x".into() }]),
+                    async {
+                        let ts = srv.expect("turn/start").await;
+                        srv.reply(
+                            &ts,
+                            json!({"turn":{"id":tid,"items":[],"status":"inProgress"}}),
+                        )
+                        .await;
+                    }
+                )
+            })
+            .await;
             res.unwrap();
         }
-        let (res, _) = with_timeout(async { tokio::join!(b.rewind("s1", 2), async {
-            let rb = srv.expect("thread/rollback").await;
-            assert_eq!(rb["params"], json!({"threadId":"th1","numTurns":2}));
-            srv.reply(&rb, json!({"thread":{"id":"th1"}})).await;
-        }) }).await;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.rewind("s1", 2), async {
+                let rb = srv.expect("thread/rollback").await;
+                assert_eq!(rb["params"], json!({"threadId":"th1","numTurns":2}));
+                srv.reply(&rb, json!({"thread":{"id":"th1"}})).await;
+            })
+        })
+        .await;
         assert!(res.unwrap());
     }
 
@@ -790,10 +1127,14 @@ mod tests {
         let (p, mut srv) = fake_process();
         let r = rig(vec![p]);
         started(&r, &mut srv).await;
-        srv.send(json!({"id": 3, "method":"attestation/generate","params":{}})).await;
+        srv.send(json!({"id": 3, "method":"attestation/generate","params":{}}))
+            .await;
         let resp = srv.read().await;
         assert_eq!(resp["id"], 3);
-        assert!(resp["error"]["message"].as_str().unwrap().contains("attestation/generate"));
+        assert!(resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("attestation/generate"));
     }
 
     #[tokio::test]
@@ -801,11 +1142,15 @@ mod tests {
         let (p, mut srv) = fake_process();
         let r = rig(vec![p]);
         let b = &r.backend;
-        let (ready, _) = with_timeout(async { tokio::join!(b.readiness(), async {
-            srv.handshake().await;
-            let ar = srv.expect("account/read").await;
-            srv.reply(&ar, json!({"account": null, "requiresOpenaiAuth": true})).await;
-        }) }).await;
+        let (ready, _) = with_timeout(async {
+            tokio::join!(b.readiness(), async {
+                srv.handshake().await;
+                let ar = srv.expect("account/read").await;
+                srv.reply(&ar, json!({"account": null, "requiresOpenaiAuth": true}))
+                    .await;
+            })
+        })
+        .await;
         assert!(matches!(ready, Readiness::NeedsLogin { .. }));
     }
 
@@ -828,10 +1173,17 @@ mod tests {
     async fn send_turn(r: &Rig, srv: &mut Server, seq: u32, turn_id: &str) {
         let b = &r.backend;
         let (res, _) = with_timeout(async {
-            tokio::join!(b.send("s1", seq, vec![UserInput::Text { text: "x".into() }]), async {
-                let ts = srv.expect("turn/start").await;
-                srv.reply(&ts, json!({"turn":{"id":turn_id,"items":[],"status":"inProgress"}})).await;
-            })
+            tokio::join!(
+                b.send("s1", seq, vec![UserInput::Text { text: "x".into() }]),
+                async {
+                    let ts = srv.expect("turn/start").await;
+                    srv.reply(
+                        &ts,
+                        json!({"turn":{"id":turn_id,"items":[],"status":"inProgress"}}),
+                    )
+                    .await;
+                }
+            )
         })
         .await;
         assert_eq!(res.unwrap(), turn_id);
@@ -847,8 +1199,17 @@ mod tests {
             let start = thread_start_params(&opts);
             let resume = thread_resume_params("th1", &opts);
             assert_eq!(resume["threadId"], "th1");
-            for key in ["cwd", "approvalPolicy", "sandbox", "developerInstructions", "model"] {
-                assert_eq!(resume[key], start[key], "{key} differs between start and resume");
+            for key in [
+                "cwd",
+                "approvalPolicy",
+                "sandbox",
+                "developerInstructions",
+                "model",
+            ] {
+                assert_eq!(
+                    resume[key], start[key],
+                    "{key} differs between start and resume"
+                );
             }
             assert!(resume.get("dynamicTools").is_none());
             let tu = turn_start_params("th1", &[], &opts);
@@ -867,7 +1228,11 @@ mod tests {
                 let rs = srv.expect("thread/resume").await;
                 assert_eq!(rs["params"]["threadId"], "th9");
                 assert_eq!(rs["params"]["sandbox"], "workspace-write");
-                srv.reply(&rs, json!({"thread":{"id":"th9","turns":[turn("a"), turn("b"), turn("c")]}})).await;
+                srv.reply(
+                    &rs,
+                    json!({"thread":{"id":"th9","turns":[turn("a"), turn("b"), turn("c")]}}),
+                )
+                .await;
             })
         })
         .await;
@@ -908,14 +1273,24 @@ mod tests {
         started(&r, &mut srv1).await;
         send_turn(&r, &mut srv1, 1, "tu1").await;
         drop(srv1);
-        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnDone { status: TurnStatus::Failed, .. })).await;
+        next_matching(&mut r.rx, |e| {
+            matches!(
+                e,
+                AgentEvent::TurnDone {
+                    status: TurnStatus::Failed,
+                    ..
+                }
+            )
+        })
+        .await;
         let b = &r.backend;
         let (res, _) = with_timeout(async {
             tokio::join!(b.rewind("s1", 1), async {
                 srv2.handshake().await;
                 let rs = srv2.expect("thread/resume").await;
                 assert_eq!(rs["params"]["threadId"], "th1");
-                srv2.reply(&rs, json!({"thread":{"id":"th1","turns":[turn("tu1")]}})).await;
+                srv2.reply(&rs, json!({"thread":{"id":"th1","turns":[turn("tu1")]}}))
+                    .await;
                 let rb = srv2.expect("thread/rollback").await;
                 assert_eq!(rb["params"], json!({"threadId":"th1","numTurns":1}));
                 srv2.reply(&rb, json!({"thread":{"id":"th1"}})).await;
@@ -942,7 +1317,13 @@ mod tests {
         assert_eq!(res.unwrap(), "tu1");
         let mut turn_events = Vec::new();
         loop {
-            let e = next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnStarted { .. } | AgentEvent::TurnDone { .. })).await;
+            let e = next_matching(&mut r.rx, |e| {
+                matches!(
+                    e,
+                    AgentEvent::TurnStarted { .. } | AgentEvent::TurnDone { .. }
+                )
+            })
+            .await;
             let done = matches!(e, AgentEvent::TurnDone { .. });
             turn_events.push(e);
             if done {
@@ -952,8 +1333,15 @@ mod tests {
         assert_eq!(
             turn_events,
             vec![
-                AgentEvent::TurnStarted { session_id: "s1".into(), seq: 1 },
-                AgentEvent::TurnDone { session_id: "s1".into(), seq: 1, status: TurnStatus::Completed },
+                AgentEvent::TurnStarted {
+                    session_id: "s1".into(),
+                    seq: 1
+                },
+                AgentEvent::TurnDone {
+                    session_id: "s1".into(),
+                    seq: 1,
+                    status: TurnStatus::Completed
+                },
             ]
         );
         // The turn is over, so interrupt must not send turn/interrupt: the next
@@ -983,9 +1371,19 @@ mod tests {
         })
         .await;
         assert!(res.unwrap_err().contains("usage limit"));
-        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnStarted { seq: 1, .. })).await;
+        next_matching(&mut r.rx, |e| {
+            matches!(e, AgentEvent::TurnStarted { seq: 1, .. })
+        })
+        .await;
         let done = next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnDone { .. })).await;
-        assert_eq!(done, AgentEvent::TurnDone { session_id: "s1".into(), seq: 1, status: TurnStatus::Failed });
+        assert_eq!(
+            done,
+            AgentEvent::TurnDone {
+                session_id: "s1".into(),
+                seq: 1,
+                status: TurnStatus::Failed
+            }
+        );
         // seq went back to 0, so there is nothing to rewind to.
         assert!(with_timeout(b.rewind("s1", 1)).await.is_err());
     }
@@ -1002,7 +1400,10 @@ mod tests {
         let resp = srv.read().await;
         assert_eq!(resp, json!({"id": 5, "result": {"answers": {}}}));
         while let Ok(e) = r.rx.try_recv() {
-            assert!(!matches!(e, AgentEvent::Ask { .. }), "asked again after cancel: {e:?}");
+            assert!(
+                !matches!(e, AgentEvent::Ask { .. }),
+                "asked again after cancel: {e:?}"
+            );
         }
     }
 

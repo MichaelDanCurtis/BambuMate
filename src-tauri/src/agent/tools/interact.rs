@@ -31,30 +31,50 @@ pub fn specs() -> Vec<ToolSpec> {
 pub async fn handle(reg: &ToolRegistry, name: &str, args: &Value) -> Option<ToolOutput> {
     Some(match name {
         "bm_ask" => {
-            let header = match arg_str(args, "header") { Ok(v) => v, Err(e) => return Some(e) };
-            let question = match arg_str(args, "question") { Ok(v) => v, Err(e) => return Some(e) };
+            let header = match arg_str(args, "header") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let question = match arg_str(args, "question") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
             let options: Vec<AskOption> = args
                 .get("options")
                 .cloned()
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
-            let allow_other = args.get("allow_other").and_then(|v| v.as_bool()).unwrap_or(false);
-            match reg.asks().ask(reg.session_id(), &header, &question, options, allow_other).await {
+            let allow_other = args
+                .get("allow_other")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match reg
+                .asks()
+                .ask(reg.session_id(), &header, &question, options, allow_other)
+                .await
+            {
                 Ok(answers) => ToolOutput::json(&json!({"answers": answers})),
                 Err(e) => ToolOutput::error(e),
             }
         }
         "bm_confirm" => {
-            let prompt = match arg_str(args, "prompt") { Ok(v) => v, Err(e) => return Some(e) };
+            let prompt = match arg_str(args, "prompt") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
             let confirmed = reg.asks().confirm(reg.session_id(), &prompt).await;
             ToolOutput::json(&json!({"confirmed": confirmed}))
         }
         "bm_todo" => {
-            let items: Vec<TodoItem> = match args.get("items").cloned().map(serde_json::from_value) {
+            let items: Vec<TodoItem> = match args.get("items").cloned().map(serde_json::from_value)
+            {
                 Some(Ok(items)) => items,
                 _ => return Some(ToolOutput::error("'items' must be a list of {text, done}")),
             };
-            reg.asks().emit(AgentEvent::Todo { session_id: reg.session_id().to_string(), items });
+            reg.asks().emit(AgentEvent::Todo {
+                session_id: reg.session_id().to_string(),
+                items,
+            });
             ToolOutput::text("checklist updated")
         }
         _ => return None,
@@ -72,7 +92,12 @@ mod tests {
     async fn bm_todo_emits_todo_event() {
         let host = Arc::new(FakeHost::new());
         let (reg, mut rx) = registry_with(host.clone());
-        let out = reg.call("bm_todo", json!({"items":[{"text":"Read profile","done":true}]})).await;
+        let out = reg
+            .call(
+                "bm_todo",
+                json!({"items":[{"text":"Read profile","done":true}]}),
+            )
+            .await;
         assert!(out.ok);
         match rx.recv().await.unwrap() {
             AgentEvent::Todo { items, .. } => assert_eq!(items[0].text, "Read profile"),
@@ -123,12 +148,21 @@ mod tests {
             ok: true,
             content: vec![
                 ToolContent::Text("photo".into()),
-                ToolContent::Image { mime: "image/jpeg".into(), base64: "AAAA".into() },
+                ToolContent::Image {
+                    mime: "image/jpeg".into(),
+                    base64: "AAAA".into(),
+                },
             ],
         };
         let v = out.to_codex_response();
         assert_eq!(v["success"], true);
-        assert_eq!(v["contentItems"][0], json!({"type":"inputText","text":"photo"}));
-        assert_eq!(v["contentItems"][1], json!({"type":"inputImage","imageUrl":"data:image/jpeg;base64,AAAA"}));
+        assert_eq!(
+            v["contentItems"][0],
+            json!({"type":"inputText","text":"photo"})
+        );
+        assert_eq!(
+            v["contentItems"][1],
+            json!({"type":"inputImage","imageUrl":"data:image/jpeg;base64,AAAA"})
+        );
     }
 }

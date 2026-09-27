@@ -33,7 +33,13 @@ fn profile_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
 
 fn safe_segment(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -43,7 +49,9 @@ impl Snapshots {
     }
 
     fn turn_dir(&self, session: &str, seq: u32) -> PathBuf {
-        self.root.join(safe_segment(session)).join(format!("{seq:06}"))
+        self.root
+            .join(safe_segment(session))
+            .join(format!("{seq:06}"))
     }
 
     pub fn take(&self, session: &str, seq: u32, profile_dir: &Path) -> io::Result<PathBuf> {
@@ -63,7 +71,10 @@ impl Snapshots {
     pub fn restore(&self, session: &str, seq: u32, profile_dir: &Path) -> io::Result<()> {
         let snap = self.turn_dir(session, seq);
         if !snap.is_dir() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, format!("no snapshot for turn {seq}")));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no snapshot for turn {seq}"),
+            ));
         }
         for current in profile_files(profile_dir)? {
             let name = current.file_name().unwrap();
@@ -78,7 +89,12 @@ impl Snapshots {
         Ok(())
     }
 
-    pub fn changed_since(&self, session: &str, seq: u32, profile_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    pub fn changed_since(
+        &self,
+        session: &str,
+        seq: u32,
+        profile_dir: &Path,
+    ) -> io::Result<Vec<PathBuf>> {
         let snap = self.turn_dir(session, seq);
         let mut changed = Vec::new();
         for current in profile_files(profile_dir)? {
@@ -152,10 +168,16 @@ mod tests {
 
         snaps.restore("s1", 1, profiles.path()).unwrap();
 
-        assert_eq!(fs::read_to_string(profiles.path().join("A.json")).unwrap(), "{\"name\":\"A\"}");
+        assert_eq!(
+            fs::read_to_string(profiles.path().join("A.json")).unwrap(),
+            "{\"name\":\"A\"}"
+        );
         assert!(profiles.path().join("A.info").exists());
         assert!(!profiles.path().join("B.json").exists());
-        assert!(profiles.path().join(".backups/A_1.json").exists(), "backups untouched");
+        assert!(
+            profiles.path().join(".backups/A_1.json").exists(),
+            "backups untouched"
+        );
     }
 
     #[test]
@@ -166,7 +188,13 @@ mod tests {
         fs::write(profiles.path().join("C.json"), "{}").unwrap();
         let mut changed = snaps.changed_since("s1", 3, profiles.path()).unwrap();
         changed.sort();
-        assert_eq!(changed, vec![profiles.path().join("A.json"), profiles.path().join("C.json")]);
+        assert_eq!(
+            changed,
+            vec![
+                profiles.path().join("A.json"),
+                profiles.path().join("C.json")
+            ]
+        );
     }
 
     #[test]

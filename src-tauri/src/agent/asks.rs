@@ -16,7 +16,10 @@ pub struct AskBroker {
 
 impl AskBroker {
     pub fn new(events: broadcast::Sender<AgentEvent>) -> Self {
-        Self { pending: Mutex::new(HashMap::new()), events }
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            events,
+        }
     }
 
     pub async fn ask(
@@ -48,8 +51,14 @@ impl AskBroker {
 
     pub async fn confirm(&self, session_id: &str, prompt: &str) -> bool {
         let options = vec![
-            AskOption { label: "Yes".into(), description: "Go ahead".into() },
-            AskOption { label: "No".into(), description: "Don't do it".into() },
+            AskOption {
+                label: "Yes".into(),
+                description: "Go ahead".into(),
+            },
+            AskOption {
+                label: "No".into(),
+                description: "Don't do it".into(),
+            },
         ];
         matches!(
             self.ask(session_id, "Confirm", prompt, options, false).await.as_deref(),
@@ -68,7 +77,10 @@ impl AskBroker {
     }
 
     pub fn cancel_session(&self, session_id: &str) {
-        self.pending.lock().unwrap().retain(|_, (s, _)| s != session_id);
+        self.pending
+            .lock()
+            .unwrap()
+            .retain(|_, (s, _)| s != session_id);
     }
 
     pub fn emit(&self, event: AgentEvent) {
@@ -99,8 +111,17 @@ mod tests {
         let (b, mut rx) = broker();
         let b2 = b.clone();
         let task = tokio::spawn(async move {
-            b2.ask("s1", "Nozzle", "Which nozzle?", vec![AskOption { label: "0.4".into(), description: "".into() }], false)
-                .await
+            b2.ask(
+                "s1",
+                "Nozzle",
+                "Which nozzle?",
+                vec![AskOption {
+                    label: "0.4".into(),
+                    description: "".into(),
+                }],
+                false,
+            )
+            .await
         });
         let req = next_ask(&mut rx).await;
         assert_eq!(req.question, "Which nozzle?");
