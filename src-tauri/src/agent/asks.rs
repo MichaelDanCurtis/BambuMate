@@ -14,15 +14,6 @@ pub struct AskBroker {
     events: broadcast::Sender<AgentEvent>,
 }
 
-impl Clone for AskBroker {
-    fn clone(&self) -> Self {
-        Self {
-            pending: Mutex::new(HashMap::new()),
-            events: self.events.clone(),
-        }
-    }
-}
-
 impl AskBroker {
     pub fn new(events: broadcast::Sender<AgentEvent>) -> Self {
         Self { pending: Mutex::new(HashMap::new()), events }
