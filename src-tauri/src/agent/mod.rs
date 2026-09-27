@@ -3,6 +3,7 @@
 
 pub mod asks;
 pub mod backend;
+pub mod codex;
 pub mod locate;
 pub mod snapshot;
 pub mod tools;
