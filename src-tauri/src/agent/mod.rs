@@ -2,3 +2,4 @@
 //! BambuMate through the `bm_*` tool registry.
 
 pub mod types;
+pub mod locate;
