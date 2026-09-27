@@ -100,7 +100,12 @@ pub fn ProfileManagementPage() -> impl IntoView {
         });
     };
 
+    let agent_refresh = use_context::<crate::agent::drawer::AgentRefresh>();
     Effect::new(move |_| {
+        // Re-run when the agent writes a profile.
+        if let Some(r) = agent_refresh {
+            r.0.track();
+        }
         load_profiles();
     });
 

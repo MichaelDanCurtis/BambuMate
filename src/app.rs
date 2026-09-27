@@ -3,6 +3,7 @@ use leptos_router::components::*;
 use leptos_router::path;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::agent::drawer::{AgentDrawer, AgentRefresh};
 use crate::commands::{self, FeatureFlags, UpdateInfo};
 use crate::components::sidebar::Sidebar;
 use crate::pages::about::AboutPage;
@@ -37,6 +38,7 @@ pub fn App() -> impl IntoView {
 
     let update_info = RwSignal::new(Option::<UpdateInfo>::None);
     provide_context(UpdateContext { update_info });
+    provide_context(AgentRefresh(RwSignal::new(0)));
 
     // Feature flags with both enabled by default
     let (flags, set_flags) = signal(FeatureFlags {
@@ -120,6 +122,7 @@ pub fn App() -> impl IntoView {
                             <Route path=path!("/about") view=AboutPage />
                         </Routes>
                     </main>
+                    <AgentDrawer />
                 </div>
             </Show>
         </Router>
