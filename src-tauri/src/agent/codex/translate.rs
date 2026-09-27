@@ -18,21 +18,41 @@ pub fn translate(session_id: &str, seq: u32, method: &str, params: &Value) -> Ve
             let item = params.get("item").cloned().unwrap_or(Value::Null);
             match item.get("type").and_then(|t| t.as_str()).unwrap_or("") {
                 "agentMessage" => vec![AgentEvent::MessageDone { session_id: sid, item_id: s(&item, "id"), text: s(&item, "text") }],
+                // `failed` stays a Command: its exitCode carries the failure.
+                "commandExecution" if item.get("status").and_then(|x| x.as_str()) == Some("declined") => {
+                    vec![AgentEvent::Error {
+                        session_id: Some(sid),
+                        message: format!("Command declined: {}", s(&item, "command")),
+                    }]
+                }
                 "commandExecution" => vec![AgentEvent::Command {
                     session_id: sid,
                     command: s(&item, "command"),
                     exit_code: item.get("exitCode").and_then(|c| c.as_i64()).map(|c| c as i32),
                 }],
-                "fileChange" => item
-                    .get("changes")
-                    .and_then(|c| c.as_array())
-                    .map(|changes| {
-                        changes
-                            .iter()
-                            .map(|c| AgentEvent::FileChange { session_id: sid.clone(), path: s(c, "path"), diff: s(c, "diff") })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                "fileChange" => {
+                    // A missing status is treated as applied.
+                    let status = item.get("status").and_then(|x| x.as_str()).unwrap_or("completed");
+                    item.get("changes")
+                        .and_then(|c| c.as_array())
+                        .map(|changes| {
+                            changes
+                                .iter()
+                                .map(|c| match status {
+                                    "completed" => AgentEvent::FileChange {
+                                        session_id: sid.clone(),
+                                        path: s(c, "path"),
+                                        diff: s(c, "diff"),
+                                    },
+                                    other => AgentEvent::Error {
+                                        session_id: Some(sid.clone()),
+                                        message: format!("Codex did not apply changes to {} ({other})", s(c, "path")),
+                                    },
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
                 "webSearch" => vec![AgentEvent::WebSearch { session_id: sid, query: s(&item, "query") }],
                 "imageGeneration" => match item.get("savedPath").and_then(|p| p.as_str()) {
                     Some(p) => vec![AgentEvent::ImageGenerated { session_id: sid, path: p.to_string() }],
@@ -115,6 +135,29 @@ mod tests {
 
         let img = t("item/completed", json!({"item":{"type":"imageGeneration","id":"i","result":"","status":"completed","savedPath":"/tmp/i.png"}}));
         assert_eq!(img, vec![AgentEvent::ImageGenerated { session_id: "s1".into(), path: "/tmp/i.png".into() }]);
+    }
+
+    #[test]
+    fn declined_file_changes_become_errors() {
+        let fc = t("item/completed", json!({"item":{"type":"fileChange","id":"f","status":"declined","changes":[
+            {"path":"/a.json","kind":{"type":"update"},"diff":"-1\n+2"},{"path":"/b.json","kind":{"type":"add"},"diff":"+x"}]}}));
+        assert_eq!(
+            fc,
+            vec![
+                AgentEvent::Error { session_id: Some("s1".into()), message: "Codex did not apply changes to /a.json (declined)".into() },
+                AgentEvent::Error { session_id: Some("s1".into()), message: "Codex did not apply changes to /b.json (declined)".into() },
+            ]
+        );
+        let failed = t("item/completed", json!({"item":{"type":"fileChange","id":"f","status":"failed","changes":[{"path":"/a.json","diff":""}]}}));
+        assert_eq!(failed, vec![AgentEvent::Error { session_id: Some("s1".into()), message: "Codex did not apply changes to /a.json (failed)".into() }]);
+    }
+
+    #[test]
+    fn declined_commands_become_errors_but_failed_ones_stay_commands() {
+        let declined = t("item/completed", json!({"item":{"type":"commandExecution","id":"c","command":"rm -rf x","commandActions":[],"cwd":"/","status":"declined"}}));
+        assert_eq!(declined, vec![AgentEvent::Error { session_id: Some("s1".into()), message: "Command declined: rm -rf x".into() }]);
+        let failed = t("item/completed", json!({"item":{"type":"commandExecution","id":"c","command":"false","exitCode":1,"commandActions":[],"cwd":"/","status":"failed"}}));
+        assert_eq!(failed, vec![AgentEvent::Command { session_id: "s1".into(), command: "false".into(), exit_code: Some(1) }]);
     }
 
     #[test]

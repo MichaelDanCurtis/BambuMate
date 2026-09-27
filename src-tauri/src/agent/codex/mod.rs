@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
@@ -64,12 +65,28 @@ impl CodexSpawner for ProcessSpawner {
     }
 }
 
+/// How long a freshly spawned `codex app-server` gets to answer `initialize`.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
 struct Session {
     thread_id: String,
+    /// Sequence number of the latest user message (= turn count) in the thread.
     seq: u32,
+    /// False after resuming a thread whose turn history Codex did not return;
+    /// rewind is then unsupported.
+    seq_known: bool,
+    /// `turn/start` was sent and the turn has not finished yet.
+    in_flight: bool,
+    /// Codex's id for the in-flight turn, once `turn/start` has answered.
     turn_id: Option<String>,
     generation: u64,
     opts: SessionOpts,
+}
+
+impl Session {
+    fn new(thread_id: String, seq: u32, seq_known: bool, generation: u64, opts: SessionOpts) -> Self {
+        Self { thread_id, seq, seq_known, in_flight: false, turn_id: None, generation, opts }
+    }
 }
 
 #[derive(Clone)]
@@ -109,15 +126,40 @@ fn text(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string()
 }
 
+fn approval_policy(opts: &SessionOpts) -> &'static str {
+    if opts.full_access {
+        "never"
+    } else {
+        "on-request"
+    }
+}
+
+/// Thread settings shared by `thread/start` and `thread/resume`, so a thread
+/// resumed in a new process keeps the policy it was started with.
+fn thread_policy(opts: &SessionOpts) -> Map<String, Value> {
+    let mut p = Map::new();
+    p.insert("cwd".into(), json!(opts.cwd));
+    p.insert("approvalPolicy".into(), json!(approval_policy(opts)));
+    p.insert(
+        "sandbox".into(),
+        json!(if opts.full_access { "danger-full-access" } else { "workspace-write" }),
+    );
+    p.insert("developerInstructions".into(), json!(AGENT_INSTRUCTIONS));
+    p.insert("model".into(), json!(opts.model));
+    p
+}
+
 pub fn thread_start_params(opts: &SessionOpts) -> Value {
-    json!({
-        "cwd": opts.cwd,
-        "approvalPolicy": if opts.full_access { "never" } else { "on-request" },
-        "sandbox": if opts.full_access { "danger-full-access" } else { "workspace-write" },
-        "developerInstructions": AGENT_INSTRUCTIONS,
-        "dynamicTools": ToolRegistry::codex_dynamic_tools(),
-        "model": opts.model,
-    })
+    let mut p = thread_policy(opts);
+    p.insert("dynamicTools".into(), ToolRegistry::codex_dynamic_tools());
+    Value::Object(p)
+}
+
+/// `thread/resume` has no `dynamicTools`: Codex restores them from the thread.
+pub fn thread_resume_params(thread_id: &str, opts: &SessionOpts) -> Value {
+    let mut p = thread_policy(opts);
+    p.insert("threadId".into(), json!(thread_id));
+    Value::Object(p)
 }
 
 pub fn turn_start_params(thread_id: &str, input: &[UserInput], opts: &SessionOpts) -> Value {
@@ -133,7 +175,8 @@ pub fn turn_start_params(thread_id: &str, input: &[UserInput], opts: &SessionOpt
     } else {
         json!({"type":"workspaceWrite","writableRoots":opts.writable_roots,"networkAccess":true})
     };
-    json!({"threadId":thread_id,"input":input,"sandboxPolicy":sandbox,"model":opts.model,"effort":opts.effort})
+    json!({"threadId":thread_id,"input":input,"sandboxPolicy":sandbox,"approvalPolicy":approval_policy(opts),
+           "model":opts.model,"effort":opts.effort})
 }
 
 impl CodexBackend {
@@ -155,17 +198,51 @@ impl CodexBackend {
         let spawned = self.spawner.spawn()?;
         let (rpc, rx) = RpcConnection::start(spawned.reader, spawned.writer);
         tokio::spawn(dispatch(rx, rpc.clone(), self.shared.clone(), self.live.clone()));
-        rpc.request(
-            "initialize",
-            json!({"clientInfo":{"name":"bambumate","title":"BambuMate","version":env!("CARGO_PKG_VERSION")},
-                   "capabilities":{"experimentalApi":true}}),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        rpc.notify("initialized", None).await.map_err(|e| e.to_string())?;
+        let handshake = async {
+            rpc.request(
+                "initialize",
+                json!({"clientInfo":{"name":"bambumate","title":"BambuMate","version":env!("CARGO_PKG_VERSION")},
+                       "capabilities":{"experimentalApi":true}}),
+            )
+            .await?;
+            rpc.notify("initialized", None).await
+        };
+        // On any failure `spawned.child` drops here, which kills the process
+        // (kill_on_drop), and `live` stays None so the next call respawns.
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e.to_string()),
+            Err(_) => {
+                return Err(format!(
+                    "codex app-server did not answer initialize within {}s",
+                    HANDSHAKE_TIMEOUT.as_secs()
+                ))
+            }
+        }
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *live = Some(Live { rpc: rpc.clone(), _child: spawned.child });
         Ok((rpc, generation))
+    }
+
+    /// The connection plus the session's thread id and options. When the
+    /// session's thread was opened on a process that has since exited, the
+    /// thread is resumed on the current one first.
+    async fn session_rpc(&self, session_id: &str) -> Result<(Arc<RpcConnection>, String, SessionOpts), String> {
+        let (rpc, generation) = self.rpc().await?;
+        let (thread_id, opts, stale) = {
+            let s = self.shared.sessions.lock().unwrap();
+            let s = s.get(session_id).ok_or("unknown session")?;
+            (s.thread_id.clone(), s.opts.clone(), s.generation != generation)
+        };
+        if stale {
+            rpc.request("thread/resume", thread_resume_params(&thread_id, &opts))
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Some(s) = self.shared.sessions.lock().unwrap().get_mut(session_id) {
+                s.generation = generation;
+            }
+        }
+        Ok((rpc, thread_id, opts))
     }
 }
 
@@ -195,14 +272,17 @@ async fn dispatch(
         let mut sessions = shared.sessions.lock().unwrap();
         sessions
             .iter_mut()
-            .filter(|(_, s)| s.turn_id.is_some())
+            .filter(|(_, s)| s.in_flight)
             .map(|(sid, s)| {
+                s.in_flight = false;
                 s.turn_id = None;
                 (sid.clone(), s.seq)
             })
             .collect()
     };
     for (sid, seq) in active {
+        // Questions from the dead process can never be answered back to it.
+        shared.asks.cancel_session(&sid);
         shared.emit(AgentEvent::Error {
             session_id: Some(sid.clone()),
             message: "Codex stopped unexpectedly. Send another message to restart it.".into(),
@@ -225,6 +305,7 @@ fn on_notification(shared: &Shared, method: &str, params: &Value) {
     let Some((sid, seq, _)) = shared.by_thread(params) else { return };
     if method == "turn/completed" {
         if let Some(s) = shared.sessions.lock().unwrap().get_mut(&sid) {
+            s.in_flight = false;
             s.turn_id = None;
         }
     }
@@ -257,11 +338,13 @@ async fn on_request(rpc: &RpcConnection, shared: &Shared, id: Value, method: &st
                     .and_then(|o| serde_json::from_value(o).ok())
                     .unwrap_or_default();
                 let allow_other = q.get("isOther").and_then(|v| v.as_bool()).unwrap_or(options.is_empty());
-                let picked = shared
-                    .asks
-                    .ask(&sid, &text(&q, "header"), &text(&q, "question"), options, allow_other)
-                    .await
-                    .unwrap_or_default();
+                // A cancelled question (interrupt, end, crash) ends the request:
+                // answer with what was gathered instead of asking the rest.
+                let Ok(picked) =
+                    shared.asks.ask(&sid, &text(&q, "header"), &text(&q, "question"), options, allow_other).await
+                else {
+                    break;
+                };
                 answers.insert(text(&q, "id"), json!({"answers": picked}));
             }
             let _ = rpc.respond(id, json!({"answers": answers})).await;
@@ -345,35 +428,44 @@ impl AgentBackend for CodexBackend {
         let (rpc, generation) = self.rpc().await?;
         let v = rpc.request("thread/start", thread_start_params(&opts)).await.map_err(|e| e.to_string())?;
         let thread_id = v["thread"]["id"].as_str().ok_or("thread/start returned no thread id")?.to_string();
-        self.shared.sessions.lock().unwrap().insert(
-            session_id.to_string(),
-            Session { thread_id: thread_id.clone(), seq: 0, turn_id: None, generation, opts },
-        );
+        self.shared
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), Session::new(thread_id.clone(), 0, true, generation, opts));
         self.shared.emit(AgentEvent::SessionReady { session_id: session_id.to_string(), provider: Provider::Codex });
         Ok(thread_id)
     }
 
     async fn resume_session(&self, session_id: &str, backend_id: &str, opts: SessionOpts) -> Result<(), String> {
         let (rpc, generation) = self.rpc().await?;
-        rpc.request("thread/resume", json!({"threadId": backend_id})).await.map_err(|e| e.to_string())?;
+        let v = rpc
+            .request("thread/resume", thread_resume_params(backend_id, &opts))
+            .await
+            .map_err(|e| e.to_string())?;
+        // Each turn in the history is one user message, so its length is the seq.
+        let turns = v["thread"]["turns"].as_array().map(|t| t.len() as u32);
         self.shared.sessions.lock().unwrap().insert(
             session_id.to_string(),
-            Session { thread_id: backend_id.to_string(), seq: 0, turn_id: None, generation, opts },
+            Session::new(backend_id.to_string(), turns.unwrap_or(0), turns.is_some(), generation, opts),
         );
         self.shared.emit(AgentEvent::SessionReady { session_id: session_id.to_string(), provider: Provider::Codex });
         Ok(())
     }
 
     async fn rewind(&self, session_id: &str, to_seq: u32) -> Result<bool, String> {
-        let (thread_id, current) = {
+        let (current, known) = {
             let s = self.shared.sessions.lock().unwrap();
             let s = s.get(session_id).ok_or("unknown session")?;
-            (s.thread_id.clone(), s.seq)
+            (s.seq, s.seq_known)
         };
+        if !known {
+            return Ok(false);
+        }
         if to_seq == 0 || to_seq > current {
             return Err(format!("cannot rewind to message {to_seq}"));
         }
-        let (rpc, _) = self.rpc().await?;
+        let (rpc, thread_id, _) = self.session_rpc(session_id).await?;
         rpc.request("thread/rollback", json!({"threadId": thread_id, "numTurns": current - to_seq + 1}))
             .await
             .map_err(|e| e.to_string())?;
@@ -384,27 +476,57 @@ impl AgentBackend for CodexBackend {
     }
 
     async fn send(&self, session_id: &str, seq: u32, input: Vec<UserInput>) -> Result<String, String> {
-        let (rpc, generation) = self.rpc().await?;
-        let (thread_id, opts, stale) = {
-            let s = self.shared.sessions.lock().unwrap();
-            let s = s.get(session_id).ok_or("unknown session")?;
-            (s.thread_id.clone(), s.opts.clone(), s.generation != generation)
+        let (rpc, thread_id, opts) = self.session_rpc(session_id).await?;
+        // Mark the turn in flight before sending turn/start: Codex may report
+        // turn/completed before the turn/start response arrives, and that
+        // notification must see the new seq.
+        let prev_seq = {
+            let mut sessions = self.shared.sessions.lock().unwrap();
+            let s = sessions.get_mut(session_id).ok_or("unknown session")?;
+            let prev = s.seq;
+            s.seq = seq;
+            s.in_flight = true;
+            s.turn_id = None;
+            prev
         };
-        if stale {
-            rpc.request("thread/resume", json!({"threadId": thread_id})).await.map_err(|e| e.to_string())?;
-        }
-        let v = rpc
+        self.shared.emit(AgentEvent::TurnStarted { session_id: session_id.to_string(), seq });
+        let started = rpc
             .request("turn/start", turn_start_params(&thread_id, &input, &opts))
             .await
-            .map_err(|e| e.to_string())?;
-        let turn_id = v["turn"]["id"].as_str().ok_or("turn/start returned no turn id")?.to_string();
-        if let Some(s) = self.shared.sessions.lock().unwrap().get_mut(session_id) {
-            s.seq = seq;
-            s.turn_id = Some(turn_id.clone());
-            s.generation = generation;
+            .map_err(|e| e.to_string())
+            .and_then(|v| {
+                v["turn"]["id"].as_str().map(str::to_string).ok_or_else(|| "turn/start returned no turn id".to_string())
+            });
+        match started {
+            Ok(turn_id) => {
+                if let Some(s) = self.shared.sessions.lock().unwrap().get_mut(session_id) {
+                    // A fast turn/completed may already have ended the turn.
+                    if s.in_flight {
+                        s.turn_id = Some(turn_id.clone());
+                    }
+                }
+                Ok(turn_id)
+            }
+            Err(e) => {
+                let was_in_flight = match self.shared.sessions.lock().unwrap().get_mut(session_id) {
+                    Some(s) => {
+                        s.seq = prev_seq;
+                        s.turn_id = None;
+                        std::mem::replace(&mut s.in_flight, false)
+                    }
+                    None => false,
+                };
+                // The crash handler may already have failed this turn.
+                if was_in_flight {
+                    self.shared.emit(AgentEvent::TurnDone {
+                        session_id: session_id.to_string(),
+                        seq,
+                        status: TurnStatus::Failed,
+                    });
+                }
+                Err(e)
+            }
         }
-        self.shared.emit(AgentEvent::TurnStarted { session_id: session_id.to_string(), seq });
-        Ok(turn_id)
     }
 
     async fn interrupt(&self, session_id: &str) -> Result<(), String> {
@@ -631,6 +753,10 @@ mod tests {
             srv2.handshake().await;
             let rs = srv2.expect("thread/resume").await;
             assert_eq!(rs["params"]["threadId"], "th1");
+            assert_eq!(rs["params"]["sandbox"], "workspace-write");
+            assert_eq!(rs["params"]["approvalPolicy"], "on-request");
+            assert!(rs["params"]["developerInstructions"].as_str().unwrap().contains("BambuMate"));
+            assert!(rs["params"].get("dynamicTools").is_none());
             srv2.reply(&rs, json!({"thread":{"id":"th1"}})).await;
             let ts = srv2.expect("turn/start").await;
             srv2.reply(&ts, json!({"turn":{"id":"tu2","items":[],"status":"inProgress"}})).await;
@@ -693,5 +819,204 @@ mod tests {
         assert_eq!(ts["approvalPolicy"], "never");
         let tu = turn_start_params("th", &[], &opts);
         assert_eq!(tu["sandboxPolicy"], json!({"type":"dangerFullAccess"}));
+    }
+
+    fn turn(id: &str) -> Value {
+        json!({"id": id, "items": [], "status": "completed"})
+    }
+
+    async fn send_turn(r: &Rig, srv: &mut Server, seq: u32, turn_id: &str) {
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.send("s1", seq, vec![UserInput::Text { text: "x".into() }]), async {
+                let ts = srv.expect("turn/start").await;
+                srv.reply(&ts, json!({"turn":{"id":turn_id,"items":[],"status":"inProgress"}})).await;
+            })
+        })
+        .await;
+        assert_eq!(res.unwrap(), turn_id);
+    }
+
+    #[test]
+    fn resume_params_carry_the_session_policy_without_dynamic_tools() {
+        let r = rig(vec![]);
+        for full_access in [false, true] {
+            let mut opts = r.opts.clone();
+            opts.full_access = full_access;
+            opts.model = Some("gpt-5.5".into());
+            let start = thread_start_params(&opts);
+            let resume = thread_resume_params("th1", &opts);
+            assert_eq!(resume["threadId"], "th1");
+            for key in ["cwd", "approvalPolicy", "sandbox", "developerInstructions", "model"] {
+                assert_eq!(resume[key], start[key], "{key} differs between start and resume");
+            }
+            assert!(resume.get("dynamicTools").is_none());
+            let tu = turn_start_params("th1", &[], &opts);
+            assert_eq!(tu["approvalPolicy"], start["approvalPolicy"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_session_learns_the_turn_count_for_rewind() {
+        let (p, mut srv) = fake_process();
+        let r = rig(vec![p]);
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.resume_session("s1", "th9", r.opts.clone()), async {
+                srv.handshake().await;
+                let rs = srv.expect("thread/resume").await;
+                assert_eq!(rs["params"]["threadId"], "th9");
+                assert_eq!(rs["params"]["sandbox"], "workspace-write");
+                srv.reply(&rs, json!({"thread":{"id":"th9","turns":[turn("a"), turn("b"), turn("c")]}})).await;
+            })
+        })
+        .await;
+        res.unwrap();
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.rewind("s1", 2), async {
+                let rb = srv.expect("thread/rollback").await;
+                assert_eq!(rb["params"], json!({"threadId":"th9","numTurns":2}));
+                srv.reply(&rb, json!({"thread":{"id":"th9"}})).await;
+            })
+        })
+        .await;
+        assert!(res.unwrap());
+    }
+
+    #[tokio::test]
+    async fn rewind_without_known_history_reports_unsupported_instead_of_failing() {
+        let (p, mut srv) = fake_process();
+        let r = rig(vec![p]);
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.resume_session("s1", "th9", r.opts.clone()), async {
+                srv.handshake().await;
+                let rs = srv.expect("thread/resume").await;
+                srv.reply(&rs, json!({"thread":{"id":"th9"}})).await;
+            })
+        })
+        .await;
+        res.unwrap();
+        assert_eq!(with_timeout(b.rewind("s1", 1)).await, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn rewind_after_a_crash_resumes_before_rolling_back() {
+        let (p1, mut srv1) = fake_process();
+        let (p2, mut srv2) = fake_process();
+        let mut r = rig(vec![p1, p2]);
+        started(&r, &mut srv1).await;
+        send_turn(&r, &mut srv1, 1, "tu1").await;
+        drop(srv1);
+        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnDone { status: TurnStatus::Failed, .. })).await;
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.rewind("s1", 1), async {
+                srv2.handshake().await;
+                let rs = srv2.expect("thread/resume").await;
+                assert_eq!(rs["params"]["threadId"], "th1");
+                srv2.reply(&rs, json!({"thread":{"id":"th1","turns":[turn("tu1")]}})).await;
+                let rb = srv2.expect("thread/rollback").await;
+                assert_eq!(rb["params"], json!({"threadId":"th1","numTurns":1}));
+                srv2.reply(&rb, json!({"thread":{"id":"th1"}})).await;
+            })
+        })
+        .await;
+        assert!(res.unwrap());
+    }
+
+    #[tokio::test]
+    async fn turn_completed_before_the_turn_start_response_is_not_lost() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.send("s1", 1, vec![UserInput::Text { text: "quick".into() }]), async {
+                let ts = srv.expect("turn/start").await;
+                srv.send(json!({"method":"turn/completed","params":{"threadId":"th1","turn":{"id":"tu1","items":[],"status":"completed"}}})).await;
+                srv.reply(&ts, json!({"turn":{"id":"tu1","items":[],"status":"inProgress"}})).await;
+            })
+        })
+        .await;
+        assert_eq!(res.unwrap(), "tu1");
+        let mut turn_events = Vec::new();
+        loop {
+            let e = next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnStarted { .. } | AgentEvent::TurnDone { .. })).await;
+            let done = matches!(e, AgentEvent::TurnDone { .. });
+            turn_events.push(e);
+            if done {
+                break;
+            }
+        }
+        assert_eq!(
+            turn_events,
+            vec![
+                AgentEvent::TurnStarted { session_id: "s1".into(), seq: 1 },
+                AgentEvent::TurnDone { session_id: "s1".into(), seq: 1, status: TurnStatus::Completed },
+            ]
+        );
+        // The turn is over, so interrupt must not send turn/interrupt: the next
+        // message the server sees is the model/list request.
+        with_timeout(b.interrupt("s1")).await.unwrap();
+        let (models, _) = with_timeout(async {
+            tokio::join!(b.models(), async {
+                let ml = srv.expect("model/list").await;
+                srv.reply(&ml, json!({"data":[]})).await;
+            })
+        })
+        .await;
+        assert!(models.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_turn_start_reports_failure_and_restores_the_seq() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.send("s1", 1, vec![UserInput::Text { text: "x".into() }]), async {
+                let ts = srv.expect("turn/start").await;
+                srv.send(json!({"id": ts["id"], "error": {"code": -32000, "message": "usage limit"}})).await;
+            })
+        })
+        .await;
+        assert!(res.unwrap_err().contains("usage limit"));
+        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnStarted { seq: 1, .. })).await;
+        let done = next_matching(&mut r.rx, |e| matches!(e, AgentEvent::TurnDone { .. })).await;
+        assert_eq!(done, AgentEvent::TurnDone { session_id: "s1".into(), seq: 1, status: TurnStatus::Failed });
+        // seq went back to 0, so there is nothing to rewind to.
+        assert!(with_timeout(b.rewind("s1", 1)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_user_input_stops_asking_and_responds() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        srv.send(json!({"id": 5, "method":"item/tool/requestUserInput","params":{"threadId":"th1","turnId":"tu","itemId":"i",
+            "questions":[{"id":"q1","header":"A","question":"First?","options":[]},{"id":"q2","header":"B","question":"Second?","options":[]}]}})).await;
+        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::Ask { .. })).await;
+        r.asks.cancel_session("s1");
+        let resp = srv.read().await;
+        assert_eq!(resp, json!({"id": 5, "result": {"answers": {}}}));
+        while let Ok(e) = r.rx.try_recv() {
+            assert!(!matches!(e, AgentEvent::Ask { .. }), "asked again after cancel: {e:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_calls_are_served_while_an_ask_is_pending() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        srv.send(json!({"id": 5, "method":"item/tool/requestUserInput","params":{"threadId":"th1","turnId":"tu","itemId":"i",
+            "questions":[{"id":"q1","header":"A","question":"Pending?","options":[]}]}})).await;
+        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::Ask { .. })).await;
+        srv.send(json!({"id": 6, "method":"item/tool/call","params":{"threadId":"th1","turnId":"tu","callId":"c1","tool":"bm_app_state","arguments":{}}})).await;
+        let resp = srv.read().await;
+        assert_eq!(resp["id"], 6);
+        assert_eq!(resp["result"]["success"], true);
     }
 }
