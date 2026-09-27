@@ -547,7 +547,9 @@ async function driveApp(browserType, engine, baseUrl) {
 
   await step(run, page, "drawer shows readiness and the default model", async () => {
     await page.waitForFunction(() => document.querySelector(".ag-status")?.innerText.startsWith("READY"), null, { timeout: 5000 });
-    return (await page.locator(".ag-model").inputValue()) || "no model";
+    const model = await page.locator(".ag-model").inputValue();
+    if (model !== "gpt-test") throw new Error(`default model is "${model}", expected "gpt-test"`);
+    return model;
   });
 
   await step(run, page, "sending starts a session and a turn", async () => {
@@ -555,7 +557,9 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.press(".ag-input", "Enter");
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "agent_send"), null, { timeout: 5000 });
     const start = await called("agent_start");
-    if (start[0].args.provider !== "codex") throw new Error(`started ${JSON.stringify(start[0].args)}`);
+    if (start[0].args.provider !== "codex" || start[0].args.model !== "gpt-test") {
+      throw new Error(`started ${JSON.stringify(start[0].args)}`);
+    }
     await page.waitForSelector(".ag-user", { timeout: 2000 });
   });
 
