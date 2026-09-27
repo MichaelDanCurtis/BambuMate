@@ -5,6 +5,7 @@ pub mod asks;
 pub mod backend;
 pub mod claude;
 pub mod codex;
+pub mod host;
 pub mod locate;
 pub mod service;
 pub mod snapshot;

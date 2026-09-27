@@ -88,6 +88,21 @@ pub fn run() {
             commands::stl_bridge::dismiss_stl,
             commands::updater::get_app_version,
             commands::updater::check_for_updates,
+            commands::agent::agent_readiness,
+            commands::agent::agent_models,
+            commands::agent::agent_login,
+            commands::agent::agent_start,
+            commands::agent::agent_open,
+            commands::agent::agent_send,
+            commands::agent::agent_interrupt,
+            commands::agent::agent_answer,
+            commands::agent::agent_rewind,
+            commands::agent::agent_list_sessions,
+            commands::agent::agent_delete_session,
+            commands::agent::agent_set_app_state,
+            commands::agent::agent_stage_image,
+            commands::agent::agent_get_settings,
+            commands::agent::agent_set_settings,
         ])
         .setup(|app| {
             // Apply the user-configured Bambu Studio config folder before any
@@ -108,6 +123,63 @@ pub fn run() {
                         tracing::warn!("Failed to restore STL watcher for {}: {}", dir, e);
                     }
                 }
+            }
+
+            // -- Agent backends --------------------------------------------
+            {
+                use std::sync::Arc;
+                use tauri::Emitter;
+
+                let (tx, _) = tokio::sync::broadcast::channel::<agent::types::AgentEvent>(1024);
+                // Subscribe the webview forwarder before anything can publish.
+                let mut forward_rx = tx.subscribe();
+                let asks = Arc::new(agent::asks::AskBroker::new(tx.clone()));
+                let host = Arc::new(agent::host::TauriToolHost::new(app.handle().clone()));
+                let codex: Arc<dyn agent::backend::AgentBackend> =
+                    Arc::new(agent::codex::CodexBackend::new(
+                        Arc::new(agent::codex::ProcessSpawner),
+                        tx.clone(),
+                        asks.clone(),
+                    ));
+                let claude = Arc::new(agent::claude::ClaudeBackend::new(
+                    Arc::new(agent::claude::ProcessSpawner),
+                    Arc::new(agent::claude::KeychainKeys),
+                    tx.clone(),
+                    asks.clone(),
+                ));
+                let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                let service = agent::service::AgentService::new(
+                    vec![
+                        codex,
+                        claude.clone() as Arc<dyn agent::backend::AgentBackend>,
+                    ],
+                    host.clone(),
+                    asks,
+                    tx,
+                    app_data,
+                )?;
+                commands::agent::apply_stored_settings(app.handle(), &service, &claude);
+
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tokio::sync::broadcast::error::RecvError;
+                    loop {
+                        match forward_rx.recv().await {
+                            Ok(ev) => {
+                                let _ = handle.emit("agent://event", &ev);
+                            }
+                            Err(RecvError::Lagged(n)) => {
+                                tracing::warn!("agent event forwarder lagged by {n}")
+                            }
+                            Err(RecvError::Closed) => break,
+                        }
+                    }
+                });
+                tauri::async_runtime::spawn(service.validator_loop());
+
+                app.manage(service);
+                app.manage(host);
+                app.manage(claude);
             }
             Ok(())
         })
