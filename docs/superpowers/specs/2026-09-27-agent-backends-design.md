@@ -53,7 +53,7 @@ trait AgentBackend: Send + Sync {
 
 ### Codex lane (primary)
 
-- Spawns `codex app-server` (stdio, JSONL JSON-RPC 2.0). Handshake: `initialize` (with `capabilities.experimentalApi: true`), then `initialized`.
+- Spawns `codex app-server` (stdio, JSONL JSON-RPC 2.0). Handshake: `initialize` (with `capabilities.experimentalApi: true`), then `initialized`. Messages carry `id`/`method`/`params`/`result`/`error` but no `"jsonrpc"` field (the schema does not require one).
 - `thread/start` registers every `bm_*` tool through `dynamicTools`; `thread/resume` restores them.
 - The server's `item/tool/call` request dispatches to the tool registry. The reply is `{ success, contentItems: [inputText | inputImage] }`. Images such as the print photo return as `inputImage` data URLs, so the model sees them.
 - `item/tool/requestUserInput` becomes an `Ask` event and card.
@@ -98,19 +98,19 @@ Rules:
 - Handlers call the existing library code (`profile::writer`, `profile::generator`, the scraper pipeline, and the analyzer). They do not call Tauri commands, so each handler can be tested without a webview.
 - Mutating tools go through the existing validation and `backup_profile` path and emit a UI event, so the relevant page updates live. The session also records to `history`.
 - `bm_navigate` and the mutating tools move the UI to the affected page or profile. The user watches the agent work.
-- Risky actions require `bm_confirm` before they run: installing while Bambu Studio is running, overwriting a profile not created by BambuMate, and deleting anything.
+- Risky actions require `bm_confirm` before they run: installing while Bambu Studio is running, overwriting a profile not created by BambuMate, and deleting anything. This rule is scoped **per session** ("first write in a session to an existing profile the session did not create"), because generated profiles carry no BambuMate marker to check against.
 - The first message of each session tells the agent to say plainly when a `bm_*` tool is missing or failing, rather than improvise.
 - `bm_app_state` needs frontend cooperation. The panel pushes the current route and selection to the backend on every change, and the backend holds the latest `AppState`.
 
 ### Undo and rewind
 
 - At `TurnStarted`, `snapshot.rs` copies the Bambu Studio user filament profile directory (small JSON files) to `app-data/agent-snapshots/<session>/<turn>/`. This captures `bm_*` writes and the agent's direct file edits alike.
-- Rewind to message N restores that turn's snapshot. For conversation rewind, Codex uses `thread/fork` with `lastTurnId` and Claude uses a resume-and-fork of the session. A "Code / Conversation / Both" choice follows comfyui-mcp-panel's model.
+- Rewind to message N restores that turn's snapshot. Conversation rewind: Codex uses `thread/rollback` with `numTurns` (codex-cli 0.142.5 has no `lastTurnId` on `thread/fork`). Claude relaunches with `--resume <id> --resume-session-at <assistant uuid>` when the CLI supports it (`RESUME_AT_SUPPORTED`). Otherwise the service rewinds files only and prefixes the next message with a note telling the agent. A "Code / Conversation / Both" choice follows comfyui-mcp-panel's model.
 - Snapshots are pruned per session (keep the last 50 turns) and when a session is deleted.
 
 ### Chat storage
 
-A new `agent_sessions` table in the existing SQLite db holds: id, provider, backend session id, title, created and updated timestamps, and the profile paths the session touched. Message content lives in the provider's own session store (Codex threads, Claude sessions). BambuMate indexes sessions; it does not duplicate transcripts.
+A new `agent_sessions` table in the existing SQLite db holds: id, provider, backend session id, title, created and updated timestamps, and `last_seq`. Message content lives in the provider's own session store (Codex threads, Claude sessions). BambuMate indexes sessions; it does not duplicate transcripts.
 
 ## Panel UI
 
@@ -128,7 +128,7 @@ A new `agent_sessions` table in the existing SQLite db holds: id, provider, back
 | Binary not found | `locate.rs` searches PATH plus `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, npm global bin, and `%APPDATA%\npm`. The lane reports not-installed with install instructions, and a Health Check row reflects it. |
 | Codex not logged in | A "Sign in" button calls `account/login/start`. |
 | Claude not ready | API-key mode: link to Settings → API key. Subscription build: show `claude` login instructions. |
-| Process exits or crashes | Emit `Error`, restart once automatically, and resume the session. A second failure within 60s leaves it disconnected with a Reconnect button. |
+| Process exits or crashes | The active turn fails with an Error notice; the next message respawns the process and resumes the conversation (Codex `thread/resume`, Claude `--resume`). |
 | Tool handler error | Return `success:false` with the message to the agent. Never panic the service. |
 | Rate limited | Show the reset time from `account/rateLimits/read` or the CLI error. |
 | Bambu Studio running during a write | A `bm_confirm` card appears; declining returns a failed tool result. |
@@ -151,8 +151,55 @@ A new `agent_sessions` table in the existing SQLite db holds: id, provider, back
 - `async-trait` (or native async traits if the MSRV allows).
 - The Space Grotesk and Space Mono font files (OFL), vendored under `style/fonts/`.
 
+## Deferred from v1
+
+What this plan intentionally leaves out:
+
+- drawer resizing and remembering its open state
+- the pending-message queue while a turn runs (Send is disabled instead)
+- pushing profile/filament *selection* into `bm_app_state` (only the route and the current photo are pushed)
+- `agent.*.logged_in` diagnostics (only `installed` checks ship)
+- a checked-in Codex schema contract test (covered by the Task 12 manual probe instead)
+
 ## Open risks
 
 - `dynamicTools` and some methods require `experimentalApi`. Codex may change them. Mitigation: the contract test plus a pinned minimum Codex version shown in Health Check.
 - The Claude stream-json control protocol is less formally documented than Codex's app-server. Mitigation: keep the adapter thin and test it against recorded transcripts.
 - Direct agent file edits can bypass BambuMate's validation. Mitigation: per-turn snapshots, plus a post-turn validation pass over any profile files that changed, surfacing invalid ones with a one-click restore.
+
+## Changes during implementation
+
+Review rounds during the build surfaced behavior beyond the corrections in "Undo and rewind", "Codex lane", "Tool registry", "Chat storage", and "Error handling" above. Recorded here rather than reworking the sections that predate them:
+
+**Tools and data**
+- `bm_rollback`'s `backup_path` argument is confined to the target profile's own `.backups/` directory; a path outside it is refused with the profile left untouched.
+- `bm_write_profile` re-validates the file after writing and restores the pre-write backup if validation fails, rather than leaving an invalid profile in place.
+- `ProfileRegistry` skips any `.backups/` directory when discovering profiles, so a backup can't shadow the live profile of the same name during inheritance resolution.
+- Confirm prompts (`ensure_write_allowed`) are serialized per profile path, so two concurrent writes to the same path can't both trigger a prompt.
+
+**Codex lane**
+- `thread/resume` re-sends the same session policy (cwd, approval policy, sandbox, developer instructions, model) as `thread/start`, so a resumed session doesn't silently drop it.
+- The turn count (`seq`) is learned from the resume response's turn history rather than assumed to be zero.
+- `rewind` performs the same resume-after-crash check as `send`: if the session's process generation is stale, it resumes first, then rolls back.
+- The handshake (`initialize`/`initialized`) is wrapped in a timeout so a hung child process doesn't wedge session startup.
+- Declined or failed Codex file changes and commands surface as `Error` events instead of being reported as successful `FileChange`/`Command` activity.
+
+**Claude lane**
+- `MultiEdit` tool-call diffs are built by joining each entry of its `edits` list (`{old_string, new_string}`), not the (absent) top-level `old_string`/`new_string` that only `Edit` uses.
+
+**AgentService**
+- Only one turn runs at a time per session; both `send` and `rewind` are guarded by a busy flag so a second `send` (or a `rewind`) while a turn is in flight is rejected instead of racing.
+- `rewind` validates the requested sequence is in `1..=current_seq` before touching anything.
+- If the backend's own rewind call fails, the service still restores files from the snapshot and queues a note for the agent's next message, rather than leaving the UI and the backend's conversation state inconsistent.
+- `last_seq` is persisted to the session store on every rewind, not just held in memory.
+- Snapshots for turns at or after the rewound-to sequence are deleted, so a later restore can't apply a stale, abandoned-branch snapshot.
+- If `Snapshots::take` fails partway through copying files, the partially written turn directory is removed rather than left behind to be mistaken for a complete snapshot.
+
+**Host and CI**
+- `agent_set_app_state` merges the incoming state into the current one field-by-field (only `Some` fields from the push replace the current value) instead of overwriting the whole `AppState`, so a push that omits `photo_path` doesn't drop an in-progress staged photo.
+- A profile staged by `bm_generate_profile` is kept until `bm_install_profile` (or the equivalent host call) actually succeeds, so a failed install can be retried instead of losing the staged profile.
+- The CI guard against enabling `claude-subscription` (or `--all-features`) in the release build is a standalone, checked-in script, `scripts/check-release-features.sh`, run from `.github/workflows/build.yml`.
+
+**Claude CLI flags (controller finding)**
+- `--permission-prompt-tool` and `--resume-session-at` are both accepted by `claude` 2.1.222's argument parser (neither raises an "unknown option" error; both reach session lookup).
+- Whether `--resume-session-at` actually resumes at the given assistant message id is unverified against a live process, so `RESUME_AT_SUPPORTED` stays `false` until that is checked manually; until then, conversation rewind on the Claude lane always uses the files-only-plus-note path.

@@ -8,6 +8,7 @@ BambuMate takes the guesswork out of 3D printing. Search for any filament, get a
 
 - **Filament Search & Scraping** — Search for filaments by name; BambuMate scrapes manufacturer specs and builds Bambu Studio profiles automatically
 - **AI Print Analysis** — Drag-and-drop a photo of your test print for AI-powered defect detection (stringing, warping, layer adhesion, elephant's foot, and more) with specific setting change recommendations
+- **Agent Panel** — Press ⌘K / Ctrl+K to open an agent that can see what you're looking at, read your photos and profiles, research filament specs, and apply fixes — every change is shown live and can be rewound. Runs on **Codex** (your ChatGPT subscription via the `codex` CLI) or **Claude Agent** (the `claude` CLI with your Anthropic API key).
 - **Profile Management** — Browse, edit, and manage Bambu Studio filament profiles with visual diffs and one-click installation
 - **Auto-Apply Changes** — Recommended profile tweaks are applied directly to your Bambu Studio config with automatic backup
 - **OpenSCAD Studio Integration** — Push STLs from OpenSCAD Studio straight to Bambu Studio for slicing
@@ -95,6 +96,17 @@ BambuMate automatically detects your Bambu Studio installation and profile direc
 |----------|-------------|
 | macOS | `~/Library/Application Support/BambuStudio/user/<device_id>/filament/` |
 | Windows | `%AppData%\BambuStudio\user\<device_id>\filament\` |
+
+### Agent Panel
+
+Install at least one agent CLI:
+
+```bash
+npm install -g @openai/codex && codex login          # Codex (ChatGPT subscription)
+npm install -g @anthropic-ai/claude-code             # Claude Agent (needs an Anthropic API key in Settings)
+```
+
+**Settings → Health Check** reports whether each CLI is installed. By default the agent can write only to the Bambu Studio profile folder and BambuMate's data folder; turn on **Full access** in the panel's settings to lift that. Every agent turn snapshots your profiles first, so **Rewind** on any message restores them.
 
 ## Tech Stack
 
