@@ -130,6 +130,19 @@ impl SessionStore {
             .map_err(|e| e.to_string())
     }
 
+    /// Sets `last_seq` directly, without touching `title` or `updated_at`.
+    /// Used after a rewind, where the session's position moves backward and
+    /// `record_turn`'s "bump updated_at / set title once" semantics don't apply.
+    pub fn set_last_seq(&self, id: &str, last_seq: u32) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE agent_sessions SET last_seq = ?2 WHERE id = ?1",
+                params![id, last_seq],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM agent_sessions WHERE id = ?1", params![id])
@@ -192,5 +205,20 @@ mod tests {
         let p = d.path().join("h.db");
         SessionStore::open(&p).unwrap().insert(&row("a")).unwrap();
         assert_eq!(SessionStore::open(&p).unwrap().list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn set_last_seq_updates_the_row_without_touching_the_title() {
+        let d = tempfile::tempdir().unwrap();
+        let s = SessionStore::open(&d.path().join("h.db")).unwrap();
+        s.insert(&row("a")).unwrap();
+        s.record_turn("a", 3, "first message").unwrap();
+        s.set_last_seq("a", 1).unwrap();
+        let a = s.get("a").unwrap().unwrap();
+        assert_eq!(a.last_seq, 1, "rewound back to turn 1");
+        assert_eq!(
+            a.title, "first message",
+            "set_last_seq must not clear the title"
+        );
     }
 }

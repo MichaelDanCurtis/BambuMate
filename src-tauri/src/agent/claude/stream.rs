@@ -130,7 +130,7 @@ impl ClaudeDecoder {
                             command: s(&input, "command"),
                             exit_code: None,
                         },
-                        "Edit" | "MultiEdit" => AgentEvent::FileChange {
+                        "Edit" => AgentEvent::FileChange {
                             session_id: sid.clone(),
                             path: s(&input, "file_path"),
                             diff: format!(
@@ -139,6 +139,25 @@ impl ClaudeDecoder {
                                 s(&input, "new_string")
                             ),
                         },
+                        "MultiEdit" => {
+                            let edits = input
+                                .get("edits")
+                                .and_then(|e| e.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let diff = edits
+                                .iter()
+                                .map(|e| {
+                                    format!("-{}\n+{}", s(e, "old_string"), s(e, "new_string"))
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            AgentEvent::FileChange {
+                                session_id: sid.clone(),
+                                path: s(&input, "file_path"),
+                                diff,
+                            }
+                        }
                         "Write" => AgentEvent::FileChange {
                             session_id: sid.clone(),
                             path: s(&input, "file_path"),
@@ -328,5 +347,31 @@ mod tests {
         let mut d = dec();
         let out = d.decode_line("not json");
         assert!(out.events.is_empty() && !out.turn_finished);
+    }
+
+    #[test]
+    fn multi_edit_diff_joins_every_edits_old_and_new_strings() {
+        let mut d = dec();
+        let out = d.decode_line(
+            &json!({"type":"assistant","uuid":"u-1","message":{"id":"msg_1","content":[
+                {"type":"tool_use","id":"t1","name":"MultiEdit","input":{
+                    "file_path":"/p/A.json",
+                    "edits":[
+                        {"old_string":"220","new_string":"215"},
+                        {"old_string":"Generic PLA","new_string":"My PLA"}
+                    ]
+                }}
+            ]}})
+            .to_string(),
+        );
+        assert_eq!(out.events.len(), 1);
+        match &out.events[0] {
+            AgentEvent::FileChange { path, diff, .. } => {
+                assert_eq!(path, "/p/A.json");
+                assert!(diff.contains("-220") && diff.contains("+215"));
+                assert!(diff.contains("-Generic PLA") && diff.contains("+My PLA"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

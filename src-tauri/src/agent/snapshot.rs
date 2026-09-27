@@ -62,7 +62,13 @@ impl Snapshots {
         fs::create_dir_all(&dest)?;
         for src in profile_files(profile_dir)? {
             if let Some(name) = src.file_name() {
-                fs::copy(&src, dest.join(name))?;
+                if let Err(e) = fs::copy(&src, dest.join(name)) {
+                    // Don't leave a partial snapshot behind: a later `restore`
+                    // must see "no snapshot" (NotFound), not silently delete
+                    // profiles using an incomplete copy.
+                    let _ = fs::remove_dir_all(&dest);
+                    return Err(e);
+                }
             }
         }
         Ok(dest)
@@ -128,6 +134,31 @@ impl Snapshots {
         let dir = self.root.join(safe_segment(session));
         if dir.exists() {
             fs::remove_dir_all(dir)?;
+        }
+        Ok(())
+    }
+
+    /// Removes snapshots for turns `>= seq`. Called after a rewind so a later
+    /// turn reusing one of those sequence numbers can't restore a stale,
+    /// abandoned-branch snapshot.
+    pub fn delete_from(&self, session: &str, seq: u32) -> io::Result<()> {
+        let dir = self.root.join(safe_segment(session));
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(&dir)? {
+            let p = entry?.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let is_stale = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.parse::<u32>().ok())
+                .is_some_and(|n| n >= seq);
+            if is_stale {
+                fs::remove_dir_all(&p)?;
+            }
         }
         Ok(())
     }
@@ -216,5 +247,55 @@ mod tests {
     fn restore_of_unknown_turn_is_an_error() {
         let (profiles, _root, snaps) = setup();
         assert!(snaps.restore("s1", 9, profiles.path()).is_err());
+    }
+
+    #[test]
+    fn delete_from_removes_turns_at_or_after_seq() {
+        let (profiles, root, snaps) = setup();
+        for seq in 1..=5 {
+            snaps.take("s1", seq, profiles.path()).unwrap();
+        }
+        snaps.delete_from("s1", 3).unwrap();
+        let mut left: Vec<String> = fs::read_dir(root.path().join("s1"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, vec!["000001", "000002"]);
+    }
+
+    #[test]
+    fn delete_from_on_a_session_with_no_snapshots_is_a_no_op() {
+        let (_profiles, _root, snaps) = setup();
+        assert!(snaps.delete_from("nope", 1).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn take_removes_the_partial_snapshot_dir_when_a_copy_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (profiles, _root, snaps) = setup();
+        let unreadable = profiles.path().join("A.json");
+        let mut perms = fs::metadata(&unreadable).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&unreadable, perms).unwrap();
+
+        let result = snaps.take("s1", 7, profiles.path());
+
+        // Restore permissions so the TempDir's own cleanup doesn't fail.
+        let mut perms = fs::metadata(&unreadable).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&unreadable, perms).unwrap();
+
+        assert!(result.is_err(), "a copy failure must surface as an error");
+        assert!(
+            !snaps.turn_dir("s1", 7).exists(),
+            "a partial snapshot dir must not be left behind"
+        );
+        assert!(
+            snaps.restore("s1", 7, profiles.path()).is_err(),
+            "restore of a never-completed snapshot must be NotFound, not a silent wipe"
+        );
     }
 }
