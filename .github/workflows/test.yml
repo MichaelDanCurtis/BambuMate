@@ -69,12 +69,9 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --features claude-subscription
 
       - name: Release builds never enable claude-subscription
+        if: matrix.os == 'macos-14'
         shell: bash
-        run: |
-          if grep -nE -- '--features[^#]*claude-subscription|features:[^#]*claude-subscription' .github/workflows/build.yml; then
-            echo "::error::build.yml must not enable the private claude-subscription feature"
-            exit 1
-          fi
+        run: ./scripts/check-release-features.sh
 
       - name: Frontend typecheck
         run: cargo check --target wasm32-unknown-unknown
