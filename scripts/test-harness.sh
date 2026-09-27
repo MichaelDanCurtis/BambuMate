@@ -72,6 +72,7 @@ stage "clippy (backend)" cargo clippy --manifest-path src-tauri/Cargo.toml --all
 
 # --- Tests ------------------------------------------------------------------
 stage "backend tests" cargo test --manifest-path src-tauri/Cargo.toml
+stage "backend tests (claude-subscription)" cargo test --manifest-path src-tauri/Cargo.toml --features claude-subscription
 
 # --- Frontend ---------------------------------------------------------------
 if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then

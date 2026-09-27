@@ -284,3 +284,10 @@ fn conf_registration_matches_platform_checksum_rules() {
         );
     }
 }
+
+#[test]
+fn agent_checks_are_registered() {
+    let ids = bambumate_tauri::diagnostics::all_check_ids();
+    assert!(ids.contains(&"agent.codex.installed"));
+    assert!(ids.contains(&"agent.claude.installed"));
+}

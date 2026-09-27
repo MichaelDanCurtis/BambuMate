@@ -76,6 +76,7 @@ Invoke-Stage "clippy (backend)" { cargo clippy --manifest-path src-tauri/Cargo.t
 
 # --- Tests ------------------------------------------------------------------
 Invoke-Stage "backend tests" { cargo test --manifest-path src-tauri/Cargo.toml }
+Invoke-Stage "backend tests (claude-subscription)" { cargo test --manifest-path src-tauri/Cargo.toml --features claude-subscription }
 
 # --- Frontend ---------------------------------------------------------------
 $targets = rustup target list --installed 2>$null

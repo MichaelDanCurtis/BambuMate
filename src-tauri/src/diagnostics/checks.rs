@@ -25,6 +25,8 @@ pub fn all_check_ids() -> Vec<&'static str> {
         "env.data_dir",
         "env.app_data_writable",
         "env.external_tools",
+        "agent.codex.installed",
+        "agent.claude.installed",
         "env.spotlight",
         "fs.case_sensitivity",
         "fs.unicode_filenames",
@@ -96,6 +98,24 @@ pub fn run_all(opts: DiagnosticsOptions) -> DiagnosticsReport {
         "Required helper binaries are reachable",
         "env",
         check_external_tools()
+    );
+    run!(
+        "agent.codex.installed",
+        "Codex CLI is installed (agent panel)",
+        "agent",
+        check_agent_cli(
+            "codex",
+            "Install with: npm install -g @openai/codex, then run: codex login"
+        )
+    );
+    run!(
+        "agent.claude.installed",
+        "claude CLI is installed (agent panel)",
+        "agent",
+        check_agent_cli(
+            "claude",
+            "Install with: npm install -g @anthropic-ai/claude-code"
+        )
     );
     run!(
         "env.spotlight",
@@ -534,6 +554,17 @@ fn check_external_tools() -> CheckOutcome {
         );
     }
     CheckOutcome::pass(format!("all reachable: {}", ok.join(", ")))
+}
+
+/// Agent CLIs are optional: a missing one is a warning, never a failure.
+fn check_agent_cli(program: &str, install_hint: &str) -> CheckOutcome {
+    match crate::agent::locate::locate(program) {
+        Some(path) => CheckOutcome::pass(format!("{program} at {}", path.display())),
+        None => CheckOutcome::warn(
+            format!("{program} not found on PATH or in the usual install folders"),
+            install_hint.to_string(),
+        ),
+    }
 }
 
 /// macOS locates BambuStudio.app through Spotlight. Spotlight can be disabled

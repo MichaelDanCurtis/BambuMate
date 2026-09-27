@@ -65,6 +65,17 @@ jobs:
       - name: Backend tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Backend tests (private claude-subscription build)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features claude-subscription
+
+      - name: Release builds never enable claude-subscription
+        shell: bash
+        run: |
+          if grep -nE -- '--features[^#]*claude-subscription|features:[^#]*claude-subscription' .github/workflows/build.yml; then
+            echo "::error::build.yml must not enable the private claude-subscription feature"
+            exit 1
+          fi
+
       - name: Frontend typecheck
         run: cargo check --target wasm32-unknown-unknown
 
