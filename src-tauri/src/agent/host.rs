@@ -34,6 +34,51 @@ pub(crate) fn merge_specs(partial: Value) -> Result<FilamentSpecs, String> {
     serde_json::from_value(base).map_err(|e| format!("invalid specs: {e}"))
 }
 
+/// The frontend pushes `route` on every change but leaves fields it does not
+/// own (e.g. `photo_path`, set by `agent_stage_image`) as `None`. A `None`
+/// therefore means "unchanged", not "cleared".
+pub(crate) fn merge_app_state(current: &AppState, incoming: AppState) -> AppState {
+    AppState {
+        route: incoming.route,
+        selected_profile: incoming
+            .selected_profile
+            .or_else(|| current.selected_profile.clone()),
+        selected_filament: incoming
+            .selected_filament
+            .or_else(|| current.selected_filament.clone()),
+        photo_path: incoming.photo_path.or_else(|| current.photo_path.clone()),
+        last_analysis_session: incoming
+            .last_analysis_session
+            .or(current.last_analysis_session),
+    }
+}
+
+/// Runs `install` on a clone of the staged entry and removes the entry only
+/// if it succeeds, so a failed install can be retried with the same id. The
+/// lock is never held across the `.await`.
+pub(crate) async fn take_staged_on_success<T, R, F, Fut>(
+    staged: &Mutex<HashMap<String, T>>,
+    staged_id: &str,
+    install: F,
+) -> Result<R, String>
+where
+    T: Clone,
+    F: FnOnce(T) -> Fut,
+    Fut: std::future::Future<Output = Result<R, String>>,
+{
+    let entry = staged
+        .lock()
+        .unwrap()
+        .get(staged_id)
+        .cloned()
+        .ok_or_else(|| {
+            format!("no staged profile '{staged_id}'; call bm_generate_profile first")
+        })?;
+    let out = install(entry).await?;
+    staged.lock().unwrap().remove(staged_id);
+    Ok(out)
+}
+
 fn to_json<T: serde::Serialize>(r: Result<T, String>) -> Result<Value, String> {
     r.and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
 }
@@ -47,8 +92,10 @@ impl TauriToolHost {
         }
     }
 
+    /// Merges a frontend push into the current state; see `merge_app_state`.
     pub fn set_app_state(&self, s: AppState) {
-        *self.state.lock().unwrap() = s;
+        let mut state = self.state.lock().unwrap();
+        *state = merge_app_state(&state, s);
     }
 
     pub fn set_photo(&self, path: String) {
@@ -125,21 +172,15 @@ impl ToolHost for TauriToolHost {
     }
 
     async fn install_staged(&self, staged_id: &str, force: bool) -> Result<Value, String> {
-        let staged = self
-            .staged
-            .lock()
-            .unwrap()
-            .remove(staged_id)
-            .ok_or_else(|| {
-                format!("no staged profile '{staged_id}'; call bm_generate_profile first")
-            })?;
         to_json(
-            crate::commands::profile::install_generated_profile(
-                staged.profile_json,
-                staged.metadata_info,
-                staged.filename,
-                force,
-            )
+            take_staged_on_success(&self.staged, staged_id, |staged: GenerateResult| {
+                crate::commands::profile::install_generated_profile(
+                    staged.profile_json,
+                    staged.metadata_info,
+                    staged.filename,
+                    force,
+                )
+            })
             .await,
         )
     }
@@ -195,5 +236,71 @@ mod tests {
     #[test]
     fn merge_specs_rejects_non_objects() {
         assert!(merge_specs(json!("PLA")).is_err());
+    }
+
+    fn with_photo(p: &str) -> AppState {
+        AppState {
+            route: "/analysis".into(),
+            selected_profile: Some("a.json".into()),
+            photo_path: Some(p.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn merge_app_state_keeps_host_owned_fields_when_push_omits_them() {
+        let pushed = AppState {
+            route: "/profiles".into(),
+            ..Default::default()
+        };
+        let merged = merge_app_state(&with_photo("/tmp/p.jpg"), pushed);
+        assert_eq!(merged.route, "/profiles");
+        assert_eq!(merged.photo_path.as_deref(), Some("/tmp/p.jpg"));
+        assert_eq!(merged.selected_profile.as_deref(), Some("a.json"));
+    }
+
+    #[test]
+    fn merge_app_state_replaces_fields_the_push_sets() {
+        let pushed = AppState {
+            route: "/analysis".into(),
+            photo_path: Some("/tmp/new.jpg".into()),
+            last_analysis_session: Some(7),
+            ..Default::default()
+        };
+        let merged = merge_app_state(&with_photo("/tmp/old.jpg"), pushed);
+        assert_eq!(merged.photo_path.as_deref(), Some("/tmp/new.jpg"));
+        assert_eq!(merged.last_analysis_session, Some(7));
+    }
+
+    fn staged_map() -> Mutex<HashMap<String, String>> {
+        Mutex::new(HashMap::from([("s1".to_string(), "profile".to_string())]))
+    }
+
+    #[tokio::test]
+    async fn take_staged_keeps_entry_when_install_fails() {
+        let map = staged_map();
+        let r: Result<(), String> =
+            take_staged_on_success(&map, "s1", |_| async { Err("disk full".to_string()) }).await;
+        assert_eq!(r, Err("disk full".to_string()));
+        assert!(
+            map.lock().unwrap().contains_key("s1"),
+            "retry must still find it"
+        );
+    }
+
+    #[tokio::test]
+    async fn take_staged_removes_entry_after_successful_install() {
+        let map = staged_map();
+        let r = take_staged_on_success(&map, "s1", |p| async move { Ok(p.len()) }).await;
+        assert_eq!(r, Ok(7));
+        assert!(!map.lock().unwrap().contains_key("s1"));
+    }
+
+    #[tokio::test]
+    async fn take_staged_errors_on_unknown_id() {
+        let map = staged_map();
+        let r: Result<(), String> =
+            take_staged_on_success(&map, "nope", |_| async { Ok(()) }).await;
+        assert!(r.unwrap_err().contains("no staged profile 'nope'"));
     }
 }
