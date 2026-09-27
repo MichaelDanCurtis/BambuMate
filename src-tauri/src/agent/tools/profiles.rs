@@ -28,7 +28,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bm_write_profile",
-            description: "Set fields on a user profile. Validates, backs up first, and shows the change in the UI. changes is an object of Bambu Studio keys to JSON values (most values are string arrays, e.g. {\"nozzle_temperature\":[\"215\"]}).",
+            description: "Set fields on a user profile. Backs up first, writes, then validates the result and automatically restores the backup if the change made the profile invalid (e.g. an empty name); otherwise shows the change in the UI. changes is an object of Bambu Studio keys to JSON values (most values are string arrays, e.g. {\"nozzle_temperature\":[\"215\"]}).",
             input_schema: json!({"type":"object","properties":{"path":{"type":"string"},"changes":{"type":"object"}},"required":["path","changes"]}),
         },
         ToolSpec {
@@ -162,6 +162,14 @@ async fn write(reg: &ToolRegistry, args: &Value) -> ToolOutput {
     if let Err(e) = write_profile_atomic(&profile, &path) {
         return ToolOutput::error(format!("write failed: {e}"));
     }
+    if let Err(reason) = crate::agent::validate::validate_profile_file(&path) {
+        return match restore_from_backup(&backup, &path) {
+            Ok(()) => ToolOutput::error(format!("change rejected: {reason}; profile restored from backup")),
+            Err(re) => {
+                ToolOutput::error(format!("change rejected: {reason}; restoring the backup ALSO failed: {re}"))
+            }
+        };
+    }
     reg.host().emit_ui(UiCommand::Navigate {
         route: "/profiles".into(),
         profile_path: Some(path.to_string_lossy().into_owned()),
@@ -169,12 +177,33 @@ async fn write(reg: &ToolRegistry, args: &Value) -> ToolOutput {
     ToolOutput::json(&json!({"path": path.to_string_lossy(), "changed_keys": keys, "backup_path": backup.to_string_lossy()}))
 }
 
+/// Require an explicit `backup_path` to live inside the profile's own
+/// `.backups/` directory (where `backup_profile` writes to). Without this,
+/// `bm_rollback` could be pointed at any readable JSON file and made to
+/// overwrite a user profile with it.
+fn resolve_backup_path(profile_path: &Path, backup_path: &str) -> Result<PathBuf, String> {
+    let backups_dir = profile_path
+        .parent()
+        .ok_or_else(|| "profile path has no parent directory".to_string())?
+        .join(".backups");
+    let canon_backups_dir = backups_dir
+        .canonicalize()
+        .map_err(|e| format!("no backups directory for this profile: {e}"))?;
+    let canon_backup = Path::new(backup_path)
+        .canonicalize()
+        .map_err(|e| format!("{backup_path}: {e}"))?;
+    if !canon_backup.starts_with(&canon_backups_dir) {
+        return Err(format!("{backup_path} is outside the profile's backups folder"));
+    }
+    Ok(canon_backup)
+}
+
 async fn rollback(reg: &ToolRegistry, args: &Value) -> ToolOutput {
     let p = match arg_str(args, "path") { Ok(v) => v, Err(e) => return e };
     let dir = match user_dir(reg) { Ok(d) => d, Err(e) => return e };
     let path = match resolve_in(&dir, &p) { Ok(p) => p, Err(e) => return ToolOutput::error(e) };
     let backup = match arg_opt_str(args, "backup_path") {
-        Some(b) => PathBuf::from(b),
+        Some(b) => match resolve_backup_path(&path, &b) { Ok(p) => p, Err(e) => return ToolOutput::error(e) },
         None => match latest_backup(&path) { Some(b) => b, None => return ToolOutput::error("no backup found") },
     };
     if reg.host().bambu_studio_running()
@@ -223,8 +252,13 @@ mod tests {
     use std::fs;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::Duration;
 
     const PLA: &str = r#"{"name":"My PLA","inherits":"Generic PLA @BBL X1C","from":"User","nozzle_temperature":["220"]}"#;
+
+    /// How long a test is willing to wait for an `Ask` or a spawned tool call
+    /// before treating it as a hung regression rather than a real failure.
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
     fn host_with_profile() -> Arc<FakeHost> {
         let h = Arc::new(FakeHost::new());
@@ -232,13 +266,29 @@ mod tests {
         h
     }
 
+    /// Waits for the next `Ask` event and answers it. Wrapped in a timeout so
+    /// a regression that stops emitting the expected `Ask` fails the test
+    /// instead of hanging the suite forever.
     async fn answer_next(rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>, reg: &crate::agent::tools::ToolRegistry, answer: &str) {
-        loop {
-            if let AgentEvent::Ask { request, .. } = rx.recv().await.unwrap() {
-                reg.asks().answer(&request.id, vec![answer.into()]).unwrap();
-                return;
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            loop {
+                if let AgentEvent::Ask { request, .. } = rx.recv().await.unwrap() {
+                    reg.asks().answer(&request.id, vec![answer.into()]).unwrap();
+                    return;
+                }
             }
-        }
+        })
+        .await
+        .expect("timed out waiting for an Ask event");
+    }
+
+    /// Awaits a spawned tool call under a timeout, so a regression that never
+    /// resolves the call fails fast instead of hanging the suite.
+    async fn await_timeout(handle: tokio::task::JoinHandle<super::ToolOutput>) -> super::ToolOutput {
+        tokio::time::timeout(TEST_TIMEOUT, handle)
+            .await
+            .expect("timed out waiting for the spawned tool call")
+            .expect("spawned tool call task panicked")
     }
 
     #[tokio::test]
@@ -277,7 +327,7 @@ mod tests {
             r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"nozzle_temperature":["215"]}})).await
         });
         answer_next(&mut rx, &reg, "Yes").await;
-        let out = t.await.unwrap();
+        let out = await_timeout(t).await;
         assert!(out.ok, "{}", out.summary());
         let body = fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap();
         assert!(body.contains("215"));
@@ -295,7 +345,7 @@ mod tests {
             r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"nozzle_temperature":["199"]}})).await
         });
         answer_next(&mut rx, &reg, "No").await;
-        assert!(!t.await.unwrap().ok);
+        assert!(!await_timeout(t).await.ok);
         assert_eq!(fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap(), PLA);
     }
 
@@ -309,7 +359,7 @@ mod tests {
             r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"nozzle_temperature":["230"]}})).await
         });
         answer_next(&mut rx, &reg, "Yes").await;
-        assert!(t.await.unwrap().ok);
+        assert!(await_timeout(t).await.ok);
         let out = reg.call("bm_rollback", json!({"path":"My PLA.json"})).await;
         assert!(out.ok, "{}", out.summary());
         let body = fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap();
@@ -338,7 +388,131 @@ mod tests {
         let r2 = reg.clone();
         let t = tokio::spawn(async move { r2.call("bm_install_profile", json!({"staged_id":"stg1"})).await });
         answer_next(&mut rx, &reg, "No").await;
-        assert!(!t.await.unwrap().ok);
+        assert!(!await_timeout(t).await.ok);
         assert!(h.calls.lock().unwrap().is_empty(), "nothing installed");
+    }
+
+    // --- Fix round 1 ---
+
+    /// Fix 1: `bm_rollback` must refuse a `backup_path` that doesn't live
+    /// inside the profile's own `.backups/` directory, so it can't be pointed
+    /// at an arbitrary file to overwrite the profile with it.
+    #[tokio::test]
+    async fn rollback_refuses_backup_path_outside_backups_dir() {
+        let h = host_with_profile();
+        fs::create_dir_all(h.user_dir.path().join(".backups")).unwrap();
+        let outside = h.user_dir.path().join("evil.json");
+        fs::write(&outside, r#"{"name":"Evil"}"#).unwrap();
+        let (reg, _rx) = registry_with(h.clone());
+        let out = reg
+            .call("bm_rollback", json!({"path":"My PLA.json","backup_path": outside.to_string_lossy()}))
+            .await;
+        assert!(!out.ok, "{}", out.summary());
+        assert_eq!(fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap(), PLA);
+    }
+
+    /// Fix 3: a write that produces an invalid profile (e.g. an empty name)
+    /// must be rejected and the pre-write backup restored, leaving the file
+    /// exactly as it was before the call.
+    #[tokio::test]
+    async fn write_profile_validates_result_and_restores_on_failure() {
+        let h = host_with_profile();
+        let (reg, mut rx) = registry_with(h.clone());
+        let reg = Arc::new(reg);
+        let r2 = reg.clone();
+        let t = tokio::spawn(async move {
+            r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"name":""}})).await
+        });
+        answer_next(&mut rx, &reg, "Yes").await;
+        let out = await_timeout(t).await;
+        assert!(!out.ok, "{}", out.summary());
+        // The backup is restored via `write_profile_atomic`, which re-serializes
+        // with 4-space indentation, so compare parsed values rather than bytes
+        // (same pattern as `rollback_restores_latest_backup` below).
+        let body = fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap();
+        let restored: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(restored["name"], "My PLA", "the original name must be restored, not the empty one");
+        assert_eq!(restored["nozzle_temperature"], json!(["220"]));
+    }
+
+    /// Fix 4(a): `bm_diff_profiles` reports the field that actually changed.
+    #[tokio::test]
+    async fn diff_profiles_reports_the_changed_field() {
+        let h = host_with_profile();
+        let other = h.user_dir.path().join("Other PLA.json");
+        // Same name as the fixture so "name" isn't itself reported as a diff —
+        // otherwise "Identity & Metadata" would sort before "Temperature" and
+        // push the field we care about past the 200-char summary window.
+        fs::write(
+            &other,
+            r#"{"name":"My PLA","inherits":"Generic PLA @BBL X1C","from":"User","nozzle_temperature":["230"]}"#,
+        )
+        .unwrap();
+        let (reg, _rx) = registry_with(h.clone());
+        let out = reg
+            .call(
+                "bm_diff_profiles",
+                json!({
+                    "path_a": h.user_dir.path().join("My PLA.json").to_string_lossy(),
+                    "path_b": other.to_string_lossy(),
+                }),
+            )
+            .await;
+        assert!(out.ok, "{}", out.summary());
+        let summary = out.summary();
+        assert!(
+            summary.contains("nozzle_temperature") || summary.contains("Temperature"),
+            "expected the changed field or its category in: {summary}"
+        );
+    }
+
+    /// Fix 4(b): `bm_read_profile` with `resolved: true` merges in a field
+    /// that only exists on the parent profile in the system dir.
+    #[tokio::test]
+    async fn read_profile_resolved_merges_inherited_field() {
+        let sys_dir = tempfile::tempdir().unwrap();
+        fs::write(
+            sys_dir.path().join("Generic PLA @BBL X1C.json"),
+            r#"{"name":"Generic PLA @BBL X1C","filament_max_volumetric_speed":["12"]}"#,
+        )
+        .unwrap();
+        let mut h = FakeHost::new();
+        fs::write(h.user_dir.path().join("My PLA.json"), PLA).unwrap();
+        h.system_dir = Some(sys_dir.path().to_path_buf());
+        let h = Arc::new(h);
+        let (reg, _rx) = registry_with(h);
+        let out = reg.call("bm_read_profile", json!({"path":"My PLA.json","resolved":true})).await;
+        assert!(out.ok, "{}", out.summary());
+        assert!(
+            out.summary().contains("filament_max_volumetric_speed"),
+            "expected the inherited field in: {}",
+            out.summary()
+        );
+    }
+
+    /// Fix 5: two concurrent writes to the same existing, unconfirmed profile
+    /// must trigger exactly one `Ask`; once it's answered "Yes", both calls
+    /// succeed without a second prompt.
+    #[tokio::test]
+    async fn concurrent_writes_to_same_profile_ask_only_once() {
+        let h = host_with_profile();
+        let (reg, mut rx) = registry_with(h.clone());
+        let reg = Arc::new(reg);
+        let r1 = reg.clone();
+        let r2 = reg.clone();
+        let t1 = tokio::spawn(async move {
+            r1.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"nozzle_temperature":["215"]}})).await
+        });
+        let t2 = tokio::spawn(async move {
+            r2.call("bm_write_profile", json!({"path":"My PLA.json","changes":{"filament_flow_ratio":["0.97"]}})).await
+        });
+        answer_next(&mut rx, &reg, "Yes").await;
+        let out1 = await_timeout(t1).await;
+        let out2 = await_timeout(t2).await;
+        assert!(out1.ok, "{}", out1.summary());
+        assert!(out2.ok, "{}", out2.summary());
+        // No second Ask should have been emitted for the other writer.
+        let second_event = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        assert!(second_event.is_err(), "expected no second Ask event, got {second_event:?}");
     }
 }

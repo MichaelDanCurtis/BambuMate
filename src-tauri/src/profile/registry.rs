@@ -80,7 +80,14 @@ impl ProfileRegistry {
         let mut count = 0u32;
         let mut skipped = 0u32;
 
-        for entry in WalkDir::new(user_dir).into_iter().filter_map(|e| e.ok()) {
+        // Skip `.backups/`: it holds timestamped copies of profiles under the
+        // same `name`, and indexing them would let a stale backup shadow the
+        // live profile during inheritance resolution (last-inserted wins).
+        for entry in WalkDir::new(user_dir)
+            .into_iter()
+            .filter_entry(|e| e.file_name() != ".backups")
+            .filter_map(|e| e.ok())
+        {
             let path = entry.path();
             if !path.is_file() {
                 continue;
@@ -144,5 +151,58 @@ impl ProfileRegistry {
     /// Check if the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.profiles.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A backup living in `.backups/` carries the same `name` as the live
+    /// profile it was copied from. If discovery ever descended into
+    /// `.backups/`, whichever of the two got indexed last would win — and
+    /// since a backup is written *after* the live profile is first read, it
+    /// could silently shadow the live value during inheritance resolution.
+    #[test]
+    fn discover_user_profiles_skips_backups_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("My PLA.json"),
+            r#"{"name":"My PLA","nozzle_temperature":["220"]}"#,
+        )
+        .unwrap();
+        let backups = dir.path().join(".backups");
+        fs::create_dir_all(&backups).unwrap();
+        fs::write(
+            backups.join("My PLA_20260101_000000.json"),
+            r#"{"name":"My PLA","nozzle_temperature":["999"]}"#,
+        )
+        .unwrap();
+
+        let mut registry = ProfileRegistry::new();
+        registry.discover_user_profiles(dir.path()).unwrap();
+
+        assert_eq!(registry.len(), 1, "the backup must not add a second entry");
+        let profile = registry.get_by_name("My PLA").unwrap();
+        assert_eq!(
+            profile.get_string_array("nozzle_temperature"),
+            Some(vec!["220"]),
+            "the live profile's value must win, not the backup's"
+        );
+    }
+
+    #[test]
+    fn discover_user_profiles_still_indexes_normal_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("A.json"), r#"{"name":"A"}"#).unwrap();
+        fs::write(dir.path().join("B.json"), r#"{"name":"B"}"#).unwrap();
+
+        let mut registry = ProfileRegistry::new();
+        registry.discover_user_profiles(dir.path()).unwrap();
+
+        assert_eq!(registry.len(), 2);
+        assert!(registry.get_by_name("A").is_some());
+        assert!(registry.get_by_name("B").is_some());
     }
 }

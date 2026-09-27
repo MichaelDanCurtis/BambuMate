@@ -6,12 +6,13 @@ pub mod fake_host;
 pub mod interact;
 pub mod profiles;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::asks::AskBroker;
 use super::types::{AppState, UiCommand};
@@ -110,6 +111,10 @@ pub fn arg_opt_str(args: &Value, key: &str) -> Option<String> {
 struct WriteScope {
     created: HashSet<PathBuf>,
     confirmed: HashSet<PathBuf>,
+    /// Per-path async locks serializing the check-then-confirm sequence in
+    /// `ensure_write_allowed`, so two concurrent writers to the same path
+    /// can't both observe "not yet confirmed" and both prompt the user.
+    locks: HashMap<PathBuf, Arc<AsyncMutex<()>>>,
 }
 
 /// One registry per agent session.
@@ -177,6 +182,16 @@ impl ToolRegistry {
         {
             return Err("declined: Bambu Studio is running".into());
         }
+        // Serialize the check-then-confirm sequence per path: fetch or create
+        // this path's lock under the std mutex, then drop that guard before
+        // awaiting so the std mutex is never held across an await point. Two
+        // concurrent writers to the same path then run this section one at a
+        // time, and the second sees `confirmed` already set and skips asking.
+        let lock = {
+            let mut s = self.scope.lock().unwrap();
+            s.locks.entry(path.to_path_buf()).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
+        };
+        let _path_guard = lock.lock().await;
         let needs_confirm = {
             let s = self.scope.lock().unwrap();
             path.exists() && !s.created.contains(path) && !s.confirmed.contains(path)
