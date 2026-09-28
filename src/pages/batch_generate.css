@@ -22,9 +22,9 @@
 }
 
 .batch-error {
-    background: var(--error-bg, #fee);
-    border: 1px solid var(--error-border, #f88);
-    color: var(--error-text, #c00);
+    background: var(--error-bg);
+    border: 1px solid var(--error-border);
+    color: var(--error-text);
     padding: 0.75rem 1rem;
     border-radius: 6px;
     margin-bottom: 1rem;
@@ -49,11 +49,11 @@
 }
 
 .batch-success {
-    color: var(--success-text, #090);
+    color: var(--success-text);
 }
 
 .batch-fail {
-    color: var(--error-text, #c00);
+    color: var(--error-text);
 }
 
 .batch-table {
@@ -78,17 +78,17 @@
 }
 
 .row-success .status-cell {
-    color: var(--success-text, #090);
+    color: var(--success-text);
     font-weight: 600;
 }
 
 .row-fail .status-cell {
-    color: var(--error-text, #c00);
+    color: var(--error-text);
     font-weight: 600;
 }
 
 .error-hint {
-    color: var(--error-text, #c00);
+    color: var(--error-text);
     font-size: 0.8rem;
 }
 

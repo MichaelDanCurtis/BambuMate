@@ -283,15 +283,11 @@ body {
 
 .settings-section {
     margin-bottom: 32px;
-    background: rgba(255, 255, 255, 0.92);
+    background: var(--nd-surface);
     border: 1px solid var(--border-primary);
     border-radius: 22px;
     padding: 24px;
     box-shadow: var(--shadow-card);
-}
-
-[data-theme="dark"] .settings-section {
-    background: rgba(51, 51, 55, 0.92);
 }
 
 .settings-section h3 {
@@ -408,7 +404,7 @@ select.input option {
     border-radius: 18px;
     color: var(--text-primary);
     cursor: pointer;
-    transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+    transition: border-color 0.15s, transform 0.15s;
 }
 
 .theme-preview-card:hover {
@@ -463,11 +459,11 @@ select.input option {
 
 .theme-preview-sidebar {
     border-radius: 12px;
-    background: linear-gradient(180deg, #daf1f6 0%, #c5e5ef 100%);
+    background: #daf1f6;
 }
 
 .theme-preview-frame-dark .theme-preview-sidebar {
-    background: linear-gradient(180deg, #183244 0%, #112534 100%);
+    background: #183244;
 }
 
 .theme-preview-canvas {
@@ -476,11 +472,11 @@ select.input option {
     gap: 10px;
     padding: 8px;
     border-radius: 12px;
-    background: rgba(255, 255, 255, 0.72);
+    background: #f5fbfd;
 }
 
 .theme-preview-frame-dark .theme-preview-canvas {
-    background: rgba(18, 36, 50, 0.92);
+    background: #12222f;
 }
 
 .theme-preview-line {
@@ -501,7 +497,7 @@ select.input option {
     width: 48%;
     height: 22px;
     border-radius: 999px;
-    background: linear-gradient(90deg, #1bd5c4 0%, #0ea5ff 100%);
+    background: #0ea5ff;
 }
 
 /* ===== API Key Form ===== */
@@ -679,7 +675,7 @@ select.input option {
     padding: 5px 10px;
     margin-bottom: 16px;
     border-radius: 999px;
-    background: rgba(0, 174, 66, 0.12);
+    background: var(--nd-surface-raised);
     color: var(--accent);
     font-size: 11px;
     font-weight: 700;
@@ -1159,7 +1155,7 @@ select.input option {
 .link-btn {
     background: none;
     border: none;
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
     cursor: pointer;
     padding: 0;
     font-size: inherit;
@@ -1175,33 +1171,33 @@ select.input option {
     border-radius: 6px;
     font-size: 0.85rem;
     margin-bottom: 0.75rem;
-    background: var(--bg-secondary, #f3f4f6);
+    background: var(--bg-secondary);
 }
 
 .wizard-status-success {
-    background: rgba(34, 197, 94, 0.1);
-    color: #16a34a;
-    border: 1px solid rgba(34, 197, 94, 0.2);
+    background: var(--bg-success);
+    color: var(--color-success);
+    border: 1px solid var(--border-success);
 }
 
 .wizard-status-warning {
-    background: rgba(234, 179, 8, 0.1);
-    color: #a16207;
-    border: 1px solid rgba(234, 179, 8, 0.2);
+    background: var(--bg-unknown);
+    color: var(--color-warning);
+    border: 1px solid var(--border-unknown);
 }
 
 .status-text.status-success {
-    color: #16a34a;
+    color: var(--color-success);
 }
 
 .status-text.status-warning {
-    color: #a16207;
+    color: var(--color-warning);
 }
 
 .wizard-signup-link {
     background: none;
     border: none;
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
     cursor: pointer;
     font-size: 0.8rem;
     text-decoration: underline;
@@ -1234,20 +1230,20 @@ select.input option {
     border: 2px solid var(--border-primary);
     border-radius: 10px;
     cursor: pointer;
-    transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+    transition: border-color 0.15s, background-color 0.15s;
     -webkit-user-select: none;
     user-select: none;
 }
 
 .wizard-mode-card:hover {
-    border-color: var(--accent, #3b82f6);
+    border-color: var(--accent);
     background-color: var(--bg-hover);
 }
 
 .wizard-mode-card.selected {
-    border-color: var(--accent, #3b82f6);
+    border-color: var(--accent);
     background-color: var(--bg-active);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #3b82f6) 20%, transparent);
+    box-shadow: var(--shadow-focus-strong);
 }
 
 .wizard-mode-icon {
@@ -1327,7 +1323,7 @@ select.input option {
 }
 
 .ai-required-notice a {
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
     text-decoration: underline;
 }
 
@@ -1448,7 +1444,7 @@ select.input option {
 .about-update-badge {
     font-size: 13px;
     font-weight: 600;
-    color: var(--color-success, #16a34a);
+    color: var(--color-success);
 }
 
 .about-release-notes {
@@ -1466,7 +1462,7 @@ select.input option {
 
 .about-up-to-date {
     font-size: 14px;
-    color: var(--color-success, #16a34a);
+    color: var(--color-success);
     margin-bottom: 14px;
     display: flex;
     align-items: center;
@@ -1517,7 +1513,7 @@ select.input option {
 .about-link-btn {
     background: none;
     border: none;
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
     font-size: 14px;
     cursor: pointer;
     padding: 4px 0;
@@ -1527,7 +1523,7 @@ select.input option {
 }
 
 .about-link-btn:hover {
-    color: var(--accent-hover, #2563eb);
+    opacity: 0.8;
 }
 
 /* ===== Diagnostics panel (Health page) ===== */
@@ -1581,11 +1577,11 @@ select.input option {
 }
 
 .diagnostics-row-fail {
-    border-color: var(--status-error, #d9534f);
+    border-color: var(--nd-accent);
 }
 
 .diagnostics-row-warn {
-    border-color: var(--status-warning, #d9a441);
+    border-color: var(--nd-warning);
 }
 
 .diagnostics-status {
@@ -1601,7 +1597,7 @@ select.input option {
    `skip` are specific to diagnostics, so they are scoped here rather than
    added to the global palette. */
 .diagnostics-status.status-warn {
-    color: var(--color-warning, #b8860b);
+    color: var(--color-warning);
 }
 
 .diagnostics-status.status-skip {

@@ -72,13 +72,11 @@
     background: var(--bg-card);
     color: var(--text-primary);
     outline: none;
-    transition: box-shadow 0.2s, border-color 0.2s;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+    transition: border-color 0.2s;
 }
 
 .search-input:focus {
     border-color: var(--accent);
-    box-shadow: 0 1px 6px rgba(233, 69, 96, 0.2);
 }
 
 .search-input::placeholder {
@@ -96,7 +94,6 @@
     border-radius: 12px;
     overflow: hidden;
     z-index: 100;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .suggestion-item {
@@ -161,13 +158,13 @@
     align-items: center;
     padding: 12px 16px;
     cursor: pointer;
-    background: linear-gradient(90deg, rgba(233, 69, 96, 0.05) 0%, transparent 100%);
+    background: var(--nd-surface-raised);
     border-top: 1px solid var(--border-primary);
     transition: background 0.1s;
 }
 
 .ai-fallback-item:hover {
-    background: linear-gradient(90deg, rgba(233, 69, 96, 0.1) 0%, transparent 100%);
+    background: var(--nd-surface-raised);
 }
 
 .ai-fallback-icon {
@@ -261,9 +258,9 @@
 
 /* Error and Success Messages */
 .error-message {
-    background: rgba(231, 76, 60, 0.1);
-    border: 1px solid rgba(231, 76, 60, 0.3);
-    color: #e74c3c;
+    background: var(--nd-surface-raised);
+    border: 1px solid var(--nd-accent);
+    color: var(--nd-accent);
     padding: 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
@@ -273,8 +270,8 @@
 }
 
 .success-message {
-    background: rgba(46, 204, 113, 0.1);
-    border: 1px solid rgba(46, 204, 113, 0.3);
+    background: var(--nd-surface-raised);
+    border: 1px solid var(--nd-signal);
     padding: 1.5rem;
     border-radius: 8px;
     margin-bottom: 1rem;
@@ -283,7 +280,7 @@
 .success-header {
     font-size: 1.25rem;
     font-weight: 600;
-    color: #2ecc71;
+    color: var(--nd-signal);
     margin-bottom: 1rem;
 }
 
@@ -300,7 +297,7 @@
 }
 
 .warning-text {
-    color: #f39c12;
+    color: var(--nd-warning);
 }
 
 /* Filament Card - Clean Design */
@@ -401,9 +398,9 @@
     border-radius: 4px;
 }
 
-.confidence-high { background: rgba(46, 204, 113, 0.2); color: #2ecc71; }
-.confidence-medium { background: rgba(243, 156, 18, 0.2); color: #f39c12; }
-.confidence-low { background: rgba(231, 76, 60, 0.2); color: #e74c3c; }
+.confidence-high { background: var(--nd-surface-raised); color: var(--nd-signal); }
+.confidence-medium { background: var(--nd-surface-raised); color: var(--nd-warning); }
+.confidence-low { background: var(--nd-surface-raised); color: var(--nd-accent); }
 
 .source-link {
     color: var(--text-secondary);
@@ -437,9 +434,9 @@
 }
 
 .warning-banner {
-    background: rgba(243, 156, 18, 0.1);
-    border: 1px solid rgba(243, 156, 18, 0.3);
-    color: #f39c12;
+    background: var(--nd-surface-raised);
+    border: 1px solid var(--nd-warning);
+    color: var(--nd-warning);
     padding: 0.75rem 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
@@ -447,9 +444,9 @@
 }
 
 .warning-banner.warning-bs-running {
-    background: rgba(231, 76, 60, 0.1);
-    border-color: rgba(231, 76, 60, 0.3);
-    color: #e74c3c;
+    background: var(--nd-surface-raised);
+    border-color: var(--nd-accent);
+    color: var(--nd-accent);
 }
 
 .profile-preview-info {
@@ -766,7 +763,6 @@
     white-space: normal;
     width: 240px;
     max-width: 90vw;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     z-index: 500;
     pointer-events: none;
 }
@@ -795,7 +791,7 @@
 .base-profiles-section {
     margin-top: 1.5rem;
     padding: 1rem;
-    border: 1px solid var(--border);
+    border: 1px solid var(--nd-border-visible);
     border-radius: 8px;
     background: var(--bg-secondary);
 }
@@ -817,9 +813,9 @@
     padding: 0.4rem 0.75rem;
     margin-bottom: 0.6rem;
     font-size: 0.85rem;
-    border: 1px solid var(--border);
+    border: 1px solid var(--nd-border-visible);
     border-radius: 6px;
-    background: var(--bg);
+    background: var(--nd-surface);
     color: var(--text-primary);
     outline: none;
     transition: border-color 0.15s;
@@ -854,9 +850,9 @@
     align-items: center;
     gap: 0.75rem;
     padding: 0.5rem 0.75rem;
-    border: 1px solid var(--border);
+    border: 1px solid var(--nd-border-visible);
     border-radius: 6px;
-    background: var(--bg);
+    background: var(--nd-surface);
     cursor: pointer;
     transition: border-color 0.15s, background 0.15s;
 }
@@ -868,7 +864,7 @@
 
 .base-profile-item.selected {
     border-color: var(--accent);
-    background: rgba(51, 154, 240, 0.12);
+    background: var(--nd-surface-raised);
 }
 
 .base-profile-name {
@@ -894,7 +890,7 @@
 .merge-screen {
     margin-top: 1.5rem;
     padding: 1.25rem;
-    border: 1px solid var(--border);
+    border: 1px solid var(--nd-border-visible);
     border-radius: 8px;
     background: var(--bg-secondary);
 }
@@ -918,7 +914,7 @@
     grid-template-columns: 1fr 1fr 1fr;
     gap: 0.5rem;
     padding: 0.5rem 0;
-    border-bottom: 2px solid var(--border);
+    border-bottom: 2px solid var(--nd-border-visible);
     font-weight: 600;
     font-size: 0.8rem;
     color: var(--text-secondary);
@@ -934,12 +930,12 @@
     grid-template-columns: 1fr 1fr 1fr;
     gap: 0.5rem;
     padding: 0.4rem 0;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--nd-border-visible);
     align-items: center;
 }
 
 .merge-row.differs {
-    background: rgba(var(--accent-rgb, 59, 130, 246), 0.05);
+    background: var(--nd-surface-raised);
 }
 
 .merge-setting-label {
@@ -958,7 +954,7 @@
 }
 
 .merge-option.selected {
-    background: rgba(var(--accent-rgb, 59, 130, 246), 0.1);
+    background: var(--nd-surface-raised);
     font-weight: 500;
 }
 
@@ -977,7 +973,7 @@
     gap: 0.75rem;
     margin-top: 1rem;
     padding-top: 1rem;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--nd-border-visible);
 }
 
 /* Nozzle multi-select checkboxes */

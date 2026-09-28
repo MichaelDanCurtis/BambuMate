@@ -74,7 +74,7 @@
 }
 
 .profile-list-item.selected {
-    background: rgba(233, 69, 96, 0.1);
+    background: var(--nd-surface-raised);
     border-left: 3px solid var(--accent);
 }
 
@@ -169,11 +169,11 @@
 }
 
 .btn-icon.btn-danger {
-    color: #e74c3c;
+    color: var(--nd-accent);
 }
 
 .btn-icon.btn-danger:hover {
-    background: rgba(231, 76, 60, 0.1);
+    background: var(--nd-accent-subtle);
 }
 
 /* Profile fields table */
@@ -269,18 +269,18 @@
 
 /* Error/success states */
 .profile-error {
-    background: rgba(231, 76, 60, 0.1);
-    border: 1px solid rgba(231, 76, 60, 0.3);
-    color: #e74c3c;
+    background: var(--nd-surface-raised);
+    border: 1px solid var(--nd-accent);
+    color: var(--nd-accent);
     padding: 0.75rem 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
 }
 
 .profile-success {
-    background: rgba(46, 204, 113, 0.1);
-    border: 1px solid rgba(46, 204, 113, 0.3);
-    color: #2ecc71;
+    background: var(--nd-surface-raised);
+    border: 1px solid var(--nd-signal);
+    color: var(--nd-signal);
     padding: 0.75rem 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
@@ -320,14 +320,14 @@
 
 /* Edit Specs button */
 .btn-edit-specs {
-    background: rgba(233, 69, 96, 0.1);
+    background: var(--nd-surface-raised);
     border-color: var(--accent);
     color: var(--accent);
     font-weight: 500;
 }
 
 .btn-edit-specs:hover {
-    background: rgba(233, 69, 96, 0.2);
+    background: var(--nd-surface-raised);
 }
 
 /* Specs Editor embedded styles (shared with filament_search) */
@@ -498,7 +498,6 @@
     white-space: normal;
     width: 240px;
     max-width: 90vw;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     z-index: 500;
     pointer-events: none;
 }
