@@ -705,55 +705,80 @@ pub fn update_profile_field(
     read_profile_command(path)
 }
 
+/// The name and file for a duplicate called `new_name`, following the
+/// generator's convention: the file is `<name>.json` and the name doubles as
+/// `filament_settings_id`. If that file already exists, " (2)", " (3)", …
+/// is appended to the name (and so to the file), so a duplicate never
+/// overwrites a preset or shares its name. Path separators become `_` in the
+/// file name only.
+fn duplicate_target(user_dir: &std::path::Path, new_name: &str) -> (String, std::path::PathBuf) {
+    let file_for = |name: &str| user_dir.join(format!("{}.json", name.replace(['/', '\\'], "_")));
+    let mut name = new_name.to_string();
+    let mut n = 2;
+    while file_for(&name).exists() {
+        name = format!("{new_name} ({n})");
+        n += 1;
+    }
+    let path = file_for(&name);
+    (name, path)
+}
+
 /// Duplicate a profile with a new name and IDs.
 ///
-/// Copies the profile, assigns new filament_id and name, and writes it
-/// to the user filament directory.
+/// Copies the profile, gives it a fresh generated `filament_id` and the new
+/// name (as `name` and `filament_settings_id`, the way the generator does),
+/// and writes it to the user filament directory as a new preset.
 #[tauri::command]
 pub fn duplicate_profile(path: String, new_name: String) -> Result<ProfileDetail, String> {
-    let file_path = std::path::Path::new(&path);
-
-    let mut profile = read_profile(file_path).map_err(|e| e.to_string())?;
-
-    // Generate a new unique filament_id
-    let new_id = format!(
-        "BambuMate_{}_{:x}",
-        new_name.replace(' ', "_"),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    );
-
-    // Update name and ID
-    profile.set_string("name", new_name.clone());
-    profile.set_string("filament_id", new_id.clone());
-    profile.set_string_array("filament_settings_id", vec![new_id.clone()]);
-
-    // Determine output path
     let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {}", e))?;
     let user_dir = paths
         .user_filament_dir()
         .ok_or_else(|| "User filament directory not found".to_string())?;
+    let fallback_user_id = paths.preset_folder.clone().unwrap_or_default();
 
-    let filename = format!("{}.json", new_id);
-    let target_path = user_dir.join(&filename);
+    let (target_path, outcome) = duplicate_into(
+        std::path::Path::new(&path),
+        &user_dir,
+        &new_name,
+        &fallback_user_id,
+    )?;
+    crate::history::ledger::note_new_preset_write(&outcome, &target_path);
+
+    read_profile_command(target_path.to_string_lossy().to_string())
+}
+
+/// The body of [`duplicate_profile`], against an explicit `user_dir`.
+///
+/// `setting_id` is left to [`write_profile_new`]: empty, so Bambu Studio
+/// uploads the copy and the cloud assigns its id. The old code wrote the file
+/// stem there, which Bambu Studio read as "already synced" and never
+/// uploaded, and made up a `BambuMate_<name>_<ms>` filament id and file name.
+fn duplicate_into(
+    source: &std::path::Path,
+    user_dir: &std::path::Path,
+    new_name: &str,
+    fallback_user_id: &str,
+) -> Result<(std::path::PathBuf, crate::profile::sync::NewPresetWrite), String> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err("Enter a name for the copy".to_string());
+    }
+    let mut profile = read_profile(source).map_err(|e| e.to_string())?;
+
+    let (name, target_path) = duplicate_target(user_dir, new_name);
     // Even though we construct target_path ourselves from user_dir, run it
     // through the shared guard so any future refactor that lets a caller
     // pass in a target path stays safe.
-    assert_in_user_filament_dir(&target_path, false)?;
+    crate::profile::paths::ensure_within(user_dir, &target_path, false)?;
 
-    // A duplicate is a new preset. An empty setting_id tells Bambu Studio to
-    // upload it and fetch a cloud id; the old code wrote the file stem here,
-    // which Bambu Studio read as "already synced" and never uploaded.
-    let fallback_user_id = paths.preset_folder.clone().unwrap_or_default();
-    let outcome = write_profile_new(&profile, &target_path, &fallback_user_id)
+    profile.set_string("name", name.clone());
+    profile.set_string("filament_id", generator::generate_filament_id());
+    profile.set_string_array("filament_settings_id", vec![name.clone()]);
+
+    let outcome = write_profile_new(&profile, &target_path, fallback_user_id)
         .map_err(|e| format!("Failed to write duplicated profile: {}", e))?;
-    crate::history::ledger::note_new_preset_write(&outcome, &target_path);
-
-    info!("Duplicated profile to {:?} as '{}'", target_path, new_name);
-
-    read_profile_command(target_path.to_string_lossy().to_string())
+    info!("Duplicated profile to {:?} as '{}'", target_path, name);
+    Ok((target_path, outcome))
 }
 
 /// Extract FilamentSpecs from an existing profile for editing.
@@ -1370,10 +1395,58 @@ fn filter_base_profile_index(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_target_printer_options, filter_base_profile_index, parse_target_printer_label,
-        BaseProfileIndexEntry, DEFAULT_NOZZLE_SIZE, DEFAULT_TARGET_PRINTER_MODEL,
+        build_target_printer_options, duplicate_into, filter_base_profile_index,
+        parse_target_printer_label, BaseProfileIndexEntry, DEFAULT_NOZZLE_SIZE,
+        DEFAULT_TARGET_PRINTER_MODEL,
     };
+    use crate::profile::reader::{read_profile, read_profile_metadata};
+    use crate::profile::sync::NewPresetWrite;
     use std::collections::HashSet;
+
+    #[test]
+    fn duplicate_uses_generated_ids_and_names_the_file_after_the_preset() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("user/1881310893/filament/base");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        let source = user_dir.join("Acme PLA.json");
+        std::fs::write(
+            &source,
+            r#"{"name":"Acme PLA","filament_id":"P1234567","filament_settings_id":["Acme PLA"]}"#,
+        )
+        .unwrap();
+
+        let (first, outcome) = duplicate_into(&source, &user_dir, "Acme PLA Copy", "").unwrap();
+        let (second, _) = duplicate_into(&source, &user_dir, " Acme PLA Copy ", "").unwrap();
+
+        assert_eq!(outcome, NewPresetWrite::Created);
+        assert_eq!(first, user_dir.join("Acme PLA Copy.json"));
+        assert_eq!(
+            second,
+            user_dir.join("Acme PLA Copy (2).json"),
+            "never overwrites"
+        );
+        let copy = read_profile(&first).unwrap();
+        assert_eq!(copy.name(), Some("Acme PLA Copy"));
+        let id = copy.filament_id().unwrap();
+        assert!(
+            id.len() == 8 && id.starts_with('P') && id != "P1234567",
+            "a generated filament id: {id}"
+        );
+        assert_eq!(
+            copy.raw()["filament_settings_id"],
+            serde_json::json!(["Acme PLA Copy"])
+        );
+        assert_eq!(
+            read_profile(&second).unwrap().name(),
+            Some("Acme PLA Copy (2)")
+        );
+        let meta = read_profile_metadata(&first).unwrap().unwrap();
+        assert_eq!(meta.setting_id, "", "the cloud assigns the id");
+        assert_eq!(meta.user_id, "1881310893");
+        let files = std::fs::read_dir(&user_dir).unwrap().count();
+        assert_eq!(files, 5, "source plus two copies, each with an .info");
+        assert!(duplicate_into(&source, &user_dir, "  ", "").is_err());
+    }
 
     fn entry(name: &str, ftype: &str, path: &str) -> BaseProfileIndexEntry {
         BaseProfileIndexEntry {
