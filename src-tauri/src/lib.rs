@@ -97,6 +97,7 @@ pub fn run() {
             commands::agent::agent_interrupt,
             commands::agent::agent_answer,
             commands::agent::agent_rewind,
+            commands::agent::agent_rewind_preview,
             commands::agent::agent_list_sessions,
             commands::agent::agent_delete_session,
             commands::agent::agent_set_app_state,
@@ -147,18 +148,32 @@ pub fn run() {
                     tx.clone(),
                     asks.clone(),
                 ));
-                let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-                let service = agent::service::AgentService::new(
-                    vec![
-                        codex,
-                        claude.clone() as Arc<dyn agent::backend::AgentBackend>,
-                    ],
-                    host.clone(),
-                    asks,
-                    tx,
-                    app_data,
-                )?;
-                commands::agent::apply_stored_settings(app.handle(), &service, &claude);
+                // A broken agent setup (unreadable app-data dir, corrupt
+                // session DB) must not stop the rest of the app launching:
+                // agent commands report it instead.
+                let service = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|app_data| {
+                        agent::service::AgentService::new(
+                            vec![
+                                codex,
+                                claude.clone() as Arc<dyn agent::backend::AgentBackend>,
+                            ],
+                            host.clone(),
+                            asks,
+                            tx,
+                            app_data,
+                        )
+                    });
+                match &service {
+                    Ok(svc) => {
+                        commands::agent::apply_stored_settings(app.handle(), svc, &claude);
+                        tauri::async_runtime::spawn(svc.validator_loop());
+                    }
+                    Err(e) => tracing::error!("agent service failed to start: {e}"),
+                }
 
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -175,9 +190,7 @@ pub fn run() {
                         }
                     }
                 });
-                tauri::async_runtime::spawn(service.validator_loop());
-
-                app.manage(service);
+                app.manage(commands::agent::AgentSlot::new(service));
                 app.manage(host);
                 app.manage(claude);
             }

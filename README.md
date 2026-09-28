@@ -106,7 +106,7 @@ npm install -g @openai/codex && codex login          # Codex (ChatGPT subscripti
 npm install -g @anthropic-ai/claude-code             # Claude Agent (needs an Anthropic API key in Settings)
 ```
 
-**Settings → Health Check** reports whether each CLI is installed. By default the agent can write only to the Bambu Studio profile folder and BambuMate's data folder; turn on **Full access** in the panel's settings to lift that. Every agent turn snapshots your profiles first, so **Rewind** on any message restores them.
+**Settings → Health Check** reports whether each CLI is installed. By default the agent can write only to the Bambu Studio profile folder and its own workspace folder; turn on **Full access** in the panel's settings to lift that. Every agent turn snapshots your profiles first, so **Rewind** on any message restores them.
 
 ## Tech Stack
 

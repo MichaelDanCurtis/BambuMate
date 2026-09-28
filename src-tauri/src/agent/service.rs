@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 
 use super::asks::AskBroker;
 use super::backend::{AgentBackend, SessionOpts};
-use super::snapshot::{Snapshots, KEEP_TURNS};
+use super::snapshot::{RewindPlan, Snapshots, KEEP_TURNS};
 use super::store::{SessionRow, SessionStore};
 use super::tools::{ToolHost, ToolRegistry};
 use super::types::{AgentEvent, Provider, UiCommand, UserInput};
@@ -49,6 +49,15 @@ impl AgentService {
         app_data: PathBuf,
     ) -> Result<Arc<Self>, String> {
         let store = SessionStore::open(&app_data.join("refinement_history.db"))?;
+        // Snapshots and staged uploads from earlier launches are unreachable:
+        // there is no resume UI, and each launch starts new sessions.
+        for leftover in ["agent-snapshots", "agent-uploads"] {
+            match std::fs::remove_dir_all(app_data.join(leftover)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!("could not clear old {leftover}: {e}"),
+            }
+        }
         Ok(Arc::new(Self {
             backends: backends.into_iter().map(|b| (b.provider(), b)).collect(),
             host,
@@ -140,7 +149,11 @@ impl AgentService {
     ) -> Result<SessionOpts, String> {
         let cwd = self.app_data.join("agent-workspace");
         std::fs::create_dir_all(&cwd).map_err(|e| e.to_string())?;
-        let mut writable_roots = vec![self.app_data.clone()];
+        // Only the agent's own scratch folder, never the app-data root: that
+        // holds preferences.json (full-access toggle), the snapshots rewind
+        // trusts, and the session DB, so write access there would let the
+        // agent lift its own limits or forge its history.
+        let mut writable_roots = vec![cwd.clone()];
         if let Ok(dir) = self.host.user_filament_dir() {
             writable_roots.push(dir);
         }
@@ -321,11 +334,34 @@ impl AgentService {
             .get(session_id)
             .map(|a| a.provider)
             .ok_or("unknown session")?;
-        self.backend(provider)?.interrupt(session_id).await
+        self.backend(provider)?.interrupt(session_id).await?;
+        // The backend also ends the turn with a TurnDone; clearing here too
+        // recovers a session whose TurnDone was lost, and is harmless twice.
+        self.clear_busy(session_id);
+        Ok(())
     }
 
     pub fn answer(&self, ask_id: &str, answers: Vec<String>) -> Result<(), String> {
         self.asks.answer(ask_id, answers)
+    }
+
+    /// What a rewind to `seq` would delete or overwrite in the profile
+    /// folder. Changes nothing.
+    pub fn rewind_preview(&self, session_id: &str, seq: u32) -> Result<RewindPlan, String> {
+        {
+            let active = self.active.lock().unwrap();
+            let a = active.get(session_id).ok_or("unknown session")?;
+            if seq < 1 || seq > a.seq {
+                return Err(format!(
+                    "seq {seq} is out of range: session is at turn {}",
+                    a.seq
+                ));
+            }
+        }
+        let dir = self.host.user_filament_dir()?;
+        self.snapshots
+            .rewind_plan(session_id, seq, &dir)
+            .map_err(|e| e.to_string())
     }
 
     pub async fn rewind(&self, session_id: &str, seq: u32) -> Result<bool, String> {
@@ -349,6 +385,12 @@ impl AgentService {
             a.provider
         };
 
+        // Bambu Studio keeps profiles in memory and writes them back, so a
+        // restore underneath it would be silently undone or corrupted.
+        if self.host.bambu_studio_running() {
+            self.clear_busy(session_id);
+            return Err("Close Bambu Studio before rewinding.".into());
+        }
         let dir = match self.host.user_filament_dir() {
             Ok(d) => d,
             Err(e) => {
@@ -356,6 +398,13 @@ impl AgentService {
                 return Err(e);
             }
         };
+        // The profile folder is shared with Bambu Studio and the user, so
+        // keep what's there now before mirroring the snapshot over it. No
+        // safety copy, no restore.
+        if let Err(e) = self.snapshots.take_pre_rewind(session_id, seq, &dir) {
+            self.clear_busy(session_id);
+            return Err(format!("could not back up profiles before rewinding: {e}"));
+        }
         if let Err(e) = self.snapshots.restore(session_id, seq, &dir) {
             self.clear_busy(session_id);
             return Err(e.to_string());
@@ -1041,5 +1090,177 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    // --- Final review, item 1: the agent cannot write BambuMate's own data.
+
+    #[test]
+    fn writable_roots_exclude_the_app_data_root() {
+        let r = rig(true);
+        let o = r.svc.opts("s1", None, None).unwrap();
+        let app_data = r._data.path();
+        assert!(
+            o.writable_roots
+                .iter()
+                .all(|root| !app_data.starts_with(root)),
+            "app data (or a parent of it) is writable: {:?}",
+            o.writable_roots
+        );
+        assert_eq!(
+            o.writable_roots,
+            vec![
+                app_data.join("agent-workspace"),
+                r.host.user_dir.path().to_path_buf()
+            ]
+        );
+        assert_eq!(o.cwd, app_data.join("agent-workspace"));
+    }
+
+    // --- Final review, item 3: rewind is previewed and non-destructive.
+
+    fn pre_rewind_copies(r: &Rig, sid: &str) -> Vec<PathBuf> {
+        let dir = r._data.path().join("agent-snapshots").join(sid);
+        fs::read_dir(dir)
+            .map(|d| {
+                d.filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| {
+                        p.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with(crate::agent::snapshot::PRE_REWIND_PREFIX)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn rewind_preview_lists_what_the_rewind_would_change() {
+        let r = rig(true);
+        tokio::spawn(r.svc.validator_loop());
+        let sid = bounded(r.svc.start(Provider::Codex, None, None))
+            .await
+            .unwrap();
+        bounded(r.svc.send(&sid, "one".into(), vec![]))
+            .await
+            .unwrap();
+        r.events.send(turn_done(&sid, 1)).unwrap();
+        let dir = r.host.user_dir.path();
+        fs::write(dir.join("A.json"), r#"{"name":"A","inherits":"X"}"#).unwrap();
+        fs::write(dir.join("Later.json"), "{}").unwrap();
+
+        let plan = r.svc.rewind_preview(&sid, 1).unwrap();
+        assert_eq!(plan.delete, vec![dir.join("Later.json")]);
+        assert_eq!(plan.overwrite, vec![dir.join("A.json")]);
+        assert!(dir.join("Later.json").exists(), "preview changes nothing");
+        assert!(r.svc.rewind_preview(&sid, 2).is_err(), "out of range");
+        assert!(r.svc.rewind_preview("nope", 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn rewind_keeps_a_pre_rewind_copy_of_the_current_files() {
+        let r = rig(true);
+        tokio::spawn(r.svc.validator_loop());
+        let sid = bounded(r.svc.start(Provider::Codex, None, None))
+            .await
+            .unwrap();
+        bounded(r.svc.send(&sid, "one".into(), vec![]))
+            .await
+            .unwrap();
+        r.events.send(turn_done(&sid, 1)).unwrap();
+        let dir = r.host.user_dir.path().to_path_buf();
+        fs::write(dir.join("UserMade.json"), r#"{"name":"UserMade"}"#).unwrap();
+
+        bounded(rewind_when_free(&r.svc, &sid, 1)).await.unwrap();
+
+        assert!(!dir.join("UserMade.json").exists(), "restore removed it");
+        let copies = pre_rewind_copies(&r, &sid);
+        assert_eq!(copies.len(), 1, "one safety copy: {copies:?}");
+        assert_eq!(
+            fs::read_to_string(copies[0].join("UserMade.json")).unwrap(),
+            r#"{"name":"UserMade"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn rewind_refuses_while_bambu_studio_is_running() {
+        let r = rig(true);
+        tokio::spawn(r.svc.validator_loop());
+        let sid = bounded(r.svc.start(Provider::Codex, None, None))
+            .await
+            .unwrap();
+        bounded(r.svc.send(&sid, "one".into(), vec![]))
+            .await
+            .unwrap();
+        r.events.send(turn_done(&sid, 1)).unwrap();
+        let a_path = r.host.user_dir.path().join("A.json");
+        fs::write(&a_path, r#"{"name":"A-edited"}"#).unwrap();
+        r.host.bs_running.store(true, Ordering::SeqCst);
+
+        let err = loop {
+            match bounded(r.svc.rewind(&sid, 1)).await {
+                Err(e) if e.contains("a turn is running") => tokio::task::yield_now().await,
+                other => break other.unwrap_err(),
+            }
+        };
+        assert!(
+            err.contains("Close Bambu Studio"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&a_path).unwrap(),
+            r#"{"name":"A-edited"}"#,
+            "nothing restored"
+        );
+        assert!(pre_rewind_copies(&r, &sid).is_empty());
+
+        // Not left busy: once Bambu Studio closes, the rewind goes through.
+        r.host.bs_running.store(false, Ordering::SeqCst);
+        bounded(r.svc.rewind(&sid, 1)).await.unwrap();
+    }
+
+    // --- Final review, item 7: nothing from earlier launches is kept.
+
+    #[test]
+    fn new_purges_snapshots_and_uploads_from_earlier_launches() {
+        let (tx, _) = broadcast::channel(16);
+        let data = tempfile::tempdir().unwrap();
+        let old_snap = data.path().join("agent-snapshots/old-session/000001");
+        fs::create_dir_all(&old_snap).unwrap();
+        fs::write(old_snap.join("A.json"), "{}").unwrap();
+        let uploads = data.path().join("agent-uploads");
+        fs::create_dir_all(&uploads).unwrap();
+        fs::write(uploads.join("x.png"), "png").unwrap();
+
+        let _svc = AgentService::new(
+            vec![],
+            Arc::new(FakeHost::new()),
+            Arc::new(AskBroker::new(tx.clone())),
+            tx,
+            data.path().to_path_buf(),
+        )
+        .unwrap();
+
+        assert!(!data.path().join("agent-snapshots/old-session").exists());
+        assert!(!uploads.join("x.png").exists());
+    }
+
+    // --- Final review, item 10: STOP recovers a session whose TurnDone was lost.
+
+    #[tokio::test]
+    async fn interrupt_clears_busy_even_without_a_turn_done() {
+        let r = rig(true);
+        let sid = bounded(r.svc.start(Provider::Codex, None, None))
+            .await
+            .unwrap();
+        bounded(r.svc.send(&sid, "one".into(), vec![]))
+            .await
+            .unwrap();
+        // No validator_loop and no TurnDone: only interrupt can clear busy.
+        bounded(r.svc.interrupt(&sid)).await.unwrap();
+        let seq = bounded(r.svc.send(&sid, "two".into(), vec![]))
+            .await
+            .unwrap();
+        assert_eq!(seq, 2);
     }
 }

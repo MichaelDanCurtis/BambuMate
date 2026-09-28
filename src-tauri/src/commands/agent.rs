@@ -11,6 +11,7 @@ use crate::agent::claude::args::{available_modes, AuthMode};
 use crate::agent::claude::ClaudeBackend;
 use crate::agent::host::TauriToolHost;
 use crate::agent::service::AgentService;
+use crate::agent::snapshot::RewindPlan;
 use crate::agent::store::SessionRow;
 use crate::agent::types::{AgentModel, AppState, Provider, Readiness};
 
@@ -24,21 +25,37 @@ pub struct AgentSettings {
     pub claude_auth_modes: Vec<AuthMode>,
 }
 
-type Svc<'a> = State<'a, Arc<AgentService>>;
+/// The agent service, or why it could not start. Managed either way so a
+/// broken agent setup never stops the rest of the app from launching.
+pub struct AgentSlot(Result<Arc<AgentService>, String>);
+
+impl AgentSlot {
+    pub fn new(service: Result<Arc<AgentService>, String>) -> Self {
+        Self(service)
+    }
+
+    fn get(&self) -> Result<&Arc<AgentService>, String> {
+        self.0
+            .as_ref()
+            .map_err(|e| format!("Agent unavailable: {e}"))
+    }
+}
+
+type Svc<'a> = State<'a, AgentSlot>;
 
 #[tauri::command]
 pub async fn agent_readiness(svc: Svc<'_>, provider: Provider) -> Result<Readiness, String> {
-    Ok(svc.backend(provider)?.readiness().await)
+    Ok(svc.get()?.backend(provider)?.readiness().await)
 }
 
 #[tauri::command]
 pub async fn agent_models(svc: Svc<'_>, provider: Provider) -> Result<Vec<AgentModel>, String> {
-    svc.backend(provider)?.models().await
+    svc.get()?.backend(provider)?.models().await
 }
 
 #[tauri::command]
 pub async fn agent_login(svc: Svc<'_>, provider: Provider) -> Result<Option<String>, String> {
-    let url = svc.backend(provider)?.login().await?;
+    let url = svc.get()?.backend(provider)?.login().await?;
     if let Some(u) = &url {
         crate::commands::launcher::open_external_url(u.clone()).await?;
     }
@@ -52,12 +69,12 @@ pub async fn agent_start(
     model: Option<String>,
     effort: Option<String>,
 ) -> Result<String, String> {
-    svc.start(provider, model, effort).await
+    svc.get()?.start(provider, model, effort).await
 }
 
 #[tauri::command]
 pub async fn agent_open(svc: Svc<'_>, session_id: String) -> Result<SessionRow, String> {
-    svc.open(&session_id).await
+    svc.get()?.open(&session_id).await
 }
 
 #[tauri::command]
@@ -67,32 +84,42 @@ pub async fn agent_send(
     text: String,
     images: Vec<String>,
 ) -> Result<u32, String> {
-    svc.send(&session_id, text, images).await
+    svc.get()?.send(&session_id, text, images).await
 }
 
 #[tauri::command]
 pub async fn agent_interrupt(svc: Svc<'_>, session_id: String) -> Result<(), String> {
-    svc.interrupt(&session_id).await
+    svc.get()?.interrupt(&session_id).await
 }
 
 #[tauri::command]
 pub fn agent_answer(svc: Svc<'_>, ask_id: String, answers: Vec<String>) -> Result<(), String> {
-    svc.answer(&ask_id, answers)
+    svc.get()?.answer(&ask_id, answers)
 }
 
 #[tauri::command]
 pub async fn agent_rewind(svc: Svc<'_>, session_id: String, seq: u32) -> Result<bool, String> {
-    svc.rewind(&session_id, seq).await
+    svc.get()?.rewind(&session_id, seq).await
+}
+
+/// Lists the profile files a rewind to `seq` would delete or overwrite.
+#[tauri::command]
+pub fn agent_rewind_preview(
+    svc: Svc<'_>,
+    session_id: String,
+    seq: u32,
+) -> Result<RewindPlan, String> {
+    svc.get()?.rewind_preview(&session_id, seq)
 }
 
 #[tauri::command]
 pub fn agent_list_sessions(svc: Svc<'_>) -> Result<Vec<SessionRow>, String> {
-    svc.list_sessions()
+    svc.get()?.list_sessions()
 }
 
 #[tauri::command]
 pub async fn agent_delete_session(svc: Svc<'_>, session_id: String) -> Result<(), String> {
-    svc.delete_session(&session_id).await
+    svc.get()?.delete_session(&session_id).await
 }
 
 #[tauri::command]
@@ -160,6 +187,7 @@ pub fn agent_set_settings(
     if !available_modes().contains(&claude_auth_mode) {
         return Err("that Claude sign-in mode is not available in this build".into());
     }
+    let svc = svc.get()?;
     let store = app.store("preferences.json").map_err(|e| e.to_string())?;
     store.set(PREF_FULL_ACCESS, serde_json::json!(full_access.to_string()));
     store.set(
@@ -187,4 +215,16 @@ pub fn apply_stored_settings(app: &AppHandle, svc: &AgentService, claude: &Claud
             .filter(|m| available_modes().contains(m))
             .unwrap_or(AuthMode::ApiKey),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_agent_service_reports_unavailable_instead_of_panicking() {
+        let slot = AgentSlot::new(Err("session DB is corrupt".into()));
+        let err = slot.get().err().unwrap();
+        assert_eq!(err, "Agent unavailable: session DB is corrupt");
+    }
 }
