@@ -5,7 +5,7 @@ pub mod args;
 pub mod mcp_server;
 pub mod stream;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +29,8 @@ pub const RESUME_AT_SUPPORTED: bool = false;
 pub struct SpawnedClaude {
     pub stdout: Box<dyn AsyncRead + Send + Unpin>,
     pub stdin: Box<dyn AsyncWrite + Send + Unpin>,
+    /// The CLI's stderr. Its last lines go into the crash message.
+    pub stderr: Option<Box<dyn AsyncRead + Send + Unpin>>,
     pub child: Option<tokio::process::Child>,
 }
 
@@ -67,17 +69,14 @@ impl ClaudeSpawner for ProcessSpawner {
             .map_err(|e| format!("failed to start claude: {e}"))?;
         let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
         let stdin = child.stdin.take().ok_or("claude stdin unavailable")?;
-        if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(l)) = lines.next_line().await {
-                    tracing::debug!(target: "claude", "{l}");
-                }
-            });
-        }
+        let stderr = child
+            .stderr
+            .take()
+            .map(|e| Box::new(e) as Box<dyn AsyncRead + Send + Unpin>);
         Ok(SpawnedClaude {
             stdout: Box::new(stdout),
             stdin: Box::new(stdin),
+            stderr,
             child: Some(child),
         })
     }
@@ -98,6 +97,53 @@ impl KeySource for KeychainKeys {
 }
 
 type Stdin = Arc<AsyncMutex<Box<dyn AsyncWrite + Send + Unpin>>>;
+
+/// How much of the CLI's stderr a crash message carries.
+const STDERR_LINES: usize = 20;
+const STDERR_CHARS: usize = 1500;
+/// How long a crash report waits for the dead process's stderr to drain.
+const STDERR_DRAIN: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Logs the CLI's stderr and keeps its last `STDERR_LINES` lines.
+fn capture_stderr(
+    stderr: Option<Box<dyn AsyncRead + Send + Unpin>>,
+    tail: Arc<Mutex<VecDeque<String>>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let stderr = stderr?;
+    Some(tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(l)) = lines.next_line().await {
+            tracing::debug!(target: "claude", "{l}");
+            let mut t = tail.lock().unwrap();
+            if t.len() == STDERR_LINES {
+                t.pop_front();
+            }
+            t.push_back(l);
+        }
+    }))
+}
+
+/// The crash message, with the end of the CLI's stderr when it said anything.
+fn crash_message(stderr_tail: &VecDeque<String>) -> String {
+    let base = "Claude Agent stopped unexpectedly. Send another message to continue.";
+    let joined = stderr_tail
+        .iter()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let joined = joined.trim();
+    if joined.is_empty() {
+        return base.to_string();
+    }
+    let n = joined.chars().count();
+    let tail: String = if n > STDERR_CHARS {
+        let kept: String = joined.chars().skip(n - STDERR_CHARS).collect();
+        format!("…{kept}")
+    } else {
+        joined.to_string()
+    };
+    format!("{base}\n\n{tail}")
+}
 
 /// The system prompt and MCP config one `claude` process reads at startup.
 /// They live in a private temp dir, outside every folder the agent may write
@@ -167,7 +213,11 @@ struct Session {
     mcp: McpHandle,
     proc: Option<Proc>,
     uuids: Arc<Mutex<Vec<(u32, String)>>>,
-    started_once: bool,
+    /// True once a process for the current `uuid` wrote any output, i.e. the
+    /// CLI created the session and a respawn must `--resume` it. Set by that
+    /// process's stdout reader; replaced (not reset) when `uuid` changes, so
+    /// a stale process can't mark the new conversation as started.
+    started_once: Arc<AtomicBool>,
     resume_at: Option<String>,
 }
 
@@ -212,7 +262,7 @@ impl ClaudeBackend {
             key.as_deref(),
             &LaunchOpts {
                 session_uuid: &s.uuid,
-                resume: s.started_once,
+                resume: s.started_once.load(Ordering::SeqCst),
                 resume_at: s.resume_at.as_deref(),
                 model: s.opts.model.as_deref(),
                 full_access: s.opts.full_access,
@@ -247,10 +297,21 @@ impl ClaudeBackend {
             session_id.to_string(),
             proc.files.clone(),
         );
+        let started_once = s.started_once.clone();
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        let stderr_task = capture_stderr(spawned.stderr, stderr_tail.clone());
         let stdout = spawned.stdout;
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
+            let mut saw_output = false;
             while let Ok(Some(line)) = lines.next_line().await {
+                // Any JSON line (normally system/init) means the CLI is up
+                // and the session exists, even if the process dies next.
+                if !saw_output && serde_json::from_str::<serde::de::IgnoredAny>(line.trim()).is_ok()
+                {
+                    saw_output = true;
+                    started_once.store(true, Ordering::SeqCst);
+                }
                 if detached.load(Ordering::SeqCst) {
                     break;
                 }
@@ -285,11 +346,13 @@ impl ClaudeBackend {
                     (d.seq(), d.is_interrupted())
                 };
                 if !interrupted {
+                    if let Some(task) = stderr_task {
+                        let _ = tokio::time::timeout(STDERR_DRAIN, task).await;
+                    }
+                    let message = crash_message(&stderr_tail.lock().unwrap());
                     let _ = events.send(AgentEvent::Error {
                         session_id: Some(sid.clone()),
-                        message:
-                            "Claude Agent stopped unexpectedly. Send another message to continue."
-                                .into(),
+                        message,
                     });
                 }
                 let status = if interrupted {
@@ -380,7 +443,7 @@ impl ClaudeBackend {
             mcp,
             proc: None,
             uuids: Arc::new(Mutex::new(Vec::new())),
-            started_once,
+            started_once: Arc::new(AtomicBool::new(started_once)),
             resume_at: None,
         };
         let replaced = self
@@ -491,7 +554,7 @@ impl AgentBackend for ClaudeBackend {
             Some(u) => s.resume_at = Some(u),
             None => {
                 s.uuid = uuid::Uuid::new_v4().to_string();
-                s.started_once = false;
+                s.started_once = Arc::new(AtomicBool::new(false));
             }
         }
         s.uuids.lock().unwrap().retain(|(seq, _)| *seq < to_seq);
@@ -505,7 +568,7 @@ impl AgentBackend for ClaudeBackend {
         input: Vec<UserInput>,
     ) -> Result<String, String> {
         let line = encode_user_message(&input)?;
-        let (stdin, turn_active, uuid) = {
+        let (stdin, turn_active) = {
             let mut sessions = self.sessions.lock().await;
             let s = sessions.get_mut(session_id).ok_or("unknown session")?;
             let alive = s
@@ -525,7 +588,7 @@ impl AgentBackend for ClaudeBackend {
                 session_id: session_id.to_string(),
                 seq,
             });
-            (p.stdin.clone(), p.turn_active.clone(), s.uuid.clone())
+            (p.stdin.clone(), p.turn_active.clone())
         };
         // Write without holding the session map, so a stuck pipe cannot block
         // interrupt or other sessions.
@@ -546,11 +609,16 @@ impl AgentBackend for ClaudeBackend {
             }
             return Err(format!("claude stdin: {e}"));
         }
-        if let Some(s) = self.sessions.lock().await.get_mut(session_id) {
-            if s.uuid == uuid {
-                s.started_once = true;
-            }
-        }
+        // `started_once` is set by the process's reader once the CLI writes
+        // output, not here: a write can succeed to a process that then dies
+        // before creating the session, and resuming that would fail forever.
+        let uuid = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|s| s.uuid.clone())
+            .unwrap_or_default();
         Ok(format!("{uuid}#{seq}"))
     }
 
@@ -647,6 +715,7 @@ mod tests {
             SpawnedClaude {
                 stdout: Box::new(cr),
                 stdin: Box::new(cw),
+                stderr: None,
                 child: None,
             },
             Cli {
@@ -654,6 +723,14 @@ mod tests {
                 w: sw,
             },
         )
+    }
+
+    /// A fake CLI plus the write end of its stderr.
+    fn fake_cli_with_stderr() -> (SpawnedClaude, Cli, DuplexStream) {
+        let (mut p, cli) = fake_cli();
+        let (stderr_r, stderr_w) = tokio::io::duplex(64 * 1024);
+        p.stderr = Some(Box::new(stderr_r));
+        (p, cli, stderr_w)
     }
 
     struct Rig {
@@ -833,6 +910,9 @@ mod tests {
         let uuid = r.backend.start_session("s1", r.opts.clone()).await.unwrap();
         r.backend.send("s1", 1, text("x")).await.unwrap();
         cli1.read_user().await;
+        // The CLI got far enough to create the session before it died.
+        cli1.say(json!({"type":"system","subtype":"init","session_id":uuid}))
+            .await;
         drop(cli1);
         until(&mut r.rx, |e| {
             matches!(
@@ -851,6 +931,54 @@ mod tests {
             .args
             .windows(2)
             .any(|w| w[0] == "--resume" && w[1] == uuid));
+    }
+
+    #[tokio::test]
+    async fn a_process_that_dies_before_any_output_is_retried_as_a_new_session() {
+        let (p1, mut cli1) = fake_cli();
+        let (p2, mut cli2) = fake_cli();
+        let mut r = rig(Some("k"), vec![p1, p2]);
+        let uuid = r.backend.start_session("s1", r.opts.clone()).await.unwrap();
+        r.backend.send("s1", 1, text("x")).await.unwrap();
+        cli1.read_user().await;
+        drop(cli1); // e.g. a bad API key: exits before writing anything
+        until(&mut r.rx, |e| matches!(e, AgentEvent::TurnDone { .. })).await;
+        r.backend.send("s1", 2, text("again")).await.unwrap();
+        cli2.read_user().await;
+        let second = r.spawner.launches.lock().unwrap()[1].clone();
+        assert!(
+            second
+                .args
+                .windows(2)
+                .any(|w| w[0] == "--session-id" && w[1] == uuid),
+            "no session was ever created, so it can't be resumed: {:?}",
+            second.args
+        );
+        assert!(!second.args.contains(&"--resume".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_crash_error_carries_the_cli_stderr() {
+        let (p, mut cli, mut stderr) = fake_cli_with_stderr();
+        let mut r = rig(Some("k"), vec![p]);
+        r.backend.start_session("s1", r.opts.clone()).await.unwrap();
+        r.backend.send("s1", 1, text("x")).await.unwrap();
+        cli.read_user().await;
+        timeout(
+            WAIT,
+            stderr.write_all(b"warming up\nError: Invalid API key \xc2\xb7 Fix it\n"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(stderr);
+        drop(cli);
+        let err = until(&mut r.rx, |e| matches!(e, AgentEvent::Error { .. })).await;
+        let AgentEvent::Error { message, .. } = err else {
+            unreachable!()
+        };
+        assert!(message.contains("stopped unexpectedly"), "{message}");
+        assert!(message.contains("Error: Invalid API key"), "{message}");
     }
 
     #[tokio::test]
@@ -946,6 +1074,7 @@ mod tests {
         let p = SpawnedClaude {
             stdout: Box::new(stdout),
             stdin: Box::new(BrokenPipe),
+            stderr: None,
             child: None,
         };
         let mut r = rig(Some("k"), vec![p]);
