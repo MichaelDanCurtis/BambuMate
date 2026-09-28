@@ -6,7 +6,7 @@ use crate::profile::generator;
 use crate::profile::paths::BambuPaths;
 use crate::profile::reader::read_profile;
 use crate::profile::registry::ProfileRegistry;
-use crate::profile::sync::write_profile_new;
+use crate::profile::sync::{write_profile_new, NewPresetWrite};
 
 /// Default target printer label used when the caller doesn't specify one.
 /// Must match `generator::generate_profile`'s internal default so the filename
@@ -186,19 +186,25 @@ pub async fn batch_generate_brand(
                 if install {
                     if let Some(ref ud) = user_dir {
                         let target_path = ud.join(&filename);
-                        if let Err(e) = write_profile_new(&profile, &target_path, &metadata.user_id)
-                        {
-                            warn!("Failed to install {}: {}", filament_name, e);
-                            failed += 1;
-                            results.push(BatchEntry {
-                                filament_name,
-                                brand: entry.brand.clone(),
-                                material: entry.material.clone(),
-                                success: false,
-                                profile_name: Some(profile_name),
-                                error: Some(format!("Install failed: {}", e)),
-                            });
-                            continue;
+                        match write_profile_new(&profile, &target_path, &metadata.user_id) {
+                            Ok(NewPresetWrite::Created) => {
+                                // Best effort: never fails the batch entry.
+                                crate::history::ledger::record_new_preset(&target_path);
+                            }
+                            Ok(NewPresetWrite::ReplacedExisting) => {}
+                            Err(e) => {
+                                warn!("Failed to install {}: {}", filament_name, e);
+                                failed += 1;
+                                results.push(BatchEntry {
+                                    filament_name,
+                                    brand: entry.brand.clone(),
+                                    material: entry.material.clone(),
+                                    success: false,
+                                    profile_name: Some(profile_name),
+                                    error: Some(format!("Install failed: {}", e)),
+                                });
+                                continue;
+                            }
                         }
                     }
                 }

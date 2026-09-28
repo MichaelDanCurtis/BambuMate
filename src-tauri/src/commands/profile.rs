@@ -10,7 +10,7 @@ use crate::profile::inheritance::resolve_inheritance;
 use crate::profile::paths::BambuPaths;
 use crate::profile::reader::{read_profile, read_profile_metadata};
 use crate::profile::registry::ProfileRegistry;
-use crate::profile::sync::{write_profile_edit, write_profile_new};
+use crate::profile::sync::{write_profile_edit, write_profile_new, NewPresetWrite};
 use crate::profile::types::{FilamentProfile, ProfileMetadata};
 use crate::profile::writer::register_filament_in_conf;
 
@@ -594,8 +594,12 @@ pub async fn install_generated_profile(
     // fields: a fresh file is "new" to Bambu Studio (empty setting_id), and
     // replacing a preset that already has a cloud id keeps that id and marks
     // it "update", so the cloud copy is not duplicated.
-    write_profile_new(&profile, &target_path, &metadata.user_id)
+    let outcome = write_profile_new(&profile, &target_path, &metadata.user_id)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
+    if outcome == NewPresetWrite::Created {
+        // Best effort: a ledger failure is logged and never fails the install.
+        crate::history::ledger::record_new_preset(&target_path);
+    }
 
     let profile_name = profile.name().unwrap_or("<unnamed>").to_string();
 
@@ -679,7 +683,9 @@ fn assert_in_user_filament_dir(
 #[tauri::command]
 pub fn delete_profile(path: String) -> Result<(), String> {
     let file_path = std::path::Path::new(&path);
-    assert_in_user_filament_dir(file_path, true)?;
+    // The canonical path doubles as the ledger key; take it before the file
+    // is gone and can no longer be canonicalised.
+    let canonical = assert_in_user_filament_dir(file_path, true)?;
 
     // Delete the JSON file
     std::fs::remove_file(&file_path).map_err(|e| format!("Failed to delete profile: {}", e))?;
@@ -691,6 +697,8 @@ pub fn delete_profile(path: String) -> Result<(), String> {
             info!("Could not delete companion .info file: {}", e);
         }
     }
+
+    crate::history::ledger::forget_preset(&canonical.to_string_lossy());
 
     info!("Deleted profile at {:?}", file_path);
     Ok(())
@@ -768,8 +776,11 @@ pub fn duplicate_profile(path: String, new_name: String) -> Result<ProfileDetail
     // upload it and fetch a cloud id; the old code wrote the file stem here,
     // which Bambu Studio read as "already synced" and never uploaded.
     let fallback_user_id = paths.preset_folder.clone().unwrap_or_default();
-    write_profile_new(&profile, &target_path, &fallback_user_id)
+    let outcome = write_profile_new(&profile, &target_path, &fallback_user_id)
         .map_err(|e| format!("Failed to write duplicated profile: {}", e))?;
+    if outcome == NewPresetWrite::Created {
+        crate::history::ledger::record_new_preset(&target_path);
+    }
 
     info!("Duplicated profile to {:?} as '{}'", target_path, new_name);
 
