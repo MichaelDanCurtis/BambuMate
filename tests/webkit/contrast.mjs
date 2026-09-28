@@ -15,9 +15,10 @@ const TEXT = [
   ["--nd-signal", 4.5],
   ["--nd-warning", 4.5],
   ["--nd-accent", 4.5],
+  ["--nd-interactive", 4.5],
   ["--nd-text-disabled", 3],
 ];
-const BACKGROUNDS = ["--nd-black", "--nd-surface"];
+const BACKGROUNDS = ["--nd-black", "--nd-surface", "--nd-surface-raised"];
 const THEMES = ["dark", "bambu"];
 
 function luminance(hex) {

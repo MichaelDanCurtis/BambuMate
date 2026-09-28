@@ -44,9 +44,9 @@ Tokens live in `style/tokens.css`. They move from the `.nd` scope to `:root`. Th
 | `--nd-accent` / error | `#F0414A` | `#D71921` |
 | `--nd-warning` | `#D4A843` | `#7D5E0E` |
 | `--nd-success` | = `--nd-signal` | = `--nd-signal` |
-| `--nd-interactive` (links) | `#5B9BF6` | `#007AFF` |
+| `--nd-interactive` (links) | `#5B9BF6` | `#0062CC` |
 
-Every text token was checked: at least 4.5:1 on page and surface (3:1 for disabled). Dark red is lightened to `#F0414A` (`#D71921` on black is 4.05:1). Light green, amber and disabled grey are darkened.
+Every text token was checked: at least 4.5:1 on page and surface (3:1 for disabled), and now also on `--nd-surface-raised`. Dark red is lightened to `#F0414A` (`#D71921` on black is 4.05:1). Light green, amber and disabled grey are darkened. Light `--nd-interactive` was originally `#007AFF` (4.02:1 on surface, 3.52:1 on raised — a fail once it was used as text in `.quality-good`, `.severity-minor` and `.status-analyzed`); `#0062CC` keeps the hue and clears 4.5:1 on page, surface and raised.
 
 The **theme attribute** stays `data-theme` on `<html>` (`src/theme.rs`):
 - `dark` selects the dark set;

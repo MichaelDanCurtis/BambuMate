@@ -62,7 +62,13 @@
     --nd-signal: #007a34;
     --nd-warning: #7d5e0e;
     --nd-accent: #d71921;
-    --nd-interactive: #007aff;
+    /* #007aff (the Bambu-ish sky blue) fails WCAG 4.5:1 as text on this
+       theme's surfaces (4.02 on --nd-surface, 3.52 on --nd-surface-raised),
+       and it is used as text color in .quality-good, .severity-minor and
+       .status-analyzed. #0062cc keeps the same hue, darkened just enough to
+       clear 4.5:1 on --nd-black (5.32), --nd-surface (5.80) and
+       --nd-surface-raised (5.09), the hardest of the three. */
+    --nd-interactive: #0062cc;
     --nd-dot: #e4e4e4;
     --nd-accent-subtle: rgba(215, 25, 33, 0.15);
 }

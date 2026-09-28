@@ -52,7 +52,12 @@
   | signal | `#007A34` |
   | error | `#D71921` |
   | warning | `#7D5E0E` |
-  | interactive | `#007AFF` |
+  | interactive | `#0062CC` |
+
+  Interactive was originally `#007AFF`, which fails 4.5:1 as text (4.02 on
+  surface, 3.52 on raised) now that it is used for `.quality-good`,
+  `.severity-minor` and `.status-analyzed`; `#0062CC` keeps the same hue and
+  clears 4.5:1 on page, surface and raised.
 
 - **Contrast:** at least 4.5:1 against page and surface for primary, secondary, signal, warning and error text. At least 3:1 for disabled.
 - **No decoration:**
