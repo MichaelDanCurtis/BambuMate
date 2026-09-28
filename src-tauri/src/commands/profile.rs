@@ -10,10 +10,9 @@ use crate::profile::inheritance::resolve_inheritance;
 use crate::profile::paths::BambuPaths;
 use crate::profile::reader::{read_profile, read_profile_metadata};
 use crate::profile::registry::ProfileRegistry;
+use crate::profile::sync::write_profile_new;
 use crate::profile::types::{FilamentProfile, ProfileMetadata};
-use crate::profile::writer::{
-    register_filament_in_conf, write_profile_atomic, write_profile_with_metadata,
-};
+use crate::profile::writer::{register_filament_in_conf, write_profile_atomic};
 
 const DEFAULT_TARGET_PRINTER_LABEL: &str = "Bambu Lab H2C 0.4 nozzle";
 const DEFAULT_TARGET_PRINTER_MODEL: &str = "H2C";
@@ -591,8 +590,11 @@ pub async fn install_generated_profile(
         info!("Overwriting existing profile at {:?}", target_path);
     }
 
-    // Write profile + metadata atomically
-    write_profile_with_metadata(&profile, &target_path, &metadata)
+    // Write profile + metadata atomically. profile::sync decides the sync
+    // fields: a fresh file is "new" to Bambu Studio (empty setting_id), and
+    // replacing a preset that already has a cloud id keeps that id and marks
+    // it "update", so the cloud copy is not duplicated.
+    write_profile_new(&profile, &target_path, &metadata.user_id)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
 
     let profile_name = profile.name().unwrap_or("<unnamed>").to_string();
@@ -762,13 +764,11 @@ pub fn duplicate_profile(path: String, new_name: String) -> Result<ProfileDetail
     // pass in a target path stays safe.
     assert_in_user_filament_dir(&target_path, false)?;
 
-    // Create metadata
-    let metadata = ProfileMetadata {
-        setting_id: new_id.clone(),
-        ..ProfileMetadata::default()
-    };
-
-    write_profile_with_metadata(&profile, &target_path, &metadata)
+    // A duplicate is a new preset. An empty setting_id tells Bambu Studio to
+    // upload it and fetch a cloud id; the old code wrote the file stem here,
+    // which Bambu Studio read as "already synced" and never uploaded.
+    let fallback_user_id = paths.preset_folder.clone().unwrap_or_default();
+    write_profile_new(&profile, &target_path, &fallback_user_id)
         .map_err(|e| format!("Failed to write duplicated profile: {}", e))?;
 
     info!("Duplicated profile to {:?} as '{}'", target_path, new_name);

@@ -6,7 +6,7 @@ use crate::profile::generator;
 use crate::profile::paths::BambuPaths;
 use crate::profile::reader::read_profile;
 use crate::profile::registry::ProfileRegistry;
-use crate::profile::writer::write_profile_with_metadata;
+use crate::profile::sync::write_profile_new;
 
 /// Default target printer label used when the caller doesn't specify one.
 /// Must match `generator::generate_profile`'s internal default so the filename
@@ -186,8 +186,7 @@ pub async fn batch_generate_brand(
                 if install {
                     if let Some(ref ud) = user_dir {
                         let target_path = ud.join(&filename);
-                        if let Err(e) =
-                            write_profile_with_metadata(&profile, &target_path, &metadata)
+                        if let Err(e) = write_profile_new(&profile, &target_path, &metadata.user_id)
                         {
                             warn!("Failed to install {}: {}", filament_name, e);
                             failed += 1;
