@@ -4,6 +4,7 @@ use serde_json::{json, Map, Value};
 
 use super::{arg_opt_str, arg_str, ToolOutput, ToolRegistry, ToolSpec};
 use crate::agent::types::UiCommand;
+use crate::history::ledger::note_new_preset_write;
 use crate::profile::inheritance::resolve_inheritance;
 use crate::profile::reader::read_profile;
 use crate::profile::sync::write_profile_edit;
@@ -211,14 +212,18 @@ async fn write(reg: &ToolRegistry, args: &Value) -> ToolOutput {
     for (k, v) in changes {
         raw.insert(k, v);
     }
-    if let Err(e) = write_profile_edit(&profile, &path) {
-        return ToolOutput::error(format!("write failed: {e}"));
+    match write_profile_edit(&profile, &path) {
+        Ok(outcome) => note_new_preset_write(&outcome, &path),
+        Err(e) => return ToolOutput::error(format!("write failed: {e:#}")),
     }
     if let Err(reason) = crate::agent::validate::validate_profile_file(&path) {
         return match restore_from_backup(&backup, &path) {
-            Ok(()) => ToolOutput::error(format!(
-                "change rejected: {reason}; profile restored from backup"
-            )),
+            Ok(outcome) => {
+                note_new_preset_write(&outcome, &path);
+                ToolOutput::error(format!(
+                    "change rejected: {reason}; profile restored from backup"
+                ))
+            }
             Err(re) => ToolOutput::error(format!(
                 "change rejected: {reason}; restoring the backup ALSO failed: {re}"
             )),
@@ -291,7 +296,8 @@ async fn rollback(reg: &ToolRegistry, args: &Value) -> ToolOutput {
         return ToolOutput::error("declined: Bambu Studio is running");
     }
     match restore_from_backup(&backup, &path) {
-        Ok(()) => {
+        Ok(outcome) => {
+            note_new_preset_write(&outcome, &path);
             reg.host().emit_ui(UiCommand::Refresh {
                 what: "profiles".into(),
             });

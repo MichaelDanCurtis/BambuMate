@@ -694,8 +694,10 @@ pub fn update_profile_field(
 
     profile.raw_mut().insert(key.clone(), json_value);
 
-    write_profile_edit(&profile, file_path)
+    let outcome = write_profile_edit(&profile, file_path)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
+    // Best effort: records the preset if the edit left it new to Bambu Studio.
+    crate::history::ledger::note_new_preset_write(&outcome, file_path);
 
     info!("Updated field '{}' in {:?}", key, file_path);
 
@@ -817,8 +819,10 @@ pub fn save_profile_specs(
     };
     profile.set_string("name", new_name);
 
-    write_profile_edit(&profile, file_path)
+    let outcome = write_profile_edit(&profile, file_path)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
+    // Best effort: records the preset if the edit left it new to Bambu Studio.
+    crate::history::ledger::note_new_preset_write(&outcome, file_path);
 
     info!("Saved edited specs to {:?}", file_path);
 

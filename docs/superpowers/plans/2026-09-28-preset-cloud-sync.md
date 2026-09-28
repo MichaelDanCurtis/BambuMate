@@ -58,6 +58,7 @@ Each item below resolves a place where the spec is ambiguous, or wrong against t
    - No ledger row can identify a legacy preset, because old versions kept no ledger.
    - A preset is `confirmed` when its `setting_id` starts with `BambuMate_`. Old `duplicate_profile` builds wrote that id, and Bambu Cloud never issues it.
    - Legacy *generated* presets (made-up `PFUS…` ids) look exactly like synced ones, so they can only ever be `signature` candidates, which start unticked.
+   - Final review: a signature-shaped preset not in the ledger is a `signature` candidate when its `sync_info` is empty, `update` or `hold`, not only empty. An edited legacy preset is `update`, and Bambu Studio puts it on `hold` once the push to its invented id fails; both used to drop off the list. Ledger presets are still never candidates, and `confirmed` is unchanged (a `BambuMate_` id with an empty `sync_info`).
 3. **Repair records the preset in the ledger.** Once Bambu Studio uploads a repaired preset and writes its cloud id back, the preset still has the signature shape. The ledger row stops it being flagged again.
 4. **Re-installing over an existing preset keeps its cloud id.**
    - This covers `install_generated_profile` and batch overwriting an existing file whose `.info` has a real (not `BambuMate_`) `setting_id`.
@@ -86,6 +87,13 @@ Each item below resolves a place where the spec is ambiguous, or wrong against t
     - Skipped repairs render as "Skipped <path>: <reason>".
 14. **Ledger location.** `install_generated_profile`, `duplicate_profile`, `delete_profile` and the diagnostics harness have no `AppHandle`. The ledger resolves `dirs::data_dir()/com.bambumate.app/refinement_history.db`, the same file Tauri's `app_data_dir()` gives (compare `diagnostics::checks::app_data_dir`).
 15. **`duplicate_profile` gets a `user_id`.** It now writes the preset folder's `user_id` into `.info`; before, the field was empty.
+16. **Final review fixes.**
+    - `write_profile_edit` (and `restore_from_backup`) return `NewPresetWrite`. `Created` means the result has an empty `setting_id` (a recreated `.info` or a cleared `BambuMate_` id), and every caller passes it to the ledger.
+    - Agent rewind restores only preset JSON; `.info` is reconciled with `sync::write_profile_restored`, and deleted presets are forgotten. Raw agent edits are reconciled at turn end with `sync::mark_edited_elsewhere`. See the spec's Agent section.
+    - `write_profile_with_metadata` returns an error when the `.info` write fails (after writing the JSON), so nothing is ledgered on a failed `.info`.
+    - `duplicate_profile` uses `generator::generate_filament_id()`, sets `filament_settings_id` to the new name, and names the file `<name>.json`, adding " (2)", " (3)", … to the name on a clash.
+    - The structural test also flags raw `fs::copy`/`fs::write`/`fs::rename` in non-test code of files that handle presets, against a per-file allowlist with counts.
+    - Unit tests never write the developer's real history database: `ledger::history_db_path()` is `None` under `cfg(test)`.
 
 ## File Map
 

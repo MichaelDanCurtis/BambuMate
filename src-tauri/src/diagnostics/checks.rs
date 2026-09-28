@@ -1173,6 +1173,8 @@ fn check_backup_restore(scratch: &Path) -> CheckOutcome {
     if let Err(e) = crate::profile::write_profile_atomic(&mutated, &target) {
         return CheckOutcome::fail(format!("mutate failed: {}", e), "Profile writes broken.");
     }
+    // Scratch directory: the outcome is deliberately not ledgered, so the
+    // user's real ledger never gains a row for a probe file.
     if let Err(e) = crate::profile::writer::restore_from_backup(&backup, &target) {
         return CheckOutcome::fail(
             format!("restore failed: {}", e),

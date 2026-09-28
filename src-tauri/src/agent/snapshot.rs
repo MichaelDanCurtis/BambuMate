@@ -1,12 +1,24 @@
 //! Per-turn copies of the Bambu Studio user filament directory, so any agent
 //! turn can be rewound regardless of whether it wrote via bm_* tools or by
 //! editing files directly.
+//!
+//! A rewind restores preset *content*, never cloud-sync state: each restored
+//! preset's JSON comes from the snapshot, and its `.info` is the current one
+//! marked updated (see `profile::sync::write_profile_restored`). Copying the
+//! old `.info` back would drop a cloud id Bambu Studio wrote since (so the
+//! preset uploads again, duplicated) or leave the revert unpushed.
 
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Serialize, Serializer};
+
+use crate::history::ledger;
+use crate::profile::reader::{read_profile, read_profile_metadata};
+use crate::profile::sync;
 
 pub const KEEP_TURNS: usize = 50;
 
@@ -51,6 +63,44 @@ fn profile_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+/// The only raw copy in this module. It fills the snapshot store, and puts
+/// back snapshot files that are not parseable presets (an orphan `.info`, a
+/// broken `.json`) exactly as before. Presets never come back through here.
+fn copy_verbatim(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::copy(src, dest).map(|_| ())
+}
+
+fn has_ext(p: &Path, ext: &str) -> bool {
+    p.extension().and_then(|e| e.to_str()) == Some(ext)
+}
+
+/// File names of the snapshot's `.json` files that parse as presets. Their
+/// `.info` files are reconciled, never copied back or deleted.
+fn snapshot_presets(snap_files: &[PathBuf]) -> HashSet<OsString> {
+    snap_files
+        .iter()
+        .filter(|p| has_ext(p, "json") && read_profile(p).is_ok())
+        .filter_map(|p| p.file_name().map(|n| n.to_os_string()))
+        .collect()
+}
+
+/// For an `.info` file, whether its preset's `.json` is one of `presets`.
+fn info_of_preset(p: &Path, presets: &HashSet<OsString>) -> bool {
+    has_ext(p, "info")
+        && p.with_extension("json")
+            .file_name()
+            .is_some_and(|n| presets.contains(n))
+}
+
+/// Same content, where "missing" equals "missing".
+fn same_content(a: &Path, b: &Path) -> io::Result<bool> {
+    match (a.exists(), b.exists()) {
+        (true, true) => Ok(fs::read(a)? == fs::read(b)?),
+        (false, false) => Ok(true),
+        _ => Ok(false),
+    }
 }
 
 fn turn_number(p: &Path) -> Option<u32> {
@@ -101,7 +151,7 @@ impl Snapshots {
         };
         for src in files {
             if let Some(name) = src.file_name() {
-                if let Err(e) = fs::copy(&src, dest.join(name)) {
+                if let Err(e) = copy_verbatim(&src, &dest.join(name)) {
                     let _ = fs::remove_dir_all(&dest);
                     return Err(e);
                 }
@@ -140,7 +190,7 @@ impl Snapshots {
         let copied = profile_files(profile_dir).and_then(|files| {
             for src in files {
                 if let Some(name) = src.file_name() {
-                    fs::copy(&src, dest.join(name))?;
+                    copy_verbatim(&src, &dest.join(name))?;
                 }
             }
             Ok(())
@@ -155,7 +205,9 @@ impl Snapshots {
     }
 
     /// The files `restore(session, seq, profile_dir)` would delete or
-    /// overwrite, sorted. Files it would only recreate are not listed.
+    /// overwrite, sorted. Files it would only recreate are not listed. A
+    /// preset's `.info` that the snapshot lacks is kept and updated, so it is
+    /// listed under `overwrite`, not `delete`.
     pub fn rewind_plan(
         &self,
         session: &str,
@@ -163,11 +215,16 @@ impl Snapshots {
         profile_dir: &Path,
     ) -> io::Result<RewindPlan> {
         let snap = self.existing_turn_dir(session, seq)?;
+        let presets = snapshot_presets(&profile_files(&snap)?);
         let mut plan = RewindPlan::default();
         for current in profile_files(profile_dir)? {
             let saved = snap.join(current.file_name().unwrap());
             if !saved.exists() {
-                plan.delete.push(current);
+                if info_of_preset(&current, &presets) {
+                    plan.overwrite.push(current);
+                } else {
+                    plan.delete.push(current);
+                }
             } else if fs::read(&saved)? != fs::read(&current)? {
                 plan.overwrite.push(current);
             }
@@ -177,19 +234,70 @@ impl Snapshots {
         Ok(plan)
     }
 
-    pub fn restore(&self, session: &str, seq: u32, profile_dir: &Path) -> io::Result<()> {
+    /// Puts the profile folder back to turn `seq`'s snapshot. `ledger_db` is
+    /// the history database holding the ledger of presets written new.
+    ///
+    /// - Files the snapshot lacks are deleted, and a deleted `.json` is
+    ///   forgotten from the ledger. The exception is the `.info` of a preset
+    ///   the snapshot has: it is kept and reconciled below.
+    /// - A snapshot preset whose `.json` or `.info` differs from the folder is
+    ///   restored with `sync::write_profile_restored`: its JSON from the
+    ///   snapshot, its `.info` the current one (else the snapshot's) marked
+    ///   updated, or a new one. A preset now new to Bambu Studio is recorded
+    ///   in the ledger. Unchanged presets are not touched, so a rewind never
+    ///   marks every preset for upload.
+    /// - Other snapshot files (not parseable presets) are copied back as-is.
+    pub fn restore(
+        &self,
+        session: &str,
+        seq: u32,
+        profile_dir: &Path,
+        ledger_db: &Path,
+    ) -> io::Result<()> {
         let snap = self.existing_turn_dir(session, seq)?;
+        let snap_files = profile_files(&snap)?;
+        let presets = snapshot_presets(&snap_files);
+
         for current in profile_files(profile_dir)? {
             let name = current.file_name().unwrap();
-            if !snap.join(name).exists() {
-                fs::remove_file(&current)?;
+            if snap.join(name).exists() || info_of_preset(&current, &presets) {
+                continue;
+            }
+            // The key is the canonical path, so take it while the file exists.
+            let key = has_ext(&current, "json").then(|| ledger::ledger_key(&current));
+            fs::remove_file(&current)?;
+            if let Some(key) = key {
+                ledger::forget_preset_at(ledger_db, &key);
             }
         }
-        for saved in profile_files(&snap)? {
+
+        for saved in snap_files {
             let name = saved.file_name().unwrap();
-            fs::copy(&saved, profile_dir.join(name))?;
+            let target = profile_dir.join(name);
+            if presets.contains(name) {
+                let unchanged = same_content(&saved, &target)?
+                    && same_content(
+                        &saved.with_extension("info"),
+                        &target.with_extension("info"),
+                    )?;
+                if unchanged {
+                    continue;
+                }
+                let profile = read_profile(&saved).map_err(io::Error::other)?;
+                let snapshot_meta = read_profile_metadata(&saved).ok().flatten();
+                let outcome = sync::write_profile_restored(&profile, &target, snapshot_meta)
+                    .map_err(io::Error::other)?;
+                ledger::note_new_preset_write_at(ledger_db, &outcome, &target);
+            } else if !info_of_preset(&saved, &presets) {
+                copy_verbatim(&saved, &target)?;
+            }
         }
         Ok(())
+    }
+
+    /// Whether turn `seq` has a snapshot to compare against.
+    pub fn has_turn(&self, session: &str, seq: u32) -> bool {
+        self.turn_dir(session, seq).is_dir()
     }
 
     pub fn changed_since(
@@ -263,6 +371,14 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn ledger_db(root: &tempfile::TempDir) -> PathBuf {
+        root.path().join("history.db")
+    }
+
+    fn json_of(p: &Path) -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap()
+    }
+
     fn setup() -> (tempfile::TempDir, tempfile::TempDir, Snapshots) {
         let profiles = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -291,11 +407,13 @@ mod tests {
         fs::write(profiles.path().join("B.json"), "{\"name\":\"B\"}").unwrap();
         fs::remove_file(profiles.path().join("A.info")).unwrap();
 
-        snaps.restore("s1", 1, profiles.path()).unwrap();
+        snaps
+            .restore("s1", 1, profiles.path(), &ledger_db(&_root))
+            .unwrap();
 
         assert_eq!(
-            fs::read_to_string(profiles.path().join("A.json")).unwrap(),
-            "{\"name\":\"A\"}"
+            json_of(&profiles.path().join("A.json")),
+            serde_json::json!({"name": "A"})
         );
         assert!(profiles.path().join("A.info").exists());
         assert!(!profiles.path().join("B.json").exists());
@@ -417,7 +535,9 @@ mod tests {
     #[test]
     fn restore_of_unknown_turn_is_an_error() {
         let (profiles, _root, snaps) = setup();
-        assert!(snaps.restore("s1", 9, profiles.path()).is_err());
+        assert!(snaps
+            .restore("s1", 9, profiles.path(), &ledger_db(&_root))
+            .is_err());
     }
 
     #[test]
@@ -465,7 +585,9 @@ mod tests {
             "a partial snapshot dir must not be left behind"
         );
         assert!(
-            snaps.restore("s1", 7, profiles.path()).is_err(),
+            snaps
+                .restore("s1", 7, profiles.path(), &ledger_db(&_root))
+                .is_err(),
             "restore of a never-completed snapshot must be NotFound, not a silent wipe"
         );
     }
@@ -496,5 +618,190 @@ mod tests {
             "an empty turn dir must not be left behind when create_dir_all \
              succeeded but listing the profile dir afterward failed"
         );
+    }
+
+    // --- Rewind restores preset content, never cloud-sync state. ---------
+
+    use crate::history::ledger::{ledger_key, load_ledger_at, record_new_preset_at};
+    use crate::profile::reader::read_profile_metadata;
+    use crate::profile::ProfileMetadata;
+
+    /// `<tmp>/BambuStudio/user/1881310893/filament/base`, like the real one.
+    fn user_folder(tmp: &tempfile::TempDir) -> PathBuf {
+        let dir = tmp.path().join("BambuStudio/user/1881310893/filament/base");
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn info(setting_id: &str, sync_info: &str) -> String {
+        ProfileMetadata {
+            sync_info: sync_info.into(),
+            user_id: "1881310893".into(),
+            setting_id: setting_id.into(),
+            base_id: String::new(),
+            updated_time: 1_700_000_000,
+        }
+        .to_info_string()
+    }
+
+    #[test]
+    fn rewind_after_the_cloud_assigned_an_id_keeps_that_id_and_marks_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = user_folder(&tmp);
+        let snaps = Snapshots::new(root.path().join("snaps"));
+        // Installed by BambuMate: new, so no setting_id yet.
+        let json = dir.join("Acme PLA.json");
+        fs::write(&json, r#"{"name":"Acme PLA","inherits":""}"#).unwrap();
+        fs::write(json.with_extension("info"), info("", "")).unwrap();
+        snaps.take("s1", 1, &dir).unwrap();
+        // Bambu Studio uploads it and writes back the cloud id.
+        fs::write(json.with_extension("info"), info("PFUS0123456789abcd", "")).unwrap();
+
+        snaps.restore("s1", 1, &dir, &ledger_db(&root)).unwrap();
+
+        let meta = read_profile_metadata(&json).unwrap().unwrap();
+        assert_eq!(
+            meta.setting_id, "PFUS0123456789abcd",
+            "not re-uploaded as new"
+        );
+        assert_eq!(meta.sync_info, "update");
+        assert!(meta.updated_time > 1_700_000_000);
+        assert!(
+            load_ledger_at(&ledger_db(&root)).is_empty(),
+            "kept a cloud id: nothing new to ledger"
+        );
+    }
+
+    #[test]
+    fn rewind_of_an_edited_synced_preset_reverts_the_json_and_marks_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = user_folder(&tmp);
+        let snaps = Snapshots::new(root.path().join("snaps"));
+        let json = dir.join("Acme PLA.json");
+        fs::write(&json, r#"{"name":"Acme PLA","nozzle_temperature":["215"]}"#).unwrap();
+        fs::write(json.with_extension("info"), info("PFUS0123456789abcd", "")).unwrap();
+        // An untouched synced preset, which the rewind must leave alone.
+        let other = dir.join("Other PLA.json");
+        fs::write(&other, r#"{"name":"Other PLA"}"#).unwrap();
+        fs::write(other.with_extension("info"), info("PFUS00000000000009", "")).unwrap();
+        let other_info = fs::read(other.with_extension("info")).unwrap();
+        snaps.take("s1", 1, &dir).unwrap();
+        // The agent edits the preset, and Bambu Studio has since pushed the
+        // edit, leaving the .info as it was.
+        fs::write(&json, r#"{"name":"Acme PLA","nozzle_temperature":["230"]}"#).unwrap();
+
+        snaps.restore("s1", 1, &dir, &ledger_db(&root)).unwrap();
+
+        assert_eq!(
+            json_of(&json),
+            serde_json::json!({"name": "Acme PLA", "nozzle_temperature": ["215"]})
+        );
+        let meta = read_profile_metadata(&json).unwrap().unwrap();
+        assert_eq!(meta.setting_id, "PFUS0123456789abcd");
+        assert_eq!(meta.sync_info, "update", "the revert must be pushed");
+        assert_eq!(
+            fs::read(other.with_extension("info")).unwrap(),
+            other_info,
+            "an unchanged preset is not marked for upload"
+        );
+    }
+
+    #[test]
+    fn rewind_keeps_a_hold_and_uses_the_snapshot_info_when_the_current_one_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = user_folder(&tmp);
+        let snaps = Snapshots::new(root.path().join("snaps"));
+        let held = dir.join("Held PLA.json");
+        fs::write(&held, r#"{"name":"Held PLA","nozzle_temperature":["215"]}"#).unwrap();
+        fs::write(held.with_extension("info"), info("PFUS00000000000001", "")).unwrap();
+        let gone = dir.join("Gone PLA.json");
+        fs::write(&gone, r#"{"name":"Gone PLA"}"#).unwrap();
+        fs::write(gone.with_extension("info"), info("PFUS00000000000002", "")).unwrap();
+        snaps.take("s1", 1, &dir).unwrap();
+        fs::write(&held, r#"{"name":"Held PLA","nozzle_temperature":["230"]}"#).unwrap();
+        fs::write(
+            held.with_extension("info"),
+            info("PFUS00000000000001", "hold"),
+        )
+        .unwrap();
+        fs::remove_file(&gone).unwrap();
+        fs::remove_file(gone.with_extension("info")).unwrap();
+
+        snaps.restore("s1", 1, &dir, &ledger_db(&root)).unwrap();
+
+        assert_eq!(
+            read_profile_metadata(&held).unwrap().unwrap().sync_info,
+            "hold"
+        );
+        let meta = read_profile_metadata(&gone).unwrap().unwrap();
+        assert_eq!(meta.setting_id, "PFUS00000000000002");
+        assert_eq!(meta.sync_info, "update");
+    }
+
+    #[test]
+    fn rewind_with_no_info_anywhere_writes_the_preset_new_and_ledgers_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = user_folder(&tmp);
+        let snaps = Snapshots::new(root.path().join("snaps"));
+        let json = dir.join("Acme PLA.json");
+        fs::write(&json, r#"{"name":"Acme PLA"}"#).unwrap();
+        snaps.take("s1", 1, &dir).unwrap();
+        fs::remove_file(&json).unwrap();
+
+        snaps.restore("s1", 1, &dir, &ledger_db(&root)).unwrap();
+
+        let meta = read_profile_metadata(&json).unwrap().unwrap();
+        assert_eq!(
+            (meta.setting_id.as_str(), meta.sync_info.as_str()),
+            ("", "")
+        );
+        assert!(load_ledger_at(&ledger_db(&root)).contains(&ledger_key(&json)));
+    }
+
+    #[test]
+    fn rewind_removes_a_preset_created_after_the_snapshot_and_forgets_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = user_folder(&tmp);
+        let snaps = Snapshots::new(root.path().join("snaps"));
+        fs::write(dir.join("Acme PLA.json"), r#"{"name":"Acme PLA"}"#).unwrap();
+        snaps.take("s1", 1, &dir).unwrap();
+        // The agent installs a new preset, which BambuMate ledgers.
+        let later = dir.join("Later PLA.json");
+        fs::write(&later, r#"{"name":"Later PLA"}"#).unwrap();
+        fs::write(later.with_extension("info"), info("", "")).unwrap();
+        record_new_preset_at(&ledger_db(&root), &later);
+        let key = ledger_key(&later);
+        assert!(load_ledger_at(&ledger_db(&root)).contains(&key));
+
+        snaps.restore("s1", 1, &dir, &ledger_db(&root)).unwrap();
+
+        assert!(!later.exists());
+        assert!(!later.with_extension("info").exists());
+        assert!(
+            !load_ledger_at(&ledger_db(&root)).contains(&key),
+            "a removed preset is forgotten"
+        );
+    }
+
+    #[test]
+    fn rewind_plan_lists_a_kept_preset_info_as_overwritten_not_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = user_folder(&tmp);
+        let snaps = Snapshots::new(root.path().join("snaps"));
+        let json = dir.join("Acme PLA.json");
+        fs::write(&json, r#"{"name":"Acme PLA"}"#).unwrap();
+        snaps.take("s1", 1, &dir).unwrap();
+        fs::write(json.with_extension("info"), info("PFUS0123456789abcd", "")).unwrap();
+
+        let plan = snaps.rewind_plan("s1", 1, &dir).unwrap();
+
+        assert!(plan.delete.is_empty(), "{plan:?}");
+        assert_eq!(plan.overwrite, vec![json.with_extension("info")]);
     }
 }

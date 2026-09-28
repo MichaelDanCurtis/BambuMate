@@ -59,8 +59,11 @@ pub fn write_profile_metadata_atomic(metadata: &ProfileMetadata, target_path: &P
 /// Write a profile and its companion metadata file atomically.
 ///
 /// The metadata file path is derived from `json_path` by changing the
-/// extension to `.info`. If the metadata write fails, the JSON file
-/// is kept (a valid profile with stale metadata is better than no profile).
+/// extension to `.info`. The JSON is written first. If the metadata write
+/// then fails, the JSON is kept (a valid profile with stale metadata is
+/// better than no profile) but the failure is returned as an error: the
+/// `.info` decides whether Bambu Studio uploads the preset, so callers must
+/// not report success, or record the preset as written new, without it.
 pub fn write_profile_with_metadata(
     profile: &FilamentProfile,
     json_path: &Path,
@@ -69,18 +72,17 @@ pub fn write_profile_with_metadata(
     // Write the profile JSON first
     write_profile_atomic(profile, json_path)?;
 
-    // Compute .info path
     let info_path = json_path.with_extension("info");
-
-    // Write metadata -- log warning on failure but don't rollback the JSON
-    if let Err(e) = write_profile_metadata_atomic(metadata, &info_path) {
+    write_profile_metadata_atomic(metadata, &info_path).map_err(|e| {
         warn!(
-            "Failed to write metadata to {:?}: {}. Profile JSON was written successfully.",
+            "Failed to write metadata to {:?}: {}. Profile JSON was written.",
             info_path, e
         );
-    }
-
-    Ok(())
+        e.context(format!(
+            "profile JSON was written, but its .info could not be ({})",
+            info_path.display()
+        ))
+    })
 }
 
 /// Create a timestamped backup of a profile before modification.
@@ -116,12 +118,16 @@ pub fn backup_profile(profile_path: &Path) -> Result<PathBuf> {
 /// Reads the backup profile and writes it to the target profile path. A
 /// revert is an edit, so it goes through `sync::write_profile_edit`, which
 /// marks the preset for upload. That covers the history revert, the agent's
-/// `bm_rollback` and its auto-restore after a rejected write.
-pub fn restore_from_backup(backup_path: &Path, profile_path: &Path) -> Result<()> {
+/// `bm_rollback` and its auto-restore after a rejected write. The outcome is
+/// returned for the caller to pass to `history::ledger::note_new_preset_write`.
+pub fn restore_from_backup(
+    backup_path: &Path,
+    profile_path: &Path,
+) -> Result<super::sync::NewPresetWrite> {
     let backup_profile = super::reader::read_profile(backup_path)?;
-    super::sync::write_profile_edit(&backup_profile, profile_path)?;
+    let outcome = super::sync::write_profile_edit(&backup_profile, profile_path)?;
     info!("Restored profile from {:?}", backup_path);
-    Ok(())
+    Ok(outcome)
 }
 
 /// Register a filament profile name in BambuStudio.conf's "filaments" array.

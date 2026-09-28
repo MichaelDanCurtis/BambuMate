@@ -23,7 +23,14 @@ use crate::profile::sync::NewPresetWrite;
 /// and the diagnostics harness can reach it. Tauri v2's `app_data_dir()` is
 /// `dirs::data_dir()/<bundle identifier>` (see
 /// `diagnostics::checks::app_data_dir`).
+///
+/// `None` in unit tests: code under test that ledgers through the handle-free
+/// helpers (edit commands, agent tools) must never write the developer's real
+/// history database. Tests that check the ledger use the `_at` variants.
 pub fn history_db_path() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
     Some(
         dirs::data_dir()?
             .join("com.bambumate.app")

@@ -59,8 +59,10 @@ pub fn mark_updated(meta: &mut ProfileMetadata);
 
 /// Write the profile JSON and mark its companion .info as updated,
 /// creating a "new" .info when none exists. Every edit path uses this
-/// instead of write_profile_atomic.
-pub fn write_profile_edit(profile: &FilamentProfile, json_path: &Path) -> Result<()>;
+/// instead of write_profile_atomic. Returns `Created` when the result is new
+/// to Bambu Studio (empty setting_id), which the caller records in the
+/// ledger, else `ReplacedExisting`.
+pub fn write_profile_edit(profile: &FilamentProfile, json_path: &Path) -> Result<NewPresetWrite>;
 ```
 
 - `generate_setting_id()` is deleted, along with its test, since nothing should invent IDs any more.
@@ -78,11 +80,11 @@ pub fn write_profile_edit(profile: &FilamentProfile, json_path: &Path) -> Result
 
 A new check with id `bambu.preset_sync`, in the `bambu` category.
 
-**Candidates** are user filament presets that have a `.info` with a non-empty `setting_id` and an empty `sync_info`, and that also meet one of these conditions:
-- **confirmed** (made-up id, certainly never synced): the `setting_id` starts with `BambuMate_`. Older builds of duplicate wrote these, and the cloud never issues that prefix;
-- **signature** (probably ours): `inherits` is empty and `base_id` is empty. That is BambuMate's fully flattened output. Presets created in Bambu Studio inherit from a system preset and carry a `base_id`.
+**Candidates** are user filament presets that have a `.info` with a non-empty `setting_id`, and that also meet one of these conditions:
+- **confirmed** (made-up id, certainly never synced): the `setting_id` starts with `BambuMate_` and `sync_info` is empty. Older builds of duplicate wrote these, and the cloud never issues that prefix;
+- **signature** (probably ours): `inherits` is empty, `base_id` is empty, and `sync_info` is empty, `update` or `hold`. That is BambuMate's fully flattened output. Presets created in Bambu Studio inherit from a system preset and carry a `base_id`. `update` and `hold` are included because older builds invented `PFUS…` ids for generated presets: once edited such a preset is `update`, and Bambu Studio puts it on `hold` when its push to the unknown id fails, so it is stuck either way.
 
-Presets recorded in the ledger are excluded.
+Presets recorded in the ledger are excluded, whatever their `sync_info`. Signature candidates start unticked, so the user decides.
 
 The check reports:
 - **Pass:** "All BambuMate presets are set to sync."
@@ -110,12 +112,17 @@ The check reports:
 
 - The agent tool that writes profiles gets the edit behaviour automatically, through `write_profile_edit`.
 - No new agent tools. The repair needs a human choice.
+- The agent keeps full file access; BambuMate reconciles after it acts:
+  - **Rewind** restores preset content, never sync state. For each restored preset only the JSON comes from the snapshot; the current `.info` is marked updated (`sync::write_profile_restored`), falling back to the snapshot's `.info`, then to a new one that is ledgered. A file the rewind deletes is forgotten from the ledger. Unchanged presets are not touched.
+  - **Raw edits** (the Claude Agent's or Codex's own Edit/Write tools) are reconciled at turn end: a preset `.json` that changed in the turn while its `.info` did not gets `sync::mark_edited_elsewhere` (marked updated, or a new ledgered `.info` inside a `user/<id>/filament/` folder). An `.info` the agent wrote itself is left alone.
+  - The system prompt tells the agent to change presets only with the `bm_*` profile tools and never to touch `.info` files.
 
 ## Error handling
 
 - A `.info` that is missing or can't be parsed on the edit path means a new `.info` is written with `metadata_for_new`, and a warning is logged.
 - Repair skips non-candidates, missing files and files outside the user filament directory, and reports each in `skipped` with a reason. Refusing because Bambu Studio is running is a single error for the whole call.
 - Writes stay atomic, as today: temp file then rename, with the JSON written before `.info`.
+- A failed `.info` write is an error, not a warning. The JSON stays written, but the caller reports the failure and does not ledger the preset.
 
 ## Testing
 
@@ -124,10 +131,11 @@ The check reports:
 - `mark_updated` sets `update` and bumps the time, and leaves an empty-`setting_id` preset as new.
 - `write_profile_edit` works whether a `.info` exists or not.
 - Each creation and edit command path produces the expected `.info`. Existing tests move from `generate_setting_id`.
-- Candidate detection covers five fixtures, of which only the first two are candidates:
+- Candidate detection covers these fixtures, of which only the first four are candidates:
   - a `BambuMate_` id (confirmed);
   - a signature match;
-  - a signature-shaped preset recorded in the ledger;
+  - signature matches with `sync_info` `update` and `hold`;
+  - signature-shaped presets recorded in the ledger, with `sync_info` empty, `update` and `hold`;
   - a genuinely synced Bambu Studio preset, with `inherits` set, `base_id` set and `sync_info` empty;
   - a new preset with an empty `setting_id`.
 - Repair rewrites only selected candidates, respects the directory guard, and refuses while Bambu Studio is running.
