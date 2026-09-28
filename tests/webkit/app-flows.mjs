@@ -21,7 +21,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { extname, join, resolve } from "node:path";
-import { FIXTURES, GIF_1X1, makePng } from "./fixtures.mjs";
+import { FIXTURES, GIF_1X1, UNSYNCED_CONFIRMED_PATH, makePng } from "./fixtures.mjs";
 
 const repoRoot = resolve(process.argv[2] ?? "../..");
 const distDir = join(repoRoot, "dist");
@@ -513,6 +513,45 @@ async function driveApp(browserType, engine, baseUrl) {
     const remedy = await page.locator(".diagnostics-remedy").count();
     if (remedy < 1) throw new Error("the warned check rendered no remedy");
     return `${pass} pass, ${warn} warn, ${remedy} remedy`;
+  });
+
+  await step(run, page, "preset sync check offers Review and repair", async () => {
+    const button = page.locator('.diagnostics-action[data-action="repair_preset_sync"]');
+    if ((await button.count()) !== 1) throw new Error("no repair action button");
+    const label = (await button.innerText()).trim();
+    if (label !== "Review and repair") throw new Error(`button reads "${label}"`);
+    const row = page.locator(".diagnostics-row-warn", { has: button });
+    const detail = (await row.locator(".diagnostics-detail").innerText()).trim();
+    if (detail !== "2 presets won't sync to Bambu Cloud") throw new Error(`detail reads "${detail}"`);
+    return detail;
+  });
+
+  await step(run, page, "repair panel lists candidates, confirmed ones ticked", async () => {
+    await page.click('.diagnostics-action[data-action="repair_preset_sync"]');
+    await page.waitForSelector(".preset-sync-panel .preset-sync-row", { timeout: 15000 });
+    const ticked = await page
+      .locator(".preset-sync-row input[type=checkbox]")
+      .evaluateAll((els) => els.map((e) => e.checked));
+    if (JSON.stringify(ticked) !== "[true,false]") throw new Error(`ticked ${JSON.stringify(ticked)}`);
+    const note = (await page.locator(".preset-sync-note").innerText()).trim();
+    const expected = "Might already be synced — only tick if it's missing from your printer";
+    if (note !== expected) throw new Error(`note reads "${note}"`);
+    return `${ticked.length} rows`;
+  });
+
+  await step(run, page, "Repair selected sends the ticked paths and reports", async () => {
+    await page.click(".preset-sync-repair");
+    await page.waitForSelector(".preset-sync-result", { timeout: 15000 });
+    const sent = await page.evaluate(() =>
+      window.__ipc.calls.filter((c) => c.cmd === "repair_preset_sync").map((c) => c.args.paths)
+    );
+    if (JSON.stringify(sent) !== JSON.stringify([[UNSYNCED_CONFIRMED_PATH]])) {
+      throw new Error(`sent ${JSON.stringify(sent)}`);
+    }
+    const msg = (await page.locator(".preset-sync-result").innerText()).trim();
+    const expected = "Repaired 1 preset. Open Bambu Studio while signed in to upload them.";
+    if (msg !== expected) throw new Error(`result reads "${msg}"`);
+    return msg;
   });
 
   await page.screenshot({ path: `flow-${engine}-health.png`, fullPage: false });

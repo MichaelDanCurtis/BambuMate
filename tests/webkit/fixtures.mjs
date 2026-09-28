@@ -62,6 +62,14 @@ const CATALOG_ENTRY = {
 const USER_PROFILE_PATH =
   "/Users/runner/Library/Application Support/BambuStudio/user/00000001/filament/Polymaker PolyLite PLA @BBL X1C 0.4 nozzle.json";
 
+// Two presets the Health check reports as not syncing: one with a made-up
+// BambuMate_ id (ticked by default) and one that only matches BambuMate's
+// file shape (unticked).
+export const UNSYNCED_CONFIRMED_PATH =
+  "/Users/runner/Library/Application Support/BambuStudio/user/00000001/filament/base/BambuMate_Old_Copy_18f2a.json";
+const UNSYNCED_SIGNATURE_PATH =
+  "/Users/runner/Library/Application Support/BambuStudio/user/00000001/filament/base/Acme PLA @Bambu Lab X1 Carbon 0.4 nozzle.json";
+
 export const FIXTURES = {
   // -- boot --
   get_preference: null,
@@ -429,6 +437,17 @@ export const FIXTURES = {
         duration_ms: 4,
       },
       {
+        id: "bambu.preset_sync",
+        name: "BambuMate presets are set to sync to Bambu Cloud",
+        category: "bambu",
+        status: "warn",
+        detail: "2 presets won't sync to Bambu Cloud",
+        remedy:
+          "Choose Review and repair, tick the presets missing from your printer, then open Bambu Studio while signed in so it uploads them.",
+        duration_ms: 3,
+        action: { id: "repair_preset_sync", label: "Review and repair" },
+      },
+      {
         id: "network-catalog-reachable",
         name: "Catalog Reachable",
         category: "network",
@@ -438,8 +457,27 @@ export const FIXTURES = {
         duration_ms: 0,
       },
     ],
-    summary: { passed: 1, warned: 1, failed: 0, skipped: 1 },
+    summary: { passed: 1, warned: 2, failed: 0, skipped: 1 },
   },
+
+  list_unsynced_presets: {
+    presets: [
+      {
+        path: UNSYNCED_CONFIRMED_PATH,
+        profile_name: "Old Copy",
+        file_name: "BambuMate_Old_Copy_18f2a.json",
+        source: "confirmed",
+      },
+      {
+        path: UNSYNCED_SIGNATURE_PATH,
+        profile_name: "Acme PLA @Bambu Lab X1 Carbon 0.4 nozzle",
+        file_name: "Acme PLA @Bambu Lab X1 Carbon 0.4 nozzle.json",
+        source: "signature",
+      },
+    ],
+    bambu_studio_running: false,
+  },
+  repair_preset_sync: { repaired: [UNSYNCED_CONFIRMED_PATH], skipped: [] },
 
   // -- settings (/settings) --
   // Option<String>: null is "no key stored", which is a real state and keeps
