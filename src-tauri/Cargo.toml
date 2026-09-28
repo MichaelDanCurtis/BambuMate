@@ -3,6 +3,8 @@ name = "bambumate-tauri"
 version = "0.1.0"
 edition = "2021"
 description = "BambuMate Tauri backend"
+# Two binaries (the app and bambumate-doctor): tells `cargo tauri` which one is the app.
+default-run = "bambumate-tauri"
 
 [dependencies]
 tauri = { version = "2", features = [] }
