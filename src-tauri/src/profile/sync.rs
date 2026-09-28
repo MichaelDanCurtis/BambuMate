@@ -58,16 +58,24 @@ pub fn metadata_for_new(user_id: String) -> ProfileMetadata {
     }
 }
 
-/// Mark an existing preset's metadata as changed so Bambu Studio pushes it:
-/// sync_info = "update", updated_time = now. Keeps setting_id, base_id and
-/// user_id. A preset with an empty setting_id stays "new" (sync_info stays
-/// empty) because "update" needs a cloud id to update. A made-up
-/// `BambuMate_…` id is cleared, which makes the preset new.
+/// Mark an existing preset's metadata as changed, following Bambu Studio's
+/// own rules for what each field means:
+/// - an empty `setting_id` means "new" to Bambu Studio, so `sync_info`
+///   stays empty — "update" needs a cloud id to push to.
+/// - a non-empty `setting_id` gets `sync_info = "update"`, so Bambu Studio
+///   pushes it.
+/// - `sync_info = "hold"` is one of Bambu Studio's own skip states; it is
+///   left untouched so BambuMate never overrides a hold.
+/// - a made-up `BambuMate_…` id is always cleared, which makes the preset
+///   new (subject to the "hold" rule above).
+///
+/// `updated_time` is always bumped to now. `base_id` and `user_id` are
+/// never touched.
 pub fn mark_updated(meta: &mut ProfileMetadata) {
     if is_made_up_setting_id(&meta.setting_id) {
         meta.setting_id.clear();
     }
-    if !meta.setting_id.is_empty() {
+    if meta.sync_info != "hold" && !meta.setting_id.is_empty() {
         meta.sync_info = "update".to_string();
     }
     meta.updated_time = now_secs();
@@ -151,11 +159,17 @@ pub fn write_profile_new(
     json_path: &Path,
     fallback_user_id: &str,
 ) -> Result<NewPresetWrite> {
-    if let Ok(Some(mut existing)) = read_profile_metadata(json_path) {
-        if !existing.setting_id.is_empty() && !is_made_up_setting_id(&existing.setting_id) {
-            mark_updated(&mut existing);
-            write_profile_with_metadata(profile, json_path, &existing)?;
-            return Ok(NewPresetWrite::ReplacedExisting);
+    match read_profile_metadata(json_path) {
+        Ok(Some(mut existing)) => {
+            if !existing.setting_id.is_empty() && !is_made_up_setting_id(&existing.setting_id) {
+                mark_updated(&mut existing);
+                write_profile_with_metadata(profile, json_path, &existing)?;
+                return Ok(NewPresetWrite::ReplacedExisting);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!("Could not read .info for {:?}: {}", json_path, e);
         }
     }
 
@@ -241,6 +255,18 @@ mod tests {
     }
 
     #[test]
+    fn mark_updated_leaves_a_hold_preset_on_hold() {
+        let mut meta = synced_meta();
+        meta.sync_info = "hold".into();
+        mark_updated(&mut meta);
+        assert_eq!(meta.sync_info, "hold");
+        assert_eq!(meta.setting_id, "PFUS0123456789abcd");
+        assert_eq!(meta.base_id, "GFSA04");
+        assert_eq!(meta.user_id, "1881310893");
+        assert!(meta.updated_time > 1_700_000_000);
+    }
+
+    #[test]
     fn user_id_comes_from_the_user_preset_folder() {
         let inside = Path::new("/x/BambuStudio/user/1881310893/filament/base/Acme PLA.json");
         assert_eq!(user_id_from_path(inside).as_deref(), Some("1881310893"));
@@ -274,6 +300,40 @@ mod tests {
         let meta = read_profile_metadata(&json)
             .unwrap()
             .expect(".info written");
+        assert_eq!(meta.setting_id, "");
+        assert_eq!(meta.sync_info, "");
+        assert_eq!(meta.user_id, "1881310893");
+    }
+
+    #[test]
+    fn write_profile_edit_on_a_hold_preset_keeps_it_on_hold() {
+        let tmp = TempDir::new().unwrap();
+        let json = user_preset_dir(&tmp).join("Acme PLA.json");
+        let mut hold_meta = synced_meta();
+        hold_meta.sync_info = "hold".into();
+        write_profile_with_metadata(&profile(), &json, &hold_meta).unwrap();
+
+        write_profile_edit(&profile(), &json).unwrap();
+
+        let meta = read_profile_metadata(&json).unwrap().unwrap();
+        assert_eq!(meta.sync_info, "hold");
+        assert_eq!(meta.setting_id, "PFUS0123456789abcd");
+        assert_eq!(meta.base_id, "GFSA04");
+        assert_eq!(meta.user_id, "1881310893");
+    }
+
+    #[test]
+    fn write_profile_edit_recovers_from_an_unparseable_info_in_a_user_folder() {
+        let tmp = TempDir::new().unwrap();
+        let json = user_preset_dir(&tmp).join("Acme PLA.json");
+        write_profile_atomic(&profile(), &json).unwrap();
+        std::fs::write(json.with_extension("info"), [0xFF, 0xFE, 0xFD, 0xFC]).unwrap();
+
+        write_profile_edit(&profile(), &json).unwrap();
+
+        let meta = read_profile_metadata(&json)
+            .unwrap()
+            .expect(".info rewritten as new");
         assert_eq!(meta.setting_id, "");
         assert_eq!(meta.sync_info, "");
         assert_eq!(meta.user_id, "1881310893");
@@ -346,5 +406,20 @@ mod tests {
         write_profile_new(&profile(), &json, "42").unwrap();
 
         assert_eq!(read_profile_metadata(&json).unwrap().unwrap().user_id, "42");
+    }
+
+    #[test]
+    fn write_profile_new_recovers_from_an_unparseable_info() {
+        let tmp = TempDir::new().unwrap();
+        let json = user_preset_dir(&tmp).join("Acme PLA.json");
+        write_profile_atomic(&profile(), &json).unwrap();
+        std::fs::write(json.with_extension("info"), [0xFF, 0xFE, 0xFD, 0xFC]).unwrap();
+
+        let outcome = write_profile_new(&profile(), &json, "fallback").unwrap();
+
+        assert_eq!(outcome, NewPresetWrite::Created);
+        let meta = read_profile_metadata(&json).unwrap().unwrap();
+        assert_eq!(meta.setting_id, "");
+        assert_eq!(meta.sync_info, "");
     }
 }
