@@ -124,10 +124,10 @@ The check reports:
 - `mark_updated` sets `update` and bumps the time, and leaves an empty-`setting_id` preset as new.
 - `write_profile_edit` works whether a `.info` exists or not.
 - Each creation and edit command path produces the expected `.info`. Existing tests move from `generate_setting_id`.
-- Candidate detection covers four fixtures, of which only the first two are candidates:
+- Candidate detection covers five fixtures, of which only the first two are candidates:
   - a `BambuMate_` id (confirmed);
-  - a preset recorded in the ledger, which must NOT be a candidate;
   - a signature match;
+  - a signature-shaped preset recorded in the ledger;
   - a genuinely synced Bambu Studio preset, with `inherits` set, `base_id` set and `sync_info` empty;
   - a new preset with an empty `setting_id`.
 - Repair rewrites only selected candidates, respects the directory guard, and refuses while Bambu Studio is running.
