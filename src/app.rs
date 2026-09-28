@@ -33,7 +33,7 @@ pub struct UpdateContext {
 
 #[component]
 pub fn App() -> impl IntoView {
-    let (theme, set_theme) = signal(String::from("bambu"));
+    let (theme, set_theme) = signal(String::from("dark"));
     provide_context(ThemeContext { theme, set_theme });
 
     let update_info = RwSignal::new(Option::<UpdateInfo>::None);
