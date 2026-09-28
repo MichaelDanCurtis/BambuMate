@@ -298,8 +298,8 @@ pub async fn apply_recommendations(
 
     let modified = FilamentProfile::from_map(data);
 
-    // 6. Write modified profile atomically
-    crate::profile::writer::write_profile_atomic(&modified, profile_path)
+    // 6. Write modified profile atomically and mark it for upload
+    crate::profile::sync::write_profile_edit(&modified, profile_path)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
 
     // 7. Record apply in history (blocking rusqlite off the async runtime)

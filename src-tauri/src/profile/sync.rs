@@ -422,4 +422,50 @@ mod tests {
         assert_eq!(meta.setting_id, "");
         assert_eq!(meta.sync_info, "");
     }
+
+    /// Structural guard. Outside the low-level writer and this module, no code
+    /// may write a profile without the sync helpers, and nothing may invent a
+    /// setting_id. `diagnostics/checks.rs` is allowed because its scratch
+    /// checks exercise the primitives in a temp directory.
+    #[test]
+    fn no_profile_write_bypasses_the_sync_helpers() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let low_level = [
+            "profile/writer.rs",
+            "profile/sync.rs",
+            "diagnostics/checks.rs",
+        ];
+        let invented_id = concat!("generate_", "setting_id");
+        let mut offenders = Vec::new();
+        for entry in walkdir::WalkDir::new(&src)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&src)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let body = std::fs::read_to_string(path).unwrap();
+            if body.contains(invented_id) {
+                offenders.push(format!("{rel}: {invented_id}"));
+            }
+            if low_level.contains(&rel.as_str()) {
+                continue;
+            }
+            for call in ["write_profile_atomic(", "write_profile_with_metadata("] {
+                if body.contains(call) {
+                    offenders.push(format!("{rel}: {call}"));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "profile writes that bypass profile::sync: {offenders:?}"
+        );
+    }
 }

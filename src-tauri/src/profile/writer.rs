@@ -113,10 +113,13 @@ pub fn backup_profile(profile_path: &Path) -> Result<PathBuf> {
 
 /// Restore a profile from a backup file.
 ///
-/// Reads the backup profile and atomically writes it to the target profile path.
+/// Reads the backup profile and writes it to the target profile path. A
+/// revert is an edit, so it goes through `sync::write_profile_edit`, which
+/// marks the preset for upload. That covers the history revert, the agent's
+/// `bm_rollback` and its auto-restore after a rejected write.
 pub fn restore_from_backup(backup_path: &Path, profile_path: &Path) -> Result<()> {
     let backup_profile = super::reader::read_profile(backup_path)?;
-    write_profile_atomic(&backup_profile, profile_path)?;
+    super::sync::write_profile_edit(&backup_profile, profile_path)?;
     info!("Restored profile from {:?}", backup_path);
     Ok(())
 }
@@ -413,5 +416,38 @@ mod tests {
         let json_slice = strip_md5_checksum(&content);
         let parsed: serde_json::Value = serde_json::from_str(json_slice).unwrap();
         assert_eq!(parsed["filaments"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn restore_from_backup_marks_the_preset_for_upload() {
+        let dir = TempDir::new().unwrap();
+        let base = dir
+            .path()
+            .join("user")
+            .join("1881310893")
+            .join("filament")
+            .join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        let profile_path = create_test_profile_file(&base, "profile.json");
+        let synced = ProfileMetadata {
+            sync_info: String::new(),
+            user_id: "1881310893".into(),
+            setting_id: "PFUS0123456789abcd".into(),
+            base_id: String::new(),
+            updated_time: 1_700_000_000,
+        };
+        write_profile_metadata_atomic(&synced, &profile_path.with_extension("info")).unwrap();
+        let backup_path = backup_profile(&profile_path).unwrap();
+
+        restore_from_backup(&backup_path, &profile_path).unwrap();
+
+        let meta = crate::profile::reader::read_profile_metadata(&profile_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.sync_info, "update",
+            "a revert is an edit Bambu Studio must push"
+        );
+        assert_eq!(meta.setting_id, "PFUS0123456789abcd");
     }
 }

@@ -10,9 +10,9 @@ use crate::profile::inheritance::resolve_inheritance;
 use crate::profile::paths::BambuPaths;
 use crate::profile::reader::{read_profile, read_profile_metadata};
 use crate::profile::registry::ProfileRegistry;
-use crate::profile::sync::write_profile_new;
+use crate::profile::sync::{write_profile_edit, write_profile_new};
 use crate::profile::types::{FilamentProfile, ProfileMetadata};
-use crate::profile::writer::{register_filament_in_conf, write_profile_atomic};
+use crate::profile::writer::register_filament_in_conf;
 
 const DEFAULT_TARGET_PRINTER_LABEL: &str = "Bambu Lab H2C 0.4 nozzle";
 const DEFAULT_TARGET_PRINTER_MODEL: &str = "H2C";
@@ -717,7 +717,7 @@ pub fn update_profile_field(
 
     profile.raw_mut().insert(key.clone(), json_value);
 
-    write_profile_atomic(&profile, file_path)
+    write_profile_edit(&profile, file_path)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
 
     info!("Updated field '{}' in {:?}", key, file_path);
@@ -839,7 +839,7 @@ pub fn save_profile_specs(
     };
     profile.set_string("name", new_name);
 
-    write_profile_atomic(&profile, file_path)
+    write_profile_edit(&profile, file_path)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
 
     info!("Saved edited specs to {:?}", file_path);
