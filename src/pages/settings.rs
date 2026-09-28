@@ -456,7 +456,7 @@ pub fn SettingsPage() -> impl IntoView {
                             <span>"Light"</span>
                                 <span class="theme-preview-badge">"Theme"</span>
                             </span>
-                            <span class="theme-preview-frame theme-preview-frame-light">
+                            <span class="theme-preview-frame theme-preview-frame-light" data-theme="bambu">
                                 <span class="theme-preview-sidebar"></span>
                                 <span class="theme-preview-canvas">
                                     <span class="theme-preview-line short"></span>
@@ -475,7 +475,7 @@ pub fn SettingsPage() -> impl IntoView {
                                 <span>"Dark"</span>
                                 <span class="theme-preview-badge">"Focus"</span>
                             </span>
-                            <span class="theme-preview-frame theme-preview-frame-dark">
+                            <span class="theme-preview-frame theme-preview-frame-dark" data-theme="dark">
                                 <span class="theme-preview-sidebar"></span>
                                 <span class="theme-preview-canvas">
                                     <span class="theme-preview-line short"></span>

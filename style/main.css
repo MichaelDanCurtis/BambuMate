@@ -433,6 +433,11 @@ select.input option {
     font-size: 11px;
 }
 
+/* Each frame carries its own `data-theme`, which re-scopes the `--nd-*`
+   custom properties (defined as attribute selectors in style/tokens.css) to
+   this subtree regardless of the page's active theme. That's what lets the
+   light and dark previews show their own fixed colours side by side, so a
+   single shared rule set below covers both. */
 .theme-preview-frame {
     display: grid;
     grid-template-columns: 54px 1fr;
@@ -440,14 +445,7 @@ select.input option {
     padding: 10px;
     border-radius: 14px;
     min-height: 102px;
-}
-
-.theme-preview-frame-light {
-    background: #eef6fa;
-}
-
-.theme-preview-frame-dark {
-    background: #0b1821;
+    background: var(--nd-black);
 }
 
 .theme-preview-sidebar,
@@ -459,11 +457,8 @@ select.input option {
 
 .theme-preview-sidebar {
     border-radius: 12px;
-    background: #daf1f6;
-}
-
-.theme-preview-frame-dark .theme-preview-sidebar {
-    background: #183244;
+    background: var(--nd-surface);
+    border: 1px solid var(--nd-border-visible);
 }
 
 .theme-preview-canvas {
@@ -472,21 +467,13 @@ select.input option {
     gap: 10px;
     padding: 8px;
     border-radius: 12px;
-    background: #f5fbfd;
-}
-
-.theme-preview-frame-dark .theme-preview-canvas {
-    background: #12222f;
+    background: var(--nd-surface-raised);
 }
 
 .theme-preview-line {
     height: 10px;
     border-radius: 999px;
-    background: #9fcde0;
-}
-
-.theme-preview-frame-dark .theme-preview-line {
-    background: #35566a;
+    background: var(--nd-text-secondary);
 }
 
 .theme-preview-line.short {
@@ -497,7 +484,7 @@ select.input option {
     width: 48%;
     height: 22px;
     border-radius: 999px;
-    background: #0ea5ff;
+    background: var(--nd-interactive);
 }
 
 /* ===== API Key Form ===== */
