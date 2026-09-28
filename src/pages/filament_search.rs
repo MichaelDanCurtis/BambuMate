@@ -557,7 +557,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 {move || if filament_ai_enabled.get() {
                     "Type to search from our catalog, or use AI to find any filament."
                 } else {
-                    "🌐 Web-only mode — specs pulled from manufacturer sites. Enable AI in Settings for AI-powered search."
+                    "Web-only mode — specs pulled from manufacturer sites. Enable AI in Settings for AI-powered search."
                 }}
             </p>
 
@@ -659,7 +659,6 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                         class="suggestion-item"
                                         on:mousedown=move |_| select_suggestion(entry_click.clone())
                                     >
-                                        <span class="suggestion-icon">"🔍"</span>
                                         <span class="suggestion-text">
                                             <span class="suggestion-brand">{entry.brand.clone()}</span>
                                             <span class="suggestion-name">{entry.name.clone()}</span>
@@ -682,7 +681,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                 // Web-only mode: no AI options, just a hint
                                 view! {
                                     <div class="specificity-hint">
-                                        "🌐 Web-only mode — select from catalog above or paste a URL"
+                                        "Web-only mode — select from catalog above or paste a URL"
                                     </div>
                                 }.into_any()
                             } else if show_ai_web {
@@ -692,7 +691,6 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                         class="ai-fallback-item"
                                         on:mousedown=move |_| do_ai_generate()
                                     >
-                                        <span class="ai-fallback-icon">"🤖"</span>
                                         <span class="ai-fallback-text">
                                             "Ask AI about \""
                                             {move || search_query.get()}
@@ -704,7 +702,6 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                         class="ai-fallback-item"
                                         on:mousedown=move |_| do_web_search()
                                     >
-                                        <span class="ai-fallback-icon">"🌐"</span>
                                         <span class="ai-fallback-text">
                                             "Search web for specs"
                                         </span>
@@ -729,7 +726,6 @@ pub fn FilamentSearchPage() -> impl IntoView {
                                 set_show_url_input.set(true);
                             }
                         >
-                            <span class="ai-fallback-icon">"🔗"</span>
                             <span class="ai-fallback-text">"Paste a product URL"</span>
                             <span class="ai-fallback-hint">"Direct extraction"</span>
                         </div>

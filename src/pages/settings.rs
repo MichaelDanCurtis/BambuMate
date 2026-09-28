@@ -387,7 +387,6 @@ pub fn SettingsPage() -> impl IntoView {
                             class={move || if filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
                             on:click=move |_| set_filament_ai_mode(true)
                         >
-                            <div class="wizard-mode-icon">"🤖"</div>
                             <h4>"Use AI Provider (Recommended)"</h4>
                             <p>
                                 "Use your configured AI provider for filament spec extraction and Print Analysis."
@@ -404,7 +403,6 @@ pub fn SettingsPage() -> impl IntoView {
                             class={move || if !filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
                             on:click=move |_| set_filament_ai_mode(false)
                         >
-                            <div class="wizard-mode-icon">"🌐"</div>
                             <h4>"Use Manufacturer Specs Only"</h4>
                             <p>
                                 "Use manufacturer sites and SpoolScout without any AI provider."
@@ -577,7 +575,7 @@ pub fn SettingsPage() -> impl IntoView {
                     <label for="ai-model">"Model"</label>
                     <Show when=move || !vision_available.get() && !models_loading.get() && models_error.get().is_none()>
                         <div class="status-text status-error" style="margin-bottom: 0.5rem;">
-                            <strong>"⚠ No vision-capable model on this account. "</strong>
+                            <strong>"No vision-capable model on this account. "</strong>
                             "Print analysis and defect detection are disabled. "
                             "Enable \"Show all models\" to pick a text-only model for filament search, or switch providers."
                         </div>
@@ -666,7 +664,7 @@ pub fn SettingsPage() -> impl IntoView {
                                             m.id.clone()
                                         };
                                         let mut display = if m.recommended {
-                                            format!("⭐ Recommended — {}", display_base)
+                                            format!("Recommended — {}", display_base)
                                         } else {
                                             display_base
                                         };

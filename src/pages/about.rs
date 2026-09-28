@@ -78,7 +78,7 @@ pub fn AboutPage() -> impl IntoView {
                             view! {
                                 <div class="about-update-available">
                                     <div class="about-update-header">
-                                        <span class="about-update-badge">"✨ Update Available"</span>
+                                        <span class="about-update-badge">"Update Available"</span>
                                         <span class="about-version-value">
                                             {format!("v{}", info.latest_version)}
                                         </span>
@@ -102,8 +102,7 @@ pub fn AboutPage() -> impl IntoView {
                         } else {
                             view! {
                                 <div class="about-up-to-date">
-                                    <span class="about-check-icon">"✅"</span>
-                                    " You're up to date!"
+                                    "You're up to date!"
                                 </div>
                             }.into_any()
                         }

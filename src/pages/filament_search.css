@@ -116,14 +116,6 @@
     background: var(--bg-primary);
 }
 
-.suggestion-icon {
-    width: 20px;
-    height: 20px;
-    margin-right: 12px;
-    color: var(--text-secondary);
-    flex-shrink: 0;
-}
-
 .suggestion-text {
     flex: 1;
     display: flex;
@@ -168,12 +160,6 @@
 
 .ai-fallback-item:hover {
     background: var(--nd-surface-raised);
-}
-
-/* Holds an emoji, which the Nothing rules forbid as UI; the row's text
-   carries the meaning on its own. */
-.ai-fallback-icon {
-    display: none;
 }
 
 .ai-fallback-text {
@@ -571,13 +557,16 @@
 
 .spec-fields-grid {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    /* minmax(0, …): a bare 1fr track can't shrink below its content, which
+       pushed the right column past the Profiles detail panel at 900px. */
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.5rem;
 }
 
 .spec-field {
     display: flex;
     flex-direction: column;
+    min-width: 0;
     gap: 0.125rem;
 }
 
@@ -586,8 +575,12 @@
 }
 
 .spec-field-label {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-text-secondary);
 }
 
 .spec-field-input-wrapper {

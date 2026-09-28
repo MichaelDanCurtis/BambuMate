@@ -135,6 +135,8 @@ body {
     border-radius: 14px;
     overflow: hidden;
     box-shadow: var(--shadow-brand);
+    /* The SVG tile fills with currentColor (src/components/branding.rs). */
+    color: var(--nd-signal);
 }
 
 .brand-mark-svg {
@@ -1440,13 +1442,6 @@ select.input option {
     box-shadow: var(--shadow-focus-strong);
 }
 
-/* These wrappers hold emoji, which the Nothing rules forbid as UI. The
-   cards read fine on their headings alone. */
-.wizard-mode-icon,
-.about-check-icon {
-    display: none;
-}
-
 .wizard-mode-card h4 {
     margin: 0 0 8px;
     font-size: 15px;
@@ -1497,10 +1492,6 @@ select.input option {
     text-align: center;
     padding: 60px 40px;
     gap: 16px;
-}
-
-.ai-required-lock {
-    font-size: 48px;
 }
 
 .ai-required-notice h3 {
