@@ -19,7 +19,7 @@ The drawer's `.nd` tokens become the app-wide foundation. Pages keep their curre
 
 | Topic | Decision |
 |---|---|
-| Direction | **C: dark, with Bambu green as the signal colour.** Green marks active and good states, red (`#D71921`) marks problems, and amber marks warnings. |
+| Direction | **C: dark, with Bambu green as the signal colour.** Green marks active and good states, red marks problems, and amber marks warnings. |
 | Default mode | Dark for new installs. Light stays available. An existing saved theme is kept. |
 | Navigation | Icon rail by default. It expands into the full labeled sidebar on hover or keyboard focus, as an overlay. |
 | Components | **Soft:** pill buttons, toggles and segments; round cards; a faint dot-grid texture on stat and hero cards. |
@@ -36,17 +36,17 @@ Tokens live in `style/tokens.css`. They move from the `.nd` scope to `:root`. Th
 | `--nd-surface-raised` | `#1A1A1A` | `#F0F0F0` |
 | `--nd-border` | `#222222` | `#E8E8E8` |
 | `--nd-border-visible` | `#333333` | `#CCCCCC` |
-| `--nd-text-disabled` | `#666666` | `#999999` |
+| `--nd-text-disabled` | `#666666` | `#8A8A8A` |
 | `--nd-text-secondary` | `#999999` | `#666666` |
 | `--nd-text-primary` | `#E8E8E8` | `#1A1A1A` |
 | `--nd-text-display` | `#FFFFFF` | `#000000` |
-| `--nd-signal` (new: active, good, on) | `#00AE42` | `#00873A` |
-| `--nd-accent` / error | `#D71921` | `#D71921` |
-| `--nd-warning` | `#D4A843` | `#9A7412` |
+| `--nd-signal` (new: active, good, on) | `#00AE42` | `#007A34` |
+| `--nd-accent` / error | `#F0414A` | `#D71921` |
+| `--nd-warning` | `#D4A843` | `#7D5E0E` |
 | `--nd-success` | = `--nd-signal` | = `--nd-signal` |
 | `--nd-interactive` (links) | `#5B9BF6` | `#007AFF` |
 
-On a light background, green and amber are darkened so they reach at least 4.5:1 contrast as text.
+Every text token was checked: at least 4.5:1 on page and surface (3:1 for disabled). Dark red is lightened to `#F0414A` (`#D71921` on black is 4.05:1). Light green, amber and disabled grey are darkened.
 
 The **theme attribute** stays `data-theme` on `<html>` (`src/theme.rs`):
 - `dark` selects the dark set;
