@@ -44,6 +44,7 @@
     --nd-accent: #f0414a;
     --nd-interactive: #5b9bf6;
     --nd-dot: #1f1f1f;
+    --nd-accent-subtle: rgba(240, 65, 74, 0.15);
 }
 
 [data-theme="bambu"],
@@ -63,10 +64,10 @@
     --nd-accent: #d71921;
     --nd-interactive: #007aff;
     --nd-dot: #e4e4e4;
+    --nd-accent-subtle: rgba(215, 25, 33, 0.15);
 }
 
 :root {
-    --nd-accent-subtle: rgba(215, 25, 33, 0.15);
     --nd-success: var(--nd-signal);
 
     --nd-space-xs: 4px;

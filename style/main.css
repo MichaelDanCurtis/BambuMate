@@ -275,7 +275,7 @@ body {
 }
 
 .btn-ghost:disabled {
-    opacity: 0.5;
+    opacity: 0.4;
     cursor: not-allowed;
 }
 
@@ -904,7 +904,7 @@ select.input option {
     height: 12px;
     border-radius: var(--nd-radius-pill);
     background: var(--nd-text-disabled);
-    transition: left 150ms var(--nd-ease), background-color 150ms var(--nd-ease);
+    transition: background-color 150ms var(--nd-ease);
 }
 
 .toggle-input:checked {
