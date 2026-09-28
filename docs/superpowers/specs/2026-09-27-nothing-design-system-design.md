@@ -118,7 +118,7 @@ The sidebar is rebuilt in `src/components/sidebar.rs` and its CSS.
 - 220px wide. It overlays the page content; it does not push it.
 - Shows the "BAMBUMATE" wordmark in Doto and Space Mono caps labels beside the icons.
 - It opens after a 150ms hover delay, or immediately on `:focus-within` for keyboard users. It closes when the pointer leaves or focus moves out.
-- It is implemented with CSS (`:hover` with a transition delay, and `:focus-within`) plus `aria-expanded` kept in sync for assistive tech.
+- It is implemented in CSS only (`:hover` with a transition delay, and `:focus-within`). The labels are always in the DOM, so assistive tech reads them in either state and no `aria-expanded` sync is needed.
 
 **States:**
 - The active route shows the icon in `--nd-text-display` and a 2px `--nd-signal` tick on the rail edge.
@@ -146,7 +146,7 @@ The sidebar is rebuilt in `src/components/sidebar.rs` and its CSS.
 - Tab focus into the rail expands it;
 - the active route shows the signal tick.
 
-**New contrast test:** `tests/webkit/contrast.mjs` loads the built app in both themes and computes the WCAG contrast of each text token against its background:
+**New contrast test:** `tests/webkit/contrast.mjs` loads `style/tokens.css` in WebKit and Chromium, switches `data-theme`, and computes the WCAG contrast of each text token against the page and surface backgrounds:
 - ≥ 4.5:1 for primary and secondary text, signal, warning and error;
 - ≥ 3:1 for disabled text.
 It runs in the CI `webkit-ui` job next to the other WebKit suites.
