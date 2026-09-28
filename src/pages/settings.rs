@@ -584,7 +584,7 @@ pub fn SettingsPage() -> impl IntoView {
                     </Show>
                     <Show when=move || catalog_recommended.get().is_some() && vision_available.get()>
                         <div class="status-text" style="margin-bottom: 0.5rem;">
-                            "⭐ Recommended: latest non-preview vision model, cheapest in its release cohort."
+                            "Recommended: latest non-preview vision model, cheapest in its release cohort."
                         </div>
                     </Show>
                     <label class="checkbox-label" style="margin-bottom: 0.5rem; display: inline-flex; gap: 0.4rem;">

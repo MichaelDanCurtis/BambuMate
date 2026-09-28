@@ -287,7 +287,10 @@ body {
     margin-left: 64px;
     height: 100vh;
     overflow-y: auto;
-    padding: 36px;
+    /* The top padding clears the fixed AGENT tab (style/agent.css, top 12px,
+       about 28px tall), which otherwise sits on full-width page content such
+       as the Home hero once the window is narrower than the page max-width. */
+    padding: 56px 36px 36px;
 }
 
 /* ===== Pages ===== */
@@ -438,6 +441,16 @@ body {
     margin-bottom: 6px;
 }
 
+/* Field labels are Nothing labels: Space Mono, all caps. Checkbox and toggle
+   labels wrap their control and read as sentences, so they keep body type. */
+.form-group:not(.checkbox-group) > label:not(.checkbox-label):not(.toggle-label) {
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
 .input-row {
     display: flex;
     gap: 8px;
@@ -520,19 +533,28 @@ select.input option {
 .theme-preview-card {
     display: flex;
     flex-direction: column;
+    align-items: stretch;
     gap: 12px;
     padding: 16px;
     background: var(--bg-tertiary);
     border: 1px solid var(--border-primary);
-    border-radius: 18px;
+    border-radius: var(--nd-radius-card);
     color: var(--text-primary);
+    text-align: left;
     cursor: pointer;
-    transition: border-color 0.15s, transform 0.15s;
+    transition: border-color 150ms var(--nd-ease);
+}
+
+/* WebKit lays out a <button>'s flex children at their content width even
+   with align-items: stretch, which collapsed the preview's 1fr canvas column
+   to nothing. An explicit width makes both rows span the card. */
+.theme-preview-card > * {
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .theme-preview-card:hover {
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-card);
+    border-color: var(--nd-text-secondary);
 }
 
 .theme-preview-card.active {
@@ -553,7 +575,11 @@ select.input option {
     border-radius: 999px;
     background: var(--bg-card);
     color: var(--text-secondary);
-    font-size: 11px;
+    font-family: var(--nd-font-mono);
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
 }
 
 /* Each frame carries its own `data-theme`, which re-scopes the `--nd-*`
@@ -813,6 +839,49 @@ select.input option {
     height: auto;
 }
 
+/* The artwork's SVG (src/components/branding.rs) was drawn for the old
+   green theme with gradient fills. CSS fill/stroke beat SVG presentation
+   attributes, so this flattens it onto the theme tokens without touching the
+   markup: grey panels, one signal-green disc, no decorative glow. */
+.hero-artwork-svg > rect:nth-of-type(1) {
+    fill: var(--nd-surface-raised);
+    stroke: var(--nd-border-visible);
+    stroke-width: 2px;
+}
+
+.hero-artwork-svg > rect:nth-of-type(2) {
+    fill: var(--nd-surface);
+    fill-opacity: 1;
+}
+
+.hero-artwork-svg > rect:nth-of-type(3) {
+    fill: var(--nd-border);
+    stroke: var(--nd-border-visible);
+    stroke-width: 2px;
+}
+
+.hero-artwork-svg > circle:nth-of-type(1) {
+    fill: var(--nd-signal);
+}
+
+.hero-artwork-svg > path:nth-of-type(1) {
+    stroke: var(--nd-surface);
+}
+
+.hero-artwork-svg > rect:nth-of-type(4),
+.hero-artwork-svg > rect:nth-of-type(6) {
+    fill: var(--nd-text-secondary);
+}
+
+.hero-artwork-svg > rect:nth-of-type(5) {
+    fill: var(--nd-text-disabled);
+}
+
+.hero-artwork-svg > path:nth-of-type(n+2),
+.hero-artwork-svg > circle:nth-of-type(n+2) {
+    display: none;
+}
+
 .how-it-works {
     margin-top: 40px;
 }
@@ -962,13 +1031,16 @@ select.input option {
 }
 
 .stl-item-actions .btn-small {
-    padding: 3px 6px;
+    padding: 3px 8px;
+    font-family: var(--nd-font-mono);
     font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     background: transparent;
     border: 1px solid var(--border-primary);
     color: var(--text-secondary);
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: var(--nd-radius-pill);
 }
 
 .stl-item-actions .btn-small:hover {
@@ -1368,9 +1440,11 @@ select.input option {
     box-shadow: var(--shadow-focus-strong);
 }
 
-.wizard-mode-icon {
-    font-size: 28px;
-    margin-bottom: 8px;
+/* These wrappers hold emoji, which the Nothing rules forbid as UI. The
+   cards read fine on their headings alone. */
+.wizard-mode-icon,
+.about-check-icon {
+    display: none;
 }
 
 .wizard-mode-card h4 {
@@ -1464,7 +1538,7 @@ select.input option {
 
 @media (max-width: 900px) {
     .content {
-        padding: 24px;
+        padding: 52px 24px 24px;
     }
 
     .steps {

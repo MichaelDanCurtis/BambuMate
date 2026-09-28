@@ -402,7 +402,7 @@
     padding: 0.375rem 0.5rem;
     font-size: 0.85rem;
     border: 1px solid var(--border-primary);
-    border-radius: 4px;
+    border-radius: var(--nd-radius-input);
     background: var(--bg-primary);
     color: var(--text-primary);
     outline: none;
@@ -427,14 +427,21 @@
 
 .spec-field-select {
     width: 100%;
-    padding: 0.5rem;
+    padding: 0.5rem 36px 0.5rem 0.5rem;
     font-size: 0.9rem;
     border: 1px solid var(--border-primary);
-    border-radius: 6px;
-    background: var(--bg-primary);
+    border-radius: var(--nd-radius-input);
+    background-color: var(--bg-primary);
     color: var(--text-primary);
     outline: none;
     cursor: pointer;
+    /* Without this WebKit draws its native Aqua bezel, a gradient pill. Same
+       chevron as select.input in style/main.css. */
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23999999' d='M1.41 0L6 4.58 10.59 0 12 1.41l-6 6-6-6z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
 }
 
 .spec-field-select:focus {

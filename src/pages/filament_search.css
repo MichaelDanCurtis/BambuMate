@@ -39,13 +39,16 @@
 }
 
 .btn-small {
-    padding: 0.25rem 0.5rem;
-    font-size: 0.75rem;
+    padding: 0.25rem 0.75rem;
+    font-family: var(--nd-font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     background: transparent;
     border: 1px solid var(--border-primary);
     color: var(--text-secondary);
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: var(--nd-radius-pill);
 }
 
 .btn-small:hover {
@@ -67,8 +70,8 @@
     width: 100%;
     padding: 12px 16px;
     font-size: 16px;
-    border: 2px solid var(--border-primary);
-    border-radius: 24px;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--nd-radius-input);
     background: var(--bg-card);
     color: var(--text-primary);
     outline: none;
@@ -167,11 +170,10 @@
     background: var(--nd-surface-raised);
 }
 
+/* Holds an emoji, which the Nothing rules forbid as UI; the row's text
+   carries the meaning on its own. */
 .ai-fallback-icon {
-    width: 20px;
-    height: 20px;
-    margin-right: 12px;
-    color: var(--accent);
+    display: none;
 }
 
 .ai-fallback-text {
@@ -224,7 +226,6 @@
 
 .url-input-row .search-input {
     flex: 1;
-    border-radius: 8px;
 }
 
 .url-input-hint {
@@ -337,13 +338,18 @@
     color: var(--text-primary);
 }
 
+/* A badge: pill, Space Mono caps. --accent is white in the dark theme, so
+   the text takes the page colour rather than white. */
 .filament-material {
     background: var(--accent);
-    color: white;
+    color: var(--nd-black);
     padding: 0.25rem 0.75rem;
-    border-radius: 4px;
-    font-size: 0.8rem;
-    font-weight: 600;
+    border-radius: var(--nd-radius-pill);
+    font-family: var(--nd-font-mono);
+    font-size: 0.75rem;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
 }
 
 .filament-card-specs {
@@ -595,7 +601,7 @@
     padding: 0.375rem 0.5rem;
     font-size: 0.85rem;
     border: 1px solid var(--border-primary);
-    border-radius: 4px;
+    border-radius: var(--nd-radius-input);
     background: var(--bg-primary);
     color: var(--text-primary);
     outline: none;
@@ -620,14 +626,21 @@
 
 .spec-field-select {
     width: 100%;
-    padding: 0.5rem;
+    padding: 0.5rem 36px 0.5rem 0.5rem;
     font-size: 0.9rem;
     border: 1px solid var(--border-primary);
-    border-radius: 6px;
-    background: var(--bg-primary);
+    border-radius: var(--nd-radius-input);
+    background-color: var(--bg-primary);
     color: var(--text-primary);
     outline: none;
     cursor: pointer;
+    /* Without this WebKit draws its native Aqua bezel, a gradient pill. Same
+       chevron as select.input in style/main.css. */
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23999999' d='M1.41 0L6 4.58 10.59 0 12 1.41l-6 6-6-6z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
 }
 
 .spec-field-select:focus {

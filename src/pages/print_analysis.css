@@ -34,8 +34,13 @@
     gap: 0.5rem;
 }
 
+/* A text stand-in for an icon ("[camera]"), set as a Nothing label rather
+   than as 48px body text. */
 .drop-icon {
-    font-size: 3rem;
+    font-family: var(--nd-font-mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     margin-bottom: 0.5rem;
     color: var(--text-muted);
 }

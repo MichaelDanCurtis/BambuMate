@@ -148,7 +148,7 @@ pub fn AboutPage() -> impl IntoView {
                                 });
                             }
                         >
-                            "🐙  GitHub Repository"
+                            "GitHub Repository"
                         </button>
                     </li>
                     <li>
@@ -162,7 +162,7 @@ pub fn AboutPage() -> impl IntoView {
                                 });
                             }
                         >
-                            "🐛  Report an Issue"
+                            "Report an Issue"
                         </button>
                     </li>
                 </ul>

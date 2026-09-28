@@ -312,16 +312,21 @@
     text-align: center;
 }
 
+/* Styled as the shared primary pill. --accent is the display colour (white in
+   the dark theme), so the label takes the page colour, not white. */
 .apply-btn {
-    padding: 0.75rem 1.5rem;
-    font-size: 1rem;
-    font-weight: 600;
+    padding: 9px 18px;
+    font-family: var(--nd-font-mono);
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     background: var(--accent);
-    color: white;
+    color: var(--nd-black);
     border: none;
-    border-radius: 6px;
+    border-radius: var(--nd-radius-pill);
     cursor: pointer;
-    transition: background 0.15s ease;
+    transition: background-color 150ms var(--nd-ease);
 }
 
 .apply-btn:hover {

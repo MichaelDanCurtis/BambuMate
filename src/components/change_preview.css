@@ -139,41 +139,9 @@
     border-top: 1px solid var(--border-primary);
 }
 
-.dialog-actions .btn {
-    padding: 0.6rem 1.25rem;
-    font-size: 0.9rem;
-    font-weight: 500;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.15s ease;
-}
-
-.dialog-actions .btn-secondary {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-    border: 1px solid var(--border-primary);
-}
-
-.dialog-actions .btn-secondary:hover {
-    background: var(--bg-card);
-    border-color: var(--text-muted);
-}
-
-.dialog-actions .btn-primary {
-    background: var(--accent);
-    color: white;
-    border: 1px solid var(--accent);
-}
-
-.dialog-actions .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-    border-color: var(--accent-hover);
-}
-
-.dialog-actions .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
+/* The dialog's buttons use the shared .btn / .btn-primary / .btn-secondary
+   pills from style/main.css. The overrides that were here set the primary
+   label to white on --accent, which is white in the dark theme. */
 
 /* Scrollbar Styling */
 .changes-list::-webkit-scrollbar {
