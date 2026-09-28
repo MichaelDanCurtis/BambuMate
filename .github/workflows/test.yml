@@ -240,6 +240,10 @@ jobs:
         working-directory: tests/webkit
         run: node layout.mjs ../..
 
+      - name: Token contrast
+        working-directory: tests/webkit
+        run: node contrast.mjs ../..
+
       # The flow tests drive the real wasm build, so they need the real build.
       - name: Build frontend
         if: ${{ !cancelled() }}
