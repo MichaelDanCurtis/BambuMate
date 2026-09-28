@@ -2,95 +2,50 @@
 
 /* ===== Theme Variables ===== */
 
-[data-theme="bambu"],
+/* Legacy variables, now aliases of the Nothing tokens in style/tokens.css.
+   The tokens switch per theme, so this block is theme-independent. */
 :root {
-    color-scheme: light;
-    --bg-primary: #f5f5f5;
-    --bg-sidebar: #ffffff;
-    --bg-card: #ffffff;
-    --bg-input: #f0f0f1;
-    --bg-hover: #ebf8ef;
-    --bg-active: #e0fceb;
-    --bg-active-hover: #d2f6df;
-    --bg-secondary: #f0f0f1;
-    --bg-tertiary: #fbfcfb;
-    --bg-success: #e8f6ec;
-    --bg-danger: #fdecef;
-    --bg-danger-hover: #f9d7df;
-    --bg-unknown: #f1f3f2;
+    --bg-primary: var(--nd-black);
+    --bg-sidebar: var(--nd-black);
+    --bg-card: var(--nd-surface);
+    --bg-input: var(--nd-surface);
+    --bg-tertiary: var(--nd-surface);
+    --bg-secondary: var(--nd-surface-raised);
+    --bg-hover: var(--nd-surface-raised);
+    --bg-active: var(--nd-surface-raised);
+    --bg-active-hover: var(--nd-border);
+    --bg-success: var(--nd-surface-raised);
+    --bg-danger: var(--nd-surface-raised);
+    --bg-danger-hover: var(--nd-border);
+    --bg-unknown: var(--nd-surface-raised);
 
-    --text-primary: #333333;
-    --text-bright: #1a1a1a;
-    --text-secondary: #6b6b6b;
-    --text-muted: #878787;
-    --text-placeholder: #a6a6a6;
-    --text-on-accent: #ffffff;
+    --text-primary: var(--nd-text-primary);
+    --text-bright: var(--nd-text-display);
+    --text-secondary: var(--nd-text-secondary);
+    --text-muted: var(--nd-text-secondary);
+    --text-placeholder: var(--nd-text-disabled);
+    --text-on-accent: var(--nd-black);
 
-    --border-primary: #d7d7d7;
-    --border-success: #b8ddc3;
-    --border-danger: #f1bcc8;
-    --border-unknown: #dddddd;
+    --border-primary: var(--nd-border-visible);
+    --border-success: var(--nd-border-visible);
+    --border-danger: var(--nd-accent);
+    --border-unknown: var(--nd-border-visible);
 
-    --accent: #00ae42;
-    --accent-hover: #34c400;
-    --color-success: #00ae42;
-    --color-danger: #d95b73;
-    --color-warning: #d79b28;
-    --success-text: #00ae42;
-    --error-text: #d95b73;
-    --error-bg: #fdecef;
-    --error-border: #f1bcc8;
+    --accent: var(--nd-text-display);
+    --accent-hover: var(--nd-text-primary);
+    --color-success: var(--nd-signal);
+    --color-danger: var(--nd-accent);
+    --color-warning: var(--nd-warning);
+    --success-text: var(--nd-signal);
+    --error-text: var(--nd-accent);
+    --error-bg: var(--nd-surface-raised);
+    --error-border: var(--nd-accent);
 
-    --shadow-card: 0 10px 24px rgba(39, 39, 39, 0.08);
-    --shadow-brand: 0 10px 18px rgba(0, 174, 66, 0.18);
-    --shadow-button: 0 10px 20px rgba(0, 174, 66, 0.22);
-    --shadow-focus: 0 0 0 3px rgba(0, 174, 66, 0.16);
-    --shadow-focus-strong: 0 0 0 3px rgba(0, 174, 66, 0.18);
-}
-
-[data-theme="dark"] {
-    color-scheme: dark;
-    --bg-primary: #1a1a1a;
-    --bg-sidebar: #222222;
-    --bg-card: #333337;
-    --bg-input: #2b2b2f;
-    --bg-hover: #2a342d;
-    --bg-active: #243e30;
-    --bg-active-hover: #2d4938;
-    --bg-secondary: #242428;
-    --bg-tertiary: #242428;
-    --bg-success: #1f3a28;
-    --bg-danger: #391a24;
-    --bg-danger-hover: #4a2230;
-    --bg-unknown: #2a2a2d;
-
-    --text-primary: rgba(255, 255, 255, 0.8);
-    --text-bright: #efeff0;
-    --text-secondary: rgba(255, 255, 255, 0.6);
-    --text-muted: #818183;
-    --text-placeholder: rgba(255, 255, 255, 0.35);
-    --text-on-accent: #ffffff;
-
-    --border-primary: #3e3e45;
-    --border-success: #2f6b42;
-    --border-danger: #6f3346;
-    --border-unknown: #4a4a4f;
-
-    --accent: #00ae42;
-    --accent-hover: #30dd70;
-    --color-success: #4ad3a4;
-    --color-danger: #ff86a1;
-    --color-warning: #f3c35f;
-    --success-text: #4ad3a4;
-    --error-text: #ff86a1;
-    --error-bg: #391a24;
-    --error-border: #6f3346;
-
-    --shadow-card: 0 18px 40px rgba(0, 0, 0, 0.28);
-    --shadow-brand: 0 10px 18px rgba(0, 174, 66, 0.24);
-    --shadow-button: 0 10px 20px rgba(0, 174, 66, 0.28);
-    --shadow-focus: 0 0 0 3px rgba(0, 174, 66, 0.18);
-    --shadow-focus-strong: 0 0 0 3px rgba(0, 174, 66, 0.22);
+    --shadow-card: none;
+    --shadow-brand: none;
+    --shadow-button: none;
+    --shadow-focus: 0 0 0 1px var(--nd-text-primary);
+    --shadow-focus-strong: 0 0 0 1px var(--nd-text-display);
 }
 
 /* ===== Reset and base ===== */
@@ -102,11 +57,11 @@
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: var(--nd-font-body);
     font-size: 14px;
     line-height: 1.5;
     color: var(--text-primary);
-    background: linear-gradient(180deg, var(--bg-tertiary) 0%, var(--bg-primary) 100%);
+    background: var(--nd-black);
     overflow: hidden;
     height: 100vh;
 }
@@ -130,7 +85,6 @@ body {
     border-right: 1px solid var(--border-primary);
     -webkit-user-select: none;
     user-select: none;
-    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.4);
 }
 
 .sidebar-header {
