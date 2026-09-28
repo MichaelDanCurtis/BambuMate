@@ -4,7 +4,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use super::types::{AgentModel, AgentSettings, AppState, AuthMode, Provider, Readiness};
+use super::types::{
+    AgentModel, AgentSettings, AppState, AuthMode, Provider, Readiness, RewindPlan,
+};
 
 #[wasm_bindgen]
 extern "C" {
@@ -132,6 +134,12 @@ pub async fn answer(ask_id: String, answers: Vec<String>) -> Result<(), String> 
 }
 pub async fn rewind(session_id: String, seq: u32) -> Result<bool, String> {
     call("agent_rewind", &RewindArgs { session_id, seq }).await
+}
+pub async fn rewind_preview(session_id: String, seq: u32) -> Result<RewindPlan, String> {
+    call("agent_rewind_preview", &RewindArgs { session_id, seq }).await
+}
+pub async fn delete_session(session_id: String) -> Result<(), String> {
+    call("agent_delete_session", &SessionArgs { session_id }).await
 }
 pub async fn set_app_state(state: &AppState) {
     let _: Result<(), String> = call("agent_set_app_state", &StateArgs { state }).await;

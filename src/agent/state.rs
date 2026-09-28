@@ -1,6 +1,6 @@
 //! Pure chat-state reducer for the agent drawer. Host-testable.
 
-use super::types::{AgentEvent, AskRequest, TodoItem, TurnStatus};
+use super::types::{AgentEvent, AskRequest, RewindPlan, TodoItem, TurnStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityKind {
@@ -38,6 +38,13 @@ pub enum Entry {
         text: String,
         is_error: bool,
     },
+    /// Asks before a rewind to `seq`, listing the profile files (names only)
+    /// it would delete or overwrite.
+    RewindConfirm {
+        seq: u32,
+        delete: Vec<String>,
+        overwrite: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -48,6 +55,9 @@ pub struct ChatState {
     pub todos: Vec<TodoItem>,
     pub used_percent: Option<f64>,
     pub invalid: Vec<String>,
+    /// Counts TurnStarted/TurnDone events for this session, so the drawer can
+    /// tell a turn event arrived even when `running` ends where it started.
+    pub turn_events: u32,
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -99,6 +109,7 @@ impl ChatState {
             AgentEvent::SessionReady { .. } => {}
             AgentEvent::TurnStarted { seq, .. } => {
                 self.running = true;
+                self.turn_events = self.turn_events.wrapping_add(1);
                 if let Some(Entry::User { seq: s, .. }) = self
                     .entries
                     .iter_mut()
@@ -204,6 +215,7 @@ impl ChatState {
             AgentEvent::Usage { used_percent, .. } => self.used_percent = *used_percent,
             AgentEvent::TurnDone { status, .. } => {
                 self.running = false;
+                self.turn_events = self.turn_events.wrapping_add(1);
                 if *status == TurnStatus::Interrupted {
                     self.entries.push(Entry::Notice {
                         text: "Stopped.".into(),
@@ -248,6 +260,22 @@ impl ChatState {
         {
             *answered = None;
         }
+    }
+
+    /// Shows the confirm card for a rewind to `seq`, replacing any other.
+    pub fn show_rewind_confirm(&mut self, seq: u32, plan: &RewindPlan) {
+        self.dismiss_rewind_confirm();
+        let names = |paths: &[String]| paths.iter().map(|p| file_name(p)).collect();
+        self.entries.push(Entry::RewindConfirm {
+            seq,
+            delete: names(&plan.delete),
+            overwrite: names(&plan.overwrite),
+        });
+    }
+
+    pub fn dismiss_rewind_confirm(&mut self) {
+        self.entries
+            .retain(|e| !matches!(e, Entry::RewindConfirm { .. }));
     }
 
     pub fn rewind_to(&mut self, seq: u32) {
@@ -424,5 +452,46 @@ mod tests {
         s.rewind_to(2);
         assert_eq!(s.entries.len(), 2);
         assert!(matches!(&s.entries[0], Entry::User { seq: Some(1), .. }));
+    }
+
+    #[test]
+    fn rewind_confirm_lists_file_names_and_replaces_an_earlier_one() {
+        let mut s = state();
+        s.push_user("one".into(), vec![]);
+        let plan = RewindPlan {
+            delete: vec!["/p/New.json".into()],
+            overwrite: vec!["C:\\u\\A.json".into(), "/p/B.info".into()],
+        };
+        s.show_rewind_confirm(1, &RewindPlan::default());
+        s.show_rewind_confirm(1, &plan);
+        let confirms: Vec<&Entry> = s
+            .entries
+            .iter()
+            .filter(|e| matches!(e, Entry::RewindConfirm { .. }))
+            .collect();
+        assert_eq!(
+            confirms,
+            vec![&Entry::RewindConfirm {
+                seq: 1,
+                delete: vec!["New.json".into()],
+                overwrite: vec!["A.json".into(), "B.info".into()],
+            }]
+        );
+        s.dismiss_rewind_confirm();
+        assert_eq!(s.entries.len(), 1, "only the user message is left");
+    }
+
+    #[test]
+    fn turn_events_count_starts_and_ends_of_this_sessions_turns() {
+        let mut s = state();
+        s.apply(&ev(r#"{"kind":"turn_started","session_id":"s1","seq":1}"#));
+        s.apply(&ev(
+            r#"{"kind":"turn_done","session_id":"s1","seq":1,"status":"failed"}"#,
+        ));
+        s.apply(&ev(
+            r#"{"kind":"turn_started","session_id":"other","seq":1}"#,
+        ));
+        assert_eq!(s.turn_events, 2);
+        assert!(!s.running);
     }
 }

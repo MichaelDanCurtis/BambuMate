@@ -193,3 +193,10 @@ pub struct AgentSettings {
     pub claude_auth_mode: AuthMode,
     pub claude_auth_modes: Vec<AuthMode>,
 }
+
+/// What a rewind would change in the profile folder (full paths).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RewindPlan {
+    pub delete: Vec<String>,
+    pub overwrite: Vec<String>,
+}

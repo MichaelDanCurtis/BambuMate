@@ -20,6 +20,8 @@ pub fn EntryView(
     entry: Entry,
     on_answer: Callback<(String, Vec<String>)>,
     on_rewind: Callback<u32>,
+    /// The user's answer on a rewind confirm card: (seq, go ahead).
+    on_rewind_decide: Callback<(u32, bool)>,
     /// A turn is running: rewinding is refused by the backend, so disable it.
     #[prop(into)]
     busy: Signal<bool>,
@@ -64,6 +66,18 @@ pub fn EntryView(
         }
         Entry::Ask { request, answered } => {
             let id = request.id.clone();
+            let allow_other = request.allow_other;
+            let other = RwSignal::new(String::new());
+            let submit_other = {
+                let id = id.clone();
+                move || {
+                    let text = other.get_untracked().trim().to_string();
+                    if !text.is_empty() {
+                        on_answer.run((id.clone(), vec![text]));
+                    }
+                }
+            };
+            let submit_on_enter = submit_other.clone();
             view! {
                 <div class="ag-ask">
                     <p class="nd-label">{request.header.to_uppercase()}</p>
@@ -81,9 +95,57 @@ pub fn EntryView(
                                         </button>
                                     }
                                 }).collect_view()}
+                                {allow_other.then(|| view! {
+                                    <div class="ag-ask-other">
+                                        <input class="ag-other-input" type="text" placeholder="Or type an answer"
+                                            prop:value=move || other.get()
+                                            on:input=move |e| other.set(event_target_value(&e))
+                                            on:keydown=move |e: web_sys::KeyboardEvent| {
+                                                if e.key() == "Enter" {
+                                                    e.prevent_default();
+                                                    submit_on_enter();
+                                                }
+                                            } />
+                                        <button class="ag-other-send nd-label"
+                                            disabled=move || other.with(|t| t.trim().is_empty())
+                                            on:click=move |_| submit_other()>"SEND"</button>
+                                    </div>
+                                })}
                             </div>
                         }.into_any(),
                     }}
+                </div>
+            }
+            .into_any()
+        }
+        Entry::RewindConfirm { seq, delete, overwrite } => {
+            let nothing = delete.is_empty() && overwrite.is_empty();
+            let list = |label: &'static str, names: Vec<String>| {
+                (!names.is_empty()).then(|| view! {
+                    <p class="nd-label">{label}</p>
+                    <ul class="ag-confirm-files nd-mono">
+                        {names.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}
+                    </ul>
+                })
+            };
+            view! {
+                <div class="ag-ask ag-confirm">
+                    <p class="nd-label">{format!("REWIND TO BEFORE MESSAGE {seq}?")}</p>
+                    {list("WILL DELETE", delete)}
+                    {list("WILL OVERWRITE", overwrite)}
+                    <p class="ag-ask-question">
+                        {if nothing {
+                            "No profile files change. A copy of the current files is kept first."
+                        } else {
+                            "A copy of the current files is kept first."
+                        }}
+                    </p>
+                    <div class="ag-ask-options">
+                        <button class="ag-option ag-confirm-rewind" disabled=move || busy.get()
+                            on:click=move |_| on_rewind_decide.run((seq, true))>"Rewind"</button>
+                        <button class="ag-option ag-confirm-cancel"
+                            on:click=move |_| on_rewind_decide.run((seq, false))>"Cancel"</button>
+                    </div>
                 </div>
             }
             .into_any()

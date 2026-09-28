@@ -513,6 +513,8 @@ export const FIXTURES = {
   agent_answer: null,
   agent_interrupt: null,
   agent_rewind: true,
+  agent_rewind_preview: { delete: [], overwrite: ["/p/A.json"] },
+  agent_delete_session: null,
   agent_stage_image: "/tmp/agent-upload.png",
   agent_login: null,
 };

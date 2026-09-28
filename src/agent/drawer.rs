@@ -86,6 +86,18 @@ pub fn AgentDrawer() -> impl IntoView {
     let draft = RwSignal::new(String::new());
     let attachments = RwSignal::new(Vec::<(String, String)>::new()); // (display name, staged path)
     let running = Signal::derive(move || chat.with(|c| c.running));
+    // Set from the moment SEND is pressed until the turn is announced (or
+    // the request fails), so a second Enter while agent_start/agent_send is
+    // still in flight can't start another session or turn.
+    let pending = RwSignal::new(false);
+    let busy = Signal::derive(move || running.get() || pending.get());
+    Effect::new(move |prev: Option<u32>| {
+        let n = chat.with(|c| c.turn_events);
+        if prev.is_some_and(|p| p != n) {
+            pending.set(false);
+        }
+        n
+    });
 
     let notice = move |text: String, is_error: bool| {
         chat.update(|c| c.entries.push(Entry::Notice { text, is_error }))
@@ -133,26 +145,46 @@ pub fn AgentDrawer() -> impl IntoView {
         }
     });
 
+    // Ends the backend session (its process, snapshots and DB row) and
+    // clears the chat. There is no resume UI, so an old session would only leak.
+    let reset_chat = move || {
+        if let Some(old) = chat.with_untracked(|c| c.session_id.clone()) {
+            spawn_local(async move {
+                if let Err(e) = bridge::delete_session(old).await {
+                    web_sys::console::warn_1(&format!("agent_delete_session: {e}").into());
+                }
+            });
+        }
+        chat.set(ChatState::default());
+    };
+
     let switch_provider = move |p: Provider| {
         // A switch mid-turn would orphan the live session and its pending asks.
-        if provider.get_untracked() == p || running.get_untracked() {
+        if provider.get_untracked() == p || busy.get_untracked() {
             return;
         }
         provider.set(p);
-        chat.set(ChatState::default());
+        reset_chat();
         notice(
             format!("Switched to {}. New chat.", provider_label(p)),
             false,
         );
     };
 
+    let new_chat = move || {
+        if !busy.get_untracked() {
+            reset_chat();
+        }
+    };
+
     let send = move || {
         let text = draft.get_untracked().trim().to_string();
         // Enter bypasses the disabled SEND button, so check readiness here too.
         let is_ready = readiness.with_untracked(|r| matches!(r, Some(Readiness::Ready { .. })));
-        if text.is_empty() || !is_ready || running.get_untracked() {
+        if text.is_empty() || !is_ready || busy.get_untracked() {
             return;
         }
+        pending.set(true);
         let images: Vec<String> = attachments
             .get_untracked()
             .into_iter()
@@ -171,10 +203,14 @@ pub fn AgentDrawer() -> impl IntoView {
                         chat.update(|c| c.session_id = Some(s.clone()));
                         s
                     }
-                    Err(e) => return notice(e, true),
+                    Err(e) => {
+                        pending.set(false);
+                        return notice(e, true);
+                    }
                 },
             };
             if let Err(e) = bridge::send(sid, text, images).await {
+                pending.set(false);
                 notice(e, true);
             }
         });
@@ -191,8 +227,26 @@ pub fn AgentDrawer() -> impl IntoView {
         });
     });
 
+    // REWIND first shows what would change; the rewind itself runs only
+    // once the user confirms on that card.
     let on_rewind = Callback::new(move |seq: u32| {
-        if running.get_untracked() {
+        if busy.get_untracked() {
+            return;
+        }
+        let Some(sid) = chat.with_untracked(|c| c.session_id.clone()) else {
+            return;
+        };
+        spawn_local(async move {
+            match bridge::rewind_preview(sid, seq).await {
+                Ok(plan) => chat.update(|c| c.show_rewind_confirm(seq, &plan)),
+                Err(e) => notice(e, true),
+            }
+        });
+    });
+
+    let on_rewind_decide = Callback::new(move |(seq, go): (u32, bool)| {
+        chat.update(|c| c.dismiss_rewind_confirm());
+        if !go || busy.get_untracked() {
             return;
         }
         let Some(sid) = chat.with_untracked(|c| c.session_id.clone()) else {
@@ -263,10 +317,13 @@ pub fn AgentDrawer() -> impl IntoView {
                     {[Provider::Codex, Provider::Claude].into_iter().map(|p| view! {
                         <button data-provider=move || if p == Provider::Codex { "codex" } else { "claude" }
                             class="nd-label" class:active=move || provider.get() == p
-                            disabled=move || running.get()
-                            title=move || running.get().then_some("Stop the current turn first")
+                            disabled=move || busy.get()
+                            title=move || busy.get().then_some("Stop the current turn first")
                             on:click=move |_| switch_provider(p)>{provider_label(p)}</button>
                     }).collect_view()}
+                    <button class="ag-new nd-label" disabled=move || busy.get()
+                        title=move || busy.get().then_some("Stop the current turn first")
+                        on:click=move |_| new_chat()>"NEW CHAT"</button>
                     <button class="ag-gear nd-label" on:click=move |_| show_settings.update(|s| *s = !*s)>"SETTINGS"</button>
                     // The open drawer covers the AGENT tab, so it needs its own close control.
                     <button class="ag-close nd-label" title="Close (Cmd/Ctrl+K)" on:click=move |_| open.set(false)>"CLOSE"</button>
@@ -332,7 +389,8 @@ pub fn AgentDrawer() -> impl IntoView {
 
             <section class="ag-stream">
                 {move || chat.with(|c| c.entries.clone()).into_iter().map(|entry| view! {
-                    <EntryView entry=entry on_answer=on_answer on_rewind=on_rewind busy=running />
+                    <EntryView entry=entry on_answer=on_answer on_rewind=on_rewind
+                        on_rewind_decide=on_rewind_decide busy=busy />
                 }).collect_view()}
             </section>
 
@@ -370,7 +428,7 @@ pub fn AgentDrawer() -> impl IntoView {
                                 input.set_value("");
                             } />
                     </label>
-                    <Show when=move || running.get()
+                    <Show when=move || busy.get()
                         fallback=move || view! {
                             <button class="ag-send" disabled=move || !ready() on:click=move |_| send()>"SEND"</button>
                         }>

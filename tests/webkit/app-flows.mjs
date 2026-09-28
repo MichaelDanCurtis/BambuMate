@@ -588,11 +588,31 @@ async function driveApp(browserType, engine, baseUrl) {
     if (ans.args.askId !== "a1" || ans.args.answers[0] !== "Yes") throw new Error(JSON.stringify(ans.args));
   });
 
-  await step(run, page, "turn completes and rewind works", async () => {
+  await step(run, page, "a free-text ask can be answered by typing", async () => {
+    await emit({
+      kind: "ask",
+      session_id: "sess-1",
+      request: { id: "a2", header: "Question", question: "Which printer?", options: [], allow_other: true },
+    });
+    await page.fill(".ag-ask .ag-other-input", "X1 Carbon");
+    await page.click(".ag-ask .ag-other-send");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "agent_answer" && c.args.askId === "a2"), null, { timeout: 3000 });
+    const ans = (await called("agent_answer")).find((c) => c.args.askId === "a2");
+    if (ans.args.answers.length !== 1 || ans.args.answers[0] !== "X1 Carbon") throw new Error(JSON.stringify(ans.args));
+  });
+
+  await step(run, page, "turn completes and rewind works after confirming", async () => {
     await emit({ kind: "message_done", session_id: "sess-1", item_id: "m1", text: "Lowered to 235°C." });
     await emit({ kind: "turn_done", session_id: "sess-1", seq: 1, status: "completed" });
     await page.waitForSelector(".ag-send", { timeout: 2000 });
     await page.click(".ag-rewind");
+    await page.waitForSelector(".ag-confirm", { timeout: 3000 });
+    const [pv] = await called("agent_rewind_preview");
+    if (pv.args.sessionId !== "sess-1" || pv.args.seq !== 1) throw new Error(JSON.stringify(pv.args));
+    if ((await called("agent_rewind")).length !== 0) throw new Error("rewound before confirming");
+    const card = await page.locator(".ag-confirm").innerText();
+    if (!card.includes("A.json") || card.includes("/p/")) throw new Error(`confirm card: ${card}`);
+    await page.click(".ag-confirm .ag-confirm-rewind");
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "agent_rewind"), null, { timeout: 3000 });
     const [rw] = await called("agent_rewind");
     if (rw.args.sessionId !== "sess-1" || rw.args.seq !== 1) throw new Error(JSON.stringify(rw.args));
@@ -606,6 +626,14 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   await page.screenshot({ path: `flow-${engine}-agent.png`, fullPage: false });
+
+  await step(run, page, "NEW CHAT ends the old session and clears the chat", async () => {
+    await page.click(".ag-new");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "agent_delete_session"), null, { timeout: 3000 });
+    const [del] = await called("agent_delete_session");
+    if (del.args.sessionId !== "sess-1") throw new Error(JSON.stringify(del.args));
+    if (await page.locator(".ag-stream > *").count() !== 0) throw new Error("chat not cleared");
+  });
 
   run.unknown = await page.evaluate(() => [...new Set(window.__ipc.unknown)]).catch(() => []);
   await browser.close();

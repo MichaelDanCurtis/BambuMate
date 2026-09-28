@@ -39,9 +39,9 @@
 .agent-drawer.open { opacity: 1; visibility: visible; pointer-events: auto; }
 
 .ag-header { padding: var(--nd-space-md); border-bottom: 1px solid var(--nd-border); display: grid; gap: var(--nd-space-sm); }
-.ag-provider { display: flex; gap: var(--nd-space-xs); }
+.ag-provider { display: flex; flex-wrap: wrap; gap: var(--nd-space-xs); }
 .ag-provider button {
-    padding: 6px 12px;
+    padding: 6px 8px;
     border: 1px solid var(--nd-border-visible);
     border-radius: 999px;
     background: transparent;
@@ -49,7 +49,7 @@
 }
 .ag-provider button.active { background: var(--nd-text-display); color: var(--nd-black); border-color: var(--nd-text-display); }
 .ag-provider button:disabled { opacity: 0.4; cursor: default; }
-.ag-provider .ag-gear { margin-left: auto; }
+.ag-provider .ag-new { margin-left: auto; }
 .ag-status { margin: 0; font-size: 12px; color: var(--nd-text-secondary); }
 .ag-login { justify-self: start; color: var(--nd-interactive); background: none; border: none; padding: 0; cursor: pointer; font: inherit; }
 .ag-model-row { display: flex; align-items: center; gap: var(--nd-space-md); }
@@ -80,7 +80,14 @@
 .ag-ask-question { margin: 0; }
 .ag-ask-options { display: flex; flex-wrap: wrap; gap: var(--nd-space-xs); }
 .ag-option { font: inherit; padding: 6px 14px; border: 1px solid var(--nd-border-visible); border-radius: 999px; background: var(--nd-surface); color: var(--nd-text-primary); cursor: pointer; }
-.ag-option:hover { border-color: var(--nd-text-primary); }
+.ag-option:hover:not(:disabled) { border-color: var(--nd-text-primary); }
+.ag-option:disabled { opacity: 0.4; cursor: default; }
+.ag-ask-other { display: flex; gap: var(--nd-space-xs); flex-basis: 100%; }
+.ag-other-input { flex: 1; min-width: 0; padding: 6px 10px; border: 1px solid var(--nd-border-visible); border-radius: 999px; background: var(--nd-surface); color: var(--nd-text-primary); font: inherit; }
+.ag-other-input:focus { outline: none; border-color: var(--nd-text-primary); }
+.ag-other-send { padding: 6px 14px; border: 1px solid var(--nd-border-visible); border-radius: 999px; background: transparent; cursor: pointer; }
+.ag-other-send:disabled { opacity: 0.4; cursor: default; }
+.ag-confirm-files { margin: 0; padding-left: var(--nd-space-lg); font-size: 12px; color: var(--nd-text-secondary); }
 
 .ag-notice { margin: 0; font-size: 12px; color: var(--nd-text-secondary); }
 .ag-notice.ag-error { color: var(--nd-accent); }
