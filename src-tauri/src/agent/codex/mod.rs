@@ -73,6 +73,8 @@ impl CodexSpawner for ProcessSpawner {
 
 /// How long a freshly spawned `codex app-server` gets to answer `initialize`.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long `turn/start` gets to answer before the turn is failed locally.
+const TURN_START_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct Session {
     thread_id: String,
@@ -85,6 +87,9 @@ struct Session {
     in_flight: bool,
     /// Codex's id for the in-flight turn, once `turn/start` has answered.
     turn_id: Option<String>,
+    /// Seq of a turn the user stopped before `turn/start` answered. It was
+    /// ended locally; when Codex does answer, that turn is interrupted.
+    abandoned_seq: Option<u32>,
     generation: u64,
     opts: SessionOpts,
 }
@@ -103,6 +108,7 @@ impl Session {
             seq_known,
             in_flight: false,
             turn_id: None,
+            abandoned_seq: None,
             generation,
             opts,
         }
@@ -367,13 +373,25 @@ fn on_notification(shared: &Shared, method: &str, params: &Value) {
     let Some((sid, seq, _)) = shared.by_thread(params) else {
         return;
     };
+    // A turn we already ended locally (stopped before turn/start answered)
+    // must not end again, nor end whichever turn is running now.
+    let mut stale_completion = false;
     if method == "turn/completed" {
         if let Some(s) = shared.sessions.lock().unwrap().get_mut(&sid) {
-            s.in_flight = false;
-            s.turn_id = None;
+            let completed = params["turn"]["id"].as_str();
+            let other_turn = matches!((&s.turn_id, completed), (Some(cur), Some(c)) if cur != c);
+            if !s.in_flight || other_turn {
+                stale_completion = true;
+            } else {
+                s.in_flight = false;
+                s.turn_id = None;
+            }
         }
     }
     for e in translate::translate(&sid, seq, method, params) {
+        if stale_completion && matches!(e, AgentEvent::TurnDone { .. }) {
+            continue;
+        }
         shared.emit(e);
     }
 }
@@ -688,29 +706,57 @@ impl AgentBackend for CodexBackend {
             s.seq = seq;
             s.in_flight = true;
             s.turn_id = None;
+            if s.abandoned_seq == Some(seq) {
+                s.abandoned_seq = None;
+            }
             prev
         };
         self.shared.emit(AgentEvent::TurnStarted {
             session_id: session_id.to_string(),
             seq,
         });
-        let started = rpc
-            .request("turn/start", turn_start_params(&thread_id, &input, &opts))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|v| {
-                v["turn"]["id"]
-                    .as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| "turn/start returned no turn id".to_string())
-            });
+        let request = rpc.request("turn/start", turn_start_params(&thread_id, &input, &opts));
+        let started = match tokio::time::timeout(TURN_START_TIMEOUT, request).await {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(_) => Err(format!(
+                "Codex did not start the turn within {}s",
+                TURN_START_TIMEOUT.as_secs()
+            )),
+        }
+        .and_then(|v| {
+            v["turn"]["id"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "turn/start returned no turn id".to_string())
+        });
         match started {
             Ok(turn_id) => {
-                if let Some(s) = self.shared.sessions.lock().unwrap().get_mut(session_id) {
-                    // A fast turn/completed may already have ended the turn.
-                    if s.in_flight {
-                        s.turn_id = Some(turn_id.clone());
+                let abandoned = match self.shared.sessions.lock().unwrap().get_mut(session_id) {
+                    Some(s) if s.abandoned_seq == Some(seq) => {
+                        s.abandoned_seq = None;
+                        true
                     }
+                    Some(s) => {
+                        // A fast turn/completed may already have ended the turn.
+                        if s.in_flight {
+                            s.turn_id = Some(turn_id.clone());
+                        }
+                        false
+                    }
+                    None => false,
+                };
+                if abandoned {
+                    // The user already stopped this turn; stop it at Codex too.
+                    let (rpc, thread_id, turn_id) =
+                        (rpc.clone(), thread_id.clone(), turn_id.clone());
+                    tokio::spawn(async move {
+                        let _ = rpc
+                            .request(
+                                "turn/interrupt",
+                                json!({"threadId": thread_id, "turnId": turn_id}),
+                            )
+                            .await;
+                    });
                 }
                 Ok(turn_id)
             }
@@ -719,6 +765,9 @@ impl AgentBackend for CodexBackend {
                     Some(s) => {
                         s.seq = prev_seq;
                         s.turn_id = None;
+                        if s.abandoned_seq == Some(seq) {
+                            s.abandoned_seq = None;
+                        }
                         std::mem::replace(&mut s.in_flight, false)
                     }
                     None => false,
@@ -738,11 +787,30 @@ impl AgentBackend for CodexBackend {
 
     async fn interrupt(&self, session_id: &str) -> Result<(), String> {
         self.shared.asks.cancel_session(session_id);
-        let (thread_id, turn_id) = {
-            let s = self.shared.sessions.lock().unwrap();
-            let s = s.get(session_id).ok_or("unknown session")?;
-            (s.thread_id.clone(), s.turn_id.clone())
+        let (thread_id, turn_id, ended_seq) = {
+            let mut sessions = self.shared.sessions.lock().unwrap();
+            let s = sessions.get_mut(session_id).ok_or("unknown session")?;
+            match (&s.turn_id, s.in_flight) {
+                (Some(t), _) => (s.thread_id.clone(), Some(t.clone()), None),
+                // turn/start hasn't answered, so there's no turn id to
+                // interrupt yet: end the turn here and interrupt it at Codex
+                // once the id arrives (see `send`).
+                (None, true) => {
+                    s.in_flight = false;
+                    s.abandoned_seq = Some(s.seq);
+                    (s.thread_id.clone(), None, Some(s.seq))
+                }
+                (None, false) => return Ok(()),
+            }
         };
+        if let Some(seq) = ended_seq {
+            self.shared.emit(AgentEvent::TurnDone {
+                session_id: session_id.to_string(),
+                seq,
+                status: TurnStatus::Interrupted,
+            });
+            return Ok(());
+        }
         let Some(turn_id) = turn_id else {
             return Ok(());
         };
@@ -1355,6 +1423,51 @@ mod tests {
         })
         .await;
         assert!(models.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupt_before_turn_start_answers_ends_the_turn_once() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.send("s1", 1, vec![UserInput::Text { text: "x".into() }]), async {
+                let ts = srv.expect("turn/start").await;
+                // STOP while turn/start is still unanswered: there's no turn
+                // id to interrupt yet, so the turn must end locally.
+                b.interrupt("s1").await.unwrap();
+                // Codex answers late; the now-abandoned turn gets interrupted.
+                srv.reply(&ts, json!({"turn":{"id":"tu1","items":[],"status":"inProgress"}})).await;
+                let ti = srv.expect("turn/interrupt").await;
+                assert_eq!(ti["params"], json!({"threadId":"th1","turnId":"tu1"}));
+                srv.reply(&ti, json!({})).await;
+                srv.send(json!({"method":"turn/completed","params":{"threadId":"th1","turn":{"id":"tu1","items":[],"status":"interrupted"}}})).await;
+                // Sentinel: every event before it has been published.
+                srv.send(json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":1}}}})).await;
+            })
+        })
+        .await;
+        res.unwrap();
+        let mut done = Vec::new();
+        loop {
+            let e = next_matching(&mut r.rx, |e| {
+                matches!(e, AgentEvent::TurnDone { .. } | AgentEvent::Usage { .. })
+            })
+            .await;
+            if matches!(e, AgentEvent::Usage { .. }) {
+                break;
+            }
+            done.push(e);
+        }
+        assert_eq!(
+            done,
+            vec![AgentEvent::TurnDone {
+                session_id: "s1".into(),
+                seq: 1,
+                status: TurnStatus::Interrupted
+            }]
+        );
     }
 
     #[tokio::test]
