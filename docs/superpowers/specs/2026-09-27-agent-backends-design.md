@@ -160,6 +160,7 @@ What this plan intentionally leaves out:
 - pushing profile/filament *selection* into `bm_app_state` (only the route and the current photo are pushed)
 - `agent.*.logged_in` diagnostics (only `installed` checks ship)
 - a checked-in Codex schema contract test (covered by the Task 12 manual probe instead)
+- a resume / session-list UI. Until it ships, `agent_open` and `agent_list_sessions` have no caller, and the Task 18 `record_turn` race stays latent: `send` records the turn after the backend returns and writes `last_seq` unconditionally, so a late `record_turn` after a fast `TurnDone` can leave the stored `last_seq` below the in-memory seq or undo a rewind's `set_last_seq`. The stored value is only read when a session is reopened.
 
 ## Open risks
 
@@ -198,7 +199,22 @@ Review rounds during the build surfaced behavior beyond the corrections in "Undo
 **Host and CI**
 - `agent_set_app_state` merges the incoming state into the current one field-by-field (only `Some` fields from the push replace the current value) instead of overwriting the whole `AppState`, so a push that omits `photo_path` doesn't drop an in-progress staged photo.
 - A profile staged by `bm_generate_profile` is kept until `bm_install_profile` (or the equivalent host call) actually succeeds, so a failed install can be retried instead of losing the staged profile.
-- The CI guard against enabling `claude-subscription` (or `--all-features`) in the release build is a standalone, checked-in script, `scripts/check-release-features.sh`, run from `.github/workflows/build.yml`.
+- The CI guard against enabling `claude-subscription` (or `--all-features`) in the release build is a standalone, checked-in script, `scripts/check-release-features.sh`. It inspects `.github/workflows/build.yml` and runs from `.github/workflows/test.yml` (the "Release builds never enable claude-subscription" step), not from `build.yml` itself.
+
+**Final review fixes**
+- *Writable roots.* The default (non-full-access) writable roots are `[app-data/agent-workspace, Bambu Studio user dir]`, not the whole app-data dir. The agent can no longer write `preferences.json` (where the full-access toggle lives), `agent-snapshots/` or the session DB. This supersedes the `writableRoots` line in "Codex lane" and applies to Claude's `--add-dir` too.
+- *Rewind preview and confirm.* `Snapshots::rewind_plan` computes which profile files a restore would delete (present now, absent in the snapshot) and overwrite (content differs). `agent_rewind_preview(session_id, seq)` returns that plan, and clicking REWIND shows an inline card in the chat listing the file names with Rewind/Cancel buttons; `agent_rewind` runs only on Rewind.
+- *Pre-rewind safety copy.* Before restoring, `rewind` copies the current profile files to `agent-snapshots/<session>/pre-rewind-<seq>-<timestamp>/`. `prune`, `delete_from` and `restore` only consider numbered turn dirs, so the copy isn't mistaken for a turn. It shares the session's lifetime: it is removed with the session (NEW CHAT, provider switch, delete) and by the startup purge. If the copy can't be made, the rewind is refused.
+- *Rewind while Bambu Studio runs.* `rewind` refuses with "Close Bambu Studio before rewinding." when Bambu Studio is running, because Studio holds profiles in memory and writes them back.
+- *Claude config isolation.* In API-key mode the CLI runs with `--bare` (no hooks, plugins, CLAUDE.md or keychain/OAuth; `ANTHROPIC_API_KEY` is the only credential). Both modes pass `--setting-sources ""`, so no user, project or local settings file can widen permissions past `bm_permission`. The subscription mode can't use `--bare`, since bare mode forces API-key auth.
+- *Prompt and MCP config via files.* The system prompt goes through `--append-system-prompt-file` and the MCP config (URL and bearer token) through `--mcp-config <path>`, instead of inline arguments. Both are written per process with mode 0600 into a private temp dir (`bambumate-claude-*`), outside every agent-writable root, since a writable MCP config would let the agent add a server that runs unprompted on the next spawn. They are deleted when the process stops or exits. No argument contains a line break, so Windows' `claude.cmd` shim can't mangle it, and the token no longer shows in `ps`. On Windows, stopping a process runs `taskkill /T /F /PID` so the node child dies too.
+- *Claude first-turn failure.* A session counts as started (and later spawns use `--resume`) only once its process has written a JSON line to stdout, not when the first stdin write succeeds. The "stopped unexpectedly" error carries the last 20 stderr lines (at most 1500 characters).
+- *Codex STOP before `turn/start` answers.* The turn ends locally with one `TurnDone{Interrupted}`; when Codex answers late, that turn is sent `turn/interrupt` and its `turn/completed` is not reported again. `turn/start` has a 60 s timeout, handled like a failed send.
+- *Busy recovery.* `AgentService::interrupt` clears the session's busy flag after the backend call, recovering a session whose `TurnDone` was lost.
+- *Leaks.* NEW CHAT (disabled while busy) and a provider switch call `agent_delete_session` for the old session. `AgentService::new` removes `agent-snapshots/` and `agent-uploads/` left from earlier launches.
+- *Double send.* The drawer treats a send as busy from the moment SEND is pressed until `TurnStarted`/`TurnDone` arrives or the request fails.
+- *Free-text asks.* Ask cards with `allow_other` get a text field and SEND, so asks without options are answerable.
+- *Init failure.* If `AgentService::new` fails, the app still starts; agent commands return "Agent unavailable: …".
 
 **Claude CLI flags (controller finding)**
 - `--permission-prompt-tool` and `--resume-session-at` are both accepted by `claude` 2.1.222's argument parser (neither raises an "unknown option" error; both reach session lookup).
