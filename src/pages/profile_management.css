@@ -235,7 +235,7 @@
     right: 0;
     bottom: 0;
     left: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background-color: rgba(0, 0, 0, 0.6);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -243,9 +243,9 @@
 }
 
 .modal-content {
-    background: var(--bg-card);
-    border: 1px solid var(--border-primary);
-    border-radius: 12px;
+    border: 1px solid var(--nd-border);
+    border-radius: var(--nd-radius-card);
+    background: var(--nd-surface);
     padding: 1.5rem;
     max-width: 400px;
     width: 90%;

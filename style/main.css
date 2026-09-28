@@ -195,11 +195,10 @@ body {
 }
 
 .card {
-    background-color: var(--bg-card);
-    border: 1px solid var(--border-primary);
-    border-radius: 18px;
+    background-color: var(--nd-surface);
+    border: 1px solid var(--nd-border);
+    border-radius: var(--nd-radius-card);
     padding: 22px;
-    box-shadow: var(--shadow-card);
 }
 
 .card h3 {
@@ -219,58 +218,60 @@ body {
 
 .btn {
     display: inline-block;
-    padding: 10px 16px;
-    font-size: 13px;
-    font-weight: 600;
+    padding: 9px 18px;
+    font-family: var(--nd-font-mono);
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     border: 1px solid transparent;
-    border-radius: 999px;
+    border-radius: var(--nd-radius-pill);
     cursor: pointer;
-    transition: background-color 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s, transform 0.15s;
+    transition: background-color 150ms var(--nd-ease), border-color 150ms var(--nd-ease), color 150ms var(--nd-ease), opacity 150ms var(--nd-ease);
     text-decoration: none;
 }
 
 .btn:disabled {
-    opacity: 0.5;
+    opacity: 0.4;
     cursor: not-allowed;
 }
 
-.btn:hover:not(:disabled) {
-    transform: translateY(-1px);
-}
-
 .btn-primary {
-    background-color: var(--accent);
-    color: var(--text-on-accent);
-    box-shadow: var(--shadow-button);
+    background-color: var(--nd-text-display);
+    border-color: var(--nd-text-display);
+    color: var(--nd-black);
 }
 
 .btn-primary:hover:not(:disabled) {
-    background-color: var(--accent-hover);
+    background-color: var(--nd-text-primary);
+    border-color: var(--nd-text-primary);
 }
 
-.btn-secondary {
-    background-color: var(--bg-card);
-    border-color: var(--border-primary);
-    color: var(--text-primary);
+.btn-secondary,
+.btn-save {
+    background-color: transparent;
+    border-color: var(--nd-border-visible);
+    color: var(--nd-text-primary);
 }
 
-.btn-secondary:hover:not(:disabled) {
-    background-color: var(--bg-hover);
+.btn-secondary:hover:not(:disabled),
+.btn-save:hover:not(:disabled) {
+    border-color: var(--nd-text-primary);
+    background-color: transparent;
 }
 
 .btn-ghost {
     background: transparent;
-    color: var(--text-secondary);
-    border: none;
+    color: var(--nd-text-secondary);
+    border: 1px solid transparent;
     padding: 6px 12px;
-    font-size: 13px;
-    cursor: pointer;
-    border-radius: 6px;
+    border-radius: var(--nd-radius-pill);
 }
 
 .btn-ghost:hover:not(:disabled) {
-    color: var(--text-primary);
-    background-color: var(--bg-active);
+    color: var(--nd-text-primary);
+    border-color: var(--nd-border-visible);
+    background: transparent;
 }
 
 .btn-ghost:disabled {
@@ -327,18 +328,19 @@ body {
 .input {
     flex: 1;
     padding: 10px 14px;
+    font-family: var(--nd-font-body);
     font-size: 13px;
-    background-color: var(--bg-input);
-    border: 1px solid var(--border-primary);
-    border-radius: 12px;
-    color: var(--text-primary);
+    background-color: var(--nd-surface);
+    border: 1px solid var(--nd-border-visible);
+    border-radius: var(--nd-radius-input);
+    color: var(--nd-text-primary);
     outline: none;
-    transition: border-color 0.15s, box-shadow 0.15s;
+    transition: border-color 150ms var(--nd-ease);
 }
 
 .input:focus {
-    border-color: var(--accent);
-    box-shadow: var(--shadow-focus);
+    border-color: var(--nd-text-primary);
+    box-shadow: none;
 }
 
 .input::placeholder {
@@ -349,7 +351,7 @@ body {
 select.input {
     appearance: none;
     -webkit-appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238892a4' d='M1.41 0L6 4.58 10.59 0 12 1.41l-6 6-6-6z'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23999999' d='M1.41 0L6 4.58 10.59 0 12 1.41l-6 6-6-6z'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 12px center;
     padding-right: 36px;
@@ -528,31 +530,16 @@ select.input option {
 }
 
 /* Save/Delete buttons */
-.btn-save {
-    background-color: var(--bg-active);
-    color: var(--text-primary);
-}
-
-.btn-save:hover:not(:disabled) {
-    background-color: var(--bg-active-hover);
-}
-
-.btn-delete {
-    background-color: var(--bg-danger);
-    color: var(--color-danger);
-}
-
-.btn-delete:hover:not(:disabled) {
-    background-color: var(--bg-danger-hover);
-}
-
+.btn-delete,
 .btn-danger {
-    background-color: var(--color-danger);
-    color: var(--text-on-accent);
+    background-color: transparent;
+    border-color: var(--nd-accent);
+    color: var(--nd-accent);
 }
 
+.btn-delete:hover:not(:disabled),
 .btn-danger:hover:not(:disabled) {
-    background-color: var(--bg-danger-hover);
+    background-color: var(--nd-accent-subtle);
 }
 
 .settings-section-danger {
@@ -589,37 +576,29 @@ select.input option {
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
-    background-color: var(--bg-card);
-    border: 1px solid var(--border-primary);
-    border-radius: 6px;
-    box-shadow: var(--shadow-card);
+    background-color: var(--nd-surface);
+    border: 1px solid var(--nd-border);
+    border-radius: var(--nd-radius-card);
 }
 
 .status-badge {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    font-size: 12px;
-    font-weight: 700;
+    min-width: 28px;
+    height: 22px;
+    padding: 0 8px;
+    border: 1px solid var(--nd-border-visible);
+    border-radius: var(--nd-radius-pill);
+    background: transparent;
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
 }
 
-.status-pass {
-    background-color: var(--bg-success);
-    color: var(--color-success);
-}
-
-.status-fail {
-    background-color: var(--bg-danger);
-    color: var(--color-danger);
-}
-
-.status-unknown {
-    background-color: var(--bg-unknown);
-    color: var(--text-muted);
-}
+.status-pass { color: var(--nd-signal); background: transparent; }
+.status-fail { color: var(--nd-accent); background: transparent; }
+.status-unknown { color: var(--nd-text-secondary); background: transparent; }
 
 .health-name {
     font-size: 14px;
@@ -640,9 +619,11 @@ select.input option {
 .health-summary {
     margin-top: 8px;
     padding: 12px 16px;
-    border-radius: 6px;
-    font-size: 15px;
-    font-weight: 600;
+    border-radius: var(--nd-radius-card);
+    border: 1px solid var(--nd-border);
+    font-family: var(--nd-font-mono);
+    font-size: 13px;
+    letter-spacing: 0.06em;
     text-align: center;
 }
 
@@ -677,14 +658,15 @@ select.input option {
     gap: 28px;
     align-items: center;
     padding: 30px 32px;
-    background: linear-gradient(135deg, #ffffff 0%, #f5fbf3 100%);
-    border: 1px solid var(--border-primary);
-    border-radius: 28px;
-    box-shadow: var(--shadow-card);
 }
 
-[data-theme="dark"] .hero-panel {
-    background: linear-gradient(135deg, #333337 0%, #2b342d 100%);
+.nd-stat,
+.hero-panel {
+    background-color: var(--nd-surface);
+    background-image: radial-gradient(circle, var(--nd-dot) 0.8px, transparent 1px);
+    background-size: 10px 10px;
+    border: 1px solid var(--nd-border);
+    border-radius: var(--nd-radius-card);
 }
 
 .hero-copy h2 {
@@ -897,11 +879,46 @@ select.input option {
     margin-bottom: 4px;
 }
 
+/* Soft pill switch built on the existing checkbox, no markup change. */
 .toggle-input {
-    width: 18px;
-    height: 18px;
-    accent-color: var(--accent);
+    -webkit-appearance: none;
+    appearance: none;
+    position: relative;
+    flex: none;
+    width: 34px;
+    height: 20px;
+    margin: 0;
+    border: 1px solid var(--nd-border-visible);
+    border-radius: var(--nd-radius-pill);
+    background: var(--nd-surface);
     cursor: pointer;
+    transition: border-color 150ms var(--nd-ease), background-color 150ms var(--nd-ease);
+}
+
+.toggle-input::before {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 12px;
+    height: 12px;
+    border-radius: var(--nd-radius-pill);
+    background: var(--nd-text-disabled);
+    transition: left 150ms var(--nd-ease), background-color 150ms var(--nd-ease);
+}
+
+.toggle-input:checked {
+    border-color: var(--nd-signal);
+}
+
+.toggle-input:checked::before {
+    left: 17px;
+    background: var(--nd-signal);
+}
+
+.toggle-input:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
 }
 
 .toggle-text {
@@ -940,10 +957,9 @@ select.input option {
 .wizard-container {
     width: 600px;
     max-width: 90vw;
-    background-color: var(--bg-card);
-    border: 1px solid var(--border-primary);
-    border-radius: 12px;
-    box-shadow: var(--shadow-card);
+    background-color: var(--nd-surface);
+    border: 1px solid var(--nd-border);
+    border-radius: var(--nd-radius-card);
     display: flex;
     flex-direction: column;
     overflow: hidden;

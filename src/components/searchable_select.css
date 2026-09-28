@@ -13,19 +13,19 @@
     display: flex;
     align-items: center;
     gap: 0.25rem;
-    padding: 8px 12px;
+    padding: 10px 14px;
     font-size: 13px;
-    background-color: var(--bg-input);
-    border: 1px solid var(--border-primary);
-    border-radius: 6px;
+    background-color: var(--nd-surface);
+    border: 1px solid var(--nd-border-visible);
+    border-radius: var(--nd-radius-input);
     color: var(--text-placeholder);
     cursor: pointer;
-    transition: border-color 0.15s;
+    transition: border-color 150ms var(--nd-ease);
     min-height: 36px;
 }
 
 .ss-display:hover {
-    border-color: var(--accent);
+    border-color: var(--nd-text-primary);
 }
 
 .ss-display.has-value {
@@ -74,10 +74,10 @@
     right: 0;
     z-index: 100;
     margin-top: 4px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-primary);
-    border-radius: 6px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--nd-border-visible);
+    border-radius: var(--nd-radius-input);
+    background: var(--nd-surface);
+    box-shadow: none;
     max-height: 360px;
     overflow-y: auto;
     overflow-x: hidden;
@@ -125,7 +125,7 @@
 }
 
 .ss-option.selected {
-    background: var(--bg-active);
+    background: var(--nd-surface-raised);
     font-weight: 600;
 }
 
