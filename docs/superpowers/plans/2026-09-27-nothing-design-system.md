@@ -264,7 +264,7 @@ Replace the whole file:
     --nd-signal: #007a34;
     --nd-warning: #7d5e0e;
     --nd-accent: #d71921;
-    --nd-interactive: #007aff;
+    --nd-interactive: #0062cc;
     --nd-dot: #e4e4e4;
 }
 
