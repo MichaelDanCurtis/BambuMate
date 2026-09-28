@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use super::RefinementHistory;
+use crate::profile::sync::NewPresetWrite;
 
 /// The history database, resolved without an `AppHandle` so plain commands
 /// and the diagnostics harness can reach it. Tauri v2's `app_data_dir()` is
@@ -109,6 +110,25 @@ pub fn load_ledger() -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Record `json_path` in the database at `db_path` only when `outcome` is
+/// [`NewPresetWrite::Created`]. A `ReplacedExisting` write kept the target's
+/// existing cloud id, so there is nothing new to ledger — the target is
+/// either already correctly synced, or was ledgered by whichever earlier
+/// write first created it.
+pub fn note_new_preset_write_at(db_path: &Path, outcome: &NewPresetWrite, json_path: &Path) {
+    if *outcome == NewPresetWrite::Created {
+        record_new_preset_at(db_path, json_path);
+    }
+}
+
+/// Record `json_path` in the app's history database only when `outcome` is
+/// [`NewPresetWrite::Created`]. See [`note_new_preset_write_at`].
+pub fn note_new_preset_write(outcome: &NewPresetWrite, json_path: &Path) {
+    if *outcome == NewPresetWrite::Created {
+        record_new_preset(json_path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +179,30 @@ mod tests {
 
         record_new_preset_at(&db, &json);
         forget_preset_at(&db, "whatever");
+
+        assert!(load_ledger_at(&db).is_empty());
+    }
+
+    #[test]
+    fn note_new_preset_write_records_only_on_created() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("history.db");
+        let json = preset(tmp.path());
+
+        note_new_preset_write_at(&db, &NewPresetWrite::Created, &json);
+
+        let ledger = load_ledger_at(&db);
+        assert_eq!(ledger.len(), 1);
+        assert!(ledger.contains(&ledger_key(&json)));
+    }
+
+    #[test]
+    fn note_new_preset_write_does_nothing_on_replaced_existing() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("history.db");
+        let json = preset(tmp.path());
+
+        note_new_preset_write_at(&db, &NewPresetWrite::ReplacedExisting, &json);
 
         assert!(load_ledger_at(&db).is_empty());
     }

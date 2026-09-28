@@ -6,7 +6,7 @@ use crate::profile::generator;
 use crate::profile::paths::BambuPaths;
 use crate::profile::reader::read_profile;
 use crate::profile::registry::ProfileRegistry;
-use crate::profile::sync::{write_profile_new, NewPresetWrite};
+use crate::profile::sync::write_profile_new;
 
 /// Default target printer label used when the caller doesn't specify one.
 /// Must match `generator::generate_profile`'s internal default so the filename
@@ -187,11 +187,23 @@ pub async fn batch_generate_brand(
                     if let Some(ref ud) = user_dir {
                         let target_path = ud.join(&filename);
                         match write_profile_new(&profile, &target_path, &metadata.user_id) {
-                            Ok(NewPresetWrite::Created) => {
-                                // Best effort: never fails the batch entry.
-                                crate::history::ledger::record_new_preset(&target_path);
+                            Ok(outcome) => {
+                                // Best effort: never fails the batch entry. Reuse the
+                                // AppHandle we already have to avoid a second, possibly
+                                // divergent, resolution of the app data directory; fall
+                                // back to the handle-free lookup if that fails.
+                                match app.path().app_data_dir() {
+                                    Ok(dir) => crate::history::ledger::note_new_preset_write_at(
+                                        &dir.join("refinement_history.db"),
+                                        &outcome,
+                                        &target_path,
+                                    ),
+                                    Err(_) => crate::history::ledger::note_new_preset_write(
+                                        &outcome,
+                                        &target_path,
+                                    ),
+                                }
                             }
-                            Ok(NewPresetWrite::ReplacedExisting) => {}
                             Err(e) => {
                                 warn!("Failed to install {}: {}", filament_name, e);
                                 failed += 1;

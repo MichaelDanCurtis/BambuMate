@@ -27,6 +27,12 @@ impl RefinementHistory {
         let conn =
             Connection::open(db_path).map_err(|e| format!("Failed to open history db: {}", e))?;
 
+        // Give concurrent history and ledger access (install/duplicate/batch/delete
+        // can all touch this file from different commands) a brief window to
+        // wait for a lock instead of failing immediately with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(2))
+            .map_err(|e| format!("Failed to set busy timeout: {}", e))?;
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS refinement_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
