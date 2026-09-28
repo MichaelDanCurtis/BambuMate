@@ -398,10 +398,13 @@ impl ClaudeBackend {
             // On Windows `claude` is a .cmd shim over node: killing the shim
             // alone leaves node running, so take the whole tree down.
             #[cfg(windows)]
-            if let Some(pid) = c.id() {
-                let _ = crate::process_command::new_command("taskkill")
-                    .args(["/T", "/F", "/PID", &pid.to_string()])
-                    .output();
+            {
+                if let Some(pid) = c.id() {
+                    let _ = crate::process_command::new_command("taskkill")
+                        .args(["/T", "/F", "/PID"])
+                        .arg(pid.to_string())
+                        .output();
+                }
             }
             let _ = c.start_kill();
         }
