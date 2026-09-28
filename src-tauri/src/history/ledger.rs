@@ -5,8 +5,11 @@
 //! `bambu.preset_sync` Health check uses that to avoid flagging presets this
 //! version created (or repaired) once Bambu Studio has uploaded them.
 //!
-//! Every function here logs and swallows errors: the ledger must never fail
-//! an install, a duplicate, a batch, a delete or a repair.
+//! Most functions here log and swallow errors: the ledger must never fail an
+//! install, a duplicate, a batch or a delete. Repair is the exception — it
+//! must fail closed on a ledger it cannot read (see [`try_load_ledger`]),
+//! since a false "not in ledger" would let it duplicate an already-synced
+//! preset in the cloud.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -92,22 +95,43 @@ pub fn forget_preset(key: &str) {
     }
 }
 
-/// All ledger keys in the database at `db_path`; empty on any error.
-pub fn load_ledger_at(db_path: &Path) -> HashSet<String> {
-    match RefinementHistory::new(db_path).and_then(|s| s.generated_preset_paths()) {
-        Ok(set) => set,
-        Err(e) => {
-            warn!("Ledger: could not load {:?}: {}", db_path, e);
-            HashSet::new()
-        }
-    }
+/// All ledger keys in the database at `db_path`, or the underlying error.
+///
+/// Used by repair, which must fail closed: treating a database error as an
+/// empty ledger would make every synced BambuMate preset look repairable,
+/// and repairing one duplicates it in the cloud. Detection is fine with the
+/// best-effort [`load_ledger_at`] instead, since it only adds candidates to
+/// a list for the user to review.
+pub fn try_load_ledger_at(db_path: &Path) -> Result<HashSet<String>, String> {
+    RefinementHistory::new(db_path).and_then(|s| s.generated_preset_paths())
 }
 
-/// All ledger keys in the app's history database; empty on any error.
+/// All ledger keys in the app's history database, or an error if the app
+/// data directory cannot be resolved or the database cannot be read. See
+/// [`try_load_ledger_at`].
+pub fn try_load_ledger() -> Result<HashSet<String>, String> {
+    let db = history_db_path().ok_or_else(|| "no app data directory found".to_string())?;
+    try_load_ledger_at(&db)
+}
+
+/// All ledger keys in the database at `db_path`; empty on any error. Only for
+/// best-effort callers (detection) — repair must fail closed and use
+/// [`try_load_ledger_at`] instead.
+pub fn load_ledger_at(db_path: &Path) -> HashSet<String> {
+    try_load_ledger_at(db_path).unwrap_or_else(|e| {
+        warn!("Ledger: could not load {:?}: {}", db_path, e);
+        HashSet::new()
+    })
+}
+
+/// All ledger keys in the app's history database; empty on any error. Only
+/// for best-effort callers (detection) — repair must fail closed and use
+/// [`try_load_ledger`] instead.
 pub fn load_ledger() -> HashSet<String> {
-    history_db_path()
-        .map(|db| load_ledger_at(&db))
-        .unwrap_or_default()
+    try_load_ledger().unwrap_or_else(|e| {
+        warn!("Ledger: could not load ledger: {}", e);
+        HashSet::new()
+    })
 }
 
 /// Record `json_path` in the database at `db_path` only when `outcome` is
@@ -205,5 +229,34 @@ mod tests {
         note_new_preset_write_at(&db, &NewPresetWrite::ReplacedExisting, &json);
 
         assert!(load_ledger_at(&db).is_empty());
+    }
+
+    /// Repair's fail-closed loader: a missing/unusable database is an error,
+    /// not a silent empty set. `load_ledger_at` (used by detection) may still
+    /// paper over the same failure with an empty set; this is what repair
+    /// must use instead so a preset that is actually in the ledger is never
+    /// mistaken for a repair candidate because the ledger failed to load.
+    #[test]
+    fn try_load_ledger_at_fails_on_an_unusable_database() {
+        let tmp = TempDir::new().unwrap();
+        let not_a_dir = tmp.path().join("file");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+        let db = not_a_dir.join("history.db");
+
+        assert!(try_load_ledger_at(&db).is_err());
+        // The best-effort wrapper over the same path still swallows it.
+        assert!(load_ledger_at(&db).is_empty());
+    }
+
+    #[test]
+    fn try_load_ledger_at_succeeds_on_a_good_database() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("history.db");
+        let json = preset(tmp.path());
+        record_new_preset_at(&db, &json);
+
+        let ledger = try_load_ledger_at(&db).unwrap();
+
+        assert!(ledger.contains(&ledger_key(&json)));
     }
 }

@@ -463,4 +463,26 @@ mod tests {
         assert!(ensure_within(&dir, &outside, true).is_err());
         assert!(ensure_within(&dir, &dir.join("missing.json"), true).is_err());
     }
+
+    /// Fix round 1: a symlink living inside the base directory but pointing
+    /// outside it must still be rejected. `canonicalize()` resolves the
+    /// symlink to its real (outside) target before the `starts_with` check,
+    /// so this already worked, but it was untested and is exactly the shape
+    /// of escape a directory guard exists to stop.
+    #[test]
+    #[cfg(unix)]
+    fn ensure_within_rejects_a_symlink_that_escapes_the_dir() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("base");
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = tmp.path().join("secret.json");
+        std::fs::write(&secret, "{}").unwrap();
+        let link = dir.join("escape.json");
+        symlink(&secret, &link).unwrap();
+
+        let err = ensure_within(&dir, &link, true).unwrap_err();
+        assert!(err.contains("outside the user filament directory"), "{err}");
+    }
 }

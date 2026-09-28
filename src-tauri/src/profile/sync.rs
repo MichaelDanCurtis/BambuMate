@@ -247,19 +247,37 @@ pub fn classify_candidate(
 /// Scan `user_dir` (the user filament folder, not recursive) for presets
 /// that will not sync. Sorted case-insensitively by profile name.
 pub fn find_unsynced_presets(user_dir: &Path, ledger: &HashSet<String>) -> Vec<UnsyncedPreset> {
-    let Ok(entries) = std::fs::read_dir(user_dir) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(user_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            warn!("Preset sync scan: could not read {:?}: {}", user_dir, e);
+            return Vec::new();
+        }
     };
     let mut found = Vec::new();
     for path in entries.filter_map(|e| e.ok().map(|e| e.path())) {
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(profile) = read_profile(&path) else {
-            continue;
+        let profile = match read_profile(&path) {
+            Ok(profile) => profile,
+            Err(e) => {
+                debug!("Preset sync scan: skipping unreadable {:?}: {}", path, e);
+                continue;
+            }
         };
-        let Ok(Some(meta)) = read_profile_metadata(&path) else {
-            continue;
+        let meta = match read_profile_metadata(&path) {
+            Ok(Some(meta)) => meta,
+            // No .info at all is an ordinary, expected state (Bambu Studio
+            // has not written one yet), not a scan failure.
+            Ok(None) => continue,
+            Err(e) => {
+                debug!(
+                    "Preset sync scan: skipping {:?}, could not read .info: {}",
+                    path, e
+                );
+                continue;
+            }
         };
         let in_ledger = ledger.contains(&crate::history::ledger::ledger_key(&path));
         if let Some(source) = classify_candidate(&profile, &meta, in_ledger) {
@@ -311,11 +329,25 @@ pub fn repair_presets(
 
 fn repair_one(user_dir: &Path, path: &Path, ledger: &HashSet<String>) -> Result<(), String> {
     let canonical = ensure_within(user_dir, path, true)?;
+
+    // Only accept the exact shape `find_unsynced_presets` would have listed:
+    // a `.json` file directly inside the scanned folder, not a nested
+    // subdirectory (detection does not recurse) and not some other
+    // extension smuggled past the folder guard.
+    let canonical_dir = user_dir
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve user directory: {}", e))?;
+    let is_listed_shape = canonical.parent() == Some(canonical_dir.as_path())
+        && canonical.extension().and_then(|e| e.to_str()) == Some("json");
+    if !is_listed_shape {
+        return Err("not a preset file BambuMate lists".to_string());
+    }
+
     let profile = read_profile(&canonical).map_err(|e| format!("Cannot read preset: {}", e))?;
     let meta = read_profile_metadata(&canonical)
         .map_err(|e| format!("Cannot read .info: {}", e))?
         .ok_or_else(|| "No .info file".to_string())?;
-    let in_ledger = ledger.contains(canonical.to_string_lossy().as_ref());
+    let in_ledger = ledger.contains(&crate::history::ledger::ledger_key(&canonical));
     if classify_candidate(&profile, &meta, in_ledger).is_none() {
         return Err("No longer needs repair".to_string());
     }
@@ -693,6 +725,13 @@ mod tests {
         );
         // No .info at all: Bambu Studio does not know it yet.
         write_preset(&dir, "Bare PLA", "", None);
+        // On hold: one of Bambu Studio's own skip states, never a candidate.
+        write_preset(
+            &dir,
+            "Held PLA",
+            "",
+            Some(meta("PFUS00000000000004", "hold", "")),
+        );
         let ledger: HashSet<String> = [crate::history::ledger::ledger_key(&ledgered)]
             .into_iter()
             .collect();
@@ -824,6 +863,82 @@ mod tests {
         assert_eq!(
             read_profile_metadata(&a).unwrap().unwrap().setting_id,
             "PFUS0123456789abcd"
+        );
+    }
+
+    /// Fix round 1: `repair_one` used to check the ledger with the raw
+    /// canonical path string instead of `ledger_key`, which normalises via
+    /// `canonicalize()`. `find_unsynced_presets` already used `ledger_key`,
+    /// so a signature-shaped preset the ledger actually covers would pass
+    /// detection as "not a candidate" but still get rewritten by repair if a
+    /// caller (e.g. a stale selection) submitted it anyway — silently
+    /// duplicating an already-synced preset in the cloud.
+    #[test]
+    fn repair_treats_a_ledgered_signature_preset_as_not_a_candidate() {
+        let tmp = TempDir::new().unwrap();
+        let dir = user_preset_dir(&tmp);
+        let a = write_preset(
+            &dir,
+            "Acme PLA",
+            "",
+            Some(meta("PFUS0123456789abcd", "", "")),
+        );
+        let ledger: HashSet<String> = [crate::history::ledger::ledger_key(&a)]
+            .into_iter()
+            .collect();
+        let info_before = std::fs::read(a.with_extension("info")).unwrap();
+
+        let result = repair_presets(&dir, &[as_arg(&a)], &ledger, false).unwrap();
+
+        assert!(result.repaired.is_empty());
+        assert_eq!(
+            result.skipped,
+            vec![(as_arg(&a), "No longer needs repair".to_string())]
+        );
+        let info_after = std::fs::read(a.with_extension("info")).unwrap();
+        assert_eq!(info_before, info_after, ".info must be byte-identical");
+    }
+
+    /// Fix round 1: repair must only accept the exact shape detection would
+    /// have listed — a `.json` file directly inside the scanned folder — so
+    /// a caller cannot point it at a non-preset file or a nested path that
+    /// slips past the plain folder-containment guard.
+    #[test]
+    fn repair_rejects_paths_detection_would_never_list() {
+        let tmp = TempDir::new().unwrap();
+        let dir = user_preset_dir(&tmp);
+        let a = write_preset(
+            &dir,
+            "Acme PLA",
+            "",
+            Some(meta("PFUS0123456789abcd", "", "")),
+        );
+        let info_path = a.with_extension("info");
+        let nested_dir = dir.join("nested");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let nested = write_preset(
+            &nested_dir,
+            "Acme PLA",
+            "",
+            Some(meta("PFUS0123456789abce", "", "")),
+        );
+
+        let result = repair_presets(
+            &dir,
+            &[as_arg(&info_path), as_arg(&nested)],
+            &HashSet::new(),
+            false,
+        )
+        .unwrap();
+
+        assert!(result.repaired.is_empty());
+        assert_eq!(result.skipped.len(), 2);
+        for (_, reason) in &result.skipped {
+            assert_eq!(reason, "not a preset file BambuMate lists");
+        }
+        assert_eq!(
+            read_profile_metadata(&nested).unwrap().unwrap().setting_id,
+            "PFUS0123456789abce"
         );
     }
 }
