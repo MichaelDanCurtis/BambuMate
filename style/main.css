@@ -1442,11 +1442,9 @@ select.input option {
 }
 
 .wizard-mode-card:hover {
-    /* Was the same border-color as .selected (both --accent), so hover and
-       selected looked identical. --nd-border-visible is a visible but
-       weaker border, keeping .selected's accent border + shadow as the
-       stronger, distinct treatment. */
-    border-color: var(--nd-border-visible);
+    /* Hover sits between the resting border (--nd-border-visible) and
+       .selected's accent border + shadow, so the three states differ. */
+    border-color: var(--nd-text-disabled);
     background-color: var(--bg-hover);
 }
 
