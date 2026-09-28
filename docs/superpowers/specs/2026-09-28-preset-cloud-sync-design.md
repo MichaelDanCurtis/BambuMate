@@ -1,6 +1,6 @@
 # Preset Cloud Sync
 
-**Status:** Approved in brainstorming (2026-09-28).
+**Status:** Approved in brainstorming (2026-09-28). The ledger semantics were corrected during planning; the plan's "Spec deviations" section lists every change.
 **Sub-project:** Bambu integration, item 1 of 3. The others are item 2, Bambu Studio CLI slicing, and item 3, local printer MQTT.
 **Branch:** `claude/preset-cloud-sync`, off `main` at 73c303c.
 
@@ -70,17 +70,19 @@ pub fn write_profile_edit(profile: &FilamentProfile, json_path: &Path) -> Result
 
 ### 2. Ledger of created presets
 
-- A new table in the existing history SQLite store (`src-tauri/src/history/store.rs`): `generated_presets(path TEXT PRIMARY KEY, filament_id TEXT, profile_name TEXT, created_at INTEGER)`.
-- Creation paths insert or replace a row after a successful write. Delete removes the row.
-- A ledger failure is logged and never fails the user's install.
+- A new table, `generated_presets`, stored in the existing history database. It records every preset that BambuMate wrote as *new* under the corrected rules. This covers install, batch, duplicate, and repair.
+- A ledger row means "this preset will sync correctly". Those presets are **never** repair candidates. Without this, a preset would look like "setting_id set, sync_info empty" as soon as Bambu Cloud assigned its id, and repairing it would duplicate it in the cloud.
+- Delete removes the row. A failure to write the ledger is logged and never fails the user's install.
 
 ### 3. Health Check: presets not syncing
 
 A new check with id `bambu.preset_sync`, in the `bambu` category.
 
 **Candidates** are user filament presets that have a `.info` with a non-empty `setting_id` and an empty `sync_info`, and that also meet one of these conditions:
-- **ledger** (confirmed ours): the path is in `generated_presets`;
+- **confirmed** (made-up id, certainly never synced): the `setting_id` starts with `BambuMate_`. Older builds of duplicate wrote these, and the cloud never issues that prefix;
 - **signature** (probably ours): `inherits` is empty and `base_id` is empty. That is BambuMate's fully flattened output. Presets created in Bambu Studio inherit from a system preset and carry a `base_id`.
+
+Presets recorded in the ledger are excluded.
 
 The check reports:
 - **Pass:** "All BambuMate presets are set to sync."
@@ -93,15 +95,15 @@ The check reports:
 
 **Repair panel:**
 - One row per candidate, showing the profile name, the file name and a checkbox.
-- Ledger candidates are ticked by default. Signature-only candidates are unticked and labelled "Might already be synced — only tick if it's missing from your printer".
+- Confirmed candidates are ticked by default. Signature-only candidates are unticked and labelled "Might already be synced — only tick if it's missing from your printer".
 - A **Repair selected** button, disabled while Bambu Studio is running, with the note "Close Bambu Studio first."
 - After a repair, it shows: "Repaired N presets. Open Bambu Studio while signed in to upload them."
 
 **Commands:**
-- `list_unsynced_presets() -> Vec<UnsyncedPreset { path, profile_name, source: "ledger" | "signature" }>`.
+- `list_unsynced_presets() -> Vec<UnsyncedPreset { path, profile_name, source: "confirmed" | "signature" }>` (plus `bambu_studio_running`; see the plan).
 - `repair_preset_sync(paths: Vec<String>) -> RepairResult { repaired: Vec<String>, skipped: Vec<(String, String)> }`.
   - For each path it applies the existing user-filament-dir guard (`assert_in_user_filament_dir`) and confirms the file is still a candidate.
-  - It then rewrites `.info` with `setting_id = ""`, `sync_info = ""` and `updated_time = now`, keeping `user_id`.
+  - It then rewrites `.info` with `setting_id = ""`, `sync_info = ""` and `updated_time = now`, keeping `user_id`, and records the preset in the ledger.
   - It refuses all paths with an error if `is_bambu_studio_running()`.
 
 ### 4. Agent
@@ -123,14 +125,15 @@ The check reports:
 - `write_profile_edit` works whether a `.info` exists or not.
 - Each creation and edit command path produces the expected `.info`. Existing tests move from `generate_setting_id`.
 - Candidate detection covers four fixtures, of which only the first two are candidates:
-  - a ledger match;
+  - a `BambuMate_` id (confirmed);
+  - a preset recorded in the ledger, which must NOT be a candidate;
   - a signature match;
   - a genuinely synced Bambu Studio preset, with `inherits` set, `base_id` set and `sync_info` empty;
   - a new preset with an empty `setting_id`.
 - Repair rewrites only selected candidates, respects the directory guard, and refuses while Bambu Studio is running.
 - Ledger insert and delete.
 
-**WebKit `app-flows.mjs`:** Health shows the check as Warn with the action. The panel lists candidates, with ledger rows ticked. Repair calls `repair_preset_sync` with the ticked paths and shows the result.
+**WebKit `app-flows.mjs`:** Health shows the check as Warn with the action. The panel lists candidates, with confirmed rows ticked. Repair calls `repair_preset_sync` with the ticked paths and shows the result.
 
 **Manual acceptance on the user's account:**
 1. Install a filament.
