@@ -241,6 +241,7 @@ jobs:
         run: node layout.mjs ../..
 
       - name: Token contrast
+        if: ${{ !cancelled() }}
         working-directory: tests/webkit
         run: node contrast.mjs ../..
 

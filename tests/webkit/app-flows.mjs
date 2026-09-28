@@ -185,6 +185,20 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219, null, { timeout: 3000 });
     const after = await page.locator(".content").evaluate((el) => el.getBoundingClientRect().left);
     if (before !== after) throw new Error(`content moved from ${before} to ${after}`);
+    // "220px with labels visible" -- opacity is a transition, so poll for it
+    // rather than reading it once.
+    await page.waitForFunction(
+      () => getComputedStyle(document.querySelector(".nav-label")).opacity === "1",
+      null,
+      { timeout: 3000 }
+    );
+    if (await page.locator(".sidebar-wordmark").count()) {
+      await page.waitForFunction(
+        () => getComputedStyle(document.querySelector(".sidebar-wordmark")).opacity === "1",
+        null,
+        { timeout: 3000 }
+      );
+    }
     await page.mouse.move(900, 400);
     await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65, null, { timeout: 3000 });
   });
@@ -197,9 +211,33 @@ async function driveApp(browserType, engine, baseUrl) {
   // directly: after the preceding hover step, page.locator(...).focus() does
   // set :focus-visible (and expands the rail) in both engines, so it is used
   // here instead. See Task 6 report for the measurements.
+  //
+  // What this step proves: once a link is focus-visible, the rail's CSS
+  // reacts correctly (expands, labels become visible). What it does NOT
+  // prove: that the link is reachable by an actual Tab key press -- WebKit's
+  // headless engine can't exercise that here (see above), so the tabIndex
+  // check below is the closest available guard against a link silently
+  // dropping out of the tab order (tabindex="-1"), which programmatic
+  // .focus() would not otherwise reveal.
   await step(run, page, "keyboard focus expands the rail", async () => {
     await page.locator('nav.sidebar a[href="/profiles"]').focus();
     await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219, null, { timeout: 3000 });
+    await page.waitForFunction(
+      () => getComputedStyle(document.querySelector(".nav-label")).opacity === "1",
+      null,
+      { timeout: 3000 }
+    );
+    if (await page.locator(".sidebar-wordmark").count()) {
+      await page.waitForFunction(
+        () => getComputedStyle(document.querySelector(".sidebar-wordmark")).opacity === "1",
+        null,
+        { timeout: 3000 }
+      );
+    }
+    const outOfOrder = await page
+      .locator("nav.sidebar a")
+      .evaluateAll((els) => els.filter((el) => el.tabIndex < 0).map((el) => el.getAttribute("href")));
+    if (outOfOrder.length) throw new Error(`removed from tab order: ${outOfOrder.join(", ")}`);
     await page.evaluate(() => document.activeElement.blur());
   });
 
