@@ -293,9 +293,48 @@ fn normalize_version(raw: &str) -> String {
         .join(".")
 }
 
+/// Canonicalise `file_path` and require it to live inside `dir`. Rejects
+/// `..` traversal and absolute paths elsewhere. With `must_exist = false`
+/// the target may be missing (a file about to be written); its parent is
+/// canonicalised instead.
+///
+/// This is the body of `commands::profile::assert_in_user_filament_dir`,
+/// taking the directory as an argument so preset repair can be tested
+/// against a temp directory.
+pub fn ensure_within(dir: &Path, file_path: &Path, must_exist: bool) -> Result<PathBuf, String> {
+    let canonical_dir = dir
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve user directory: {}", e))?;
+
+    let canonical = if must_exist {
+        file_path
+            .canonicalize()
+            .map_err(|e| format!("Invalid path: {}", e))?
+    } else {
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| "Target has no parent directory".to_string())?;
+        let name = file_path
+            .file_name()
+            .ok_or_else(|| "Target has no filename".to_string())?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|e| format!("Invalid parent path: {}", e))?;
+        canonical_parent.join(name)
+    };
+
+    if !canonical.starts_with(&canonical_dir) {
+        return Err(format!(
+            "Refusing to touch path outside the user filament directory: {:?}",
+            file_path
+        ));
+    }
+    Ok(canonical)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{normalize_version, BambuPaths};
+    use super::{ensure_within, normalize_version, BambuPaths};
 
     #[test]
     fn strips_leading_zeros_from_each_component() {
@@ -396,5 +435,32 @@ mod tests {
         if let Ok(paths) = BambuPaths::detect_with_override(Some(&missing)) {
             assert_ne!(paths.config_root, missing);
         }
+    }
+
+    #[test]
+    fn ensure_within_accepts_files_inside_the_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let inside = tmp.path().join("A.json");
+        std::fs::write(&inside, "{}").unwrap();
+
+        let got = ensure_within(tmp.path(), &inside, true).unwrap();
+        assert_eq!(got, inside.canonicalize().unwrap());
+
+        let not_yet = tmp.path().join("B.json");
+        assert!(ensure_within(tmp.path(), &not_yet, false).is_ok());
+    }
+
+    #[test]
+    fn ensure_within_rejects_traversal_and_outside_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("base");
+        std::fs::create_dir_all(&dir).unwrap();
+        let outside = tmp.path().join("evil.json");
+        std::fs::write(&outside, "{}").unwrap();
+
+        let err = ensure_within(&dir, &dir.join("..").join("evil.json"), true).unwrap_err();
+        assert!(err.contains("outside the user filament directory"), "{err}");
+        assert!(ensure_within(&dir, &outside, true).is_err());
+        assert!(ensure_within(&dir, &dir.join("missing.json"), true).is_err());
     }
 }

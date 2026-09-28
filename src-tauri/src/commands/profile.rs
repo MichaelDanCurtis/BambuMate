@@ -642,36 +642,7 @@ fn assert_in_user_filament_dir(
     let user_dir = paths
         .user_filament_dir()
         .ok_or_else(|| "User filament directory not found".to_string())?;
-    let canonical_user_dir = user_dir
-        .canonicalize()
-        .map_err(|e| format!("Cannot resolve user directory: {}", e))?;
-
-    let canonical = if must_exist {
-        file_path
-            .canonicalize()
-            .map_err(|e| format!("Invalid path: {}", e))?
-    } else {
-        // Canonicalise the parent + append the filename so a not-yet-existing
-        // target still lands under user_dir.
-        let parent = file_path
-            .parent()
-            .ok_or_else(|| "Target has no parent directory".to_string())?;
-        let name = file_path
-            .file_name()
-            .ok_or_else(|| "Target has no filename".to_string())?;
-        let canonical_parent = parent
-            .canonicalize()
-            .map_err(|e| format!("Invalid parent path: {}", e))?;
-        canonical_parent.join(name)
-    };
-
-    if !canonical.starts_with(&canonical_user_dir) {
-        return Err(format!(
-            "Refusing to touch path outside the user filament directory: {:?}",
-            file_path
-        ));
-    }
-    Ok(canonical)
+    crate::profile::paths::ensure_within(&user_dir, file_path, must_exist)
 }
 
 /// Delete a user filament profile and its companion .info file.
