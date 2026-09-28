@@ -238,15 +238,16 @@ impl AgentService {
         Ok(row)
     }
 
-    /// Undoes a reservation the backend didn't accept: puts `seq` back
-    /// (unless it's already moved on — e.g. a fast `TurnDone` let a new turn
-    /// start and reserve further before this rollback ran) and clears `busy`.
+    /// Undoes a reservation the backend didn't accept: puts `seq` back and
+    /// clears `busy`, unless the session has already moved on (e.g. the turn
+    /// was stopped, so a new turn reserved further before this rollback ran)
+    /// — `busy` then belongs to that newer turn.
     fn rollback_failed_send(&self, session_id: &str, seq: u32) {
         if let Some(a) = self.active.lock().unwrap().get_mut(session_id) {
             if a.seq == seq {
                 a.seq = seq - 1;
+                a.busy = false;
             }
-            a.busy = false;
         }
     }
 
@@ -522,6 +523,9 @@ mod tests {
         /// the backend) so a test can deterministically observe a concurrent
         /// `send`/`rewind` racing an in-flight rewind.
         rewind_gate: Option<Arc<Gate>>,
+        /// When set, the *first* `send` pauses on this `Gate` and then fails,
+        /// like a Codex turn/start that errors long after the user stopped it.
+        stall_then_fail: StdMutex<Option<Arc<Gate>>>,
     }
 
     #[async_trait]
@@ -557,6 +561,11 @@ mod tests {
         }
         async fn send(&self, sid: &str, seq: u32, input: Vec<UserInput>) -> Result<String, String> {
             if self.fail_send.load(Ordering::SeqCst) {
+                return Err("backend send boom".into());
+            }
+            let stall = self.stall_then_fail.lock().unwrap().take();
+            if let Some(gate) = stall {
+                gate.pause().await;
                 return Err("backend send boom".into());
             }
             if let Some((path, content)) = &self.write_on_send {
@@ -1262,5 +1271,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seq, 2);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_turn_failing_late_does_not_clear_the_next_turns_busy() {
+        let gate = Arc::new(Gate::default());
+        let r = rig_with(
+            host_with_profile(),
+            FakeBackend {
+                stall_then_fail: StdMutex::new(Some(gate.clone())),
+                ..Default::default()
+            },
+        );
+        let sid = bounded(r.svc.start(Provider::Codex, None, None))
+            .await
+            .unwrap();
+        let svc = r.svc.clone();
+        let sid1 = sid.clone();
+        let first = tokio::spawn(async move { svc.send(&sid1, "one".into(), vec![]).await });
+        bounded(gate.ready.notified()).await;
+        // STOP while turn 1's backend send is still pending, then send turn 2.
+        bounded(r.svc.interrupt(&sid)).await.unwrap();
+        let seq2 = bounded(r.svc.send(&sid, "two".into(), vec![]))
+            .await
+            .unwrap();
+        assert_eq!(seq2, 2);
+        // Turn 1 now fails. Turn 2 is still running, so it stays busy.
+        gate.proceed.notify_one();
+        assert!(bounded(first).await.unwrap().is_err());
+        let err = bounded(r.svc.send(&sid, "three".into(), vec![]))
+            .await
+            .unwrap_err();
+        assert!(err.contains("already running"), "{err}");
+        // Nor was turn 2's seq rolled back: once it ends, the next is 3.
+        bounded(r.svc.interrupt(&sid)).await.unwrap();
+        let seq3 = bounded(r.svc.send(&sid, "three".into(), vec![]))
+            .await
+            .unwrap();
+        assert_eq!(seq3, 3);
     }
 }

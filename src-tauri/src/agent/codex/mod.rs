@@ -89,7 +89,11 @@ struct Session {
     turn_id: Option<String>,
     /// Seq of a turn the user stopped before `turn/start` answered. It was
     /// ended locally; when Codex does answer, that turn is interrupted.
+    /// No new turn may start until then (see `send`).
     abandoned_seq: Option<u32>,
+    /// Codex's ids for abandoned turns that answered late. Their
+    /// `turn/completed` must not end whichever turn is running by then.
+    abandoned_turns: Vec<String>,
     generation: u64,
     opts: SessionOpts,
 }
@@ -109,6 +113,7 @@ impl Session {
             in_flight: false,
             turn_id: None,
             abandoned_seq: None,
+            abandoned_turns: Vec::new(),
             generation,
             opts,
         }
@@ -380,7 +385,11 @@ fn on_notification(shared: &Shared, method: &str, params: &Value) {
         if let Some(s) = shared.sessions.lock().unwrap().get_mut(&sid) {
             let completed = params["turn"]["id"].as_str();
             let other_turn = matches!((&s.turn_id, completed), (Some(cur), Some(c)) if cur != c);
-            if !s.in_flight || other_turn {
+            let abandoned = completed.and_then(|c| s.abandoned_turns.iter().position(|t| t == c));
+            if let Some(i) = abandoned {
+                s.abandoned_turns.swap_remove(i);
+                stale_completion = true;
+            } else if !s.in_flight || other_turn {
                 stale_completion = true;
             } else {
                 s.in_flight = false;
@@ -702,13 +711,16 @@ impl AgentBackend for CodexBackend {
         let prev_seq = {
             let mut sessions = self.shared.sessions.lock().unwrap();
             let s = sessions.get_mut(session_id).ok_or("unknown session")?;
+            // A turn stopped before its turn/start answered still has that
+            // request pending; starting another now would let its late
+            // answer (or failure) land on the new turn.
+            if s.abandoned_seq.is_some() {
+                return Err("the previous turn is still stopping".into());
+            }
             let prev = s.seq;
             s.seq = seq;
             s.in_flight = true;
             s.turn_id = None;
-            if s.abandoned_seq == Some(seq) {
-                s.abandoned_seq = None;
-            }
             prev
         };
         self.shared.emit(AgentEvent::TurnStarted {
@@ -734,6 +746,7 @@ impl AgentBackend for CodexBackend {
                 let abandoned = match self.shared.sessions.lock().unwrap().get_mut(session_id) {
                     Some(s) if s.abandoned_seq == Some(seq) => {
                         s.abandoned_seq = None;
+                        s.abandoned_turns.push(turn_id.clone());
                         true
                     }
                     Some(s) => {
@@ -762,12 +775,17 @@ impl AgentBackend for CodexBackend {
             }
             Err(e) => {
                 let was_in_flight = match self.shared.sessions.lock().unwrap().get_mut(session_id) {
-                    Some(s) => {
-                        s.seq = prev_seq;
-                        s.turn_id = None;
+                    // Already ended by interrupt, or no longer the session's
+                    // latest turn: the turn state belongs to something else.
+                    Some(s) if s.abandoned_seq == Some(seq) || s.seq != seq => {
                         if s.abandoned_seq == Some(seq) {
                             s.abandoned_seq = None;
                         }
+                        false
+                    }
+                    Some(s) => {
+                        s.seq = prev_seq;
+                        s.turn_id = None;
                         std::mem::replace(&mut s.in_flight, false)
                     }
                     None => false,
@@ -1499,6 +1517,241 @@ mod tests {
         );
         // seq went back to 0, so there is nothing to rewind to.
         assert!(with_timeout(b.rewind("s1", 1)).await.is_err());
+    }
+
+    fn say(text: &str) -> Vec<UserInput> {
+        vec![UserInput::Text { text: text.into() }]
+    }
+
+    fn done(seq: u32, status: TurnStatus) -> AgentEvent {
+        AgentEvent::TurnDone {
+            session_id: "s1".into(),
+            seq,
+            status,
+        }
+    }
+
+    fn completed(turn_id: &str, status: &str) -> Value {
+        json!({"method":"turn/completed","params":{"threadId":"th1","turn":{"id":turn_id,"items":[],"status":status}}})
+    }
+
+    /// (seq, in_flight, turn_id, abandoned_seq) of session "s1".
+    fn state(b: &CodexBackend) -> (u32, bool, Option<String>, Option<u32>) {
+        let sessions = b.shared.sessions.lock().unwrap();
+        let s = &sessions["s1"];
+        (s.seq, s.in_flight, s.turn_id.clone(), s.abandoned_seq)
+    }
+
+    /// Sends a sentinel notification and returns every TurnDone published
+    /// before it.
+    async fn turn_dones(
+        srv: &mut Server,
+        rx: &mut broadcast::Receiver<AgentEvent>,
+    ) -> Vec<AgentEvent> {
+        srv.send(json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":1}}}})).await;
+        let mut out = Vec::new();
+        loop {
+            let e = next_matching(rx, |e| {
+                matches!(e, AgentEvent::TurnDone { .. } | AgentEvent::Usage { .. })
+            })
+            .await;
+            if matches!(e, AgentEvent::Usage { .. }) {
+                return out;
+            }
+            out.push(e);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_turn_whose_turn_start_fails_late_leaves_the_next_turn_alone() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.send("s1", 1, say("one")), async {
+                let ts = srv.expect("turn/start").await;
+                b.interrupt("s1").await.unwrap();
+                // SEND is enabled again, but turn 1's turn/start is still
+                // pending, so turn 2 is refused instead of started.
+                let err = b.send("s1", 2, say("early")).await.unwrap_err();
+                assert!(err.contains("still stopping"), "{err}");
+                srv.send(
+                    json!({"id": ts["id"], "error": {"code": -32000, "message": "usage limit"}}),
+                )
+                .await;
+            })
+        })
+        .await;
+        assert!(res.unwrap_err().contains("usage limit"));
+        assert_eq!(state(b).3, None);
+
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.send("s1", 2, say("two")), async {
+                let ts = srv.expect("turn/start").await;
+                // The refused send never reached Codex.
+                assert_eq!(ts["params"]["input"][0]["text"], "two");
+                srv.reply(
+                    &ts,
+                    json!({"turn":{"id":"tu2","items":[],"status":"inProgress"}}),
+                )
+                .await;
+            })
+        })
+        .await;
+        assert_eq!(res.unwrap(), "tu2");
+        assert_eq!(state(b), (2, true, Some("tu2".into()), None));
+        srv.send(completed("tu2", "completed")).await;
+        assert_eq!(
+            turn_dones(&mut srv, &mut r.rx).await,
+            vec![
+                done(1, TurnStatus::Interrupted),
+                done(2, TurnStatus::Completed)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_turn_start_failure_leaves_a_newer_in_flight_turn_alone() {
+        // Behind the refusal above: if a newer turn is somehow in flight when
+        // turn 1's turn/start finally fails, turn 1 must not touch it.
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.send("s1", 1, say("one")), async {
+                let ts = srv.expect("turn/start").await;
+                b.interrupt("s1").await.unwrap();
+                {
+                    let mut sessions = b.shared.sessions.lock().unwrap();
+                    let s = sessions.get_mut("s1").unwrap();
+                    s.abandoned_seq = None;
+                    s.seq = 2;
+                    s.in_flight = true;
+                    s.turn_id = Some("tu2".into());
+                }
+                srv.send(
+                    json!({"id": ts["id"], "error": {"code": -32000, "message": "usage limit"}}),
+                )
+                .await;
+            })
+        })
+        .await;
+        assert!(res.is_err());
+        assert_eq!(state(b), (2, true, Some("tu2".into()), None));
+        srv.send(completed("tu2", "completed")).await;
+        assert_eq!(
+            turn_dones(&mut srv, &mut r.rx).await,
+            vec![
+                done(1, TurnStatus::Interrupted),
+                done(2, TurnStatus::Completed)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_turns_late_completion_does_not_end_the_next_turn() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        let b = &r.backend;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.send("s1", 1, say("one")), async {
+                let ts = srv.expect("turn/start").await;
+                b.interrupt("s1").await.unwrap();
+                srv.reply(
+                    &ts,
+                    json!({"turn":{"id":"tu1","items":[],"status":"inProgress"}}),
+                )
+                .await;
+            })
+        })
+        .await;
+        assert_eq!(res.unwrap(), "tu1");
+        let ti = srv.expect("turn/interrupt").await;
+        assert_eq!(ti["params"]["turnId"], "tu1");
+        srv.reply(&ti, json!({})).await;
+
+        let rx = &mut r.rx;
+        let (res, _) = with_timeout(async {
+            tokio::join!(b.send("s1", 2, say("two")), async {
+                let ts = srv.expect("turn/start").await;
+                // Turn 1's completion lands while turn 2 has no turn id yet.
+                srv.send(completed("tu1", "interrupted")).await;
+                assert_eq!(
+                    turn_dones(&mut srv, rx).await,
+                    vec![done(1, TurnStatus::Interrupted)]
+                );
+                assert_eq!(state(b), (2, true, None, None));
+                srv.reply(
+                    &ts,
+                    json!({"turn":{"id":"tu2","items":[],"status":"inProgress"}}),
+                )
+                .await;
+            })
+        })
+        .await;
+        assert_eq!(res.unwrap(), "tu2");
+        srv.send(completed("tu2", "completed")).await;
+        assert_eq!(
+            turn_dones(&mut srv, &mut r.rx).await,
+            vec![done(2, TurnStatus::Completed)]
+        );
+    }
+
+    /// Longer than TURN_START_TIMEOUT; on the paused clock it costs nothing.
+    async fn past_turn_start_timeout<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::time::timeout(TURN_START_TIMEOUT * 2, fut)
+            .await
+            .expect("test timed out waiting past the turn/start timeout")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_start_that_never_answers_times_out_and_fails_the_turn() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        let b = &r.backend;
+        let (res, _) = past_turn_start_timeout(async {
+            tokio::join!(b.send("s1", 1, say("one")), srv.expect("turn/start"))
+        })
+        .await;
+        assert!(res.unwrap_err().contains("within 60s"));
+        assert_eq!(state(b), (0, false, None, None));
+        assert_eq!(
+            turn_dones(&mut srv, &mut r.rx).await,
+            vec![done(1, TurnStatus::Failed)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_turn_whose_turn_start_times_out_ends_only_once() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        let b = &r.backend;
+        let (res, _) = past_turn_start_timeout(async {
+            tokio::join!(b.send("s1", 1, say("one")), async {
+                srv.expect("turn/start").await;
+                b.interrupt("s1").await.unwrap();
+            })
+        })
+        .await;
+        assert!(res.unwrap_err().contains("within 60s"));
+        let (_, in_flight, _, abandoned) = state(b);
+        assert!(!in_flight);
+        assert_eq!(abandoned, None);
+        // The session is free again.
+        send_turn(&r, &mut srv, 2, "tu2").await;
+        srv.send(completed("tu2", "completed")).await;
+        assert_eq!(
+            turn_dones(&mut srv, &mut r.rx).await,
+            vec![
+                done(1, TurnStatus::Interrupted),
+                done(2, TurnStatus::Completed)
+            ]
+        );
     }
 
     #[tokio::test]
