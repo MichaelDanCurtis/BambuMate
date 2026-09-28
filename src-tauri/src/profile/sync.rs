@@ -153,6 +153,24 @@ pub fn write_profile_restored(
     json_path: &Path,
     snapshot_meta: Option<ProfileMetadata>,
 ) -> Result<NewPresetWrite> {
+    // A cloud id is never given up. If the .info on disk lost its id since
+    // the snapshot (blanked or recreated) while the snapshot held a real
+    // one, keep the snapshot's id: an empty id would make Bambu Studio
+    // upload the preset again as new, a duplicate.
+    if let (Ok(Some(current)), Some(snap)) = (read_profile_metadata(json_path), &snapshot_meta) {
+        if current.setting_id.is_empty()
+            && !snap.setting_id.is_empty()
+            && !is_made_up_setting_id(&snap.setting_id)
+        {
+            let mut meta = ProfileMetadata {
+                setting_id: snap.setting_id.clone(),
+                ..current
+            };
+            mark_updated(&mut meta);
+            write_profile_with_metadata(profile, json_path, &meta)?;
+            return Ok(NewPresetWrite::of(&meta));
+        }
+    }
     write_profile_marked(profile, json_path, snapshot_meta)
 }
 
@@ -686,6 +704,21 @@ mod tests {
         let snapshot_meta = metadata_for_new("1881310893".into());
 
         let outcome = write_profile_restored(&profile(), &json, Some(snapshot_meta)).unwrap();
+
+        assert_eq!(outcome, NewPresetWrite::ReplacedExisting);
+        let meta = read_profile_metadata(&json).unwrap().unwrap();
+        assert_eq!(meta.setting_id, "PFUS0123456789abcd");
+        assert_eq!(meta.sync_info, "update");
+    }
+
+    #[test]
+    fn write_profile_restored_keeps_the_snapshot_cloud_id_when_the_current_one_was_blanked() {
+        let tmp = TempDir::new().unwrap();
+        let json = user_preset_dir(&tmp).join("Acme PLA.json");
+        write_profile_with_metadata(&profile(), &json, &metadata_for_new("1881310893".into()))
+            .unwrap();
+
+        let outcome = write_profile_restored(&profile(), &json, Some(synced_meta())).unwrap();
 
         assert_eq!(outcome, NewPresetWrite::ReplacedExisting);
         let meta = read_profile_metadata(&json).unwrap().unwrap();
