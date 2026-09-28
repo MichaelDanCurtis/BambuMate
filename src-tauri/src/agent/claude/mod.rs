@@ -6,7 +6,7 @@ pub mod mcp_server;
 pub mod stream;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,6 +21,7 @@ use self::stream::{encode_user_message, ClaudeDecoder};
 use super::asks::AskBroker;
 use super::backend::{AgentBackend, SessionOpts};
 use super::types::{AgentEvent, AgentModel, Provider, Readiness, TurnStatus, UserInput};
+use super::AGENT_INSTRUCTIONS;
 
 /// Flip to true once Step 6 confirms the CLI accepts `--resume-session-at`.
 pub const RESUME_AT_SUPPORTED: bool = false;
@@ -98,6 +99,50 @@ impl KeySource for KeychainKeys {
 
 type Stdin = Arc<AsyncMutex<Box<dyn AsyncWrite + Send + Unpin>>>;
 
+/// The system prompt and MCP config one `claude` process reads at startup.
+/// They live in a private temp dir, outside every folder the agent may write
+/// (a writable MCP config would let the agent add a server that runs
+/// unprompted on the next spawn), and are deleted with the dir when the
+/// process stops or exits.
+struct LaunchFiles {
+    _dir: tempfile::TempDir,
+    mcp_config: PathBuf,
+    system_prompt: PathBuf,
+}
+
+impl LaunchFiles {
+    fn write(mcp_config_json: &str) -> Result<Self, String> {
+        let dir = tempfile::Builder::new()
+            .prefix("bambumate-claude-")
+            .tempdir()
+            .map_err(|e| format!("claude launch files: {e}"))?;
+        let mcp_config = dir.path().join("mcp.json");
+        let system_prompt = dir.path().join("instructions.md");
+        write_private(&mcp_config, mcp_config_json)
+            .and_then(|_| write_private(&system_prompt, AGENT_INSTRUCTIONS))
+            .map_err(|e| format!("claude launch files: {e}"))?;
+        Ok(Self {
+            _dir: dir,
+            mcp_config,
+            system_prompt,
+        })
+    }
+}
+
+/// Writes `contents` readable by the current user only (the MCP config holds
+/// the session's bearer token).
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path)?.write_all(contents.as_bytes())
+}
+
 /// One running `claude -p`. Turn state lives here, not on the session, so a
 /// process that is being torn down can never finish a turn of its successor.
 struct Proc {
@@ -112,6 +157,8 @@ struct Proc {
     /// Set when BambuMate stops the process on purpose; its reader then drops
     /// the remaining output instead of reporting a crash.
     detached: Arc<AtomicBool>,
+    /// Deleted when the process exits (by its reader) or is stopped (by drop).
+    files: Arc<Mutex<Option<LaunchFiles>>>,
 }
 
 struct Session {
@@ -158,9 +205,8 @@ impl ClaudeBackend {
         *self.mode.lock().unwrap()
     }
 
-    fn launch_for(&self, s: &Session) -> Result<ClaudeLaunch, String> {
+    fn launch_for(&self, s: &Session, files: &LaunchFiles) -> Result<ClaudeLaunch, String> {
         let key = self.keys.claude_api_key();
-        let mcp_config = s.mcp.mcp_config_json();
         build_launch(
             self.auth_mode(),
             key.as_deref(),
@@ -171,13 +217,15 @@ impl ClaudeBackend {
                 model: s.opts.model.as_deref(),
                 full_access: s.opts.full_access,
                 add_dirs: &s.opts.writable_roots,
-                mcp_config: &mcp_config,
+                mcp_config_path: &files.mcp_config,
+                system_prompt_path: &files.system_prompt,
             },
         )
     }
 
     fn spawn_proc(&self, session_id: &str, s: &mut Session) -> Result<(), String> {
-        let launch = self.launch_for(s)?;
+        let files = LaunchFiles::write(&s.mcp.mcp_config_json())?;
+        let launch = self.launch_for(s, &files)?;
         let spawned = self.spawner.spawn(&launch, &s.opts.cwd)?;
         s.resume_at = None;
         let proc = Proc {
@@ -187,8 +235,9 @@ impl ClaudeBackend {
             turn_active: Arc::new(AtomicBool::new(false)),
             alive: Arc::new(AtomicBool::new(true)),
             detached: Arc::new(AtomicBool::new(false)),
+            files: Arc::new(Mutex::new(Some(files))),
         };
-        let (events, decoder, turn_active, alive, detached, uuids, sid) = (
+        let (events, decoder, turn_active, alive, detached, uuids, sid, files) = (
             self.events.clone(),
             proc.decoder.clone(),
             proc.turn_active.clone(),
@@ -196,6 +245,7 @@ impl ClaudeBackend {
             proc.detached.clone(),
             s.uuids.clone(),
             session_id.to_string(),
+            proc.files.clone(),
         );
         let stdout = spawned.stdout;
         tokio::spawn(async move {
@@ -224,6 +274,8 @@ impl ClaudeBackend {
                 }
             }
             alive.store(false, Ordering::SeqCst);
+            // The CLI read both files at startup; it's gone now.
+            files.lock().unwrap().take();
             if detached.load(Ordering::SeqCst) {
                 return;
             }
@@ -280,8 +332,17 @@ impl ClaudeBackend {
             });
         }
         if let Some(c) = p.child.as_mut() {
+            // On Windows `claude` is a .cmd shim over node: killing the shim
+            // alone leaves node running, so take the whole tree down.
+            #[cfg(windows)]
+            if let Some(pid) = c.id() {
+                let _ = crate::process_command::new_command("taskkill")
+                    .args(["/T", "/F", "/PID", &pid.to_string()])
+                    .output();
+            }
             let _ = c.start_kill();
         }
+        p.files.lock().unwrap().take();
         // A write blocked on a dead pipe holds this lock; the kill above
         // unblocks it, so only close stdin when it is free.
         let stdin = p.stdin;
@@ -308,7 +369,8 @@ impl ClaudeBackend {
                 model: None,
                 full_access: opts.full_access,
                 add_dirs: &[],
-                mcp_config: "{}",
+                mcp_config_path: Path::new(""),
+                system_prompt_path: Path::new(""),
             },
         )?;
         let mcp = mcp_server::start(opts.registry.clone()).await?;
@@ -697,6 +759,56 @@ mod tests {
         assert!(launch
             .env_set
             .contains(&("ANTHROPIC_API_KEY".into(), "sk-test".into())));
+    }
+
+    fn arg_after(launch: &ClaudeLaunch, flag: &str) -> PathBuf {
+        let i = launch.args.iter().position(|a| a == flag).unwrap();
+        PathBuf::from(&launch.args[i + 1])
+    }
+
+    #[tokio::test]
+    async fn prompt_and_mcp_config_files_exist_while_running_and_go_on_end_session() {
+        let (p, mut cli) = fake_cli();
+        let r = rig(Some("k"), vec![p]);
+        r.backend.start_session("s1", r.opts.clone()).await.unwrap();
+        r.backend.send("s1", 1, text("hi")).await.unwrap();
+        cli.read_user().await;
+        let launch = r.spawner.launches.lock().unwrap()[0].clone();
+        let mcp = arg_after(&launch, "--mcp-config");
+        let prompt = arg_after(&launch, "--append-system-prompt-file");
+
+        let cfg: Value = serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+        assert!(cfg["mcpServers"]["bambumate"]["headers"]["Authorization"]
+            .as_str()
+            .unwrap()
+            .starts_with("Bearer "));
+        assert_eq!(
+            std::fs::read_to_string(&prompt).unwrap(),
+            crate::agent::AGENT_INSTRUCTIONS
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&mcp).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "token file is private");
+        }
+
+        r.backend.end_session("s1").await;
+        assert!(!mcp.exists() && !prompt.exists(), "launch files removed");
+    }
+
+    #[tokio::test]
+    async fn launch_files_are_removed_when_the_process_exits() {
+        let (p, mut cli) = fake_cli();
+        let mut r = rig(Some("k"), vec![p]);
+        r.backend.start_session("s1", r.opts.clone()).await.unwrap();
+        r.backend.send("s1", 1, text("hi")).await.unwrap();
+        cli.read_user().await;
+        let mcp = arg_after(&r.spawner.launches.lock().unwrap()[0], "--mcp-config");
+        assert!(mcp.exists());
+        drop(cli);
+        until(&mut r.rx, |e| matches!(e, AgentEvent::TurnDone { .. })).await;
+        assert!(!mcp.exists());
     }
 
     #[tokio::test]

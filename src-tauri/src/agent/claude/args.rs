@@ -4,11 +4,9 @@
 //! allow third-party products to offer claude.ai login without approval, so
 //! public builds always use an API key and refuse to run without one.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-
-use crate::agent::AGENT_INSTRUCTIONS;
 
 pub const PERMISSION_TOOL: &str = "mcp__bambumate__bm_permission";
 
@@ -35,7 +33,12 @@ pub struct LaunchOpts<'a> {
     pub model: Option<&'a str>,
     pub full_access: bool,
     pub add_dirs: &'a [PathBuf],
-    pub mcp_config: &'a str,
+    /// JSON file with the loopback MCP server's URL and bearer token. A file,
+    /// not inline JSON: argv is visible to other processes, and Windows runs
+    /// `claude.cmd` through cmd.exe, which mangles quotes and newlines.
+    pub mcp_config_path: &'a Path,
+    /// File holding the text for `--append-system-prompt-file`.
+    pub system_prompt_path: &'a Path,
 }
 
 #[derive(Debug, Clone)]
@@ -83,14 +86,27 @@ pub fn build_launch(
         "--verbose",
         "--include-partial-messages",
         "--strict-mcp-config",
+        // No user, project or local settings: a global permissions.allow
+        // must not bypass bm_permission, and a settings file the agent
+        // writes into its workspace must have no effect.
+        "--setting-sources",
+        "",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
-    args.extend(["--mcp-config".into(), o.mcp_config.to_string()]);
+    if mode == AuthMode::ApiKey {
+        // Skips hooks, plugins, CLAUDE.md discovery and keychain/OAuth, and
+        // makes ANTHROPIC_API_KEY the only credential the CLI will use.
+        args.push("--bare".into());
+    }
     args.extend([
-        "--append-system-prompt".into(),
-        AGENT_INSTRUCTIONS.to_string(),
+        "--mcp-config".into(),
+        o.mcp_config_path.to_string_lossy().into_owned(),
+    ]);
+    args.extend([
+        "--append-system-prompt-file".into(),
+        o.system_prompt_path.to_string_lossy().into_owned(),
     ]);
     if o.resume {
         args.extend(["--resume".into(), o.session_uuid.to_string()]);
@@ -144,7 +160,8 @@ mod tests {
             model: Some("sonnet"),
             full_access: false,
             add_dirs: dirs,
-            mcp_config: "{\"mcpServers\":{}}",
+            mcp_config_path: Path::new("/tmp/bm-claude/mcp.json"),
+            system_prompt_path: Path::new("/tmp/bm-claude/instructions.md"),
         }
     }
 
@@ -190,6 +207,49 @@ mod tests {
     }
 
     #[test]
+    fn prompt_and_mcp_config_are_passed_as_files() {
+        let l = build_launch(AuthMode::ApiKey, Some("k"), &opts(&[])).unwrap();
+        let a = &l.args;
+        assert!(has_pair(a, "--mcp-config", "/tmp/bm-claude/mcp.json"));
+        assert!(has_pair(
+            a,
+            "--append-system-prompt-file",
+            "/tmp/bm-claude/instructions.md"
+        ));
+        assert!(!a.contains(&"--append-system-prompt".to_string()));
+        assert!(
+            !a.iter()
+                .any(|x| x.contains("Bearer") || x.contains("mcpServers")),
+            "no MCP JSON or token on the command line"
+        );
+    }
+
+    #[test]
+    fn no_argument_contains_a_line_break() {
+        let dirs = vec![PathBuf::from("/profiles")];
+        let mut o = opts(&dirs);
+        for full_access in [false, true] {
+            o.full_access = full_access;
+            let a = build_launch(AuthMode::ApiKey, Some("k"), &o).unwrap().args;
+            for arg in &a {
+                assert!(
+                    !arg.contains('\n') && !arg.contains('\r'),
+                    "argument with a line break: {arg:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn api_key_mode_is_bare_and_ignores_setting_files() {
+        let a = build_launch(AuthMode::ApiKey, Some("k"), &opts(&[]))
+            .unwrap()
+            .args;
+        assert!(a.contains(&"--bare".to_string()));
+        assert!(has_pair(&a, "--setting-sources", ""));
+    }
+
+    #[test]
     fn full_access_skips_permissions_and_resume_uses_resume_flag() {
         let mut o = opts(&[]);
         o.full_access = true;
@@ -223,5 +283,9 @@ mod tests {
         let l = build_launch(AuthMode::Subscription, None, &opts(&[])).unwrap();
         assert!(l.env_set.iter().all(|(k, _)| k != "ANTHROPIC_API_KEY"));
         assert!(l.env_remove.contains(&"ANTHROPIC_API_KEY".to_string()));
+        // Bare mode would force API-key auth, so the subscription lane can't
+        // use it; it still ignores setting files.
+        assert!(!l.args.contains(&"--bare".to_string()));
+        assert!(has_pair(&l.args, "--setting-sources", ""));
     }
 }
