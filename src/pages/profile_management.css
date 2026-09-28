@@ -209,7 +209,10 @@
 }
 
 .field-value:hover {
-    color: var(--accent);
+    /* --accent (--nd-text-display) is nearly identical to --text-primary
+       (--nd-text-primary), so this hover was invisible. --nd-interactive
+       gives a real colour change to signal the field is editable. */
+    color: var(--nd-interactive);
 }
 
 /* Inline edit input */
@@ -327,7 +330,10 @@
 }
 
 .btn-edit-specs:hover {
-    background: var(--nd-surface-raised);
+    /* The base background was the same --nd-surface-raised, so this hover
+       was invisible. --nd-border is one tier darker/lighter, flat and
+       colour-only. */
+    background: var(--nd-border);
 }
 
 /* Specs Editor embedded styles (shared with filament_search) */

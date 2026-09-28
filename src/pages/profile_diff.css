@@ -133,7 +133,10 @@
 }
 
 .diff-category-header:hover {
-    background: var(--bg-active);
+    /* --bg-hover and --bg-active are both --nd-surface-raised, so this hover
+       was invisible against the header's own base background. --bg-active-hover
+       (--nd-border) is one tier darker/lighter, flat and colour-only. */
+    background: var(--bg-active-hover);
 }
 
 .diff-category-arrow {
@@ -185,7 +188,11 @@
 }
 
 .diff-row.changed .diff-val-b {
-    color: var(--accent);
+    /* --accent now resolves to --nd-text-display (white), which is barely
+       distinguishable from --text-primary (#e8e8e8) on the A side, so the
+       Compare page no longer marks which value is the B side. Use
+       --nd-interactive instead for a real colour distinction. */
+    color: var(--nd-interactive);
 }
 
 .diff-row.identical td {
