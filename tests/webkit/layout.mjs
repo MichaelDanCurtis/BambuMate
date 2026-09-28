@@ -11,8 +11,11 @@
 // way the CSS is written, so it cannot rot into a tautology.
 
 import { chromium, webkit } from "playwright";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { extname, join, resolve } from "node:path";
+import { FIXTURES } from "./fixtures.mjs";
 
 const repoRoot = resolve(process.argv[2] ?? "../..");
 
@@ -102,3 +105,166 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log("\nPASS: all full-screen overlays cover the viewport in both engines.");
+
+// ============================================================================
+// Rail z-index regression (final-fix Task 1).
+//
+// `.sidebar` (the 64px→220px hover rail) used to sit at z-index 45, below
+// several page-level z-indexed elements (.search-container at 200 on
+// /filament, an open SearchableSelect .ss-dropdown at 100 on /compare, …).
+// `.content` never creates its own stacking context, so those elements
+// stack directly against the rail in the root stacking context: below about
+// 1076px width, where the page content and the expanded 220px rail
+// physically overlap, the rail rendered *under* them instead of on top.
+//
+// This drives the real, built app (the same mock-server + Tauri-mock
+// approach as app-flows.mjs) rather than a synthetic snippet, because the
+// bug depends on real page content sitting at the real pixel coordinates the
+// expanded rail covers — a fabricated snippet couldn't reproduce that
+// geometry without just re-asserting the fix by construction.
+//
+// This test must fail on the pre-fix z-index (.sidebar at 45) and pass once
+// the rail outranks page-level z-indexes (see style/main.css / style/agent.css
+// for the full ladder).
+
+const distDir = join(repoRoot, "dist");
+if (!existsSync(join(distDir, "index.html"))) {
+  console.error(`No build found at ${distDir}. Run \`trunk build\` first.`);
+  process.exit(1);
+}
+
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+};
+
+// Serves the Trunk output, same as app-flows.mjs's `serve()`.
+function serveDist() {
+  const server = createServer(async (req, res) => {
+    const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
+    let file = join(distDir, path);
+    if (!existsSync(file) || path === "/") file = join(distDir, "index.html");
+    try {
+      const body = await readFile(file);
+      res.writeHead(200, {
+        "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
+        "Cache-Control": "no-store",
+      });
+      res.end(body);
+    } catch (err) {
+      res.writeHead(500).end(String(err));
+    }
+  });
+  return new Promise((ok) => server.listen(0, "127.0.0.1", () => ok(server)));
+}
+
+// Same mock as app-flows.mjs's `installTauriMock`, trimmed to what this test
+// needs (no event emission).
+function installTauriMock(fixtures) {
+  window.__ipc = { calls: [], unknown: [] };
+  const invoke = async (cmd, args) => {
+    window.__ipc.calls.push({ cmd, args });
+    if (!(cmd in fixtures)) {
+      window.__ipc.unknown.push(cmd);
+      throw new Error(`no fixture for command '${cmd}'`);
+    }
+    return structuredClone(fixtures[cmd]);
+  };
+  window.__TAURI__ = { core: { invoke }, event: { listen: async () => () => {} } };
+  window.__TAURI_INTERNALS__ = { invoke };
+}
+
+const RAIL_WIDTH_VIEWPORT = { width: 900, height: 800 };
+
+// Each case: a route, how to surface a page-level z-indexed element near the
+// rail (some need a click to open), and that element's selector.
+const RAIL_OVERLAP_CASES = [
+  {
+    route: "/filament",
+    reveal: async () => {},
+    overlapSelector: ".search-container",
+  },
+  {
+    route: "/compare",
+    reveal: async (page) => {
+      await page.locator(".ss-display").first().click();
+    },
+    overlapSelector: ".ss-dropdown",
+  },
+];
+
+async function checkRailOverlap(browserType, name, baseUrl) {
+  const failures = [];
+  const browser = await browserType.launch();
+  for (const { route, reveal, overlapSelector } of RAIL_OVERLAP_CASES) {
+    const page = await browser.newPage({ viewport: RAIL_WIDTH_VIEWPORT });
+    await page.addInitScript(installTauriMock, FIXTURES);
+    try {
+      await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector(".sidebar", { timeout: 45000 });
+      await page.click(`a[href="${route}"]`);
+      await reveal(page);
+      await page.waitForSelector(overlapSelector, { timeout: 5000 });
+      // The bug only shows once the rail is at its full 220px.
+      await page.hover("nav.sidebar");
+      await page.waitForFunction(
+        () => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219,
+        null,
+        { timeout: 3000 }
+      );
+      const result = await page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        const rect = el.getBoundingClientRect();
+        // The middle of the overlapping element's own box, so this tracks
+        // the actual overlap rather than a guessed fixed coordinate.
+        const y = Math.round(rect.top + rect.height / 2);
+        const points = [160, 200].map((x) => {
+          const hit = document.elementFromPoint(x, y);
+          return { x, inSidebar: !!hit?.closest("nav.sidebar"), hitClass: hit?.className ?? "(none)" };
+        });
+        return { y, points };
+      }, overlapSelector);
+      for (const p of result.points) {
+        console.log(
+          `  ${p.inSidebar ? "OK  " : "FAIL"} ${name} ${route} rail-overlap x=${p.x} y=${result.y} -> ${p.hitClass}`
+        );
+        if (!p.inSidebar) {
+          failures.push(
+            `${route}: elementFromPoint(${p.x}, ${result.y}) hit "${p.hitClass}", not nav.sidebar -- ` +
+              `the expanded rail is covered by ${overlapSelector} at 900px width`
+          );
+        }
+      }
+    } finally {
+      await page.close();
+    }
+  }
+  await browser.close();
+  return failures;
+}
+
+const server = await serveDist();
+const baseUrl = `http://127.0.0.1:${server.address().port}/`;
+console.log(`\nServing ${distDir} at ${baseUrl}`);
+
+let railFailures;
+try {
+  railFailures = [
+    ...(await checkRailOverlap(webkit, "webkit", baseUrl)),
+    ...(await checkRailOverlap(chromium, "chromium", baseUrl)),
+  ];
+} finally {
+  server.close();
+}
+
+if (railFailures.length) {
+  console.error(`\nFAIL: ${railFailures.length} rail z-index overlap(s):\n` + railFailures.join("\n"));
+  process.exit(1);
+}
+console.log("\nPASS: the expanded rail is never covered by page content in either engine.");
