@@ -86,14 +86,15 @@ pub fn Sidebar() -> impl IntoView {
                 <li class="nav-item" class:nav-item-locked=locked>
                     <a href=href class="nav-link" class:active=active class:nav-link-locked=locked
                         aria-current=move || if active() { Some("page") } else { None }
-                        title=move || if locked() { "Requires AI — enable in Settings".to_string() } else { label.to_string() }>
+                        aria-label=move || has_update().then(|| format!("{label}, update available"))
+                        title=move || locked().then(|| "Requires AI — enable in Settings".to_string())>
                         <span class="nav-icon"><Icon kind=icon /></span>
                         <span class="nav-label">{label}</span>
                         <Show when=locked>
                             <span class="nav-lock"><Icon kind=IconKind::Lock /></span>
                         </Show>
                         <Show when=has_update>
-                            <span class="nav-update-dot" title="Update available"></span>
+                            <span class="nav-update-dot" aria-hidden="true" title="Update available"></span>
                         </Show>
                     </a>
                 </li>

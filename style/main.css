@@ -97,9 +97,26 @@ body {
     transition-delay: 150ms;
 }
 
-.sidebar:focus-within {
+.sidebar:has(:focus-visible) {
     width: 220px;
     transition-delay: 0ms;
+}
+
+/* Chromium/WebView2 focuses an <a> on mousedown and the router doesn't
+   re-render the nav, so :focus-within never clears after a click there.
+   :has(:focus-visible) only expands for keyboard focus, which is what we
+   want. Engines without :has() fall back to the old :focus-within below. */
+@supports not selector(:has(*)) {
+    .sidebar:focus-within {
+        width: 220px;
+        transition-delay: 0ms;
+    }
+
+    .sidebar:focus-within .sidebar-wordmark,
+    .sidebar:focus-within .nav-label {
+        opacity: 1;
+        transition-delay: 0ms;
+    }
 }
 
 .sidebar-header {
@@ -144,14 +161,14 @@ body {
 
 .sidebar:hover .sidebar-wordmark,
 .sidebar:hover .nav-label,
-.sidebar:focus-within .sidebar-wordmark,
-.sidebar:focus-within .nav-label {
+.sidebar:has(:focus-visible) .sidebar-wordmark,
+.sidebar:has(:focus-visible) .nav-label {
     opacity: 1;
     transition-delay: 150ms;
 }
 
-.sidebar:focus-within .sidebar-wordmark,
-.sidebar:focus-within .nav-label {
+.sidebar:has(:focus-visible) .sidebar-wordmark,
+.sidebar:has(:focus-visible) .nav-label {
     transition-delay: 0ms;
 }
 
@@ -195,7 +212,15 @@ body {
 .nav-link:hover,
 .nav-link:focus-visible {
     color: var(--nd-text-primary);
+}
+
+.nav-link:hover {
     outline: none;
+}
+
+.nav-link:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: -2px;
 }
 
 .nav-link.active {
@@ -219,11 +244,17 @@ body {
     height: 20px;
 }
 
+/* Positioned over the icon's corner (like .nav-update-dot below) rather than
+   flowed after the label, so it still shows once the 64px collapsed rail
+   clips everything past the icon — the opacity:0 label still occupies its
+   full width in the layout and would otherwise push this past the edge. */
 .nav-lock {
+    position: absolute;
+    left: 32px;
+    top: 22px;
     display: inline-flex;
     width: 14px;
     height: 14px;
-    margin-left: auto;
 }
 
 .nav-lock .nd-icon {
@@ -239,6 +270,15 @@ body {
     height: 6px;
     border-radius: var(--nd-radius-pill);
     background: var(--nd-signal);
+}
+
+/* Locked nav item: keep it visibly dimmed even on hover/focus/active,
+   where .nav-link's own state rules would otherwise win on specificity. */
+.nav-link.nav-link-locked,
+.nav-link.nav-link-locked:hover,
+.nav-link.nav-link-locked:focus-visible,
+.nav-link.nav-link-locked.active {
+    color: var(--nd-text-disabled);
 }
 
 /* ===== Content area ===== */
@@ -884,7 +924,7 @@ select.input option {
 
 .stl-dropdown {
     position: fixed;
-    left: 72px;
+    left: 228px;
     bottom: 16px;
     z-index: 46;
     min-width: 200px;
@@ -1409,12 +1449,8 @@ select.input option {
     text-decoration: underline;
 }
 
-/* ============================================================
-   Sidebar locked nav item
-   ============================================================ */
-.nav-link-locked {
-    color: var(--nd-text-disabled);
-}
+/* Sidebar locked nav item styling moved next to the other .nav-link rules
+   above (as .nav-link.nav-link-locked, for specificity over hover/focus/active). */
 
 @media (max-width: 1100px) {
     .hero-panel {
