@@ -537,7 +537,7 @@ fn PhotoDropZone(
 ///
 /// Magic bytes are used rather than `File.type()` because files arriving via
 /// drag-and-drop frequently report an empty type.
-async fn read_file_as_base64(file: web_sys::File) -> Result<(String, String), String> {
+pub(crate) async fn read_file_as_base64(file: web_sys::File) -> Result<(String, String), String> {
     use js_sys::{ArrayBuffer, Uint8Array};
     use wasm_bindgen_futures::JsFuture;
 

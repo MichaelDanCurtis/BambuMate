@@ -65,6 +65,14 @@ jobs:
       - name: Backend tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Backend tests (private claude-subscription build)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features claude-subscription
+
+      - name: Release builds never enable claude-subscription
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: ./scripts/check-release-features.sh
+
       - name: Frontend typecheck
         run: cargo check --target wasm32-unknown-unknown
 

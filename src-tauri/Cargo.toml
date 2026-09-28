@@ -3,6 +3,8 @@ name = "bambumate-tauri"
 version = "0.1.0"
 edition = "2021"
 description = "BambuMate Tauri backend"
+# Two binaries (the app and bambumate-doctor): tells `cargo tauri` which one is the app.
+default-run = "bambumate-tauri"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -26,7 +28,7 @@ texting_robots = "0.2"
 rusqlite = { version = "0.38", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "process", "io-util", "sync", "macros", "rt-multi-thread", "net"] }
 rand = "0.9"
 urlencoding = "2.1"
 regex = "1"
@@ -34,9 +36,23 @@ toml = "0.8"
 image = "0.25"
 base64 = "0.22"
 notify = "7"
+async-trait = "0.1"
+rmcp = { version = "3.4.1", default-features = false, features = ["server", "transport-streamable-http-server", "base64"] }
+axum = "0.8"
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
 md5 = "0.7"
 
+[dev-dependencies]
+# Paused clock for tests of long timeouts.
+tokio = { version = "1", features = ["test-util"] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+# Private build only: lets the Claude lane use the local CLI login instead of an API key.
+# Never enable this in .github/workflows/build.yml.
+claude-subscription = []

@@ -1,0 +1,106 @@
+/* Agent drawer, built on the .nd tokens (style/tokens.css). Flat surfaces,
+   borders instead of shadows, opacity transitions, red only for failures. */
+
+.agent-toggle {
+    position: fixed;
+    top: 12px;
+    right: 16px;
+    z-index: 40;
+    padding: 6px 12px;
+    border: 1px solid var(--nd-border-visible);
+    border-radius: 999px;
+    background: var(--nd-surface);
+    cursor: pointer;
+    /* .nd .nd-label only matches descendants, and this button is the .nd root. */
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-text-secondary);
+}
+.agent-toggle:hover { color: var(--nd-text-display); border-color: var(--nd-text-secondary); }
+
+.agent-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 50;
+    width: min(440px, 100vw);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--nd-black);
+    border-left: 1px solid var(--nd-border-visible);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 200ms var(--nd-ease), visibility 200ms var(--nd-ease);
+}
+.agent-drawer.open { opacity: 1; visibility: visible; pointer-events: auto; }
+
+.ag-header { padding: var(--nd-space-md); border-bottom: 1px solid var(--nd-border); display: grid; gap: var(--nd-space-sm); }
+.ag-provider { display: flex; flex-wrap: wrap; gap: var(--nd-space-xs); }
+.ag-provider button {
+    padding: 6px 8px;
+    border: 1px solid var(--nd-border-visible);
+    border-radius: 999px;
+    background: transparent;
+    cursor: pointer;
+}
+.ag-provider button.active { background: var(--nd-text-display); color: var(--nd-black); border-color: var(--nd-text-display); }
+.ag-provider button:disabled { opacity: 0.4; cursor: default; }
+.ag-provider .ag-new { margin-left: auto; }
+.ag-status { margin: 0; font-size: 12px; color: var(--nd-text-secondary); }
+.ag-login { justify-self: start; color: var(--nd-interactive); background: none; border: none; padding: 0; cursor: pointer; font: inherit; }
+.ag-model-row { display: flex; align-items: center; gap: var(--nd-space-md); }
+.ag-model { flex: 1; padding: 6px 8px; border: 1px solid var(--nd-border-visible); border-radius: 4px; background: var(--nd-surface); color: var(--nd-text-primary); }
+.ag-usage { display: flex; gap: 2px; }
+.ag-seg { width: 6px; height: 12px; background: var(--nd-border-visible); }
+.ag-seg.on { background: var(--nd-text-primary); }
+.ag-seg.on.hot { background: var(--nd-accent); }
+.ag-settings { display: grid; gap: var(--nd-space-sm); padding-top: var(--nd-space-sm); border-top: 1px solid var(--nd-border); }
+
+.ag-stream { flex: 1; overflow-y: auto; padding: var(--nd-space-md); display: flex; flex-direction: column; gap: var(--nd-space-md); }
+.ag-user { align-self: flex-end; max-width: 85%; padding: var(--nd-space-sm) var(--nd-space-md); background: var(--nd-surface-raised); border-radius: 12px; }
+.ag-user-text { margin: 0; white-space: pre-wrap; }
+.ag-rewind { margin-top: var(--nd-space-xs); background: none; border: none; padding: 0; cursor: pointer; }
+.ag-rewind:hover:not(:disabled) { color: var(--nd-text-display); }
+.ag-rewind:disabled { opacity: 0.4; cursor: default; }
+.ag-agent { white-space: pre-wrap; line-height: 1.5; color: var(--nd-text-primary); }
+.ag-agent.ag-streaming::after { content: "▍"; color: var(--nd-text-disabled); }
+
+.ag-activity { border: 1px solid var(--nd-border); border-radius: 8px; padding: var(--nd-space-sm) var(--nd-space-md); }
+.ag-activity-head { display: flex; gap: var(--nd-space-sm); align-items: baseline; }
+.ag-activity-title { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-activity-status { font-size: 12px; color: var(--nd-success); }
+.ag-activity.ag-fail .ag-activity-status { color: var(--nd-accent); }
+.ag-activity-detail pre { margin: var(--nd-space-xs) 0 0; font-family: var(--nd-font-mono); font-size: 11px; white-space: pre-wrap; color: var(--nd-text-secondary); max-height: 200px; overflow: auto; }
+
+.ag-ask { border: 1px solid var(--nd-text-primary); border-radius: 8px; padding: var(--nd-space-md); display: grid; gap: var(--nd-space-sm); }
+.ag-ask-question { margin: 0; }
+.ag-ask-options { display: flex; flex-wrap: wrap; gap: var(--nd-space-xs); }
+.ag-option { font: inherit; padding: 6px 14px; border: 1px solid var(--nd-border-visible); border-radius: 999px; background: var(--nd-surface); color: var(--nd-text-primary); cursor: pointer; }
+.ag-option:hover:not(:disabled) { border-color: var(--nd-text-primary); }
+.ag-option:disabled { opacity: 0.4; cursor: default; }
+.ag-ask-other { display: flex; gap: var(--nd-space-xs); flex-basis: 100%; }
+.ag-other-input { flex: 1; min-width: 0; padding: 6px 10px; border: 1px solid var(--nd-border-visible); border-radius: 999px; background: var(--nd-surface); color: var(--nd-text-primary); font: inherit; }
+.ag-other-input:focus { outline: none; border-color: var(--nd-text-primary); }
+.ag-other-send { padding: 6px 14px; border: 1px solid var(--nd-border-visible); border-radius: 999px; background: transparent; cursor: pointer; }
+.ag-other-send:disabled { opacity: 0.4; cursor: default; }
+.ag-confirm-files { margin: 0; padding-left: var(--nd-space-lg); font-size: 12px; color: var(--nd-text-secondary); }
+
+.ag-notice { margin: 0; font-size: 12px; color: var(--nd-text-secondary); }
+.ag-notice.ag-error { color: var(--nd-accent); }
+
+.ag-todo { margin: 0; padding: var(--nd-space-sm) var(--nd-space-md) var(--nd-space-sm) var(--nd-space-xl); border-top: 1px solid var(--nd-border); font-size: 13px; }
+.ag-todo li.done { color: var(--nd-text-disabled); }
+
+.ag-composer { padding: var(--nd-space-md); border-top: 1px solid var(--nd-border); display: grid; gap: var(--nd-space-sm); }
+.ag-attachments { margin: 0; }
+.ag-input { width: 100%; box-sizing: border-box; resize: vertical; padding: var(--nd-space-sm); border: 1px solid var(--nd-border-visible); border-radius: 8px; background: var(--nd-surface); color: var(--nd-text-primary); font-family: var(--nd-font-body); font-size: 14px; }
+.ag-input:focus { outline: none; border-color: var(--nd-text-primary); }
+.ag-actions { display: flex; justify-content: space-between; align-items: center; }
+.ag-attach { cursor: pointer; }
+.ag-send, .ag-stop { padding: 8px 20px; border-radius: 999px; border: 1px solid var(--nd-text-display); background: var(--nd-text-display); color: var(--nd-black); font-family: var(--nd-font-mono); letter-spacing: 0.08em; cursor: pointer; }
+.ag-send:disabled { opacity: 0.4; cursor: default; }
+.ag-stop { background: transparent; color: var(--nd-accent); border-color: var(--nd-accent); }
