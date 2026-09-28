@@ -80,7 +80,13 @@ body {
     top: 0;
     bottom: 0;
     left: 0;
-    z-index: 45;
+    /* Must outrank every page-level z-index (dropdowns 100, .search-container
+       200, tooltips 500) so the expanded rail never slides under page
+       content below ~1076px width, but stay under full-screen overlays
+       (1000) and the agent drawer (style/agent.css), which must still be
+       able to cover the rail when open. See the z-index ladder in the
+       Nothing design-system final-fix report. */
+    z-index: 600;
     width: 64px;
     overflow: hidden;
     display: flex;
@@ -161,16 +167,19 @@ body {
     transition: opacity 150ms var(--nd-ease);
 }
 
+/* Kept as separate rules, NOT one comma-separated group: an engine that
+   cannot parse `:has()` discards the whole selector list, which would take
+   the working `:hover` rule down with it and leave an empty 220px panel on
+   hover. See the equivalent width rules above and src/components/change_preview.css. */
 .sidebar:hover .sidebar-wordmark,
-.sidebar:hover .nav-label,
-.sidebar:has(:focus-visible) .sidebar-wordmark,
-.sidebar:has(:focus-visible) .nav-label {
+.sidebar:hover .nav-label {
     opacity: 1;
     transition-delay: 150ms;
 }
 
 .sidebar:has(:focus-visible) .sidebar-wordmark,
 .sidebar:has(:focus-visible) .nav-label {
+    opacity: 1;
     transition-delay: 0ms;
 }
 
@@ -997,7 +1006,8 @@ select.input option {
     position: fixed;
     left: 228px;
     bottom: 16px;
-    z-index: 46;
+    /* Just above the rail (.sidebar, z-index 600 above). */
+    z-index: 610;
     min-width: 200px;
     background: var(--nd-surface);
     border: 1px solid var(--nd-border-visible);
@@ -1432,7 +1442,11 @@ select.input option {
 }
 
 .wizard-mode-card:hover {
-    border-color: var(--accent);
+    /* Was the same border-color as .selected (both --accent), so hover and
+       selected looked identical. --nd-border-visible is a visible but
+       weaker border, keeping .selected's accent border + shadow as the
+       stronger, distinct treatment. */
+    border-color: var(--nd-border-visible);
     background-color: var(--bg-hover);
 }
 
