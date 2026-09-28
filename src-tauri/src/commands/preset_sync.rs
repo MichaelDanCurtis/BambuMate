@@ -10,7 +10,7 @@ use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::profile::paths::BambuPaths;
-use crate::profile::sync::{self, RepairResult, UnsyncedPreset};
+use crate::profile::sync::{self, RepairResult, UnsyncedPreset, BS_RUNNING_ERROR};
 
 /// Candidates plus whether Bambu Studio is open, so the panel can disable
 /// "Repair selected".
@@ -42,15 +42,19 @@ pub async fn list_unsynced_presets() -> Result<UnsyncedPresetList, String> {
     .map_err(|e| format!("preset scan failed: {}", e))?
 }
 
-/// Reset the chosen presets to "new". Refused while Bambu Studio runs, and
-/// refused (before any write) if BambuMate's own record of what it wrote as
-/// new can't be read — treating that failure as an empty ledger would make
-/// every synced BambuMate preset look repairable, and repairing one
-/// duplicates it in the cloud.
+/// Reset the chosen presets to "new". Refused while Bambu Studio runs — checked
+/// first, before anything else, so a user with Studio open gets the running
+/// refusal rather than a ledger-read error — and refused (before any write)
+/// if BambuMate's own record of what it wrote as new can't be read — treating
+/// that failure as an empty ledger would make every synced BambuMate preset
+/// look repairable, and repairing one duplicates it in the cloud.
 #[tauri::command]
 pub async fn repair_preset_sync(paths: Vec<String>) -> Result<RepairResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<RepairResult, String> {
         let running = crate::profile::is_bambu_studio_running();
+        if running {
+            return Err(BS_RUNNING_ERROR.to_string());
+        }
         let user_dir = user_filament_dir()?;
         let ledger = crate::history::ledger::try_load_ledger().map_err(|e| {
             warn!("Preset sync repair: could not load ledger, refusing: {}", e);

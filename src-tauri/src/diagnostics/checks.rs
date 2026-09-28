@@ -5,6 +5,7 @@
 //! run. Checks must never panic — a panicking check is itself a bug, so the
 //! runner catches unwinds and turns them into `Fail`.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -1036,7 +1037,21 @@ fn check_preset_sync(opts: DiagnosticsOptions) -> CheckOutcome {
         return CheckOutcome::skip("no user filament directory, so no presets to sync");
     };
     let ledger = crate::history::ledger::load_ledger();
-    preset_sync_outcome(crate::profile::sync::find_unsynced_presets(&user_dir, &ledger).len())
+    preset_sync_for_dir(&user_dir, &ledger)
+}
+
+/// Testable core of [`check_preset_sync`]. `find_unsynced_presets` silently
+/// returns an empty list when the directory can't be read, which would
+/// otherwise read as a false "all synced" Pass — so this probes the
+/// directory itself first and reports that failure distinctly.
+fn preset_sync_for_dir(dir: &Path, ledger: &HashSet<String>) -> CheckOutcome {
+    if let Err(e) = std::fs::read_dir(dir) {
+        return CheckOutcome::warn(
+            format!("Couldn't read the user filament folder: {e}"),
+            "Check that BambuMate can read your Bambu Studio user folder, then run the check again.",
+        );
+    }
+    preset_sync_outcome(crate::profile::sync::find_unsynced_presets(dir, ledger).len())
 }
 
 fn preset_sync_outcome(unsynced: usize) -> CheckOutcome {
@@ -1633,5 +1648,18 @@ mod tests {
     #[test]
     fn preset_sync_is_advertised() {
         assert!(all_check_ids().contains(&"bambu.preset_sync"));
+    }
+
+    #[test]
+    fn preset_sync_warns_without_an_action_when_the_dir_cant_be_read() {
+        let missing = Path::new("/nonexistent/definitely-not-a-real-bambumate-dir");
+        let outcome = preset_sync_for_dir(missing, &HashSet::new());
+        assert_eq!(outcome.status, CheckStatus::Warn);
+        assert!(outcome.action.is_none());
+        assert!(
+            outcome.detail.starts_with("Couldn't read"),
+            "unexpected detail: {:?}",
+            outcome.detail
+        );
     }
 }
