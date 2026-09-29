@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use super::state::{PrinterState, Tray};
 use crate::history::SlotAssignment;
@@ -41,8 +42,15 @@ pub struct SlotView {
     pub assigned_filament_id: Option<String>,
     pub status: SlotStatus,
     /// The assigned preset is a user preset Bambu Cloud doesn't have yet,
-    /// so the printer can't select it.
+    /// so the printer can't select it. Only computed while `status` is
+    /// `Different` (the only status whose steps use it); false otherwise.
     pub needs_cloud_sync: bool,
+    /// The slot has an assignment whose preset has no resolvable
+    /// `filament_id`, so it can never report `Matches`. `status` stays
+    /// `Different`; the UI says: "BambuMate can't check this slot: *{preset}*
+    /// has no filament id. Set it on the printer and confirm by eye."
+    #[serde(default)]
+    pub preset_has_no_id: bool,
 }
 
 /// `A1`…`D4` for AMS units (lettered by id), `HT1`… for AMS HT units
@@ -66,6 +74,10 @@ pub fn slot_label(ams_id: u32, tray_id: u32, external_count: usize) -> String {
 /// The status rules, in order: an empty slot is Empty; a reported filament
 /// id equal to the assigned preset's is Matches; an RFID spool is Rfid;
 /// any other assignment is Different; otherwise Unassigned.
+///
+/// What the printer reports beats what the user assigned: an RFID spool
+/// whose reported id matches the assignment is Matches, and one that
+/// doesn't is Rfid, even when the assignment is stale.
 pub fn slot_status(tray: &Tray, assigned: Option<&SlotAssignment>) -> SlotStatus {
     if tray.empty {
         return SlotStatus::Empty;
@@ -88,7 +100,8 @@ pub fn slot_status(tray: &Tray, assigned: Option<&SlotAssignment>) -> SlotStatus
 }
 
 /// Every AMS slot, then the external spools, with its status.
-/// `needs_cloud_sync` answers for an assigned preset's JSON path.
+/// `needs_cloud_sync` answers for an assigned preset's JSON path and is only
+/// called for `Different` slots, so other statuses cost no file IO.
 pub fn compute_slots(
     state: &PrinterState,
     assignments: &[SlotAssignment],
@@ -108,6 +121,8 @@ pub fn compute_slots(
         .chain(state.external_spools.iter().map(|t| (EXTERNAL_AMS_ID, t)));
     for (ams_id, tray) in slots {
         let assigned = find(ams_id, tray.id);
+        let status = slot_status(tray, assigned);
+        let is_different = status == SlotStatus::Different;
         out.push(SlotView {
             ams_id,
             tray_id: tray.id,
@@ -116,10 +131,18 @@ pub fn compute_slots(
             rfid: tray.has_rfid(),
             assigned_preset: assigned.map(|a| a.preset_name.clone()),
             assigned_filament_id: assigned.and_then(|a| a.filament_id.clone()),
-            status: slot_status(tray, assigned),
-            needs_cloud_sync: assigned
-                .and_then(|a| a.preset_path.as_deref())
-                .is_some_and(needs_cloud_sync),
+            status,
+            needs_cloud_sync: is_different
+                && assigned
+                    .and_then(|a| a.preset_path.as_deref())
+                    .is_some_and(needs_cloud_sync),
+            preset_has_no_id: is_different
+                && assigned.is_some_and(|a| {
+                    a.filament_id
+                        .as_deref()
+                        .map(str::trim)
+                        .is_none_or(str::is_empty)
+                }),
         });
     }
     out
@@ -128,10 +151,14 @@ pub fn compute_slots(
 /// A user preset (it has a `.info`) whose `setting_id` is still empty has
 /// never reached Bambu Cloud, so the printer can't offer it yet.
 pub fn preset_needs_cloud_sync(json_path: &Path) -> bool {
-    matches!(
-        reader::read_profile_metadata(json_path),
-        Ok(Some(meta)) if meta.setting_id.trim().is_empty()
-    )
+    match reader::read_profile_metadata(json_path) {
+        Ok(Some(meta)) => meta.setting_id.trim().is_empty(),
+        Ok(None) => false,
+        Err(e) => {
+            debug!("Can't read the .info for {json_path:?}: {e}");
+            false
+        }
+    }
 }
 
 /// The preset's `filament_id`, following `inherits` through `registry`
@@ -358,5 +385,99 @@ mod tests {
             ]
         );
         assert_eq!(set_on_printer_steps("B2", "Acme PLA", true).len(), 3);
+    }
+
+    #[test]
+    fn a_matching_report_beats_the_rfid_shortcut() {
+        let a = assignment(0, 0, Some("GFA00"));
+        assert_eq!(
+            slot_status(&tray("GFA00", true), Some(&a)),
+            SlotStatus::Matches
+        );
+    }
+
+    #[test]
+    fn an_rfid_spool_beats_a_stale_mismatching_assignment() {
+        let a = assignment(0, 0, Some("P1234567"));
+        assert_eq!(
+            slot_status(&tray("GFA00", true), Some(&a)),
+            SlotStatus::Rfid
+        );
+    }
+
+    #[test]
+    fn an_assignment_without_a_filament_id_is_flagged_and_stays_different() {
+        for id in [None, Some(""), Some("  ")] {
+            let state = state_after(&[H2D_FULL]);
+            let slots = compute_slots(&state, &[assignment(1, 1, id)], &|_| false);
+            assert_eq!(slots[5].status, SlotStatus::Different);
+            assert!(slots[5].preset_has_no_id, "{id:?}");
+        }
+        let state = state_after(&[H2D_FULL]);
+        let with_id = compute_slots(&state, &[assignment(1, 1, Some("P1"))], &|_| false);
+        assert!(!with_id[5].preset_has_no_id);
+        // Not flagged where the assignment isn't what decides the status.
+        let rfid = compute_slots(&state, &[assignment(0, 1, None)], &|_| false);
+        assert_eq!(rfid[1].status, SlotStatus::Rfid);
+        assert!(!rfid[1].preset_has_no_id);
+    }
+
+    #[test]
+    fn cloud_sync_is_only_checked_for_different_slots() {
+        let state = state_after(&[H2D_FULL]);
+        // A2 is an RFID spool, B2 is Different, B4 is empty.
+        let assignments = vec![
+            assignment(0, 1, Some("P1")),
+            assignment(1, 1, Some("P1")),
+            assignment(1, 3, Some("P1")),
+        ];
+        let calls = std::cell::Cell::new(0);
+        let slots = compute_slots(&state, &assignments, &|_| {
+            calls.set(calls.get() + 1);
+            true
+        });
+        assert_eq!(calls.get(), 1);
+        assert!(slots[5].needs_cloud_sync);
+        assert!(!slots[1].needs_cloud_sync);
+        assert!(!slots[7].needs_cloud_sync);
+    }
+
+    #[test]
+    fn a_missing_preset_file_does_not_need_cloud_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!preset_needs_cloud_sync(&dir.path().join("Gone.json")));
+    }
+
+    #[test]
+    fn an_unreadable_info_file_does_not_need_cloud_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("Bad.json");
+        // A directory where the .info file should be: reading it fails.
+        std::fs::create_dir(json.with_extension("info")).unwrap();
+        assert!(!preset_needs_cloud_sync(&json));
+    }
+
+    #[test]
+    fn an_inherits_cycle_terminates_with_none() {
+        let mut registry = ProfileRegistry::new();
+        registry.insert(FilamentProfile::from_json(r#"{"name":"A","inherits":"B"}"#).unwrap());
+        registry.insert(FilamentProfile::from_json(r#"{"name":"B","inherits":"A"}"#).unwrap());
+        let a = FilamentProfile::from_json(r#"{"name":"A","inherits":"B"}"#).unwrap();
+        assert_eq!(resolve_filament_id(&a, &registry), None);
+    }
+
+    #[test]
+    fn an_empty_filament_id_falls_through_to_the_parent() {
+        let mut registry = ProfileRegistry::new();
+        registry.insert(
+            FilamentProfile::from_json(r#"{"name":"Base","filament_id":"GFA00"}"#).unwrap(),
+        );
+        let leaf =
+            FilamentProfile::from_json(r#"{"name":"Leaf","filament_id":"  ","inherits":"Base"}"#)
+                .unwrap();
+        assert_eq!(
+            resolve_filament_id(&leaf, &registry).as_deref(),
+            Some("GFA00")
+        );
     }
 }
