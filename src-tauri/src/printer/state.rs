@@ -48,7 +48,7 @@ pub fn parse_report(payload: &[u8]) -> Result<Report, String> {
         let full = match print.get("msg").and_then(num_u64) {
             Some(0) => true,
             Some(_) => false,
-            None => print.len() >= FULL_PUSH_MIN_FIELDS,
+            None => looks_full(print),
         };
         return Ok(Report::Status {
             print: print.clone(),
@@ -84,6 +84,18 @@ pub fn parse_report(payload: &[u8]) -> Result<Report, String> {
     Ok(Report::Other)
 }
 
+/// Without a `msg` marker a push is full only when it is large and carries
+/// the AMS block plus a device or external-spool block, as real full pushes
+/// do. Anything else merges: replacing state on a mistaken delta would lose
+/// everything, while merging a real full push only loses removals.
+fn looks_full(print: &Map<String, Value>) -> bool {
+    print.len() >= FULL_PUSH_MIN_FIELDS
+        && print.contains_key("ams")
+        && ["device", "vt_tray", "vir_slot"]
+            .iter()
+            .any(|k| print.contains_key(*k))
+}
+
 /// Keeps the merged raw `print` object and derives `PrinterState` from it.
 #[derive(Debug, Default, Clone)]
 pub struct ReportMerger {
@@ -100,6 +112,7 @@ impl ReportMerger {
         } else {
             merge_into(&mut self.raw, print);
         }
+        prune_absent_ams_units(&mut self.raw);
         PrinterState::from_print(&self.raw)
     }
 
@@ -111,23 +124,52 @@ impl ReportMerger {
 
 /// Merges `delta` into `base` field by field. Objects merge recursively.
 /// Arrays of objects that all carry an `id` merge element by element on
-/// that id; any other array replaces. An element with only `id` (and
-/// `state`) replaces its old element: that is how an emptied tray is sent.
+/// that id; any other array replaces, except that an empty array never
+/// empties an id list (Bambu does not send empty lists to mean removal;
+/// vanished AMS units are pruned through `ams_exist_bits`). A tray element
+/// (`ams.ams[].tray[]`, `vir_slot[]`, `vt_tray`) whose only key is `id`
+/// replaces its old element: that is how an emptied slot is sent. Every
+/// other partial element, such as `{"id":"1","state":10}`, merges.
 pub fn merge_into(base: &mut Map<String, Value>, delta: &Map<String, Value>) {
+    merge_object(base, delta, "");
+}
+
+fn merge_object(base: &mut Map<String, Value>, delta: &Map<String, Value>, path: &str) {
     for (key, value) in delta {
-        merge_value(base.entry(key.clone()).or_insert(Value::Null), value);
+        let child = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
+        merge_value(
+            base.entry(key.clone()).or_insert(Value::Null),
+            value,
+            &child,
+        );
     }
 }
 
-fn merge_value(base: &mut Value, delta: &Value) {
+/// Paths whose `id`-only elements mean "slot emptied".
+fn is_tray_path(path: &str) -> bool {
+    matches!(path, "ams.ams.tray" | "vir_slot" | "vt_tray")
+}
+
+fn merge_value(base: &mut Value, delta: &Value, path: &str) {
     match (base, delta) {
-        (Value::Object(b), Value::Object(d)) => merge_into(b, d),
+        (Value::Object(b), Value::Object(d)) => {
+            if is_tray_path(path) && is_id_only(delta) {
+                *b = d.clone();
+            } else {
+                merge_object(b, d, path);
+            }
+        }
+        (Value::Array(b), Value::Array(d)) if d.is_empty() && is_id_list(b) => {}
         (Value::Array(b), Value::Array(d)) if is_id_list(b) && is_id_list(d) => {
             for item in d {
                 let id = id_key(item);
                 match b.iter_mut().find(|old| id_key(old) == id) {
-                    Some(old) if is_id_only(item) => *old = item.clone(),
-                    Some(old) => merge_value(old, item),
+                    Some(old) if is_tray_path(path) && is_id_only(item) => *old = item.clone(),
+                    Some(old) => merge_value(old, item, path),
                     None => b.push(item.clone()),
                 }
             }
@@ -147,13 +189,47 @@ fn id_key(item: &Value) -> Option<String> {
     }
 }
 
+/// An element with exactly one key, `id`.
 fn is_id_only(item: &Value) -> bool {
     item.as_object()
-        .is_some_and(|o| o.keys().all(|k| k == "id" || k == "state"))
+        .is_some_and(|o| o.len() == 1 && o.contains_key("id"))
+}
+
+/// `ams.ams_exist_bits`: hex bitmask, bit n set when AMS unit id n exists.
+fn ams_exist_mask(p: &Map<String, Value>) -> Option<u64> {
+    let bits = p.get("ams")?.get("ams_exist_bits")?.as_str()?.trim();
+    let bits = bits.strip_prefix("0x").unwrap_or(bits);
+    u64::from_str_radix(bits, 16).ok()
+}
+
+/// Whether unit `id` survives the mask. Ids outside the mask's range (AMS HT
+/// uses 128+) and an absent mask keep the unit.
+fn ams_unit_exists(mask: Option<u64>, id: u32) -> bool {
+    match mask {
+        Some(m) if id < 64 => (m >> id) & 1 == 1,
+        _ => true,
+    }
+}
+
+/// Drops units the printer no longer reports from the raw merged object so a
+/// later delta cannot bring them back.
+fn prune_absent_ams_units(raw: &mut Map<String, Value>) {
+    let mask = ams_exist_mask(raw);
+    if mask.is_none() {
+        return;
+    }
+    if let Some(Value::Array(units)) = raw.get_mut("ams").and_then(|a| a.get_mut("ams")) {
+        units.retain(|u| {
+            u.get("id")
+                .and_then(num_u32)
+                .is_none_or(|id| ams_unit_exists(mask, id))
+        });
+    }
 }
 
 /// The live printer state shown on the Printer page and to the agent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PrinterState {
     /// `gcode_state`: IDLE, PREPARE, RUNNING, PAUSE, FINISH, FAILED, ...
     pub gcode_state: Option<String>,
@@ -182,6 +258,7 @@ pub struct PrinterState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Nozzle {
     /// Extruder id. On the H2 series 0 is the right nozzle, 1 the left.
     pub id: u32,
@@ -193,6 +270,7 @@ pub struct Nozzle {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AmsUnit {
     /// 0-3 for AMS / AMS 2 Pro, 128+ for AMS HT.
     pub id: u32,
@@ -205,6 +283,7 @@ pub struct AmsUnit {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Tray {
     pub id: u32,
     /// No filament reported in this slot.
@@ -235,6 +314,7 @@ fn is_set_id(s: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HmsCode {
     pub attr: u32,
     pub code: u32,
@@ -287,7 +367,13 @@ impl PrinterState {
             ams_units: ams
                 .and_then(|a| a.get("ams"))
                 .and_then(Value::as_array)
-                .map(|units| units.iter().filter_map(ams_unit).collect::<Vec<_>>())
+                .map(|units| {
+                    units
+                        .iter()
+                        .filter_map(ams_unit)
+                        .filter(|u| ams_unit_exists(ams_exist_mask(p), u.id))
+                        .collect::<Vec<_>>()
+                })
                 .map(sorted_units)
                 .unwrap_or_default(),
             external_spools: external_spools(p),
@@ -397,9 +483,17 @@ fn tray(v: &Value) -> Option<Tray> {
     };
     let tray_type = s("tray_type");
     let tray_info_idx = s("tray_info_idx");
+    if tray_type.is_empty() && tray_info_idx.is_empty() {
+        // An empty slot reports nothing, whatever stale fields came along.
+        return Some(Tray {
+            id,
+            empty: true,
+            ..Tray::default()
+        });
+    }
     Some(Tray {
         id,
-        empty: tray_type.is_empty() && tray_info_idx.is_empty(),
+        empty: false,
         tray_color: s("tray_color"),
         tray_sub_brands: s("tray_sub_brands"),
         nozzle_temp_min: v
@@ -598,7 +692,7 @@ mod tests {
     #[test]
     fn an_id_only_tray_in_a_delta_empties_the_slot() {
         let emptied = r#"{"print":{"command":"push_status","msg":1,
-            "ams":{"ams":[{"id":"0","tray":[{"id":"1","state":0}]}]}}}"#;
+            "ams":{"ams":[{"id":"0","tray":[{"id":"1"}]}]}}}"#;
         let s = state_after(&[H2D_FULL, emptied]);
         let tray = &s.ams_units[0].trays[1];
         assert!(tray.empty);
@@ -677,5 +771,141 @@ mod tests {
             parse_report(H2D_FULL.as_bytes()).unwrap(),
             Report::Status { full: true, .. }
         ));
+    }
+
+    fn delta(json: &str) -> String {
+        format!(r#"{{"print":{{"command":"push_status","msg":1,{json}}}}}"#)
+    }
+
+    #[test]
+    fn a_large_no_msg_delta_without_ams_merges_instead_of_replacing() {
+        let fields: Vec<String> = (0..22).map(|i| format!(r#""extra_{i}":{i}"#)).collect();
+        let big = format!(
+            r#"{{"print":{{"command":"push_status","mc_percent":9,{}}}}}"#,
+            fields.join(",")
+        );
+        assert!(matches!(
+            parse_report(big.as_bytes()).unwrap(),
+            Report::Status { full: false, .. }
+        ));
+        let s = state_after(&[H2D_FULL, &big]);
+        assert_eq!(s.mc_percent, Some(9));
+        assert_eq!(s.ams_units.len(), 2);
+        assert_eq!(s.nozzles.len(), 2);
+        assert_eq!(s.gcode_state.as_deref(), Some("RUNNING"));
+    }
+
+    #[test]
+    fn a_no_msg_push_needs_ams_and_a_device_block_to_count_as_full() {
+        let fields: Vec<String> = (0..22).map(|i| format!(r#""extra_{i}":{i}"#)).collect();
+        let ams_only = format!(
+            r#"{{"print":{{"command":"push_status","ams":{{"ams":[]}},{}}}}}"#,
+            fields.join(",")
+        );
+        assert!(matches!(
+            parse_report(ams_only.as_bytes()).unwrap(),
+            Report::Status { full: false, .. }
+        ));
+    }
+
+    #[test]
+    fn ams_exist_bits_prunes_units_that_are_gone() {
+        let gone = delta(r#""ams":{"ams_exist_bits":"1"}"#);
+        let s = state_after(&[H2D_FULL, &gone]);
+        assert_eq!(s.ams_units.len(), 1);
+        assert_eq!(s.ams_units[0].id, 0);
+        // The unit stays gone even if the bitmask later says it exists again,
+        // because the raw merged object was pruned too.
+        let back = delta(r#""ams":{"ams_exist_bits":"3"}"#);
+        let s = state_after(&[H2D_FULL, &gone, &back]);
+        assert_eq!(s.ams_units.len(), 1);
+    }
+
+    #[test]
+    fn without_ams_exist_bits_no_unit_is_pruned() {
+        let no_bits = r#"{"print":{"command":"push_status","msg":0,
+            "ams":{"ams":[{"id":"0","tray":[{"id":"0"}]},{"id":"1","tray":[{"id":"0"}]}]}}}"#;
+        assert_eq!(state_after(&[no_bits]).ams_units.len(), 2);
+    }
+
+    #[test]
+    fn a_tray_delta_with_only_id_and_state_keeps_the_tray() {
+        let d = delta(r#""ams":{"ams":[{"id":"0","tray":[{"id":"1","state":10}]}]}"#);
+        let s = state_after(&[H2D_FULL, &d]);
+        let t = &s.ams_units[0].trays[1];
+        assert!(!t.empty);
+        assert_eq!(t.tray_type, "PLA");
+        assert_eq!(t.tray_color, "FFFFFFFF");
+        assert!(t.has_rfid());
+    }
+
+    #[test]
+    fn an_id_only_element_outside_trays_does_not_wipe_it() {
+        let d = delta(r#""device":{"extruder":{"info":[{"id":0}]}}"#);
+        let s = state_after(&[H2D_FULL, &d]);
+        assert_eq!(s.nozzles[0].temp, Some(245.0));
+        assert_eq!(s.nozzles[0].diameter, Some(0.4));
+    }
+
+    #[test]
+    fn an_id_only_vir_slot_empties_the_external_spool() {
+        let d = delta(r#""vir_slot":[{"id":"254"}]"#);
+        let s = state_after(&[H2D_FULL, &d]);
+        assert!(s.external_spools[0].empty);
+        assert_eq!(s.external_spools[0].tray_info_idx, "");
+    }
+
+    #[test]
+    fn an_empty_tray_reports_no_stale_fields() {
+        let stale = r#"{"print":{"command":"push_status","msg":0,
+            "ams":{"ams":[{"id":"0","tray":[{"id":"0","tray_type":"","tray_info_idx":"",
+            "tray_color":"FF0000FF","tray_sub_brands":"Old","remain":50,
+            "nozzle_temp_min":"190","nozzle_temp_max":"230",
+            "tag_uid":"ABCDEF0123456789","tray_uuid":"DE69ECEBB924468D99CA2A9DFCB5FD3B"}]}]}}}"#;
+        let t = &state_after(&[stale]).ams_units[0].trays[0];
+        assert!(t.empty);
+        assert_eq!(
+            t,
+            &Tray {
+                id: 0,
+                empty: true,
+                ..Tray::default()
+            }
+        );
+        assert!(!t.has_rfid());
+    }
+
+    #[test]
+    fn active_nozzle_decodes_the_high_nibble_of_the_extruder_state() {
+        let d = delta(r#""device":{"extruder":{"state":18}}"#);
+        let s = state_after(&[H2D_FULL, &d]);
+        assert_eq!(s.active_nozzle, Some(1));
+    }
+
+    #[test]
+    fn an_empty_tray_list_in_a_delta_is_a_no_op() {
+        let d = delta(r#""ams":{"ams":[{"id":"0","tray":[]}]}"#);
+        let s = state_after(&[H2D_FULL, &d]);
+        assert_eq!(s.ams_units[0].trays.len(), 4);
+        assert_eq!(s.ams_units[0].trays[1].tray_info_idx, "GFA00");
+    }
+
+    #[test]
+    fn an_empty_hms_list_clears_the_codes() {
+        let d = delta(r#""hms":[]"#);
+        assert!(state_after(&[H2D_FULL, &d]).hms.is_empty());
+    }
+
+    #[test]
+    fn partial_json_deserializes_into_a_printer_state() {
+        let s: PrinterState = serde_json::from_str(r#"{"gcode_state":"IDLE"}"#).unwrap();
+        assert_eq!(s.gcode_state.as_deref(), Some("IDLE"));
+        assert!(s.ams_units.is_empty());
+        let t: Tray = serde_json::from_str(r#"{"id":2}"#).unwrap();
+        assert_eq!(t.id, 2);
+        let full = state_after(&[H2D_FULL]);
+        let round: PrinterState =
+            serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(round, full);
     }
 }
