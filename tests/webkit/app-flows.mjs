@@ -88,8 +88,14 @@ function installTauriMock(fixtures) {
       unknown.push(cmd);
       throw new Error(`no fixture for command '${cmd}'`);
     }
-    // `{ __reject: "text" }` answers the way a Tauri command's Err(String) does.
-    const answer = fixtures[cmd];
+    // `{ __reject: "text" }` answers the way a Tauri command's Err(String) does;
+    // `{ __delay: ms, answer }` answers late, like a slow printer.
+    let answer = fixtures[cmd];
+    if (answer && typeof answer === "object" && "__delay" in answer) {
+      const { __delay, answer: late } = answer;
+      await new Promise((r) => setTimeout(r, __delay));
+      answer = late;
+    }
     if (answer && typeof answer === "object" && "__reject" in answer) throw answer.__reject;
     return structuredClone(answer);
   };
@@ -555,11 +561,24 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await page.inputValue("#printer-code")) !== "") throw new Error("the access code is still in the field");
   });
 
+  await step(run, page, "after trust the follow-up test sends the pin and no access code", async () => {
+    const calls = await ipcCalls("printer_test_connection");
+    if (calls.length !== 2) throw new Error(`${calls.length} test calls`);
+    const t = calls.at(-1).args;
+    if (t.pinnedFingerprint !== PRINTER_FINGERPRINT || t.accessCode || t.ip !== "192.168.1.20" || t.serial !== PRINTER_SERIAL) {
+      throw new Error(JSON.stringify(t));
+    }
+  });
+
   // The trust card must show the whole fingerprint and the serial it is for.
   await step(run, page, "a live untrusted certificate is trusted without retyping the code", async () => {
     const other = PRINTER_FINGERPRINT.replace(/^3A/, "4B");
     await emitPrinter({ state: "cert_untrusted", fingerprint: other });
     await page.waitForSelector(".printer-trust", { timeout: 5000 });
+    const status = (await page.locator(".printer-live-status").innerText()).trim();
+    if (status !== "The printer's certificate isn't from a Bambu CA that BambuMate knows.") {
+      throw new Error(`live status reads "${status}"`);
+    }
     const fp = (await page.locator(".printer-fingerprint").innerText()).trim();
     const serial = (await page.locator(".printer-trust-serial").innerText()).trim();
     if (fp !== other || serial !== PRINTER_SERIAL) throw new Error(`card shows ${serial} / ${fp}`);
@@ -624,6 +643,117 @@ async function driveApp(browserType, engine, baseUrl) {
       { timeout: 5000 }
     );
   });
+
+  await step(run, page, "editing the form between Test and Trust still pins the tested printer", async () => {
+    await setFixture("printer_save", FIXTURES.printer_save);
+    await setFixture("printer_test_connection", FIXTURES.printer_test_connection);
+    await page.fill("#printer-ip", "192.168.1.20");
+    await page.fill("#printer-code", "12345678");
+    const tests = (await ipcCalls("printer_test_connection")).length;
+    await page.click(".printer-test");
+    await page.waitForFunction(
+      (n) => window.__ipc.calls.filter((c) => c.cmd === "printer_test_connection").length > n,
+      tests,
+      { timeout: 5000 }
+    );
+    await page.waitForSelector(".printer-trust", { timeout: 5000 });
+    await page.fill("#printer-ip", "10.0.0.66");
+    await page.fill("#printer-serial", "EVIL00000000001");
+    await setFixture("printer_test_connection", { connection: { state: "connected" }, got_report: true, model: "H2D" });
+    const saves = (await ipcCalls("printer_save")).length;
+    await page.click(".printer-trust-btn");
+    await page.waitForFunction(
+      (n) => window.__ipc.calls.filter((c) => c.cmd === "printer_save").length > n,
+      saves,
+      { timeout: 5000 }
+    );
+    const save = (await ipcCalls("printer_save")).at(-1).args;
+    if (
+      save.ip !== "192.168.1.20" ||
+      save.serial !== PRINTER_SERIAL ||
+      save.pinnedFingerprint !== PRINTER_FINGERPRINT ||
+      save.accessCode !== "12345678"
+    ) {
+      throw new Error(JSON.stringify(save));
+    }
+    const form = [await page.inputValue("#printer-ip"), await page.inputValue("#printer-serial")];
+    if (form.join() !== `192.168.1.20,${PRINTER_SERIAL}`) throw new Error(`form has ${form}`);
+    await page.waitForFunction(
+      () => document.querySelector(".printer-result")?.innerText.includes("Connected to H2D"),
+      null,
+      { timeout: 5000 }
+    );
+  });
+
+  await step(run, page, "editing the IP away from the pinned printer drops the pin", async () => {
+    await page.fill("#printer-ip", "192.168.1.99");
+    await page.fill("#printer-ip", "192.168.1.20");
+    const tests = (await ipcCalls("printer_test_connection")).length;
+    await page.click(".printer-test");
+    await page.waitForFunction(
+      (n) => window.__ipc.calls.filter((c) => c.cmd === "printer_test_connection").length > n,
+      tests,
+      { timeout: 5000 }
+    );
+    const t = (await ipcCalls("printer_test_connection")).at(-1).args;
+    if (t.pinnedFingerprint) throw new Error(`still sent pin ${t.pinnedFingerprint}`);
+  });
+
+  await step(run, page, "Remove calls printer_remove and clears the form", async () => {
+    await page.waitForSelector(".printer-remove:not([disabled])", { timeout: 5000 });
+    await page.click(".printer-remove");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "printer_remove"), null, {
+      timeout: 5000,
+    });
+    await page.waitForFunction(
+      () => document.querySelector(".printer-result")?.innerText.trim() === "Printer removed.",
+      null,
+      { timeout: 5000 }
+    );
+    const left = [await page.inputValue("#printer-ip"), await page.inputValue("#printer-serial")];
+    if (left.some(Boolean)) throw new Error(`form still has ${left}`);
+    if (await page.locator(".printer-remove").count()) throw new Error("Remove is still shown");
+  });
+
+  await step(run, page, "only Test connection and Save carry the access code", async () => {
+    const found = await page.evaluate(() => {
+      const allowed = ["printer_test_connection", "printer_save"];
+      const withCode = window.__ipc.calls.filter((c) => c.args && c.args.accessCode);
+      const leaked = window.__ipc.calls
+        .filter((c) => !allowed.includes(c.cmd))
+        .filter((c) => (c.args && "accessCode" in c.args) || JSON.stringify(c.args ?? null).includes("12345678"))
+        .map((c) => c.cmd);
+      return { sent: withCode.length, leaked };
+    });
+    if (found.leaked.length) throw new Error(`access code sent with ${found.leaked}`);
+    if (found.sent === 0) throw new Error("no command carried the access code at all");
+    return `${found.sent} calls carried it`;
+  });
+
+  // Trust chains Save into Test after an await; leaving Settings in between
+  // disposes the section's signals, which must not panic.
+  await step(run, page, "leaving Settings while Trust is saving doesn't panic", async () => {
+    await setFixture("printer_test_connection", FIXTURES.printer_test_connection);
+    await page.fill("#printer-ip", "192.168.1.20");
+    await page.fill("#printer-serial", PRINTER_SERIAL);
+    await page.fill("#printer-code", "12345678");
+    await page.click(".printer-test");
+    await page.waitForSelector(".printer-trust", { timeout: 5000 });
+    await setFixture("printer_save", { __delay: 400, answer: FIXTURES.printer_save });
+    const errors = run.errors.length;
+    await page.click(".printer-trust-btn");
+    await page.click('a[href="/about"]');
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    await page.waitForTimeout(800);
+    if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
+    await page.click('a[href="/settings"]');
+    await page.waitForSelector(".printer-settings", { timeout: 15000 });
+  });
+
+  // Put the canned answers back so later steps start from the defaults.
+  for (const cmd of Object.keys(FIXTURES).filter((k) => k.startsWith("printer_"))) {
+    await setFixture(cmd, FIXTURES[cmd]);
+  }
 
   await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });
 

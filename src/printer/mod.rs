@@ -14,20 +14,63 @@ use types::{ConnectionState, PrinterView};
 #[derive(Clone, Copy)]
 pub struct PrinterShared {
     pub view: RwSignal<PrinterView>,
+    /// Counts delivered events, so a refresh that started before one can't
+    /// overwrite what it brought.
+    events: StoredValue<Seen>,
+}
+
+/// How many `printer://state` and `printer://connection` events arrived.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Seen {
+    views: u64,
+    connections: u64,
+}
+
+/// What a refresh that started at `seen` may apply once the counters are at
+/// `now`: nothing if a newer full view arrived meanwhile, the fetched view
+/// with the newer connection state if only that changed, else the fetched
+/// view.
+fn refreshed(
+    seen: Seen,
+    now: Seen,
+    fetched: PrinterView,
+    current: &ConnectionState,
+) -> Option<PrinterView> {
+    if now.views != seen.views {
+        return None;
+    }
+    let mut view = fetched;
+    if now.connections != seen.connections {
+        view.connection = current.clone();
+    }
+    Some(view)
 }
 
 impl PrinterShared {
     pub fn new() -> Self {
         Self {
             view: RwSignal::new(PrinterView::default()),
+            events: StoredValue::new(Seen::default()),
         }
     }
 
-    /// Re-reads the view from the backend.
+    /// Re-reads the view from the backend without undoing newer events.
     pub fn refresh(self) {
+        let Some(seen) = self.events.try_get_value() else {
+            return;
+        };
         spawn_local(async move {
-            if let Ok(v) = bridge::view().await {
-                self.view.set(v);
+            let Ok(fetched) = bridge::view().await else {
+                return;
+            };
+            let (Some(now), Some(current)) = (
+                self.events.try_get_value(),
+                self.view.try_with_untracked(|v| v.connection.clone()),
+            ) else {
+                return;
+            };
+            if let Some(v) = refreshed(seen, now, fetched, &current) {
+                self.view.try_set(v);
             }
         });
     }
@@ -44,9 +87,47 @@ impl Default for PrinterShared {
 #[component]
 pub fn PrinterEvents() -> impl IntoView {
     let shared = expect_context::<PrinterShared>();
-    crate::agent::bridge::listen::<PrinterView>("printer://state", move |v| shared.view.set(v));
+    crate::agent::bridge::listen::<PrinterView>("printer://state", move |v| {
+        shared.events.try_update_value(|n| n.views += 1);
+        shared.view.try_set(v);
+    });
     crate::agent::bridge::listen::<ConnectionState>("printer://connection", move |c| {
-        shared.view.update(|v| v.connection = c)
+        shared.events.try_update_value(|n| n.connections += 1);
+        shared.view.try_update(|v| v.connection = c);
     });
     shared.refresh();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(connection: ConnectionState) -> PrinterView {
+        PrinterView {
+            configured: true,
+            connection,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_refresh_never_overwrites_a_newer_event() {
+        let start = Seen::default();
+        let fetched = || view(ConnectionState::Connecting);
+        let live = ConnectionState::Connected;
+        // Nothing arrived meanwhile: the fetched view is applied.
+        assert_eq!(refreshed(start, start, fetched(), &live), Some(fetched()));
+        // A full view arrived: it is newer, so the fetch is dropped.
+        let after_view = Seen { views: 1, ..start };
+        assert_eq!(refreshed(start, after_view, fetched(), &live), None);
+        // Only the connection changed: keep it, take the rest.
+        let after_connection = Seen {
+            connections: 1,
+            ..start
+        };
+        assert_eq!(
+            refreshed(start, after_connection, fetched(), &live),
+            Some(view(ConnectionState::Connected))
+        );
+    }
 }
