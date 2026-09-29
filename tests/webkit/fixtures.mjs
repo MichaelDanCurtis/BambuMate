@@ -62,6 +62,126 @@ const CATALOG_ENTRY = {
 const USER_PROFILE_PATH =
   "/Users/runner/Library/Application Support/BambuStudio/user/00000001/filament/Polymaker PolyLite PLA @BBL X1C 0.4 nozzle.json";
 
+// -- printer ------------------------------------------------------------------
+//
+// Shapes mirror src/printer/types.rs, which mirrors the backend's
+// PrinterView (src-tauri/src/printer/service.rs). The slots follow the H2D
+// report fixture in src-tauri/src/printer/testdata/h2d_full.json.
+
+export const PRINTER_SERIAL = "0948AB000000001";
+export const PRINTER_FINGERPRINT =
+  "3A:7F:10:C2:9B:44:E1:08:5D:6A:0F:92:B7:31:CE:04:88:1B:F6:2D:73:A9:50:E3:1C:47:DA:6E:02:B5:98:FF";
+
+const tray = (type, color, idx, sub = "", remain = null) => ({
+  id: 0,
+  empty: !type && !idx,
+  tray_type: type,
+  tray_color: color,
+  tray_info_idx: idx,
+  tray_sub_brands: sub,
+  remain,
+});
+
+const slotOf = (ams_id, tray_id, label, t, extra = {}) => ({
+  ams_id,
+  tray_id,
+  label,
+  tray: { ...t, id: tray_id },
+  rfid: false,
+  assigned_preset: null,
+  assigned_filament_id: null,
+  status: "unassigned",
+  needs_cloud_sync: false,
+  preset_has_no_id: false,
+  ...extra,
+});
+
+export const PRINTER_SLOTS = [
+  slotOf(0, 0, "A1", tray("PLA-S", "FFFFFFFF", "GFS02", "Support for PLA", 1), { rfid: true, status: "rfid" }),
+  slotOf(0, 1, "A2", tray("PLA", "FFFFFFFF", "GFA00", "PLA Basic", 31), { rfid: true, status: "rfid" }),
+  slotOf(0, 2, "A3", tray("PETG", "1F7A3DFF", "GFG99")),
+  slotOf(0, 3, "A4", tray("PLA", "FFFFFFFF", "GFA00", "PLA Basic", 100), { rfid: true, status: "rfid" }),
+  slotOf(1, 0, "B1", tray("PLA", "000000FF", "GFA00", "PLA Basic", 55), { rfid: true, status: "rfid" }),
+  slotOf(1, 1, "B2", tray("PLA", "F95959FF", "P4d6ae04"), {
+    assigned_preset: "Acme Matte PLA",
+    assigned_filament_id: "P4d6ae04",
+    status: "matches",
+  }),
+  slotOf(1, 2, "B3", tray("PETG-CF", "000000FF", "GFG50", "PETG-CF", 100), { rfid: true, status: "rfid" }),
+  slotOf(1, 3, "B4", tray("", "00000000", ""), { status: "empty" }),
+  slotOf(255, 254, "Ext-L", tray("PLA", "76D9F4FF", "GFA01")),
+  slotOf(255, 255, "Ext-R", tray("", "00000000", ""), { status: "empty" }),
+];
+
+export const PRINTER_VIEW = {
+  configured: true,
+  printer: {
+    ip: "192.168.1.20",
+    serial: PRINTER_SERIAL,
+    name: "Workshop H2D",
+    model: "H2D",
+    firmware: "01.01.01.00",
+  },
+  connection: { state: "connected" },
+  state: {
+    gcode_state: "RUNNING",
+    subtask_name: "T-pose - slim H2D dual AMS riser",
+    mc_percent: 6,
+    mc_remaining_time: 549,
+    layer_num: 1,
+    total_layer_num: 200,
+    bed_temp: 70.0,
+    bed_target_temp: 70.0,
+    nozzles: [
+      { id: 0, temp: 245.0, target_temp: 245.0, diameter: 0.4, nozzle_type: "HS01" },
+      { id: 1, temp: 47.0, target_temp: 0.0, diameter: 0.4, nozzle_type: "HS01" },
+    ],
+    active_nozzle: 0,
+    ams_units: [
+      { id: 0, humidity_level: 5, humidity_pct: 21, temp: 27.0 },
+      { id: 1, humidity_level: 5, humidity_pct: 18, temp: 29.7 },
+    ],
+  },
+  slots: PRINTER_SLOTS,
+  errors: [
+    {
+      kind: "hms",
+      code: "0300_0100_0001_0007",
+      text: "The heatbed temperature is abnormal; the sensor may have an open circuit.",
+      wiki_url: "https://wiki.bambulab.com/en/h2/troubleshooting/hmscode/0300_0100_0001_0007",
+    },
+    {
+      kind: "print_error",
+      code: "0300_400C",
+      text: null,
+      wiki_url: "https://wiki.bambulab.com/en/hms/home",
+    },
+  ],
+};
+
+export const PRINTER_UNCONFIGURED = {
+  configured: false,
+  printer: null,
+  connection: { state: "disconnected" },
+  state: null,
+  slots: [],
+  errors: [],
+};
+
+/** PRINTER_VIEW with one slot changed. */
+export const withSlot = (label, patch) => ({
+  ...PRINTER_VIEW,
+  slots: PRINTER_SLOTS.map((s) => (s.label === label ? { ...s, ...patch } : s)),
+});
+
+/** A3 after the user assigns PolyLite: the printer still reports PETG. */
+export const A3_ASSIGNED = {
+  assigned_preset: "Polymaker PolyLite PLA @BBL X1C 0.4 nozzle",
+  assigned_filament_id: "PA-PL-WHTPA0-01",
+  status: "different",
+  needs_cloud_sync: true,
+};
+
 export const FIXTURES = {
   // -- boot --
   get_preference: null,
@@ -517,6 +637,30 @@ export const FIXTURES = {
   agent_delete_session: null,
   agent_stage_image: "/tmp/agent-upload.png",
   agent_login: null,
+
+  // -- printer --
+  // Not set up in Settings yet, so the discovery flow has an empty form.
+  printer_get_config: null,
+  printer_view: PRINTER_VIEW,
+  printer_discover: [
+    { ip: "192.168.1.20", serial: PRINTER_SERIAL, name: "Workshop H2D", model: "H2D", conflict: false },
+  ],
+  printer_test_connection: {
+    connection: { state: "cert_untrusted", fingerprint: PRINTER_FINGERPRINT },
+    got_report: false,
+    model: null,
+  },
+  printer_save: {
+    ip: "192.168.1.20",
+    serial: PRINTER_SERIAL,
+    name: "Workshop H2D",
+    model: "H2D",
+    pinned_fingerprint: PRINTER_FINGERPRINT,
+    has_access_code: true,
+  },
+  printer_remove: null,
+  printer_assign_slot: withSlot("A3", A3_ASSIGNED),
+  printer_clear_slot: PRINTER_VIEW,
 };
 
 // -- test images ------------------------------------------------------------

@@ -21,7 +21,13 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { extname, join, resolve } from "node:path";
-import { FIXTURES, GIF_1X1, makePng } from "./fixtures.mjs";
+import {
+  FIXTURES,
+  GIF_1X1,
+  makePng,
+  PRINTER_FINGERPRINT,
+  PRINTER_SERIAL,
+} from "./fixtures.mjs";
 
 const repoRoot = resolve(process.argv[2] ?? "../..");
 const distDir = join(repoRoot, "dist");
@@ -74,13 +80,18 @@ function installTauriMock(fixtures) {
   const unknown = [];
   const handlers = {};
   window.__ipc = { calls, unknown };
+  // Steps swap a command's canned answer mid-run through this.
+  window.__fixtures = fixtures;
   const invoke = async (cmd, args) => {
     calls.push({ cmd, args });
     if (!(cmd in fixtures)) {
       unknown.push(cmd);
       throw new Error(`no fixture for command '${cmd}'`);
     }
-    return structuredClone(fixtures[cmd]);
+    // `{ __reject: "text" }` answers the way a Tauri command's Err(String) does.
+    const answer = fixtures[cmd];
+    if (answer && typeof answer === "object" && "__reject" in answer) throw answer.__reject;
+    return structuredClone(answer);
   };
   const listen = async (name, cb) => {
     (handlers[name] ||= []).push(cb);
@@ -488,6 +499,130 @@ async function driveApp(browserType, engine, baseUrl) {
     const rows = await page.locator(".settings-page .api-key-form").count();
     if (rows !== 4) throw new Error(`expected 4 key forms, got ${rows}`);
     return `${rows} providers`;
+  });
+
+  // -- Settings → Printer -------------------------------------------------------
+  const ipcCalls = (cmd) => page.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c), cmd);
+  const setFixture = (cmd, value) =>
+    page.evaluate(([c, v]) => {
+      window.__fixtures[c] = v;
+    }, [cmd, value]);
+  const emitPrinter = (state) => page.evaluate((s) => window.__emit("printer://connection", s), state);
+
+  await step(run, page, "printer settings find a printer on the network", async () => {
+    await page.click(".printer-scan");
+    await page.waitForSelector(".printer-found-item", { timeout: 10000 });
+    await page.click(".printer-found-item");
+    const ip = await page.inputValue("#printer-ip");
+    const serial = await page.inputValue("#printer-serial");
+    if (ip !== "192.168.1.20" || serial !== PRINTER_SERIAL) throw new Error(`form has ${ip} / ${serial}`);
+    return `${ip} ${serial}`;
+  });
+
+  await step(run, page, "an untrusted certificate offers Trust this printer", async () => {
+    await page.fill("#printer-code", "12345678");
+    await page.click(".printer-test");
+    await page.waitForSelector(".printer-trust", { timeout: 10000 });
+    const fp = (await page.locator(".printer-fingerprint").innerText()).trim();
+    if (fp !== PRINTER_FINGERPRINT) throw new Error(`fingerprint shows ${fp}`);
+    const [t] = await ipcCalls("printer_test_connection");
+    if (t.args.accessCode !== "12345678" || t.args.serial !== PRINTER_SERIAL) {
+      throw new Error(JSON.stringify(t.args));
+    }
+    const label = (await page.locator(".printer-trust-btn").innerText()).trim();
+    if (label !== "Trust this printer") throw new Error(`button reads "${label}"`);
+  });
+
+  await step(run, page, "trusting pins the fingerprint, saves and connects", async () => {
+    await setFixture("printer_test_connection", {
+      connection: { state: "connected" },
+      got_report: true,
+      model: "H2D",
+    });
+    await page.click(".printer-trust-btn");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "printer_save"), null, {
+      timeout: 5000,
+    });
+    const [save] = await ipcCalls("printer_save");
+    if (save.args.pinnedFingerprint !== PRINTER_FINGERPRINT || save.args.accessCode !== "12345678") {
+      throw new Error(JSON.stringify(save.args));
+    }
+    await page.waitForFunction(
+      () => document.querySelector(".printer-result")?.innerText.includes("Connected to H2D"),
+      null,
+      { timeout: 5000 }
+    );
+    if ((await page.inputValue("#printer-code")) !== "") throw new Error("the access code is still in the field");
+  });
+
+  // The trust card must show the whole fingerprint and the serial it is for.
+  await step(run, page, "a live untrusted certificate is trusted without retyping the code", async () => {
+    const other = PRINTER_FINGERPRINT.replace(/^3A/, "4B");
+    await emitPrinter({ state: "cert_untrusted", fingerprint: other });
+    await page.waitForSelector(".printer-trust", { timeout: 5000 });
+    const fp = (await page.locator(".printer-fingerprint").innerText()).trim();
+    const serial = (await page.locator(".printer-trust-serial").innerText()).trim();
+    if (fp !== other || serial !== PRINTER_SERIAL) throw new Error(`card shows ${serial} / ${fp}`);
+    const before = (await ipcCalls("printer_save")).length;
+    await page.click(".printer-trust-btn");
+    await page.waitForFunction(
+      (n) => window.__ipc.calls.filter((c) => c.cmd === "printer_save").length > n,
+      before,
+      { timeout: 5000 }
+    );
+    const save = (await ipcCalls("printer_save")).at(-1);
+    if (
+      save.args.pinnedFingerprint !== other ||
+      save.args.accessCode ||
+      save.args.ip !== "192.168.1.20" ||
+      save.args.serial !== PRINTER_SERIAL
+    ) {
+      throw new Error(JSON.stringify(save.args));
+    }
+    await emitPrinter({ state: "connected" });
+    await page.waitForSelector(".printer-trust", { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "a wrong serial is shown shortened and as plain text", async () => {
+    const presented = `<b>X</b>${"A".repeat(200)}`;
+    await emitPrinter({ state: "wrong_serial", presented });
+    await page.waitForSelector(".printer-live-status", { timeout: 5000 });
+    const text = await page.locator(".printer-live-status").innerText();
+    const bold = await page.locator(".printer-live-status b").count();
+    const shown = `<b>X</b>${"A".repeat(64 - 8)}`;
+    if (bold !== 0 || !text.includes(`serial ${shown}.`)) throw new Error(`status reads "${text.slice(0, 120)}"`);
+    await emitPrinter({ state: "connected" });
+    await page.waitForSelector(".printer-live-status", { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "a serial claimed by two devices is flagged", async () => {
+    await setFixture("printer_discover", [
+      { ip: "192.168.1.20", serial: PRINTER_SERIAL, name: "Workshop H2D", model: "H2D", conflict: true },
+      { ip: "192.168.1.31", serial: "01P00A000000002", name: "", model: "P1S", conflict: false },
+    ]);
+    await page.click(".printer-scan");
+    await page.waitForFunction(() => document.querySelectorAll(".printer-found-item").length === 2, null, {
+      timeout: 10000,
+    });
+    const warnings = await page.locator(".printer-conflict").count();
+    const text = (await page.locator(".printer-conflict").first().innerText()).trim();
+    const expected =
+      "Two devices on your network claim this serial — check the IP on the printer screen before connecting.";
+    if (warnings !== 1 || text !== expected) throw new Error(`${warnings} warnings: "${text}"`);
+    const serials = await page.locator(".printer-found-serial code").allInnerTexts();
+    if (serials.join() !== `${PRINTER_SERIAL},01P00A000000002`) throw new Error(`serials ${serials}`);
+  });
+
+  await step(run, page, "a refused save shows the backend's reason inline", async () => {
+    const reason = "Enter the access code to connect to a different printer or certificate.";
+    await setFixture("printer_save", { __reject: reason });
+    await page.fill("#printer-ip", "192.168.1.31");
+    await page.click(".printer-save");
+    await page.waitForFunction(
+      (r) => document.querySelector(".printer-result")?.innerText.trim() === r,
+      reason,
+      { timeout: 5000 }
+    );
   });
 
   await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });

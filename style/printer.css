@@ -1,0 +1,16 @@
+/* Printer page, rail dot and Settings → Printer. Built on the .nd tokens
+   (style/tokens.css). --nd-signal arrives with the design-system branch
+   (PR #25); until then the dot falls back to --nd-success. */
+
+/* -- Settings → Printer (uses the Settings page's own classes otherwise) ----- */
+.printer-found { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; }
+.printer-found-item { width: 100%; text-align: left; padding: 8px 10px; border: 1px solid var(--border-primary); border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; display: grid; gap: 2px; }
+.printer-found-title { font-weight: 600; }
+.printer-found-serial code, .printer-trust-serial { font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; letter-spacing: 0.04em; }
+.printer-found-ip { font-size: 12px; opacity: 0.8; }
+.printer-conflict { margin: 4px 0 0; }
+.printer-serial-input { font-family: ui-monospace, monospace; letter-spacing: 0.04em; }
+.printer-trust { display: grid; gap: 8px; margin-top: 12px; }
+.printer-trust-details { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+.printer-trust-details dd { margin: 0; min-width: 0; }
+.printer-fingerprint { font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }

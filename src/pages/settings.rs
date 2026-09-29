@@ -4,6 +4,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::app::FeatureFlagsContext;
 use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
+use crate::components::printer_settings::PrinterSettings;
 use crate::theme::ThemeContext;
 
 /// Detect whether the app is running on macOS.
@@ -709,6 +710,8 @@ pub fn SettingsPage() -> impl IntoView {
                     </Show>
                 </div>
             </section>
+
+            <PrinterSettings />
 
             <section class="settings-section">
                 <h3>"Application"</h3>
