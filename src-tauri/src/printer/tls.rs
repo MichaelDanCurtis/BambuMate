@@ -275,8 +275,6 @@ pub(crate) mod testpki {
 
     pub struct TestLeaf {
         pub cert_der: Vec<u8>,
-        // Only Task 3's in-process broker reads this.
-        #[allow(dead_code)]
         pub key_pem: String,
     }
 
