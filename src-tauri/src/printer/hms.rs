@@ -48,8 +48,19 @@ pub struct HmsCatalog {
     /// has codes the generic list lacks. `None` fetches the generic list.
     model_prefix: Option<String>,
     cache: Mutex<Option<HmsCache>>,
+    /// When a fetch was last started and had not succeeded. Set before the
+    /// request is sent, so the backoff also covers an attempt still in flight.
     last_failed_fetch: Mutex<Option<Instant>>,
+    /// Held across a load so only one caller reads the disk and fetches; the
+    /// others wait for it and use its result.
+    load_lock: tokio::sync::Mutex<()>,
     http: reqwest::Client,
+}
+
+/// A cache is fresh for 7 days. One dated in the future (a clock that was
+/// wrong when it was written) is stale.
+fn is_fresh(fetched_at: i64, now_secs: i64) -> bool {
+    fetched_at <= now_secs && now_secs - fetched_at < CACHE_TTL_SECS
 }
 
 impl HmsCatalog {
@@ -58,7 +69,9 @@ impl HmsCatalog {
         Self::with_base_url(cache_dir, serial, HMS_URL)
     }
 
-    pub fn with_base_url(cache_dir: PathBuf, serial: Option<&str>, base_url: &str) -> Self {
+    /// Points the catalog at another server. Tests use it with a local stub, and
+    /// the printer service uses it to make the URL configurable.
+    pub(crate) fn with_base_url(cache_dir: PathBuf, serial: Option<&str>, base_url: &str) -> Self {
         let model_prefix = serial
             .map(|s| s.chars().take(3).collect::<String>())
             .filter(|p| p.len() == 3 && p.chars().all(|c| c.is_ascii_alphanumeric()));
@@ -72,7 +85,9 @@ impl HmsCatalog {
             model_prefix,
             cache: Mutex::new(None),
             last_failed_fetch: Mutex::new(None),
+            load_lock: tokio::sync::Mutex::new(()),
             http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(20))
                 .build()
                 .unwrap_or_default(),
@@ -84,46 +99,55 @@ impl HmsCatalog {
         self.cache.lock().unwrap().is_some()
     }
 
+    fn fresh_in_memory(&self, now_secs: i64) -> bool {
+        self.cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|c| is_fresh(c.fetched_at, now_secs))
+    }
+
+    fn recently_failed(&self) -> bool {
+        self.last_failed_fetch
+            .lock()
+            .unwrap()
+            .is_some_and(|t| t.elapsed() < RETRY_AFTER)
+    }
+
     /// Makes the text available: memory, then a fresh disk cache, then the
     /// network, then a stale disk cache. Returns whether text is available.
+    /// Concurrent callers share one load: only one fetches, the rest wait for
+    /// it and use what it found.
     pub async fn ensure_loaded(&self, now_secs: i64) -> bool {
-        if let Some(c) = self.cache.lock().unwrap().as_ref() {
-            if now_secs - c.fetched_at < CACHE_TTL_SECS {
-                return true;
-            }
+        if self.fresh_in_memory(now_secs) {
+            return true;
         }
-        let on_disk = std::fs::read(&self.cache_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<HmsCache>(&b).ok());
+        let _one_load_at_a_time = self.load_lock.lock().await;
+        if self.fresh_in_memory(now_secs) {
+            return true;
+        }
+        // Stale text is already in memory and a fetch just failed: keep it
+        // without touching the disk or the network again.
+        if self.recently_failed() && self.is_loaded() {
+            return true;
+        }
+        let on_disk = self.read_disk_cache().await;
         if let Some(c) = &on_disk {
-            if now_secs - c.fetched_at < CACHE_TTL_SECS {
+            if is_fresh(c.fetched_at, now_secs) {
                 *self.cache.lock().unwrap() = on_disk;
                 return true;
             }
         }
-        let recently_failed = self
-            .last_failed_fetch
-            .lock()
-            .unwrap()
-            .is_some_and(|t| t.elapsed() < RETRY_AFTER);
-        if !recently_failed {
+        if !self.recently_failed() {
+            *self.last_failed_fetch.lock().unwrap() = Some(Instant::now());
             match self.fetch(now_secs).await {
                 Ok(fresh) => {
-                    if let Some(dir) = self.cache_path.parent() {
-                        let _ = std::fs::create_dir_all(dir);
-                    }
-                    if let Ok(bytes) = serde_json::to_vec(&fresh) {
-                        if let Err(e) = std::fs::write(&self.cache_path, bytes) {
-                            tracing::debug!("could not write HMS cache: {e}");
-                        }
-                    }
+                    self.write_disk_cache(&fresh).await;
+                    *self.last_failed_fetch.lock().unwrap() = None;
                     *self.cache.lock().unwrap() = Some(fresh);
                     return true;
                 }
-                Err(e) => {
-                    tracing::debug!("HMS list fetch failed: {e}");
-                    *self.last_failed_fetch.lock().unwrap() = Some(Instant::now());
-                }
+                Err(e) => tracing::debug!("HMS list fetch failed: {e}"),
             }
         }
         if on_disk.is_some() {
@@ -131,6 +155,42 @@ impl HmsCatalog {
             return true;
         }
         self.is_loaded()
+    }
+
+    async fn read_disk_cache(&self) -> Option<HmsCache> {
+        let path = self.cache_path.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::read(path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<HmsCache>(&b).ok())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Writes to a temp file next to the cache and renames it into place, so a
+    /// crash mid-write never leaves a half-written cache.
+    async fn write_disk_cache(&self, cache: &HmsCache) {
+        let Ok(bytes) = serde_json::to_vec(cache) else {
+            return;
+        };
+        let path = self.cache_path.clone();
+        let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write;
+            let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            std::fs::create_dir_all(dir)?;
+            let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+            tmp.write_all(&bytes)?;
+            tmp.persist(&path).map_err(|e| e.error)?;
+            Ok(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::debug!("could not write HMS cache: {e}"),
+            Err(e) => tracing::debug!("HMS cache write task failed: {e}"),
+        }
     }
 
     async fn fetch(&self, now_secs: i64) -> Result<HmsCache, String> {
@@ -236,6 +296,7 @@ mod tests {
     use crate::printer::state::HmsCode;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const NOW: i64 = 1_790_000_000;
@@ -248,6 +309,15 @@ mod tests {
 
     /// A one-route HTTP server that counts requests and records the query.
     async fn stub() -> (String, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
+        stub_with("200 OK", BODY, 0).await
+    }
+
+    /// Like `stub`, but answers with `status` and `body` after `delay_ms`.
+    async fn stub_with(
+        status: &'static str,
+        body: &'static str,
+        delay_ms: u64,
+    ) -> (String, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/query.php", listener.local_addr().unwrap());
         let hits = Arc::new(AtomicUsize::new(0));
@@ -264,10 +334,13 @@ mod tests {
                     .unwrap_or_default()
                     .to_string();
                 p.lock().unwrap().push(line);
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    BODY.len(),
-                    BODY
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
                 );
                 let _ = sock.write_all(resp.as_bytes()).await;
             }
@@ -374,5 +447,108 @@ mod tests {
         assert!(hms_wiki_url(code, Some("H2C")).contains("/en/h2c/"));
         assert!(hms_wiki_url(code, Some("X1 Carbon")).contains("/en/x1/"));
         assert!(hms_wiki_url(code, None).ends_with("/hmscode/0300_0100_0001_0007"));
+    }
+    #[tokio::test]
+    async fn a_failing_fetch_is_not_retried_inside_the_backoff_window() {
+        const EMPTY_LIST: &str =
+            r#"{"result":0,"data":{"device_hms":{"en":[]},"device_error":{"en":[]}}}"#;
+        let cases: [(&str, &str); 5] = [
+            ("500 Internal Server Error", "{}"),
+            ("200 OK", "this is not json"),
+            ("200 OK", r#"{"result":1,"data":{}}"#),
+            ("200 OK", EMPTY_LIST),
+            ("200 OK", r#"{"result":0}"#),
+        ];
+        for (status, body) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (url, hits, _) = stub_with(status, body, 0).await;
+            let cat = HmsCatalog::with_base_url(dir.path().into(), None, &url);
+            assert!(!cat.ensure_loaded(NOW).await, "{status} {body}");
+            assert!(!cat.is_loaded());
+            assert!(!cat.ensure_loaded(NOW + 1).await);
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                1,
+                "backoff armed: {status} {body}"
+            );
+            assert!(!dir.path().join("hms_en.json").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_callers_share_one_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, hits, _) = stub_with("200 OK", BODY, 100).await;
+        let cat = Arc::new(HmsCatalog::with_base_url(dir.path().into(), None, &url));
+        let calls: Vec<_> = (0..8)
+            .map(|_| {
+                let cat = cat.clone();
+                tokio::spawn(async move { cat.ensure_loaded(NOW).await })
+            })
+            .collect();
+        for call in calls {
+            assert!(call.await.unwrap(), "waiters use the fetch's result");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_callers_share_one_failed_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, hits, _) = stub_with("500 Internal Server Error", "{}", 100).await;
+        let cat = Arc::new(HmsCatalog::with_base_url(dir.path().into(), None, &url));
+        let calls: Vec<_> = (0..8)
+            .map(|_| {
+                let cat = cat.clone();
+                tokio::spawn(async move { cat.ensure_loaded(NOW).await })
+            })
+            .collect();
+        for call in calls {
+            assert!(!call.await.unwrap());
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_cache_file_is_fetched_again_and_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hms_en.json");
+        std::fs::write(&file, b"{ not a cache").unwrap();
+        let (url, hits, _) = stub().await;
+        let cat = HmsCatalog::with_base_url(dir.path().into(), None, &url);
+        assert!(cat.ensure_loaded(NOW).await);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(serde_json::from_slice::<HmsCache>(&std::fs::read(&file).unwrap()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_cache_dated_in_the_future_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, hits, _) = stub().await;
+        HmsCatalog::with_base_url(dir.path().into(), None, &url)
+            .ensure_loaded(NOW + 30 * 24 * 3600)
+            .await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let again = HmsCatalog::with_base_url(dir.path().into(), None, &url);
+        assert!(again.ensure_loaded(NOW).await);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "future-dated cache refetched"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cache_is_written_without_leaving_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _, _) = stub().await;
+        HmsCatalog::with_base_url(dir.path().join("nested"), Some("094"), &url)
+            .ensure_loaded(NOW)
+            .await;
+        let names: Vec<_> = std::fs::read_dir(dir.path().join("nested"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["hms_en_094.json"]);
     }
 }
