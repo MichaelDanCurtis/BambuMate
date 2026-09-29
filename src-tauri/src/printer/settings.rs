@@ -26,6 +26,17 @@ pub struct PrinterConfig {
     pub pinned_fingerprint: Option<String>,
 }
 
+/// A printer serial in its canonical form: trimmed, uppercased, letters and
+/// digits only, 1 to 32 characters. `None` for anything else. Shared by
+/// settings validation and SSDP announcement parsing.
+pub fn valid_serial(raw: &str) -> Option<String> {
+    let serial = raw.trim().to_ascii_uppercase();
+    let ok = !serial.is_empty()
+        && serial.len() <= 32
+        && serial.chars().all(|c| c.is_ascii_alphanumeric());
+    ok.then_some(serial)
+}
+
 impl PrinterConfig {
     /// Trims fields and rejects an IP or serial the client can't use.
     pub fn normalized(mut self) -> Result<Self, String> {
@@ -40,12 +51,10 @@ impl PrinterConfig {
         if self.ip.parse::<IpAddr>().is_err() {
             return Err("Enter the printer's IP address, like 192.168.1.20.".into());
         }
-        let serial_ok = !self.serial.is_empty()
-            && self.serial.len() <= 32
-            && self.serial.chars().all(|c| c.is_ascii_alphanumeric());
-        if !serial_ok {
+        let Some(serial) = valid_serial(&self.serial) else {
             return Err("Enter the printer's serial number (letters and digits).".into());
-        }
+        };
+        self.serial = serial;
         Ok(self)
     }
 }
@@ -83,50 +92,110 @@ pub fn check_access_code(code: &str) -> Result<&str, String> {
     Ok(code)
 }
 
-pub fn load_config(app: &AppHandle) -> Option<PrinterConfig> {
+/// The stored config as written, without validation. Used to find the serial
+/// whose keychain entry belongs to it.
+fn read_stored(app: &AppHandle) -> Option<PrinterConfig> {
     let store = app.store(STORE_FILE).ok()?;
-    serde_json::from_value(store.get(STORE_KEY)?).ok()
+    match serde_json::from_value(store.get(STORE_KEY)?) {
+        Ok(config) => Some(config),
+        Err(e) => {
+            tracing::debug!("stored printer settings could not be read: {e}");
+            None
+        }
+    }
 }
 
+/// The saved printer, or `None` if there is none or it is no longer valid.
+pub fn load_config(app: &AppHandle) -> Option<PrinterConfig> {
+    match read_stored(app)?.normalized() {
+        Ok(config) => Some(config),
+        Err(e) => {
+            tracing::debug!("stored printer settings are not valid: {e}");
+            None
+        }
+    }
+}
+
+/// Saves `config`. If it replaces a printer with a different serial, the old
+/// printer's access code is removed from the keychain (best effort).
 pub fn save_config(app: &AppHandle, config: &PrinterConfig) -> Result<(), String> {
+    let previous = read_stored(app);
     let store = app.store(STORE_FILE).map_err(|e| e.to_string())?;
     store.set(
         STORE_KEY,
         serde_json::to_value(config).map_err(|e| e.to_string())?,
     );
-    store.save().map_err(|e| e.to_string())
+    store.save().map_err(|e| e.to_string())?;
+    if let Some(old) = previous {
+        if keychain_account(&old.serial) != keychain_account(&config.serial) {
+            discard_access_code(&old.serial);
+        }
+    }
+    Ok(())
 }
 
+/// Removes the saved printer and its access code. Nothing stored is fine.
 pub fn remove_config(app: &AppHandle) -> Result<(), String> {
+    let previous = read_stored(app);
     let store = app.store(STORE_FILE).map_err(|e| e.to_string())?;
     store.delete(STORE_KEY);
-    store.save().map_err(|e| e.to_string())
+    store.save().map_err(|e| e.to_string())?;
+    if let Some(old) = previous {
+        discard_access_code(&old.serial);
+    }
+    Ok(())
 }
 
-/// Reads the access code for `serial` from the system keychain
-/// (service `bambumate-printer-access-code`, account = serial).
-pub fn get_access_code(serial: &str) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, serial).map_err(|e| e.to_string())?;
-    match entry.get_password() {
+/// Best-effort removal of a code nothing refers to any more. Logs the serial
+/// and the error, never the code.
+fn discard_access_code(serial: &str) {
+    if let Err(e) = delete_access_code(serial) {
+        tracing::debug!("could not remove the access code for {serial}: {e}");
+    }
+}
+
+/// The keychain account for a serial. Serials are case-insensitive to the
+/// user, so the key is always the uppercase form.
+fn keychain_account(serial: &str) -> String {
+    serial.trim().to_ascii_uppercase()
+}
+
+fn read_outcome(result: keyring::Result<String>) -> Result<Option<String>, String> {
+    match result {
         Ok(code) => Ok(Some(code)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(format!("Could not read the keychain: {e}")),
     }
 }
 
+fn delete_outcome(result: keyring::Result<()>) -> Result<(), String> {
+    match result {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("Could not remove the access code: {e}")),
+    }
+}
+
+fn entry(serial: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_account(serial)).map_err(|e| e.to_string())
+}
+
+/// Reads the access code for `serial` from the system keychain
+/// (service `bambumate-printer-access-code`, account = uppercase serial).
+pub fn get_access_code(serial: &str) -> Result<Option<String>, String> {
+    read_outcome(entry(serial)?.get_password())
+}
+
+/// Stores the access code, after `check_access_code`.
 pub fn set_access_code(serial: &str, code: &str) -> Result<(), String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, serial)
-        .and_then(|e| e.set_password(code))
+    let code = check_access_code(code)?;
+    entry(serial)?
+        .set_password(code)
         .map_err(|e| format!("Could not save the access code to the keychain: {e}"))
 }
 
 /// Removing a code that isn't there is not an error.
 pub fn delete_access_code(serial: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, serial).map_err(|e| e.to_string())?;
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("Could not remove the access code: {e}")),
-    }
+    delete_outcome(entry(serial)?.delete_credential())
 }
 
 #[cfg(test)]
@@ -177,5 +246,37 @@ mod tests {
         let err = check_access_code("12 34").unwrap_err();
         assert!(!err.contains("12 34"));
         assert!(check_access_code("").is_err());
+    }
+
+    #[test]
+    fn valid_serial_is_uppercase_alphanumeric_up_to_32() {
+        assert_eq!(valid_serial(" 0948ab01 ").as_deref(), Some("0948AB01"));
+        assert_eq!(valid_serial(&"a".repeat(32)).unwrap().len(), 32);
+        for bad in ["", "  ", "09/48", "09 48", &"a".repeat(33), "é1"] {
+            assert_eq!(valid_serial(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn keychain_accounts_are_the_uppercase_serial() {
+        assert_eq!(keychain_account(" 0948ab01 "), "0948AB01");
+    }
+
+    #[test]
+    fn a_missing_keychain_entry_reads_as_none_and_deletes_as_ok() {
+        assert_eq!(read_outcome(Err(keyring::Error::NoEntry)), Ok(None));
+        assert_eq!(
+            read_outcome(Ok("12345678".into())),
+            Ok(Some("12345678".into()))
+        );
+        assert_eq!(delete_outcome(Err(keyring::Error::NoEntry)), Ok(()));
+        assert_eq!(delete_outcome(Ok(())), Ok(()));
+    }
+
+    #[test]
+    fn other_keychain_failures_are_errors() {
+        let boom = || keyring::Error::PlatformFailure("locked".into());
+        assert!(read_outcome(Err(boom())).is_err());
+        assert!(delete_outcome(Err(boom())).is_err());
     }
 }
