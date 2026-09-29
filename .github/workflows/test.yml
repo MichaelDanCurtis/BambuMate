@@ -288,3 +288,7 @@ jobs:
       # plain `cargo check` does not.
       - name: Build frontend
         run: trunk build
+
+      # The frontend's unit tests run on the host target, not in wasm.
+      - name: Frontend tests
+        run: cargo test --bin bambumate
