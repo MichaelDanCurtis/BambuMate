@@ -1,0 +1,10 @@
+{
+  "info": {
+    "command": "get_version",
+    "sequence_id": "1",
+    "module": [
+      { "hw_ver": "N/A", "name": "ota", "product_name": "Bambu Lab H2D", "sn": "0948AB000000001", "sw_ver": "01.01.01.00" },
+      { "hw_ver": "N3F05", "name": "n3f/0", "product_name": "AMS 2 Pro (1)", "sn": "REDACTED", "sw_ver": "02.00.19.47" }
+    ]
+  }
+}

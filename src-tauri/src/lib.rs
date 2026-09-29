@@ -7,6 +7,7 @@ pub mod diagnostics;
 pub mod history;
 pub mod mapper;
 pub mod model_catalog;
+pub mod printer;
 mod process_command;
 pub mod profile;
 pub mod scraper;

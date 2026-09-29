@@ -1,0 +1,16 @@
+{
+  "print": {
+    "command": "push_status",
+    "msg": 1,
+    "sequence_id": "2022",
+    "mc_percent": 7,
+    "mc_remaining_time": 540,
+    "layer_num": 2,
+    "device": {
+      "extruder": {
+        "info": [{ "id": 0, "temp": 16056564 }],
+        "state": 2
+      }
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "print": {
+    "command": "push_status",
+    "sequence_id": "2021",
+    "gcode_state": "RUNNING",
+    "subtask_name": "T-pose - slim H2D dual AMS riser",
+    "mc_percent": 6,
+    "mc_remaining_time": 549,
+    "layer_num": 1,
+    "total_layer_num": 200,
+    "bed_temper": 70.0,
+    "bed_target_temper": 70.0,
+    "nozzle_temper": 245.0,
+    "nozzle_target_temper": 245.0,
+    "nozzle_diameter": "0.4",
+    "nozzle_type": "stainless_steel",
+    "print_error": 0,
+    "hms": [{ "attr": 50331904, "code": 65543 }],
+    "wifi_signal": "-45dBm",
+    "ipcam": { "ipcam_dev": "1", "resolution": "1080p" },
+    "device": {
+      "bed": { "info": { "temp": 4587590 }, "state": 2 },
+      "extruder": {
+        "info": [
+          { "id": 0, "snow": 259, "temp": 16056565 },
+          { "id": 1, "snow": 65279, "temp": 47 }
+        ],
+        "state": 2
+      },
+      "nozzle": {
+        "exist": 3,
+        "info": [
+          { "diameter": 0.4, "id": 0, "type": "HS01", "wear": 0 },
+          { "diameter": 0.4, "id": 1, "type": "HS01", "wear": 0 }
+        ],
+        "state": 0
+      },
+      "type": 1
+    },
+    "ams": {
+      "ams_exist_bits": "3",
+      "tray_now": "3",
+      "version": 275305,
+      "ams": [
+        {
+          "id": "0",
+          "info": "2103",
+          "humidity": "5",
+          "humidity_raw": "21",
+          "temp": "27.0",
+          "tray": [
+            { "id": "0", "state": 11, "tray_type": "PLA-S", "tray_sub_brands": "Support for PLA", "tray_info_idx": "GFS02", "tray_color": "FFFFFFFF", "nozzle_temp_min": "190", "nozzle_temp_max": "230", "remain": 1, "tag_uid": "0C047A9600000100", "tray_uuid": "95558FE23FB14F3A9E4985B8B37839B1", "cols": ["FFFFFFFF"] },
+            { "id": "1", "state": 11, "tray_type": "PLA", "tray_sub_brands": "PLA Basic", "tray_info_idx": "GFA00", "tray_color": "FFFFFFFF", "nozzle_temp_min": "190", "nozzle_temp_max": "230", "remain": 31, "tag_uid": "9AD3FBAC00000100", "tray_uuid": "5998E373899342BE9FC6BFA51103AB78", "cols": ["FFFFFFFF"] },
+            { "id": "2", "state": 11, "tray_type": "PETG", "tray_sub_brands": "", "tray_info_idx": "GFG99", "tray_color": "1F7A3DFF", "nozzle_temp_min": "230", "nozzle_temp_max": "260", "remain": 0, "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000", "cols": ["1F7A3DFF"] },
+            { "id": "3", "state": 11, "tray_type": "PLA", "tray_sub_brands": "PLA Basic", "tray_info_idx": "GFA00", "tray_color": "FFFFFFFF", "nozzle_temp_min": "190", "nozzle_temp_max": "230", "remain": 100, "tag_uid": "FABCE4E000000100", "tray_uuid": "8CCF700805CD483086E38C8AC5BB6ED9", "cols": ["FFFFFFFF"] }
+          ]
+        },
+        {
+          "id": "1",
+          "info": "2003",
+          "humidity": "5",
+          "humidity_raw": "18",
+          "temp": "29.7",
+          "tray": [
+            { "id": "0", "state": 11, "tray_type": "PLA", "tray_sub_brands": "PLA Basic", "tray_info_idx": "GFA00", "tray_color": "000000FF", "nozzle_temp_min": "190", "nozzle_temp_max": "230", "remain": 55, "tag_uid": "64AFAB0000000100", "tray_uuid": "CA9B8419B0284ACA84044AA73FF17557", "cols": ["000000FF"] },
+            { "id": "1", "state": 11, "tray_type": "PLA", "tray_sub_brands": "", "tray_info_idx": "P4d6ae04", "tray_color": "F95959FF", "nozzle_temp_min": "190", "nozzle_temp_max": "240", "remain": 0, "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000", "cols": ["F95959FF"] },
+            { "id": "2", "state": 11, "tray_type": "PETG-CF", "tray_sub_brands": "PETG-CF", "tray_info_idx": "GFG50", "tray_color": "000000FF", "nozzle_temp_min": "240", "nozzle_temp_max": "270", "remain": 100, "tag_uid": "B2A80B7000000100", "tray_uuid": "DE69ECEBB924468D99CA2A9DFCB5FD3B", "cols": ["000000FF"] },
+            { "id": "3", "state": 0 }
+          ]
+        }
+      ]
+    },
+    "vir_slot": [
+      { "id": "254", "tray_type": "PLA", "tray_sub_brands": "", "tray_info_idx": "GFA01", "tray_color": "76D9F4FF", "nozzle_temp_min": "190", "nozzle_temp_max": "240", "remain": 0, "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000", "cols": ["76D9F4FF"] },
+      { "id": "255", "tray_type": "", "tray_sub_brands": "", "tray_info_idx": "", "tray_color": "00000000", "nozzle_temp_min": "0", "nozzle_temp_max": "0", "remain": 0, "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000", "cols": ["00000000"] }
+    ],
+    "vt_tray": { "id": "255", "tray_type": "", "tray_info_idx": "", "tray_color": "00000000", "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000" }
+  }
+}
