@@ -11,6 +11,7 @@ use crate::printer::slots::{set_on_printer_steps, SlotStatus};
 
 pub const NO_PRINTER: &str = "No printer configured";
 pub const NOT_CONNECTED: &str = "Printer not connected";
+pub const WAITING_FOR_REPORT: &str = "Printer connected; waiting for the first status report.";
 
 pub fn specs() -> Vec<ToolSpec> {
     vec![
@@ -21,7 +22,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bm_ams_slots",
-            description: "Read-only list of every AMS slot and external spool: label (A1-D4, HT1, Ext-L/Ext-R), the filament the printer reports, whether it is a Bambu RFID spool, remaining %, the preset the user assigned in BambuMate, and whether the printer's setting matches it (with the steps to fix it when it doesn't, or a flag when BambuMate can't verify the slot because the preset has no filament id).",
+            description: "Read-only list of every AMS slot and external spool: label (A1-D4, HT1, Ext-L/Ext-R), the filament the printer reports, whether it is a Bambu RFID spool, remaining %, the preset the user assigned in BambuMate, and its status: set (the printer's setting matches the assignment), bambu_spool, needs_setting_on_printer (the printer reports a different filament; the user must still set the preset on the printer, and the steps are included), empty or not_set. preset_has_no_id means BambuMate can't verify the slot because the preset has no filament id.",
             input_schema: json!({"type":"object","properties":{}}),
         },
     ]
@@ -45,6 +46,9 @@ fn unavailable(view: &PrinterView) -> Option<ToolOutput> {
     }
     if view.connection != ConnectionState::Connected {
         return Some(ToolOutput::text(NOT_CONNECTED));
+    }
+    if view.state.is_none() {
+        return Some(ToolOutput::text(WAITING_FOR_REPORT));
     }
     None
 }
@@ -104,7 +108,7 @@ fn status_name(status: SlotStatus) -> &'static str {
     match status {
         SlotStatus::Matches => "set",
         SlotStatus::Rfid => "bambu_spool",
-        SlotStatus::Different => "set_on_printer",
+        SlotStatus::Different => "needs_setting_on_printer",
         SlotStatus::Empty => "empty",
         SlotStatus::Unassigned => "not_set",
     }
@@ -223,6 +227,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn both_tools_wait_when_connected_but_no_report_has_arrived() {
+        let mut view = connected_view();
+        view.state = None;
+        for tool in ["bm_printer_status", "bm_ams_slots"] {
+            assert_eq!(call(view.clone(), tool).await, WAITING_FOR_REPORT);
+        }
+    }
+
+    #[tokio::test]
     async fn every_state_but_connected_reads_as_not_connected_and_leaks_nothing() {
         let states = [
             ConnectionState::Disconnected,
@@ -273,7 +286,7 @@ mod tests {
         assert_eq!(slots[1]["slot"], "A2");
         assert_eq!(slots[1]["status"], "bambu_spool");
         assert_eq!(slots[1]["remaining_percent"], 31);
-        assert_eq!(slots[2]["status"], "set_on_printer");
+        assert_eq!(slots[2]["status"], "needs_setting_on_printer");
         assert_eq!(slots[2]["assigned_preset"], "Acme PETG");
         assert_eq!(slots[2]["steps"].as_array().unwrap().len(), 3);
         assert!(slots[2]["remaining_percent"].is_null());
@@ -302,7 +315,7 @@ mod tests {
         let text = call(view, "bm_ams_slots").await;
         let v: Value = serde_json::from_str(&text).unwrap();
         let slots = v["slots"].as_array().unwrap();
-        assert_eq!(slots[2]["status"], "set_on_printer");
+        assert_eq!(slots[2]["status"], "needs_setting_on_printer");
         assert_eq!(slots[2]["preset_has_no_id"], true);
         assert_eq!(slots[1]["preset_has_no_id"], false);
     }
