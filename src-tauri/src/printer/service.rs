@@ -600,9 +600,9 @@ impl PrinterService {
             let Some(id) = resolve(a).filter(|id| !id.trim().is_empty()) else {
                 continue;
             };
-            let saved = self
-                .history()
-                .and_then(|h| h.set_slot_filament_id(&a.serial, a.ams_id, a.tray_id, &id));
+            let saved = self.history().and_then(|h| {
+                h.set_slot_filament_id(&a.serial, a.ams_id, a.tray_id, &a.preset_name, &id)
+            });
             if let Err(e) = saved {
                 tracing::warn!("could not save a resolved filament id: {e}");
             }

@@ -216,20 +216,22 @@ impl RefinementHistory {
     }
 
     /// Fills in the filament id of an assignment stored without one. An
-    /// assignment that already has an id is left as it is.
+    /// assignment that already has an id is left as it is, and so is a slot
+    /// that has since been reassigned to a different preset.
     pub fn set_slot_filament_id(
         &self,
         serial: &str,
         ams_id: u32,
         tray_id: u32,
+        preset_name: &str,
         filament_id: &str,
     ) -> Result<(), String> {
         self.conn
             .execute(
-                "UPDATE slot_assignments SET filament_id = ?4
-                 WHERE serial = ?1 AND ams_id = ?2 AND tray_id = ?3
+                "UPDATE slot_assignments SET filament_id = ?5
+                 WHERE serial = ?1 AND ams_id = ?2 AND tray_id = ?3 AND preset_name = ?4
                    AND (filament_id IS NULL OR TRIM(filament_id) = '')",
-                params![serial, ams_id, tray_id, filament_id],
+                params![serial, ams_id, tray_id, preset_name, filament_id],
             )
             .map_err(|e| format!("Failed to update slot assignment: {}", e))?;
         Ok(())
@@ -443,11 +445,28 @@ mod tests {
             .assign_slot("SN1", 0, 1, "Acme", Some("P1234567"), None)
             .unwrap();
         let before = store.list_slot_assignments("SN1").unwrap();
-        store.set_slot_filament_id("SN1", 0, 0, "P0000009").unwrap();
-        store.set_slot_filament_id("SN1", 0, 1, "P0000009").unwrap();
+        store
+            .set_slot_filament_id("SN1", 0, 0, "Mine", "P0000009")
+            .unwrap();
+        store
+            .set_slot_filament_id("SN1", 0, 1, "Acme", "P0000009")
+            .unwrap();
         let rows = store.list_slot_assignments("SN1").unwrap();
         assert_eq!(rows[0].filament_id.as_deref(), Some("P0000009"));
         assert_eq!(rows[0].assigned_at, before[0].assigned_at);
         assert_eq!(rows[1].filament_id.as_deref(), Some("P1234567"));
+    }
+
+    #[test]
+    fn a_reassigned_slot_does_not_take_the_old_presets_filament_id() {
+        let (store, _dir) = create_test_store();
+        store
+            .assign_slot("SN1", 0, 0, "New", None, Some("/u/New.json"))
+            .unwrap();
+        store
+            .set_slot_filament_id("SN1", 0, 0, "Old", "P0000009")
+            .unwrap();
+        let rows = store.list_slot_assignments("SN1").unwrap();
+        assert_eq!(rows[0].filament_id, None);
     }
 }
