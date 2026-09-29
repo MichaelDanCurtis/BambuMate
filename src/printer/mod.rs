@@ -17,6 +17,9 @@ pub struct PrinterShared {
     /// Counts delivered events, so a refresh that started before one can't
     /// overwrite what it brought.
     events: StoredValue<Seen>,
+    /// Bumped when the saved printer settings changed outside Settings →
+    /// Printer (Reset for clean install), so that section re-reads them.
+    config_changes: RwSignal<u64>,
 }
 
 /// The event counters when a request started.
@@ -55,7 +58,21 @@ impl PrinterShared {
         Self {
             view: RwSignal::new(PrinterView::default()),
             events: StoredValue::new(Seen::default()),
+            config_changes: RwSignal::new(0),
         }
+    }
+
+    /// Tells Settings → Printer the saved settings changed behind its back,
+    /// and re-reads the view.
+    pub fn config_changed(self) {
+        self.config_changes.try_update(|n| *n += 1);
+        self.refresh();
+    }
+
+    /// How often [`config_changed`](Self::config_changed) was called; read
+    /// it to re-run when it is.
+    pub fn config_changes(self) -> u64 {
+        self.config_changes.get()
     }
 
     /// Re-reads the view from the backend without undoing newer events.

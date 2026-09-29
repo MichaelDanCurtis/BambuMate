@@ -103,6 +103,8 @@ pub struct PrinterSummary {
     pub name: String,
     pub model: String,
     pub firmware: Option<String>,
+    /// The printer has verified against a Bambu CA before.
+    pub ca_verified: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -249,6 +251,8 @@ pub struct PrinterConfigView {
     pub model: String,
     pub pinned_fingerprint: Option<String>,
     pub has_access_code: bool,
+    /// The printer has verified against a Bambu CA before.
+    pub ca_verified: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]

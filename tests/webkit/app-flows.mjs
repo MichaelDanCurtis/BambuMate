@@ -533,7 +533,16 @@ async function driveApp(browserType, engine, baseUrl) {
     page.evaluate(([c, v]) => {
       window.__fixtures[c] = v;
     }, [cmd, value]);
-  const emitPrinter = (state) => page.evaluate((s) => window.__emit("printer://connection", s), state);
+  const emitEvent = (name, payload) => page.evaluate(([n, p]) => window.__emit(n, p), [name, payload]);
+  const emitPrinter = (state) => emitEvent("printer://connection", state);
+  const resultText = (text) =>
+    page.waitForFunction((t) => document.querySelector(".printer-result")?.innerText.trim() === t, text, {
+      timeout: 5000,
+    });
+  // While the restarted live connection is still connecting, as right after a save.
+  const CONNECTING_VIEW = { ...PRINTER_VIEW, connection: { state: "connecting" } };
+  const TRUSTED_CONNECTING = "Trusted — connecting…";
+  const CONNECTED_H2D = "Connected to H2D. Live status is on the Printer page.";
 
   await step(run, page, "printer settings find a printer on the network", async () => {
     await page.click(".printer-scan");
@@ -559,12 +568,10 @@ async function driveApp(browserType, engine, baseUrl) {
     if (label !== "Trust this printer") throw new Error(`button reads "${label}"`);
   });
 
-  await step(run, page, "trusting pins the fingerprint, saves and connects", async () => {
-    await setFixture("printer_test_connection", {
-      connection: { state: "connected" },
-      got_report: true,
-      model: "H2D",
-    });
+  await step(run, page, "trusting pins the fingerprint, saves and follows the live connection", async () => {
+    // The save restarts the live connection; it reports Connecting first.
+    await setFixture("printer_view", CONNECTING_VIEW);
+    await emitPrinter({ state: "connecting" });
     await page.click(".printer-trust-btn");
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "printer_save"), null, {
       timeout: 5000,
@@ -573,21 +580,17 @@ async function driveApp(browserType, engine, baseUrl) {
     if (save.args.pinnedFingerprint !== PRINTER_FINGERPRINT || save.args.accessCode !== "12345678") {
       throw new Error(JSON.stringify(save.args));
     }
-    await page.waitForFunction(
-      () => document.querySelector(".printer-result")?.innerText.includes("Connected to H2D"),
-      null,
-      { timeout: 5000 }
-    );
+    await resultText(TRUSTED_CONNECTING);
+    if (await page.locator(".printer-trust").count()) throw new Error("the trust card is still shown");
     if ((await page.inputValue("#printer-code")) !== "") throw new Error("the access code is still in the field");
+    // The live connection comes up: the line says so, from the event alone.
+    await emitPrinter({ state: "connected" });
+    await resultText(CONNECTED_H2D);
   });
 
-  await step(run, page, "after trust the follow-up test sends the pin and no access code", async () => {
+  await step(run, page, "trust opens no second session: no test connection after the save", async () => {
     const calls = await ipcCalls("printer_test_connection");
-    if (calls.length !== 2) throw new Error(`${calls.length} test calls`);
-    const t = calls.at(-1).args;
-    if (t.pinnedFingerprint !== PRINTER_FINGERPRINT || t.accessCode || t.ip !== "192.168.1.20" || t.serial !== PRINTER_SERIAL) {
-      throw new Error(JSON.stringify(t));
-    }
+    if (calls.length !== 1) throw new Error(`${calls.length} test calls`);
   });
 
   // The trust card must show the whole fingerprint and the serial it is for.
@@ -602,6 +605,9 @@ async function driveApp(browserType, engine, baseUrl) {
     const fp = (await page.locator(".printer-fingerprint").innerText()).trim();
     const serial = (await page.locator(".printer-trust-serial").innerText()).trim();
     if (fp !== other || serial !== PRINTER_SERIAL) throw new Error(`card shows ${serial} / ${fp}`);
+    if (await page.locator(".printer-trust-warning").count()) {
+      throw new Error("a printer that never verified against a Bambu CA shows the downgrade warning");
+    }
     const before = (await ipcCalls("printer_save")).length;
     await page.click(".printer-trust-btn");
     await page.waitForFunction(
@@ -618,8 +624,52 @@ async function driveApp(browserType, engine, baseUrl) {
     ) {
       throw new Error(JSON.stringify(save.args));
     }
-    await emitPrinter({ state: "connected" });
+    // The stale rejection of the certificate just trusted is no new problem.
     await page.waitForSelector(".printer-trust", { state: "detached", timeout: 5000 });
+    await resultText(TRUSTED_CONNECTING);
+    if (await page.locator(".printer-live-status").count()) throw new Error("the stale rejection is still shown");
+    await emitPrinter({ state: "connected" });
+    await resultText(CONNECTED_H2D);
+  });
+
+  await step(run, page, "a new certificate from a printer that proved itself genuine needs a second click", async () => {
+    const third = PRINTER_FINGERPRINT.replace(/^3A/, "5C");
+    await emitEvent("printer://state", {
+      ...PRINTER_VIEW,
+      printer: { ...PRINTER_VIEW.printer, ca_verified: true },
+      connection: { state: "cert_untrusted", fingerprint: third },
+    });
+    await page.waitForSelector(".printer-trust-warning", { timeout: 5000 });
+    const warning = (await page.locator(".printer-trust-warning").innerText()).trim();
+    const expected =
+      "This printer previously proved it's a genuine Bambu printer. A new, unrecognised certificate could mean another device is impersonating it. Only trust it if you've just replaced or reset the printer.";
+    if (warning !== expected) throw new Error(`warning reads "${warning}"`);
+    const label = async () => (await page.locator(".printer-trust-btn").innerText()).trim();
+    if ((await label()) !== "Trust this printer") throw new Error(`button reads "${await label()}"`);
+    const before = (await ipcCalls("printer_save")).length;
+    await page.click(".printer-trust-btn");
+    await page.waitForFunction(
+      () => document.querySelector(".printer-trust-btn")?.innerText.trim() === "Yes, trust this certificate",
+      null,
+      { timeout: 5000 }
+    );
+    await page.waitForTimeout(300);
+    if ((await ipcCalls("printer_save")).length !== before) throw new Error("the first click saved already");
+    await page.click(".printer-trust-btn");
+    await page.waitForFunction(
+      (n) => window.__ipc.calls.filter((c) => c.cmd === "printer_save").length > n,
+      before,
+      { timeout: 5000 }
+    );
+    const save = (await ipcCalls("printer_save")).at(-1).args;
+    if (save.pinnedFingerprint !== third || save.accessCode || save.serial !== PRINTER_SERIAL) {
+      throw new Error(JSON.stringify(save));
+    }
+    await resultText(TRUSTED_CONNECTING);
+    await emitPrinter({ state: "connected" });
+    await resultText(CONNECTED_H2D);
+    await setFixture("printer_view", PRINTER_VIEW);
+    await emitEvent("printer://state", PRINTER_VIEW);
   });
 
   await step(run, page, "a wrong serial is shown shortened and as plain text", async () => {
@@ -698,11 +748,8 @@ async function driveApp(browserType, engine, baseUrl) {
     }
     const form = [await page.inputValue("#printer-ip"), await page.inputValue("#printer-serial")];
     if (form.join() !== `192.168.1.20,${PRINTER_SERIAL}`) throw new Error(`form has ${form}`);
-    await page.waitForFunction(
-      () => document.querySelector(".printer-result")?.innerText.includes("Connected to H2D"),
-      null,
-      { timeout: 5000 }
-    );
+    // From the live connection (connected in the shared view), not a test.
+    await resultText(CONNECTED_H2D);
   });
 
   await step(run, page, "editing the IP away from the pinned printer drops the pin", async () => {
@@ -750,8 +797,8 @@ async function driveApp(browserType, engine, baseUrl) {
     return `${found.sent} calls carried it`;
   });
 
-  // Trust chains Save into Test after an await; leaving Settings in between
-  // disposes the section's signals, which must not panic.
+  // Trust reads the section's signals after the save's await; leaving
+  // Settings in between disposes them, which must not panic.
   await step(run, page, "leaving Settings while Trust is saving doesn't panic", async () => {
     await setFixture("printer_test_connection", FIXTURES.printer_test_connection);
     await page.fill("#printer-ip", "192.168.1.20");
@@ -768,6 +815,35 @@ async function driveApp(browserType, engine, baseUrl) {
     if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
     await page.click('a[href="/settings"]');
     await page.waitForSelector(".printer-settings", { timeout: 15000 });
+  });
+
+  await step(run, page, "Reset for clean install empties Settings → Printer", async () => {
+    // A saved printer, shown when the section mounts.
+    await setFixture("printer_get_config", FIXTURES.printer_save);
+    await page.click('a[href="/about"]');
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    await page.click('a[href="/settings"]');
+    await page.waitForFunction(() => document.querySelector("#printer-ip")?.value === "192.168.1.20", null, {
+      timeout: 15000,
+    });
+    await page.waitForSelector(".printer-remove", { timeout: 5000 });
+    // The reset removes the printer in the backend.
+    await setFixture("printer_get_config", null);
+    await setFixture("printer_view", PRINTER_UNCONFIGURED);
+    const gets = (await ipcCalls("printer_get_config")).length;
+    await page.click("text=Reset for Clean Installation");
+    await page.click("text=Yes, Reset Everything");
+    await page.waitForFunction(
+      (n) => window.__ipc.calls.filter((c) => c.cmd === "printer_get_config").length > n,
+      gets,
+      { timeout: 5000 }
+    );
+    await page.waitForFunction(
+      () => document.querySelector("#printer-ip")?.value === "" && !document.querySelector(".printer-remove"),
+      null,
+      { timeout: 5000 }
+    );
+    if (await page.inputValue("#printer-serial")) throw new Error("the serial is still in the form");
   });
 
   // Put the canned answers back so later steps start from the defaults.
@@ -819,7 +895,6 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   // -- printer page -------------------------------------------------------------
-  const emitEvent = (name, payload) => page.evaluate(([n, p]) => window.__emit(n, p), [name, payload]);
   const slotCard = (label) => page.locator(`.pr-slot[data-label="${label}"]`);
   const badgeOf = async (label) => (await slotCard(label).locator(".pr-status").innerText()).trim();
   const presetPath = FIXTURES.list_profiles[0].path;

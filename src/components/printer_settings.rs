@@ -14,6 +14,10 @@ use crate::printer::PrinterShared;
 
 const SERIAL_HINT: &str = "Check this serial matches the label on your printer.";
 const CONFLICT_WARNING: &str = "Two devices on your network claim this serial — check the IP on the printer screen before connecting.";
+pub const TRUSTED_CONNECTING: &str = "Trusted — connecting…";
+pub const DOWNGRADE_WARNING: &str = "This printer previously proved it's a genuine Bambu printer. A new, unrecognised certificate could mean another device is impersonating it. Only trust it if you've just replaced or reset the printer.";
+pub const TRUST_LABEL: &str = "Trust this printer";
+pub const CONFIRM_TRUST_LABEL: &str = "Yes, trust this certificate";
 
 /// `connection_message` as Settings → Printer words it: without pointing
 /// the user to Settings → Printer, where they already are.
@@ -45,6 +49,71 @@ pub fn outcome_message(outcome: &TestOutcome, ip: &str) -> String {
         }
         (state, _) => settings_message(state, ip).unwrap_or_default(),
     }
+}
+
+/// Fingerprints compared the way the backend compares them: hex digits
+/// only, any case.
+pub fn same_fingerprint(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(char::is_ascii_hexdigit)
+            .map(|c| c.to_ascii_uppercase())
+            .collect()
+    };
+    let a = norm(a);
+    !a.is_empty() && a == norm(b)
+}
+
+/// What the saved printer's live connection looks like to Settings.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LiveInfo {
+    pub configured: bool,
+    pub connection: ConnectionState,
+    /// A status report has arrived.
+    pub has_state: bool,
+    pub model: Option<String>,
+    pub serial: Option<String>,
+    pub ca_verified: bool,
+}
+
+/// The line shown after Trust this printer, from the live connection the
+/// save restarted (Trust runs no separate test). `pinned` is the
+/// fingerprint just trusted: until the restarted connection reports, the
+/// live state may still be the old rejection of that same certificate.
+pub fn trust_progress(pinned: &str, live: &LiveInfo, ip: &str) -> (String, bool) {
+    match &live.connection {
+        ConnectionState::Connected => (
+            outcome_message(
+                &TestOutcome {
+                    connection: ConnectionState::Connected,
+                    got_report: live.has_state,
+                    model: live.model.clone(),
+                },
+                ip,
+            ),
+            true,
+        ),
+        ConnectionState::CertUntrusted { fingerprint } if same_fingerprint(fingerprint, pinned) => {
+            (TRUSTED_CONNECTING.into(), true)
+        }
+        ConnectionState::Connecting | ConnectionState::Disconnected => {
+            (TRUSTED_CONNECTING.into(), true)
+        }
+        other => (settings_message(other, ip).unwrap_or_default(), false),
+    }
+}
+
+/// Whether `serial` has verified against a Bambu CA before, per the saved
+/// settings or the live connection. A new untrusted certificate for such a
+/// printer gets the downgrade warning and a second confirmation.
+pub fn previously_verified(
+    serial: &str,
+    saved: Option<&PrinterConfigView>,
+    live: &LiveInfo,
+) -> bool {
+    let serial = serial.trim().to_ascii_uppercase();
+    saved.is_some_and(|c| c.ca_verified && c.serial == serial)
+        || (live.ca_verified && live.serial.as_deref() == Some(serial.as_str()))
 }
 
 /// A certificate the user may trust, and the printer that presented it.
@@ -138,6 +207,11 @@ pub fn PrinterSettings() -> impl IntoView {
     let message = RwSignal::new(Option::<(String, bool)>::None);
     // From Test connection; the live connection's offer is derived below.
     let untrusted = RwSignal::new(Option::<TrustOffer>::None);
+    // The fingerprint just trusted: the result line then follows the live
+    // connection instead of a Test connection.
+    let trusted = RwSignal::new(Option::<String>::None);
+    // The fingerprint whose downgrade warning got its first click.
+    let confirming = RwSignal::new(Option::<String>::None);
 
     // All reads after an await go through this: the user may have left
     // Settings, which disposes these signals.
@@ -170,31 +244,107 @@ pub fn PrinterSettings() -> impl IntoView {
         }
     };
 
-    spawn_local(async move {
-        if let Ok(Some(c)) = bridge::get_config().await {
-            ip.try_set(c.ip.clone());
-            serial.try_set(c.serial.clone());
-            name.try_set(c.name.clone());
-            model.try_set(c.model.clone());
-            set_pin(
-                c.pinned_fingerprint.clone().unwrap_or_default(),
-                Some((c.ip.clone(), c.serial.clone())),
-            );
-            saved.try_set(Some(c));
-        }
-    });
+    // Fills the form from the saved printer, or empties it when there is
+    // none (after Reset for clean install).
+    let load_config = move || {
+        spawn_local(async move {
+            let Ok(config) = bridge::get_config().await else {
+                return;
+            };
+            match config {
+                Some(c) => {
+                    ip.try_set(c.ip.clone());
+                    serial.try_set(c.serial.clone());
+                    name.try_set(c.name.clone());
+                    model.try_set(c.model.clone());
+                    set_pin(
+                        c.pinned_fingerprint.clone().unwrap_or_default(),
+                        Some((c.ip.clone(), c.serial.clone())),
+                    );
+                    saved.try_set(Some(c));
+                }
+                None => {
+                    if saved.try_get_untracked().flatten().is_none() {
+                        return; // Nothing was shown; keep what the user typed.
+                    }
+                    for s in [ip, serial, name, model, code] {
+                        s.try_set(String::new());
+                    }
+                    set_pin(String::new(), None);
+                    saved.try_set(None);
+                    untrusted.try_set(None);
+                    trusted.try_set(None);
+                    message.try_set(None);
+                }
+            }
+        });
+    };
+    load_config();
+    if let Some(s) = shared {
+        Effect::new(move |seen: Option<u64>| {
+            let changes = s.config_changes();
+            if seen.is_some_and(|n| n != changes) {
+                load_config();
+            }
+            changes
+        });
+    }
 
-    // Only the connection state matters here, so a state event that
-    // changes temperatures doesn't re-render the section.
+    // Only these fields matter here, so a state event that changes
+    // temperatures doesn't re-render the section.
     let live = Memo::new(move |_| {
         shared
-            .map(|s| s.view.with(|v| (v.configured, v.connection.clone())))
+            .map(|s| {
+                s.view.with(|v| LiveInfo {
+                    configured: v.configured,
+                    connection: v.connection.clone(),
+                    has_state: v.state.is_some(),
+                    model: v.printer.as_ref().map(|p| p.model.clone()),
+                    serial: v.printer.as_ref().map(|p| p.serial.clone()),
+                    ca_verified: v.printer.as_ref().is_some_and(|p| p.ca_verified),
+                })
+            })
             .unwrap_or_default()
     });
+    // A live offer for the certificate just trusted is the connection's
+    // stale state from before the restart, not a new problem.
     let offer = move || {
         untrusted
             .get()
-            .or_else(|| live.with(|(_, c)| live_trust_offer(saved.get().as_ref(), c)))
+            .or_else(|| live.with(|l| live_trust_offer(saved.get().as_ref(), &l.connection)))
+            .filter(|o| {
+                trusted.with(|t| {
+                    t.as_deref()
+                        .is_none_or(|t| !same_fingerprint(t, &o.fingerprint))
+                })
+            })
+    };
+    // A new problem after Trust (anything that needs the user other than
+    // the stale rejection of the certificate just trusted) ends the trust
+    // result line; the live status line then says what is wrong.
+    Effect::new(move |_| {
+        let Some(fp) = trusted.get() else {
+            return;
+        };
+        let new_problem = live.with(|l| match &l.connection {
+            ConnectionState::CertUntrusted { fingerprint } => !same_fingerprint(fingerprint, &fp),
+            other => other.needs_user(),
+        });
+        if new_problem {
+            trusted.set(None);
+        }
+    });
+    let warn_downgrade = move |o: &TrustOffer| {
+        live.with(|l| previously_verified(&o.serial, saved.get().as_ref(), l))
+    };
+    let shown_message = move || match trusted.get() {
+        Some(fp) => {
+            let ip_now = saved
+                .with(|c| c.as_ref().map(|c| c.ip.clone()))
+                .unwrap_or_default();
+            Some(live.with(|l| trust_progress(&fp, l, &ip_now)))
+        }
+        None => message.get(),
     };
 
     let scan = move |_| {
@@ -214,6 +364,7 @@ pub fn PrinterSettings() -> impl IntoView {
         model.set(p.model);
         message.set(None);
         untrusted.set(None);
+        trusted.set(None);
         check_pin();
     };
 
@@ -226,6 +377,7 @@ pub fn PrinterSettings() -> impl IntoView {
         busy.try_set(true);
         message.try_set(None);
         untrusted.try_set(None);
+        trusted.try_set(None);
         spawn_local(async move {
             let result = bridge::test_connection(&f.ip, &f.serial, &f.code, &f.pin).await;
             match result {
@@ -252,11 +404,15 @@ pub fn PrinterSettings() -> impl IntoView {
     };
 
     // Saves the form (and a pin, when given), then refreshes the shared view.
-    let run_save = move |then_test: bool| {
+    // `trusting` is the fingerprint Trust this printer pins: the save
+    // restarts the live connection, which then shows the result (no second
+    // session to the printer for a test).
+    let run_save = move |trusting: Option<String>| {
         let Some(f) = form() else {
             return;
         };
         busy.try_set(true);
+        trusted.try_set(None);
         spawn_local(async move {
             let result = bridge::save(&f.ip, &f.serial, &f.name, &f.model, &f.code, &f.pin).await;
             if let Some(s) = shared {
@@ -271,8 +427,10 @@ pub fn PrinterSettings() -> impl IntoView {
                 Ok(c) => {
                     code.try_set(String::new());
                     saved.try_set(Some(c));
-                    if then_test {
-                        run_test();
+                    if trusting.is_some() {
+                        untrusted.try_set(None);
+                        message.try_set(None);
+                        trusted.try_set(trusting);
                     } else {
                         message.try_set(Some(("Saved.".into(), true)));
                     }
@@ -284,14 +442,23 @@ pub fn PrinterSettings() -> impl IntoView {
         });
     };
 
-    // Pins the offered certificate for the printer that presented it.
+    // Pins the offered certificate for the printer that presented it. For
+    // a printer that once verified against a Bambu CA, the first click only
+    // arms the confirmation.
     let trust = move |_| {
-        if let Some(o) = untrack(offer) {
-            ip.set(o.ip.clone());
-            serial.set(o.serial.clone());
-            set_pin(o.fingerprint, Some((o.ip, o.serial)));
-            run_save(true);
+        let Some(o) = untrack(offer) else {
+            return;
+        };
+        let armed = confirming.with_untracked(|c| c.as_deref() == Some(o.fingerprint.as_str()));
+        if untrack(|| warn_downgrade(&o)) && !armed {
+            confirming.set(Some(o.fingerprint));
+            return;
         }
+        confirming.set(None);
+        ip.set(o.ip.clone());
+        serial.set(o.serial.clone());
+        set_pin(o.fingerprint.clone(), Some((o.ip, o.serial)));
+        run_save(Some(o.fingerprint));
     };
 
     let remove = move |_| {
@@ -314,6 +481,7 @@ pub fn PrinterSettings() -> impl IntoView {
                     set_pin(String::new(), None);
                     saved.try_set(None);
                     untrusted.try_set(None);
+                    trusted.try_set(None);
                     message.try_set(Some(("Printer removed.".into(), true)));
                 }
                 Err(e) => {
@@ -338,7 +506,8 @@ pub fn PrinterSettings() -> impl IntoView {
                 "Connect to your Bambu printer on the local network to see live status and what is loaded in each AMS slot. BambuMate only reads from the printer."
             </p>
 
-            {move || live.with(|(configured, c)| live_message(saved.get().as_ref(), *configured, c)).map(|m| view! {
+            // After Trust the result line follows the live connection instead.
+            {move || trusted.with(Option::is_none).then(|| live.with(|l| live_message(saved.get().as_ref(), l.configured, &l.connection))).flatten().map(|m| view! {
                 <p class="status-text status-warning printer-live-status">{m}</p>
             })}
 
@@ -414,7 +583,7 @@ pub fn PrinterSettings() -> impl IntoView {
                 <button class="btn btn-secondary printer-test" on:click=move |_| run_test() disabled=move || busy.get()>
                     "Test connection"
                 </button>
-                <button class="btn btn-save printer-save" on:click=move |_| run_save(false) disabled=move || busy.get()>
+                <button class="btn btn-save printer-save" on:click=move |_| run_save(None) disabled=move || busy.get()>
                     "Save"
                 </button>
                 <Show when=move || saved.get().is_some()>
@@ -427,14 +596,21 @@ pub fn PrinterSettings() -> impl IntoView {
             <Show when=move || busy.get()>
                 <span class="status-text">"Connecting…"</span>
             </Show>
-            {move || message.get().map(|(text, ok)| view! {
+            {move || shown_message().map(|(text, ok)| view! {
                 <p class={if ok { "status-text status-success printer-result" } else { "status-text status-warning printer-result" }}>
                     {text}
                 </p>
             })}
 
-            {move || offer().map(|o| view! {
+            {move || offer().map(|o| {
+                let warn = warn_downgrade(&o);
+                let fp = o.fingerprint.clone();
+                let armed = move || confirming.with(|c| c.as_deref() == Some(fp.as_str()));
+                view! {
                 <div class="printer-trust">
+                    {warn.then(|| view! {
+                        <p class="status-text status-warning printer-trust-warning" role="alert">{DOWNGRADE_WARNING}</p>
+                    })}
                     <p class="section-description">
                         "This printer's certificate isn't signed by a Bambu CA that BambuMate knows. If this fingerprint matches your printer, trust it. From now on BambuMate accepts this certificate, or one signed by a Bambu CA, for this serial."
                     </p>
@@ -445,10 +621,14 @@ pub fn PrinterSettings() -> impl IntoView {
                         <dd><code class="printer-fingerprint">{o.fingerprint}</code></dd>
                     </dl>
                     <p class="section-description printer-serial-hint">{SERIAL_HINT}</p>
-                    <button class="btn btn-primary btn-sm printer-trust-btn" on:click=trust disabled=move || busy.get()>
-                        "Trust this printer"
+                    <button class="btn btn-sm printer-trust-btn"
+                        class:btn-primary=move || !warn
+                        class:btn-danger=warn
+                        on:click=trust disabled=move || busy.get()>
+                        {move || if warn && armed() { CONFIRM_TRUST_LABEL } else { TRUST_LABEL }}
                     </button>
                 </div>
+                }
             })}
         </section>
     }
@@ -564,6 +744,104 @@ mod tests {
             settings_message(&ConnectionState::Unreachable, "10.0.0.2"),
             connection_message(&ConnectionState::Unreachable, "10.0.0.2")
         );
+    }
+
+    fn live(connection: ConnectionState) -> LiveInfo {
+        LiveInfo {
+            configured: true,
+            connection,
+            has_state: true,
+            model: Some("H2D".into()),
+            serial: Some("0948AB000000001".into()),
+            ca_verified: false,
+        }
+    }
+
+    #[test]
+    fn after_trust_the_result_follows_the_live_connection() {
+        let pinned = "AB:CD:EF";
+        let at = |c| trust_progress(pinned, &live(c), "192.168.1.20");
+        assert_eq!(
+            at(ConnectionState::Connecting),
+            (TRUSTED_CONNECTING.to_string(), true)
+        );
+        assert_eq!(
+            at(ConnectionState::Disconnected),
+            (TRUSTED_CONNECTING.to_string(), true)
+        );
+        // The old rejection of the certificate just trusted is stale.
+        let stale = ConnectionState::CertUntrusted {
+            fingerprint: "abcdef".into(),
+        };
+        assert_eq!(at(stale), (TRUSTED_CONNECTING.to_string(), true));
+        assert_eq!(
+            at(ConnectionState::Connected),
+            (
+                "Connected to H2D. Live status is on the Printer page.".to_string(),
+                true
+            )
+        );
+        let (text, ok) = at(ConnectionState::CertUntrusted {
+            fingerprint: "11:22".into(),
+        });
+        assert!(!ok);
+        assert_eq!(
+            text,
+            "The printer's certificate isn't from a Bambu CA that BambuMate knows."
+        );
+        assert_eq!(
+            at(ConnectionState::Unreachable),
+            (
+                "Can't reach the printer at 192.168.1.20.".to_string(),
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn fingerprints_match_ignoring_separators_and_case() {
+        assert!(same_fingerprint("AB:CD:01", "abcd01"));
+        assert!(!same_fingerprint("AB:CD:01", "AB:CD:02"));
+        assert!(!same_fingerprint("zz", "zz"), "no hex digits never matches");
+    }
+
+    #[test]
+    fn a_printer_that_verified_before_gets_the_downgrade_warning() {
+        let verified = PrinterConfigView {
+            ca_verified: true,
+            ..saved()
+        };
+        let none = LiveInfo::default();
+        assert!(previously_verified(
+            "0948ab000000001",
+            Some(&verified),
+            &none
+        ));
+        assert!(!previously_verified(
+            "0948AB000000002",
+            Some(&verified),
+            &none
+        ));
+        assert!(!previously_verified(
+            "0948AB000000001",
+            Some(&saved()),
+            &none
+        ));
+        let live_verified = LiveInfo {
+            ca_verified: true,
+            ..live(ConnectionState::Connected)
+        };
+        assert!(previously_verified(
+            "0948AB000000001",
+            Some(&saved()),
+            &live_verified
+        ));
+        assert!(previously_verified("0948AB000000001", None, &live_verified));
+        assert!(!previously_verified(
+            "0948AB000000002",
+            None,
+            &live_verified
+        ));
     }
 
     #[test]
