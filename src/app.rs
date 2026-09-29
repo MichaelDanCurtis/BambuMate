@@ -12,6 +12,7 @@ use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
 use crate::pages::home::HomePage;
 use crate::pages::print_analysis::PrintAnalysisPage;
+use crate::pages::printer::PrinterPage;
 use crate::pages::profile_diff::ProfileDiffPage;
 use crate::pages::profile_management::ProfileManagementPage;
 use crate::pages::settings::SettingsPage;
@@ -127,6 +128,7 @@ pub fn App() -> impl IntoView {
                             <Route path=path!("/settings") view=SettingsPage />
                             <Route path=path!("/health") view=HealthPage />
                             <Route path=path!("/about") view=AboutPage />
+                            <Route path=path!("/printer") view=PrinterPage />
                         </Routes>
                     </main>
                     <AgentDrawer />

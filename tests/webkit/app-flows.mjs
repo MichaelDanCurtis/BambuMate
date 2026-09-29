@@ -22,11 +22,15 @@ import { existsSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { extname, join, resolve } from "node:path";
 import {
+  A3_ASSIGNED,
   FIXTURES,
   GIF_1X1,
   makePng,
   PRINTER_FINGERPRINT,
   PRINTER_SERIAL,
+  PRINTER_UNCONFIGURED,
+  PRINTER_VIEW,
+  withSlot,
 } from "./fixtures.mjs";
 
 const repoRoot = resolve(process.argv[2] ?? "../..");
@@ -109,6 +113,22 @@ function installTauriMock(fixtures) {
 }
 
 const png = makePng(320, 240, deflateSync);
+
+/** The view once the printer reports the preset assigned to A3. */
+function a3Matched() {
+  const a3 = PRINTER_VIEW.slots.find((s) => s.label === "A3");
+  return withSlot("A3", {
+    ...A3_ASSIGNED,
+    status: "matches",
+    tray: { ...a3.tray, tray_type: "PLA", tray_info_idx: "PA-PL-WHTPA0-01" },
+  });
+}
+
+/** Invoke arguments compared exactly, whatever their key order. */
+function sameArgs(got, want) {
+  const norm = (o) => JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]]));
+  return norm(got ?? {}) === norm(want);
+}
 
 class Run {
   constructor(engine) {
@@ -797,6 +817,241 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".about-up-to-date", { timeout: 20000 });
     return (await page.locator(".about-up-to-date").first().innerText()).replace(/\s+/g, " ").trim();
   });
+
+  // -- printer page -------------------------------------------------------------
+  const emitEvent = (name, payload) => page.evaluate(([n, p]) => window.__emit(n, p), [name, payload]);
+  const slotCard = (label) => page.locator(`.pr-slot[data-label="${label}"]`);
+  const badgeOf = async (label) => (await slotCard(label).locator(".pr-status").innerText()).trim();
+  const presetPath = FIXTURES.list_profiles[0].path;
+
+  await step(run, page, "printer page points to Settings when no printer is set up", async () => {
+    await setFixture("printer_view", PRINTER_UNCONFIGURED);
+    await page.click('a[href="/printer"]');
+    await page.waitForSelector(".printer-page .pr-empty", { timeout: 15000 });
+    const link = await page.locator(".pr-setup-link").innerText();
+    if (!link.includes("Settings → Printer")) throw new Error(`link reads "${link}"`);
+    if ((await page.locator(".printer-dot").count()) !== 0) throw new Error("rail dot shown with no printer");
+  });
+
+  await step(run, page, "printer hero shows the current print", async () => {
+    await setFixture("printer_view", PRINTER_VIEW);
+    await page.click('a[href="/"]');
+    await page.click('a[href="/printer"]');
+    await page.waitForSelector(".printer-page.nd .pr-hero", { timeout: 15000 });
+    await page.waitForFunction(() => document.querySelector(".pr-hero-percent")?.innerText === "6%", null, {
+      timeout: 5000,
+    });
+    // Lower-cased: .nd-label uppercases its text, and innerText reports what is rendered.
+    const hero = (await page.locator(".pr-hero").innerText()).replace(/\s+/g, " ").toLowerCase();
+    for (const want of ["running", "1 / 200", "9 h 09 m", "t-pose - slim h2d dual ams riser", "right nozzle", "left nozzle", "245 / 245 °c", "70 / 70 °c"]) {
+      if (!hero.includes(want)) throw new Error(`hero lacks "${want}": ${hero}`);
+    }
+  });
+
+  await step(run, page, "rail dot shows the connection", async () => {
+    const dot = page.locator('.printer-dot[data-state="connected"]');
+    if ((await dot.count()) !== 1) throw new Error("no connected dot on the rail");
+    const bg = await dot.evaluate((el) => getComputedStyle(el).backgroundColor);
+    if (bg === "rgba(0, 0, 0, 0)" || bg === "transparent") throw new Error("dot has no colour");
+    return bg;
+  });
+
+  await step(run, page, "AMS cards show every slot with its status", async () => {
+    const cards = await page.locator(".pr-slot").count();
+    if (cards !== 10) throw new Error(`expected 10 slot cards, got ${cards}`);
+    const rows = await page.locator(".pr-ams-row").count();
+    if (rows !== 3) throw new Error(`expected 3 rows (A, B, External), got ${rows}`);
+    const expect = { A2: "✓ Bambu spool", A3: "Not set", B2: "✓ Set", B4: "Empty", "Ext-L": "Not set" };
+    for (const [label, badge] of Object.entries(expect)) {
+      const got = await badgeOf(label);
+      if (got !== badge) throw new Error(`${label} shows "${got}", expected "${badge}"`);
+    }
+    if ((await slotCard("A2").locator(".pr-rfid").count()) !== 1) throw new Error("A2 lacks its RFID badge");
+    const meta = await page.locator(".pr-ams-meta").first().innerText();
+    if (!meta.includes("Humidity 21%")) throw new Error(`AMS A meta: ${meta}`);
+  });
+
+  await step(run, page, "errors show their text or the wiki link", async () => {
+    const errors = await page.locator(".pr-error").count();
+    if (errors !== 2) throw new Error(`expected 2 errors, got ${errors}`);
+    const text = await page.locator(".pr-error-text").first().innerText();
+    if (!text.includes("heatbed")) throw new Error(`error text: ${text}`);
+    const href = await page.locator(".pr-error-link").getAttribute("href");
+    if (!href.startsWith("https://wiki.bambulab.com/")) throw new Error(`wiki link: ${href}`);
+  });
+
+  await page.screenshot({ path: `flow-${engine}-printer.png`, fullPage: true });
+
+  await step(run, page, "assigning a preset shows the steps to set it on the printer", async () => {
+    await slotCard("A3").locator(".pr-slot-main").click();
+    await page.waitForSelector(".pr-picker .pr-picker-item", { timeout: 10000 });
+    await page.fill(".pr-picker-search", "PolyLite");
+    await page.locator(".pr-picker-item", { hasText: "PolyLite" }).first().click();
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "printer_assign_slot"), null, {
+      timeout: 5000,
+    });
+    const calls = await ipcCalls("printer_assign_slot");
+    if (calls.length !== 1) throw new Error(`${calls.length} assign calls`);
+    if (!sameArgs(calls[0].args, { amsId: 0, trayId: 2, presetPath })) throw new Error(JSON.stringify(calls[0].args));
+    await page.waitForSelector(".pr-picker", { state: "detached", timeout: 5000 });
+    const badge = await badgeOf("A3");
+    if (badge !== "Set on printer") throw new Error(`A3 shows "${badge}"`);
+    const steps = (await slotCard("A3").locator(".pr-steps").innerText()).replace(/\s+/g, " ");
+    for (const want of [
+      "On the printer: Filament → A3 → choose Polymaker PolyLite PLA @BBL X1C 0.4 nozzle.",
+      "Or in Bambu Studio: Device → AMS → A3 → Polymaker PolyLite PLA @BBL X1C 0.4 nozzle.",
+      "It must sync to Bambu Cloud first — open Bambu Studio while signed in.",
+    ]) {
+      if (!steps.includes(want)) throw new Error(`steps lack "${want}": ${steps}`);
+    }
+    if ((await slotCard("A3").locator(".pr-steps em").count()) !== 2) throw new Error("preset names not in <em>");
+  });
+
+  await step(run, page, "the card flips to ✓ Set when the printer reports the preset", async () => {
+    const matched = a3Matched();
+    await emitEvent("printer://state", matched);
+    await page.waitForFunction(
+      () => document.querySelector('.pr-slot[data-label="A3"] .pr-status')?.innerText.trim() === "✓ Set",
+      null,
+      { timeout: 5000 }
+    );
+    if ((await slotCard("A3").locator(".pr-steps").count()) !== 0) throw new Error("steps still shown");
+  });
+
+  await step(run, page, "losing the printer greys the page and says why", async () => {
+    await emitEvent("printer://connection", { state: "unreachable" });
+    await page.waitForSelector(".pr-body.pr-stale", { timeout: 5000 });
+    const notice = (await page.locator(".pr-notice").innerText()).trim();
+    if (notice !== "Can't reach the printer at 192.168.1.20.") throw new Error(`notice: ${notice}`);
+    if ((await page.locator('.printer-dot[data-state="error"]').count()) !== 1) throw new Error("dot not in error");
+    await emitEvent("printer://connection", { state: "connected" });
+    await page.waitForSelector(".pr-body:not(.pr-stale)", { timeout: 5000 });
+  });
+
+  // The backend's status rules put a spool's RFID report above an assignment
+  // the user made before swapping it in.
+  await step(run, page, "an RFID spool's report beats a stale assignment", async () => {
+    await emitEvent("printer://state", withSlot("A2", { assigned_preset: "Old Acme PLA", assigned_filament_id: "P00000001" }));
+    await page.waitForSelector('.pr-slot[data-label="A2"] .pr-prev', { timeout: 5000 });
+    const preset = (await slotCard("A2").locator(".pr-preset").innerText()).trim();
+    if (preset !== "PLA Basic") throw new Error(`A2 preset reads "${preset}"`);
+    const prev = (await slotCard("A2").locator(".pr-prev").innerText()).trim();
+    if (prev !== "Previously assigned: Old Acme PLA") throw new Error(`A2 history reads "${prev}"`);
+    const badge = await badgeOf("A2");
+    if (badge !== "✓ Bambu spool") throw new Error(`A2 shows "${badge}"`);
+    if ((await slotCard("A2").locator(".pr-steps, .pr-no-id").count()) !== 0) throw new Error("A2 shows steps");
+  });
+
+  await step(run, page, "a preset with no filament id says to confirm by eye", async () => {
+    await emitEvent(
+      "printer://state",
+      withSlot("A3", { ...A3_ASSIGNED, assigned_filament_id: null, needs_cloud_sync: false, preset_has_no_id: true })
+    );
+    await page.waitForSelector('.pr-slot[data-label="A3"] .pr-no-id', { timeout: 5000 });
+    const note = (await slotCard("A3").locator(".pr-no-id").innerText()).replace(/\s+/g, " ").trim();
+    const want =
+      "BambuMate can't check this slot: Polymaker PolyLite PLA @BBL X1C 0.4 nozzle has no filament id. Set it on the printer and confirm by eye.";
+    if (note !== want) throw new Error(`note reads "${note}"`);
+    if ((await slotCard("A3").locator(".pr-no-id em").innerText()) !== A3_ASSIGNED.assigned_preset) {
+      throw new Error("preset name not in <em>");
+    }
+    if ((await slotCard("A3").locator(".pr-steps").count()) !== 0) throw new Error("steps shown as well");
+    const badge = await badgeOf("A3");
+    if (badge !== "Set on printer") throw new Error(`A3 shows "${badge}"`);
+  });
+
+  await step(run, page, "clearing an assignment calls printer_clear_slot", async () => {
+    await slotCard("A3").locator(".pr-slot-main").click();
+    await page.click(".pr-picker-clear", { timeout: 5000 });
+    await page.waitForSelector(".pr-picker", { state: "detached", timeout: 5000 });
+    const calls = await ipcCalls("printer_clear_slot");
+    if (calls.length !== 1) throw new Error(`${calls.length} clear calls`);
+    if (!sameArgs(calls[0].args, { amsId: 0, trayId: 2 })) throw new Error(JSON.stringify(calls[0].args));
+    const badge = await badgeOf("A3");
+    if (badge !== "Not set") throw new Error(`A3 shows "${badge}"`);
+  });
+
+  await step(run, page, "a refused slot shows the backend's reason inline", async () => {
+    await setFixture("printer_assign_slot", { __reject: "That isn't a slot on this printer." });
+    await slotCard("Ext-L").locator(".pr-slot-main").click();
+    await page.waitForSelector(".pr-picker .pr-picker-item", { timeout: 10000 });
+    await page.locator(".pr-picker-item").first().click();
+    await page.waitForSelector(".pr-picker-error", { timeout: 5000 });
+    const text = (await page.locator(".pr-picker-error").innerText()).trim();
+    if (text !== "That isn't a slot on this printer.") throw new Error(`error reads "${text}"`);
+    const calls = await ipcCalls("printer_assign_slot");
+    const last = calls.at(-1);
+    if (!sameArgs(last.args, { amsId: 255, trayId: 254, presetPath })) throw new Error(JSON.stringify(last.args));
+    if (!(await page.locator(".pr-picker-item").first().isEnabled())) throw new Error("picker stayed busy");
+    await page.click(".pr-picker-cancel");
+    await page.waitForSelector(".pr-picker", { state: "detached", timeout: 5000 });
+    await setFixture("printer_assign_slot", FIXTURES.printer_assign_slot);
+  });
+
+  // The backend doesn't retry these, so the page points at Settings → Printer.
+  await step(run, page, "a connection that needs the user links to Settings → Printer", async () => {
+    await emitEvent("printer://connection", { state: "cert_untrusted", fingerprint: PRINTER_FINGERPRINT });
+    await page.waitForSelector(".pr-notice .pr-settings-link", { timeout: 5000 });
+    const notice = (await page.locator(".pr-notice").innerText()).replace(/\s+/g, " ");
+    if (!notice.includes("Trust it in Settings → Printer.")) throw new Error(`notice: ${notice}`);
+    const href = await page.locator(".pr-settings-link").getAttribute("href");
+    if (href !== "/settings#printer") throw new Error(`link: ${href}`);
+
+    // The presented serial comes from whoever answered: text only, cut to 64.
+    await emitEvent("printer://connection", { state: "wrong_serial", presented: `<b>X</b>${"A".repeat(200)}` });
+    await page.waitForFunction(() => document.querySelector(".pr-notice")?.innerText.includes("reports serial"), null, {
+      timeout: 5000,
+    });
+    const wrong = await page.locator(".pr-notice").innerText();
+    if (!wrong.includes(`<b>X</b>${"A".repeat(56)}`) || wrong.includes("A".repeat(57))) {
+      throw new Error(`serial not shown as 64 characters of text: ${wrong}`);
+    }
+    if ((await page.locator(".pr-notice b").count()) !== 0) throw new Error("presented serial rendered as HTML");
+    if ((await page.locator(".pr-settings-link").count()) !== 1) throw new Error("no Settings link");
+
+    // A state the backend retries has nothing for the user to fix.
+    await emitEvent("printer://connection", { state: "unreachable" });
+    await page.waitForSelector(".pr-settings-link", { state: "detached", timeout: 5000 });
+
+    await emitEvent("printer://connection", { state: "auth_failed" });
+    await page.click(".pr-settings-link");
+    await page.waitForSelector(".printer-settings", { timeout: 15000 });
+    await emitEvent("printer://connection", { state: "connected" });
+    await page.click('a[href="/printer"]');
+    await page.waitForSelector(".pr-body:not(.pr-stale)", { timeout: 15000 });
+  });
+
+  await step(run, page, "a connected printer with no report yet says it is waiting", async () => {
+    await emitEvent("printer://state", { ...PRINTER_VIEW, state: null, slots: [], errors: [] });
+    await page.waitForSelector(".pr-waiting", { timeout: 5000 });
+    const text = (await page.locator(".pr-waiting").innerText()).trim();
+    if (text !== "Waiting for the first status report…") throw new Error(`reads "${text}"`);
+    if ((await page.locator(".pr-slot, .pr-hero").count()) !== 0) throw new Error("empty cards shown");
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await page.waitForSelector(".pr-hero", { timeout: 5000 });
+  });
+
+  // The agent's bm_navigate can leave the page while the picker waits on the
+  // backend; the late answer must not touch the page's disposed signals.
+  await step(run, page, "leaving the Printer page mid-assignment doesn't panic", async () => {
+    await setFixture("printer_assign_slot", { __delay: 400, answer: withSlot("A3", A3_ASSIGNED) });
+    const before = (await ipcCalls("printer_assign_slot")).length;
+    await slotCard("A3").locator(".pr-slot-main").click();
+    await page.waitForSelector(".pr-picker .pr-picker-item", { timeout: 10000 });
+    const errors = run.errors.length;
+    await page.locator(".pr-picker-item").first().click();
+    // The picker's backdrop covers the rail, so navigate the way the agent would.
+    await page.locator('a[href="/about"]').dispatchEvent("click");
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    await page.waitForTimeout(800);
+    if ((await ipcCalls("printer_assign_slot")).length !== before + 1) throw new Error("assign was not sent");
+    if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
+  });
+
+  // Put the canned answers back so later steps start from the defaults.
+  for (const cmd of Object.keys(FIXTURES).filter((k) => k.startsWith("printer_"))) {
+    await setFixture(cmd, FIXTURES[cmd]);
+  }
 
   // -- agent drawer ------------------------------------------------------------
   const emit = (payload) => page.evaluate((p) => window.__emit("agent://event", p), payload);

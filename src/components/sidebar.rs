@@ -3,11 +3,19 @@ use leptos::prelude::*;
 use crate::app::{FeatureFlagsContext, UpdateContext};
 use crate::components::branding::BrandMark;
 use crate::components::stl_indicator::StlIndicator;
+use crate::printer::PrinterShared;
 
 #[component]
 pub fn Sidebar() -> impl IntoView {
     let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
     let update_ctx = use_context::<UpdateContext>().expect("UpdateContext not provided");
+    let printer = use_context::<PrinterShared>().expect("PrinterShared not provided");
+    // No dot until a printer is set up.
+    let printer_dot = move || {
+        printer
+            .view
+            .with(|v| v.configured.then(|| v.connection.dot()))
+    };
 
     view! {
         <nav class="sidebar">
@@ -44,6 +52,14 @@ pub fn Sidebar() -> impl IntoView {
                 </Show>
                 <li class="nav-item">
                     <a href="/profiles" class="nav-link">"Profiles"</a>
+                </li>
+                <li class="nav-item">
+                    <a href="/printer" class="nav-link nav-link-printer">
+                        "Printer"
+                        {move || printer_dot().map(|state| view! {
+                            <span class="nd printer-dot" data-state=state title="Printer connection"></span>
+                        })}
+                    </a>
                 </li>
                 <li class="nav-item">
                     <a href="/batch" class="nav-link">"Batch Generate"</a>
