@@ -57,7 +57,8 @@ pub fn Sidebar() -> impl IntoView {
                     <a href="/printer" class="nav-link nav-link-printer">
                         "Printer"
                         {move || printer_dot().map(|state| view! {
-                            <span class="nd printer-dot" data-state=state title="Printer connection"></span>
+                            <span class="nd printer-dot" data-state=state role="img"
+                                aria-label=format!("Printer: {state}") title="Printer connection"></span>
                         })}
                     </a>
                 </li>

@@ -101,6 +101,7 @@
 .pr-picker-item { width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--nd-text-primary); font: inherit; text-align: left; cursor: pointer; }
 .pr-picker-item:hover { background: var(--nd-surface-raised); }
 .pr-picker-item:disabled, .pr-picker-clear:disabled { cursor: progress; opacity: 0.6; }
+.pr-picker-status { margin: 0; font-size: 12px; color: var(--nd-text-secondary); }
 .pr-picker-error { margin: 0; color: var(--nd-accent); }
 .pr-picker-actions { display: flex; justify-content: flex-end; gap: var(--nd-space-sm); }
 .pr-picker-clear, .pr-picker-cancel { padding: 6px 14px; border: 1px solid var(--nd-border-visible); border-radius: 999px; background: transparent; color: var(--nd-text-primary); font: inherit; cursor: pointer; }

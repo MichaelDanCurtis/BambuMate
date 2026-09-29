@@ -853,6 +853,8 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await dot.count()) !== 1) throw new Error("no connected dot on the rail");
     const bg = await dot.evaluate((el) => getComputedStyle(el).backgroundColor);
     if (bg === "rgba(0, 0, 0, 0)" || bg === "transparent") throw new Error("dot has no colour");
+    const [role, label] = await dot.evaluate((el) => [el.getAttribute("role"), el.getAttribute("aria-label")]);
+    if (role !== "img" || label !== "Printer: connected") throw new Error(`dot role="${role}" aria-label="${label}"`);
     return bg;
   });
 
@@ -908,6 +910,10 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   await step(run, page, "the card flips to ✓ Set when the printer reports the preset", async () => {
+    // The card updates in place: someone focused on it keeps their place.
+    await page.evaluate(() => {
+      document.querySelector('.pr-slot[data-label="A3"] .pr-slot-main').__keep = true;
+    });
     const matched = a3Matched();
     await emitEvent("printer://state", matched);
     await page.waitForFunction(
@@ -916,6 +922,8 @@ async function driveApp(browserType, engine, baseUrl) {
       { timeout: 5000 }
     );
     if ((await slotCard("A3").locator(".pr-steps").count()) !== 0) throw new Error("steps still shown");
+    const kept = await page.evaluate(() => document.querySelector('.pr-slot[data-label="A3"] .pr-slot-main').__keep);
+    if (kept !== true) throw new Error("the A3 card was rebuilt when its status changed");
   });
 
   await step(run, page, "losing the printer greys the page and says why", async () => {
@@ -1031,6 +1039,135 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".pr-hero", { timeout: 5000 });
   });
 
+  // A state event arrives about twice a second during a print. One that only
+  // changes temperatures must leave the cards and errors (and anything the
+  // user is clicking or typing into) alone.
+  const warmer = (nozzle) => ({
+    ...PRINTER_VIEW,
+    state: {
+      ...PRINTER_VIEW.state,
+      nozzles: [{ ...PRINTER_VIEW.state.nozzles[0], temp: nozzle }, PRINTER_VIEW.state.nozzles[1]],
+    },
+  });
+  const heroShows = (text) =>
+    page.waitForFunction((t) => document.querySelector(".pr-hero")?.innerText.includes(t), text, { timeout: 5000 });
+
+  await step(run, page, "a temperature-only state event keeps the card and error nodes", async () => {
+    await page.evaluate(() => {
+      document.querySelector('.pr-slot[data-label="A1"]').__keep = true;
+      document.querySelector(".pr-error").__keep = true;
+    });
+    await emitEvent("printer://state", warmer(246.0));
+    await heroShows("246 / 245");
+    const kept = await page.evaluate(() => [
+      document.querySelector('.pr-slot[data-label="A1"]')?.__keep === true,
+      document.querySelector(".pr-error")?.__keep === true,
+    ]);
+    if (!kept[0]) throw new Error("the A1 card was rebuilt");
+    if (!kept[1]) throw new Error("the error row was rebuilt");
+  });
+
+  await step(run, page, "the picker keeps its search text and focus through a state event", async () => {
+    await slotCard("A3").locator(".pr-slot-main").click();
+    await page.waitForSelector(".pr-picker .pr-picker-item", { timeout: 10000 });
+    if ((await page.locator(".pr-picker").getAttribute("aria-modal")) !== "true") throw new Error("not aria-modal");
+    await page.waitForFunction(() => document.activeElement?.classList.contains("pr-picker-search"), null, {
+      timeout: 5000,
+    });
+    await page.keyboard.type("Poly");
+    await emitEvent("printer://state", warmer(247.0));
+    await heroShows("247 / 245");
+    const value = await page.inputValue(".pr-picker-search");
+    if (value !== "Poly") throw new Error(`search reads "${value}"`);
+    const focused = await page.evaluate(() => document.activeElement?.classList.contains("pr-picker-search"));
+    if (!focused) throw new Error("the search box lost focus");
+    await page.keyboard.press("Escape");
+    await page.waitForSelector(".pr-picker", { state: "detached", timeout: 5000 });
+    await page.waitForFunction(() => document.activeElement?.closest(".pr-slot")?.dataset.label === "A3", null, {
+      timeout: 5000,
+    });
+  });
+
+  await step(run, page, "the picker says when presets are loading, missing or too many", async () => {
+    const open = async () => {
+      await slotCard("A3").locator(".pr-slot-main").click();
+      await page.waitForSelector(".pr-picker", { timeout: 5000 });
+    };
+    const close = async () => {
+      await page.keyboard.press("Escape");
+      await page.waitForSelector(".pr-picker", { state: "detached", timeout: 5000 });
+    };
+    const status = async () => (await page.locator(".pr-picker-status").innerText()).trim();
+
+    await setFixture("list_profiles", { __delay: 400, answer: FIXTURES.list_profiles });
+    await open();
+    await page.waitForSelector(".pr-picker-status", { timeout: 2000 });
+    if ((await status()) !== "Loading presets…") throw new Error(`while loading: "${await status()}"`);
+    await page.waitForSelector(".pr-picker-item", { timeout: 5000 });
+    await page.waitForSelector(".pr-picker-status", { state: "detached", timeout: 5000 });
+    await close();
+
+    const reason = "Bambu Studio's preset folder isn't readable.";
+    await setFixture("list_profiles", { __reject: reason });
+    await open();
+    await page.waitForSelector(".pr-picker-error", { timeout: 5000 });
+    const error = await page.locator(".pr-picker-error").innerText();
+    if (!error.includes(reason)) throw new Error(`error reads "${error}"`);
+    if ((await page.locator(".pr-picker-item").count()) !== FIXTURES.list_system_profiles.length) {
+      throw new Error("Bambu presets not listed after the user list failed");
+    }
+    await close();
+
+    await setFixture("list_profiles", FIXTURES.list_profiles);
+    const many = Array.from({ length: 70 }, (_, i) => ({
+      name: `Test Preset ${String(i).padStart(2, "0")}`,
+      filament_type: "PLA",
+      filament_id: null,
+      path: `/presets/Test Preset ${i}.json`,
+      is_user_profile: false,
+    }));
+    await setFixture("list_system_profiles", many);
+    await open();
+    await page.waitForSelector(".pr-picker-item", { timeout: 5000 });
+    await page.waitForSelector(".pr-picker-status", { timeout: 5000 });
+    if ((await status()) !== "Refine your search to see more.") throw new Error(`with 70: "${await status()}"`);
+    await page.fill(".pr-picker-search", "zzzz");
+    await page.waitForFunction(() => document.querySelector(".pr-picker-status")?.innerText.trim() === "No presets match.", null, {
+      timeout: 5000,
+    });
+    await page.fill(".pr-picker-search", "Test Preset 0");
+    await page.waitForSelector(".pr-picker-status", { state: "detached", timeout: 5000 });
+    await close();
+    await setFixture("list_system_profiles", FIXTURES.list_system_profiles);
+  });
+
+  await step(run, page, "printer-supplied names are shortened and shown as plain text", async () => {
+    const odd = {
+      ...withSlot("A2", {
+        tray: { ...PRINTER_VIEW.slots[1].tray, tray_sub_brands: `<u>S</u>${"S".repeat(100)}` },
+      }),
+      printer: { ...PRINTER_VIEW.printer, name: `<b>N</b>${"N".repeat(100)}` },
+      state: { ...PRINTER_VIEW.state, subtask_name: `<i>F</i>‮${"F".repeat(200)}` },
+    };
+    await emitEvent("printer://state", odd);
+    await page.waitForFunction(() => document.querySelector(".pr-file dd")?.innerText.startsWith("<i>F</i>"), null, {
+      timeout: 5000,
+    });
+    const file = await page.locator(".pr-file dd").innerText();
+    if ([...file].length !== 120 || file.includes("‮")) throw new Error(`file: ${[...file].length} chars`);
+    const ident = await page.locator(".pr-ident").innerText();
+    if (!ident.includes(`<b>N</b>${"N".repeat(56)} · `)) throw new Error(`ident: ${ident}`);
+    const preset = await slotCard("A2").locator(".pr-preset").innerText();
+    if (preset !== `<u>S</u>${"S".repeat(56)}`) throw new Error(`A2 preset: ${preset}`);
+    if ((await page.locator(".printer-page b, .printer-page i, .printer-page u").count()) !== 0) {
+      throw new Error("a printer-supplied name was rendered as HTML");
+    }
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await page.waitForFunction(() => document.querySelector(".pr-ident")?.innerText.startsWith("Workshop H2D"), null, {
+      timeout: 5000,
+    });
+  });
+
   // The agent's bm_navigate can leave the page while the picker waits on the
   // backend; the late answer must not touch the page's disposed signals.
   await step(run, page, "leaving the Printer page mid-assignment doesn't panic", async () => {
@@ -1049,7 +1186,7 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   // Put the canned answers back so later steps start from the defaults.
-  for (const cmd of Object.keys(FIXTURES).filter((k) => k.startsWith("printer_"))) {
+  for (const cmd of Object.keys(FIXTURES).filter((k) => k.startsWith("printer_") || k === "list_profiles" || k === "list_system_profiles")) {
     await setFixture(cmd, FIXTURES[cmd]);
   }
 

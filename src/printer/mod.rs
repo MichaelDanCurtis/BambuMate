@@ -19,6 +19,10 @@ pub struct PrinterShared {
     events: StoredValue<Seen>,
 }
 
+/// The event counters when a request started.
+#[derive(Debug, Clone, Copy)]
+pub struct Ticket(Seen);
+
 /// How many `printer://state` and `printer://connection` events arrived.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Seen {
@@ -56,23 +60,34 @@ impl PrinterShared {
 
     /// Re-reads the view from the backend without undoing newer events.
     pub fn refresh(self) {
-        let Some(seen) = self.events.try_get_value() else {
+        let Some(ticket) = self.ticket() else {
             return;
         };
         spawn_local(async move {
-            let Ok(fetched) = bridge::view().await else {
-                return;
-            };
-            let (Some(now), Some(current)) = (
-                self.events.try_get_value(),
-                self.view.try_with_untracked(|v| v.connection.clone()),
-            ) else {
-                return;
-            };
-            if let Some(v) = refreshed(seen, now, fetched, &current) {
-                self.view.try_set(v);
+            if let Ok(fetched) = bridge::view().await {
+                self.apply(ticket, fetched);
             }
         });
+    }
+
+    /// Marks the start of a request whose answer is a full view; pass the
+    /// ticket to [`apply`](Self::apply) with that answer.
+    pub fn ticket(self) -> Option<Ticket> {
+        self.events.try_get_value().map(Ticket)
+    }
+
+    /// Applies a view a command returned, unless a newer event arrived since
+    /// `ticket` was taken (see [`refreshed`]).
+    pub fn apply(self, ticket: Ticket, fetched: PrinterView) {
+        let (Some(now), Some(current)) = (
+            self.events.try_get_value(),
+            self.view.try_with_untracked(|v| v.connection.clone()),
+        ) else {
+            return;
+        };
+        if let Some(v) = refreshed(ticket.0, now, fetched, &current) {
+            self.view.try_set(v);
+        }
     }
 }
 
