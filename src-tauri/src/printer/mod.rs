@@ -4,3 +4,4 @@
 //! requests. It never sends a control command and never talks to Bambu Cloud.
 
 pub mod state;
+pub mod tls;

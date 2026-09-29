@@ -40,6 +40,11 @@ async-trait = "0.1"
 rmcp = { version = "3.4.1", default-features = false, features = ["server", "transport-streamable-http-server", "base64"] }
 axum = "0.8"
 uuid = { version = "1", features = ["v4"] }
+# Printer live connection (read-only MQTT over TLS to the printer on the LAN).
+# rustls uses the ring provider explicitly: aws-lc-rs needs cmake/NASM on Windows.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+x509-parser = "0.18.1"
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 md5 = "0.7"
@@ -47,6 +52,8 @@ md5 = "0.7"
 [dev-dependencies]
 # Paused clock for tests of long timeouts.
 tokio = { version = "1", features = ["test-util"] }
+# In-process TLS MQTT broker and test certificates for printer::client/tls tests.
+rcgen = "0.14.10"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
