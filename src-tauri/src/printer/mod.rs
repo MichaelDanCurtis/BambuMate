@@ -6,6 +6,7 @@
 pub mod client;
 pub mod discovery;
 pub mod hms;
+pub mod service;
 pub mod settings;
 pub mod slots;
 pub mod state;
