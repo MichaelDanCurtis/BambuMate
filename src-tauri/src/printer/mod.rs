@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod hms;
+pub mod slots;
 pub mod state;
 #[cfg(test)]
 mod testbroker;
