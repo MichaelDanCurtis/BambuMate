@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 use super::{ToolHost, ToolRegistry};
 use crate::agent::asks::AskBroker;
 use crate::agent::types::{AgentEvent, AppState, UiCommand};
+use crate::printer::service::PrinterView;
 
 pub struct FakeHost {
     pub user_dir: tempfile::TempDir,
@@ -17,6 +18,7 @@ pub struct FakeHost {
     pub ui: Mutex<Vec<UiCommand>>,
     pub calls: Mutex<Vec<String>>,
     pub bs_running: AtomicBool,
+    pub printer: Mutex<PrinterView>,
 }
 
 impl FakeHost {
@@ -28,6 +30,7 @@ impl FakeHost {
             ui: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             bs_running: AtomicBool::new(false),
+            printer: Mutex::new(PrinterView::unconfigured()),
         }
     }
     fn log(&self, s: String) {
@@ -64,6 +67,9 @@ impl ToolHost for FakeHost {
     }
     fn bambu_studio_running(&self) -> bool {
         self.bs_running.load(Ordering::SeqCst)
+    }
+    fn printer_view(&self) -> PrinterView {
+        self.printer.lock().unwrap().clone()
     }
     async fn search_filament(&self, name: &str) -> Result<Value, String> {
         self.log(format!("search_filament:{name}"));

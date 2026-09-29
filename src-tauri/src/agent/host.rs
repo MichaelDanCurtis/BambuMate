@@ -128,6 +128,14 @@ impl ToolHost for TauriToolHost {
         crate::profile::is_bambu_studio_running()
     }
 
+    fn printer_view(&self) -> crate::printer::service::PrinterView {
+        use tauri::Manager;
+        self.app
+            .try_state::<crate::printer::service::PrinterService>()
+            .map(|s| s.view())
+            .unwrap_or_else(crate::printer::service::PrinterView::unconfigured)
+    }
+
     async fn search_filament(&self, name: &str) -> Result<Value, String> {
         to_json(crate::commands::scraper::search_filament(self.app.clone(), name.to_string()).await)
     }

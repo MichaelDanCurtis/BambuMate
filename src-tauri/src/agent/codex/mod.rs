@@ -993,7 +993,7 @@ mod tests {
         let script = async {
             srv.handshake().await;
             let ts = srv.expect("thread/start").await;
-            assert_eq!(ts["params"]["dynamicTools"].as_array().unwrap().len(), 18);
+            assert_eq!(ts["params"]["dynamicTools"].as_array().unwrap().len(), 20);
             assert_eq!(ts["params"]["sandbox"], "workspace-write");
             assert!(ts["params"]["developerInstructions"]
                 .as_str()
