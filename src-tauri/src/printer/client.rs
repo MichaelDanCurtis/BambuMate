@@ -4,7 +4,8 @@
 //! Its only output is `ClientEvent`s: raw report payloads and connection
 //! state changes. It publishes nothing but `pushall` and `get_version`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rumqttc::{
@@ -121,7 +122,11 @@ pub struct Backoff {
 }
 
 impl Backoff {
+    /// `min` is clamped to at least 1 ms (a zero `min` would double to zero
+    /// forever and spin), and `max` to at least `min`.
     pub fn new(min: Duration, max: Duration) -> Self {
+        let min = min.max(Duration::from_millis(1));
+        let max = max.max(min);
         Self {
             next: min,
             min,
@@ -138,37 +143,72 @@ impl Backoff {
     }
 }
 
-/// Allows one `pushall` per interval, across reconnects.
+/// When each printer last got a `pushall`, process-wide. The limit belongs
+/// to the printer, not to one connection: it must hold across reconnects,
+/// restarts of the client, and Test connection.
+static LAST_PUSHALL: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Allows one `pushall` per interval for one printer, shared by every
+/// `run` and `test_connection` on that serial.
 #[derive(Debug, Clone)]
 pub struct PushallGate {
-    last: Option<Instant>,
+    serial: String,
     interval: Duration,
 }
 
 impl PushallGate {
-    pub fn new(interval: Duration) -> Self {
+    pub fn new(serial: &str, interval: Duration) -> Self {
         Self {
-            last: None,
+            serial: serial.to_string(),
             interval,
         }
     }
-    pub fn try_take(&mut self, now: Instant) -> bool {
-        match self.last {
-            Some(t) if now.duration_since(t) < self.interval => false,
+
+    fn last(&self) -> std::sync::MutexGuard<'static, HashMap<String, Instant>> {
+        LAST_PUSHALL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records a `pushall` at `now` and returns true, or returns false when
+    /// one was sent less than an interval ago.
+    pub fn try_take(&self, now: Instant) -> bool {
+        let mut last = self.last();
+        match last.get(&self.serial) {
+            Some(t) if now.saturating_duration_since(*t) < self.interval => false,
             _ => {
-                self.last = Some(now);
+                last.insert(self.serial.clone(), now);
                 true
             }
         }
     }
+
+    /// True if `try_take(now)` would succeed. Takes nothing.
+    pub fn is_open(&self, now: Instant) -> bool {
+        self.reopens_at(now).is_none()
+    }
+
+    /// When the gate next opens, or `None` if it is open at `now`.
+    pub fn reopens_at(&self, now: Instant) -> Option<Instant> {
+        let at = *self.last().get(&self.serial)? + self.interval;
+        (at > now).then_some(at)
+    }
 }
 
 /// Connects, and reconnects with backoff, until `events` is closed or the
-/// task is aborted.
+/// task is aborted. A state that needs the user (`needs_user()`: wrong
+/// access code, untrusted certificate, wrong serial) is sent once and then
+/// `run` returns: retrying can't fix it, so the caller restarts the client
+/// after the user saves a new code or trusts the printer.
 pub async fn run(params: ClientParams, events: mpsc::Sender<ClientEvent>, timing: Timing) {
     let mut backoff = Backoff::new(timing.backoff_min, timing.backoff_max);
-    let mut gate = PushallGate::new(timing.pushall_interval);
+    let gate = PushallGate::new(&params.serial, timing.pushall_interval);
     let mut seq: u64 = 0;
+    // One id for every reconnect, so the printer replaces a stale session
+    // instead of holding a second slot.
+    let client_id = format!(
+        "bambumate-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
     loop {
         if events
             .send(ClientEvent::Connection(ConnectionState::Connecting))
@@ -177,28 +217,52 @@ pub async fn run(params: ClientParams, events: mpsc::Sender<ClientEvent>, timing
         {
             return;
         }
-        let ended = connect_once(&params, &events, &mut gate, &mut seq, &mut backoff).await;
+        let ended = connect_once(&params, &client_id, &events, &gate, &mut seq, &mut backoff).await;
         let Some(state) = ended else { return };
         tracing::debug!(serial = %params.serial, ?state, "printer connection ended");
-        if events.send(ClientEvent::Connection(state)).await.is_err() {
+        let stop = state.needs_user();
+        if events.send(ClientEvent::Connection(state)).await.is_err() || stop {
             return;
         }
-        tokio::time::sleep(backoff.next_delay()).await;
+        tokio::select! {
+            _ = tokio::time::sleep(backoff.next_delay()) => {}
+            _ = events.closed() => return,
+        }
     }
+}
+
+/// Sleeps until `at`; never completes when `at` is `None`.
+async fn sleep_until_opt(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Sends `pushall` if the printer's gate allows it. Returns whether it did.
+fn try_pushall(client: &AsyncClient, request: &str, gate: &PushallGate, seq: &mut u64) -> bool {
+    if !gate.try_take(Instant::now()) {
+        return false;
+    }
+    *seq += 1;
+    let _ = client.try_publish(
+        request.to_string(),
+        QoS::AtMostOnce,
+        false,
+        pushall_request(*seq),
+    );
+    true
 }
 
 /// One connection attempt. `None` means the receiver is gone.
 async fn connect_once(
     params: &ClientParams,
+    client_id: &str,
     events: &mpsc::Sender<ClientEvent>,
-    gate: &mut PushallGate,
+    gate: &PushallGate,
     seq: &mut u64,
     backoff: &mut Backoff,
 ) -> Option<ConnectionState> {
-    let client_id = format!(
-        "bambumate-{}",
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
     let mut opts = MqttOptions::new(client_id, params.host.clone(), params.port);
     opts.set_credentials(MQTT_USER, params.access_code.clone());
     opts.set_keep_alive(Duration::from_secs(30));
@@ -211,47 +275,78 @@ async fn connect_once(
     let report = report_topic(&params.serial);
     let request = request_topic(&params.serial);
     let mut connected = false;
+    let mut got_report = false;
+    // When the gate refused a pushall at ConnAck: send one as soon as it
+    // reopens, so a quick reconnect doesn't leave the state stale.
+    let mut deferred: Option<Instant> = None;
     params.rejection.take();
     loop {
-        match eventloop.poll().await {
-            Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                connected = true;
-                backoff.reset();
-                events
-                    .send(ClientEvent::Connection(ConnectionState::Connected))
-                    .await
-                    .ok()?;
-                let _ = client.try_subscribe(report.clone(), QoS::AtMostOnce);
-                *seq += 1;
-                let _ = client.try_publish(
-                    request.clone(),
-                    QoS::AtMostOnce,
-                    false,
-                    get_version_request(*seq),
-                );
-                if gate.try_take(Instant::now()) {
+        tokio::select! {
+            _ = events.closed() => {
+                disconnect(&client, &mut eventloop).await;
+                return None;
+            }
+            _ = sleep_until_opt(deferred), if deferred.is_some() => {
+                deferred = None;
+                if connected && !try_pushall(&client, &request, gate, seq) {
+                    deferred = gate.reopens_at(Instant::now());
+                }
+            }
+            polled = eventloop.poll() => match polled {
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    connected = true;
+                    events
+                        .send(ClientEvent::Connection(ConnectionState::Connected))
+                        .await
+                        .ok()?;
+                    let _ = client.try_subscribe(report.clone(), QoS::AtMostOnce);
                     *seq += 1;
                     let _ = client.try_publish(
                         request.clone(),
                         QoS::AtMostOnce,
                         false,
-                        pushall_request(*seq),
+                        get_version_request(*seq),
                     );
+                    if !try_pushall(&client, &request, gate, seq) {
+                        deferred = gate.reopens_at(Instant::now());
+                    }
                 }
-            }
-            Ok(Event::Incoming(Packet::Publish(p))) if p.topic == report => {
-                events
-                    .send(ClientEvent::Report(p.payload.to_vec()))
-                    .await
-                    .ok()?;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::debug!(serial = %params.serial, "printer MQTT error: {e}");
-                return Some(classify(&e, params.rejection.take(), connected));
+                Ok(Event::Incoming(Packet::Publish(p))) if p.topic == report => {
+                    // A connection that delivers data is a healthy one, so only
+                    // now does the reconnect delay start over.
+                    if !got_report {
+                        got_report = true;
+                        backoff.reset();
+                    }
+                    events
+                        .send(ClientEvent::Report(p.payload.to_vec()))
+                        .await
+                        .ok()?;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(serial = %params.serial, "printer MQTT error: {e}");
+                    return Some(classify(&e, params.rejection.take(), connected));
+                }
             }
         }
     }
+}
+
+/// Sends MQTT DISCONNECT and gives the event loop a moment to flush it, so
+/// the printer frees the connection slot at once.
+async fn disconnect(client: &AsyncClient, eventloop: &mut rumqttc::EventLoop) {
+    if client.try_disconnect().is_err() {
+        return;
+    }
+    let flush = async {
+        while let Ok(event) = eventloop.poll().await {
+            if matches!(event, Event::Outgoing(rumqttc::Outgoing::Disconnect)) {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(1), flush).await;
 }
 
 fn classify(
@@ -287,11 +382,25 @@ pub struct TestOutcome {
     pub model: Option<String>,
 }
 
-/// Connects once, waits for the first full report or a failure, then
-/// disconnects.
+/// Connects once, waits for a report or a failure, then disconnects.
+///
+/// What counts as "a report" depends on the printer's `pushall` limit (one
+/// per interval, shared with the live connection):
+/// - If this call can send `pushall`, it waits for the first full status
+///   report, and `got_report` means exactly that.
+/// - If the limit blocks `pushall` (the live connection just sent one), no
+///   full report is coming, so it waits for any parsed report, a status
+///   push or the `get_version` answer, and `got_report` means the printer
+///   answered us.
+///
+/// Either way `connection == Connected` is what proves the address, access
+/// code and certificate; if no report arrives before `wait` it stays
+/// `Connected` with `got_report == false`.
 pub async fn test_connection(params: ClientParams, timing: Timing, wait: Duration) -> TestOutcome {
+    let full_report_expected =
+        PushallGate::new(&params.serial, timing.pushall_interval).is_open(Instant::now());
     let (tx, mut rx) = mpsc::channel(64);
-    let task = tokio::spawn(run(params, tx, timing));
+    let mut task = tokio::spawn(run(params, tx, timing));
     let mut outcome = TestOutcome {
         connection: ConnectionState::Unreachable,
         got_report: false,
@@ -308,9 +417,16 @@ pub async fn test_connection(params: ClientParams, timing: Timing, wait: Duratio
                     break;
                 }
             }
-            ClientEvent::Report(bytes) => match super::state::parse_report(&bytes) {
-                Ok(super::state::Report::Version { model, .. }) => outcome.model = model,
-                Ok(super::state::Report::Status { full: true, .. }) => {
+            ClientEvent::Report(bytes) => {
+                let finished = match super::state::parse_report(&bytes) {
+                    Ok(super::state::Report::Version { model, .. }) => {
+                        outcome.model = model;
+                        !full_report_expected
+                    }
+                    Ok(super::state::Report::Status { full, .. }) => full || !full_report_expected,
+                    Ok(super::state::Report::Other) | Err(_) => false,
+                };
+                if finished {
                     outcome.got_report = true;
                     // get_version is sent first, so its answer is usually in.
                     let grace = tokio::time::Instant::now() + Duration::from_millis(500);
@@ -325,23 +441,40 @@ pub async fn test_connection(params: ClientParams, timing: Timing, wait: Duratio
                     }
                     break;
                 }
-                _ => {}
-            },
+            }
         }
     }
-    task.abort();
+    // Dropping the receiver makes `run` send an MQTT DISCONNECT and return,
+    // freeing the printer's connection slot. Abort only if that stalls.
+    drop(rx);
+    if tokio::time::timeout(Duration::from_secs(2), &mut task)
+        .await
+        .is_err()
+    {
+        tracing::debug!("printer test connection did not close in time");
+        task.abort();
+    }
     outcome
 }
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::printer::state::fixtures::{GET_VERSION_H2D, H2D_FULL};
     use crate::printer::testbroker::FakeBroker;
     use crate::printer::tls::testpki::TestCa;
     use crate::printer::tls::{client_config, fingerprint, PrinterCertVerifier};
 
-    const SERIAL: &str = "0948AB000000001";
     const CODE: &str = "12345678";
+
+    /// The pushall limit is process-wide and keyed by serial, so every test
+    /// uses its own serial and tests can't starve each other of a pushall.
+    fn unique_serial() -> String {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        format!("0948AB{:09}", NEXT.fetch_add(1, Ordering::SeqCst))
+    }
 
     fn fast() -> Timing {
         Timing {
@@ -351,14 +484,20 @@ mod tests {
         }
     }
 
-    fn params(ca: &TestCa, broker: &FakeBroker, code: &str, pin: Option<&str>) -> ClientParams {
+    fn params(
+        ca: &TestCa,
+        broker: &FakeBroker,
+        serial: &str,
+        code: &str,
+        pin: Option<&str>,
+    ) -> ClientParams {
         let rejection = RejectionSlot::default();
         let verifier =
-            PrinterCertVerifier::with_trust(&ca.pem, &[], SERIAL, pin, rejection.clone()).unwrap();
+            PrinterCertVerifier::with_trust(&ca.pem, &[], serial, pin, rejection.clone()).unwrap();
         ClientParams {
             host: "127.0.0.1".into(),
             port: broker.addr.port(),
-            serial: SERIAL.into(),
+            serial: serial.into(),
             access_code: code.into(),
             tls: client_config(Arc::new(verifier)).unwrap(),
             rejection,
@@ -386,6 +525,33 @@ mod tests {
         }
     }
 
+    /// Asserts `run` has returned: no event arrives and the channel closes.
+    async fn assert_run_ended(rx: &mut mpsc::Receiver<ClientEvent>) {
+        match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            Ok(None) => {}
+            other => panic!("expected the client to stop, got {other:?}"),
+        }
+    }
+
+    fn pushall_count(broker: &FakeBroker) -> usize {
+        broker
+            .published()
+            .iter()
+            .filter(|(_, b)| String::from_utf8_lossy(b).contains("pushall"))
+            .count()
+    }
+
+    /// Polls `cond` for up to 5 s; fails the test on timeout.
+    async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..250 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
     #[test]
     fn requests_are_the_documented_read_only_json() {
         let v: serde_json::Value = serde_json::from_str(&pushall_request(7)).unwrap();
@@ -410,24 +576,50 @@ mod tests {
     }
 
     #[test]
+    fn backoff_never_delays_less_than_a_millisecond() {
+        let mut b = Backoff::new(Duration::ZERO, Duration::ZERO);
+        assert_eq!(b.next_delay(), Duration::from_millis(1));
+        assert_eq!(b.next_delay(), Duration::from_millis(1));
+        let mut b = Backoff::new(Duration::ZERO, Duration::from_millis(4));
+        let seen: Vec<u128> = (0..4).map(|_| b.next_delay().as_millis()).collect();
+        assert_eq!(seen, vec![1, 2, 4, 4]);
+    }
+
+    #[test]
     fn pushall_is_allowed_once_per_interval() {
-        let mut g = PushallGate::new(Duration::from_secs(300));
+        let g = PushallGate::new(&unique_serial(), Duration::from_secs(300));
         let t0 = Instant::now();
+        assert!(g.is_open(t0));
         assert!(g.try_take(t0));
+        assert!(!g.is_open(t0));
         assert!(!g.try_take(t0 + Duration::from_secs(299)));
+        assert_eq!(g.reopens_at(t0), Some(t0 + Duration::from_secs(300)));
         assert!(g.try_take(t0 + Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn the_pushall_limit_is_shared_per_serial_across_gates() {
+        let serial = unique_serial();
+        let a = PushallGate::new(&serial, Duration::from_secs(300));
+        let b = PushallGate::new(&serial, Duration::from_secs(300));
+        let other = PushallGate::new(&unique_serial(), Duration::from_secs(300));
+        let t0 = Instant::now();
+        assert!(a.try_take(t0));
+        assert!(!b.try_take(t0), "a second handle on the same printer");
+        assert!(other.try_take(t0), "a different printer is unaffected");
     }
 
     #[test]
     fn debug_output_never_contains_the_access_code() {
         let ca = TestCa::new("CA");
+        let serial = unique_serial();
         let v =
-            PrinterCertVerifier::with_trust(&ca.pem, &[], SERIAL, None, RejectionSlot::default())
+            PrinterCertVerifier::with_trust(&ca.pem, &[], &serial, None, RejectionSlot::default())
                 .unwrap();
         let p = ClientParams {
             host: "10.0.0.2".into(),
             port: MQTT_PORT,
-            serial: SERIAL.into(),
+            serial,
             access_code: "SECRET99".into(),
             tls: client_config(Arc::new(v)).unwrap(),
             rejection: RejectionSlot::default(),
@@ -437,10 +629,11 @@ mod tests {
 
     #[tokio::test]
     async fn connects_subscribes_requests_and_forwards_reports() {
+        let serial = unique_serial();
         let ca = TestCa::new("Test Printer CA");
-        let broker = FakeBroker::start(&ca.leaf(SERIAL), SERIAL, CODE, H2D_FULL).await;
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
         let (tx, mut rx) = mpsc::channel(64);
-        let task = tokio::spawn(run(params(&ca, &broker, CODE, None), tx, fast()));
+        let task = tokio::spawn(run(params(&ca, &broker, &serial, CODE, None), tx, fast()));
 
         assert_eq!(next_state(&mut rx).await, ConnectionState::Connected);
         let report = next_report(&mut rx).await;
@@ -448,11 +641,11 @@ mod tests {
             crate::printer::state::parse_report(&report).unwrap(),
             crate::printer::state::Report::Status { full: true, .. }
         ));
-        assert_eq!(broker.subscriptions(), vec![report_topic(SERIAL)]);
+        assert_eq!(broker.subscriptions(), vec![report_topic(&serial)]);
         let published = broker.published();
         assert!(published
             .iter()
-            .all(|(topic, _)| *topic == request_topic(SERIAL)));
+            .all(|(topic, _)| *topic == request_topic(&serial)));
         let commands: Vec<String> = published
             .iter()
             .map(|(_, body)| {
@@ -469,11 +662,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnects_after_the_broker_drops_without_a_second_pushall() {
+    async fn a_full_size_report_over_the_default_packet_limit_is_received() {
+        // rumqttc's default incoming limit is 10 KB; a real H2 push is ~30 KB.
+        let mut report: serde_json::Value = serde_json::from_str(H2D_FULL).unwrap();
+        report["print"]["padding"] = "x".repeat(40_000).into();
+        let big = report.to_string();
+        assert!(big.len() > 40_000);
+
+        let serial = unique_serial();
         let ca = TestCa::new("Test Printer CA");
-        let broker = FakeBroker::start(&ca.leaf(SERIAL), SERIAL, CODE, H2D_FULL).await;
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, &big).await;
         let (tx, mut rx) = mpsc::channel(64);
-        let task = tokio::spawn(run(params(&ca, &broker, CODE, None), tx, fast()));
+        let task = tokio::spawn(run(params(&ca, &broker, &serial, CODE, None), tx, fast()));
+        assert_eq!(next_state(&mut rx).await, ConnectionState::Connected);
+        let received = next_report(&mut rx).await;
+        assert_eq!(received.len(), big.len());
+        assert!(matches!(
+            crate::printer::state::parse_report(&received).unwrap(),
+            crate::printer::state::Report::Status { full: true, .. }
+        ));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn reconnects_after_the_broker_drops_without_a_second_pushall() {
+        let serial = unique_serial();
+        let ca = TestCa::new("Test Printer CA");
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(run(params(&ca, &broker, &serial, CODE, None), tx, fast()));
         assert_eq!(next_state(&mut rx).await, ConnectionState::Connected);
         next_report(&mut rx).await;
 
@@ -481,54 +698,95 @@ mod tests {
         assert_eq!(next_state(&mut rx).await, ConnectionState::Disconnected);
         assert_eq!(next_state(&mut rx).await, ConnectionState::Connected);
         assert_eq!(broker.connection_count(), 2);
-        // Wait until the second connection's get_version has arrived.
-        for _ in 0..50 {
-            if broker.published().len() >= 3 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let pushalls = broker
-            .published()
-            .iter()
-            .filter(|(_, b)| String::from_utf8_lossy(b).contains("pushall"))
-            .count();
-        assert_eq!(pushalls, 1, "pushall is limited to once per 5 minutes");
+        // The second connection's get_version must arrive: get_version, pushall,
+        // get_version. Fail if it doesn't, so the pushall count below is final.
+        eventually("the second get_version", || broker.published().len() >= 3).await;
+        assert_eq!(
+            pushall_count(&broker),
+            1,
+            "pushall is limited to once per 5 minutes"
+        );
         task.abort();
     }
 
     #[tokio::test]
-    async fn a_wrong_access_code_is_auth_failed() {
+    async fn a_quick_reconnect_gets_its_pushall_once_the_interval_has_passed() {
+        let serial = unique_serial();
         let ca = TestCa::new("Test Printer CA");
-        let broker = FakeBroker::start(&ca.leaf(SERIAL), SERIAL, CODE, H2D_FULL).await;
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
+        let timing = Timing {
+            pushall_interval: Duration::from_millis(800),
+            ..fast()
+        };
         let (tx, mut rx) = mpsc::channel(64);
-        let task = tokio::spawn(run(params(&ca, &broker, "00000000", None), tx, fast()));
-        assert_eq!(next_state(&mut rx).await, ConnectionState::AuthFailed);
+        let task = tokio::spawn(run(params(&ca, &broker, &serial, CODE, None), tx, timing));
+        assert_eq!(next_state(&mut rx).await, ConnectionState::Connected);
+        next_report(&mut rx).await;
+        let first = Instant::now();
+
+        broker.drop_connections();
+        assert_eq!(next_state(&mut rx).await, ConnectionState::Disconnected);
+        assert_eq!(next_state(&mut rx).await, ConnectionState::Connected);
+        eventually("the second get_version", || broker.published().len() >= 3).await;
+        assert_eq!(pushall_count(&broker), 1, "refused at ConnAck, not yet due");
+
+        eventually("the deferred pushall", || pushall_count(&broker) == 2).await;
+        assert!(
+            first.elapsed() >= Duration::from_millis(800),
+            "the deferred pushall waited for the interval"
+        );
+        // Once, not repeatedly: nothing more is scheduled.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        assert_eq!(pushall_count(&broker), 2);
         task.abort();
     }
 
     #[tokio::test]
-    async fn an_unknown_ca_is_cert_untrusted_with_the_fingerprint() {
+    async fn a_wrong_access_code_is_auth_failed_once_and_not_retried() {
+        let serial = unique_serial();
+        let ca = TestCa::new("Test Printer CA");
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(run(
+            params(&ca, &broker, &serial, "00000000", None),
+            tx,
+            fast(),
+        ));
+        assert_eq!(next_state(&mut rx).await, ConnectionState::AuthFailed);
+        // Several backoff periods pass with no new Connecting and no new event.
+        assert_run_ended(&mut rx).await;
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_ca_is_cert_untrusted_with_the_fingerprint_and_not_retried() {
+        let serial = unique_serial();
         let trusted = TestCa::new("Test Printer CA");
         let other = TestCa::new("Unknown CA");
-        let leaf = other.leaf(SERIAL);
-        let broker = FakeBroker::start(&leaf, SERIAL, CODE, H2D_FULL).await;
+        let leaf = other.leaf(&serial);
+        let broker = FakeBroker::start(&leaf, &serial, CODE, H2D_FULL).await;
         let (tx, mut rx) = mpsc::channel(64);
-        let task = tokio::spawn(run(params(&trusted, &broker, CODE, None), tx, fast()));
+        let task = tokio::spawn(run(
+            params(&trusted, &broker, &serial, CODE, None),
+            tx,
+            fast(),
+        ));
         assert_eq!(
             next_state(&mut rx).await,
             ConnectionState::CertUntrusted {
                 fingerprint: fingerprint(&leaf.cert_der)
             }
         );
-        task.abort();
+        assert_run_ended(&mut rx).await;
+        task.await.unwrap();
     }
 
     #[tokio::test]
-    async fn nothing_listening_is_unreachable() {
+    async fn nothing_listening_is_unreachable_and_keeps_retrying() {
+        let serial = unique_serial();
         let ca = TestCa::new("Test Printer CA");
-        let broker = FakeBroker::start(&ca.leaf(SERIAL), SERIAL, CODE, H2D_FULL).await;
-        let mut p = params(&ca, &broker, CODE, None);
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
+        let mut p = params(&ca, &broker, &serial, CODE, None);
         drop(broker);
         // A port nothing listens on.
         let spare = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -537,17 +795,38 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let task = tokio::spawn(run(p, tx, fast()));
         assert_eq!(next_state(&mut rx).await, ConnectionState::Unreachable);
+        // Unreachable is not a user problem: it goes on trying.
+        assert_eq!(next_state(&mut rx).await, ConnectionState::Unreachable);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn reconnects_reuse_one_client_id() {
+        let serial = unique_serial();
+        let ca = TestCa::new("Test Printer CA");
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(run(params(&ca, &broker, &serial, CODE, None), tx, fast()));
+        assert_eq!(next_state(&mut rx).await, ConnectionState::Connected);
+        broker.drop_connections();
+        assert_eq!(next_state(&mut rx).await, ConnectionState::Disconnected);
+        assert_eq!(next_state(&mut rx).await, ConnectionState::Connected);
+        let ids = broker.client_ids();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], ids[1]);
+        assert!(ids[0].starts_with("bambumate-"));
         task.abort();
     }
 
     #[tokio::test]
     async fn test_connection_reports_the_model_and_a_full_report() {
+        let serial = unique_serial();
         let ca = TestCa::new("Test Printer CA");
-        let broker = FakeBroker::start(&ca.leaf(SERIAL), SERIAL, CODE, H2D_FULL)
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL)
             .await
             .with_version_reply(GET_VERSION_H2D);
         let out = test_connection(
-            params(&ca, &broker, CODE, None),
+            params(&ca, &broker, &serial, CODE, None),
             fast(),
             Duration::from_secs(5),
         )
@@ -555,19 +834,68 @@ mod tests {
         assert_eq!(out.connection, ConnectionState::Connected);
         assert!(out.got_report);
         assert_eq!(out.model.as_deref(), Some("H2D"));
+        // It said goodbye instead of just dropping the socket.
+        eventually("the MQTT disconnect", || broker.disconnect_count() == 1).await;
     }
 
     #[tokio::test]
     async fn test_connection_stops_at_a_rejected_code() {
+        let serial = unique_serial();
         let ca = TestCa::new("Test Printer CA");
-        let broker = FakeBroker::start(&ca.leaf(SERIAL), SERIAL, CODE, H2D_FULL).await;
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
         let out = test_connection(
-            params(&ca, &broker, "wrong", None),
+            params(&ca, &broker, &serial, "wrong", None),
             fast(),
             Duration::from_secs(5),
         )
         .await;
         assert_eq!(out.connection, ConnectionState::AuthFailed);
         assert!(!out.got_report);
+    }
+
+    #[tokio::test]
+    async fn test_connection_returns_promptly_when_unreachable() {
+        let serial = unique_serial();
+        let ca = TestCa::new("Test Printer CA");
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
+        let mut p = params(&ca, &broker, &serial, CODE, None);
+        drop(broker);
+        let spare = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        p.port = spare.local_addr().unwrap().port();
+        drop(spare);
+        // The production backoff is 2 s; the call must not wait it out.
+        let started = Instant::now();
+        let out = test_connection(p, Timing::default(), Duration::from_secs(5)).await;
+        assert_eq!(out.connection, ConnectionState::Unreachable);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn test_connection_after_a_live_pushall_sends_none_and_still_succeeds() {
+        let serial = unique_serial();
+        let ca = TestCa::new("Test Printer CA");
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL)
+            .await
+            .with_version_reply(GET_VERSION_H2D);
+        // The live connection takes the printer's pushall.
+        let (tx, mut rx) = mpsc::channel(64);
+        let live = tokio::spawn(run(params(&ca, &broker, &serial, CODE, None), tx, fast()));
+        assert_eq!(next_state(&mut rx).await, ConnectionState::Connected);
+        next_report(&mut rx).await;
+        assert_eq!(pushall_count(&broker), 1);
+        live.abort();
+
+        let out = test_connection(
+            params(&ca, &broker, &serial, CODE, None),
+            fast(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(pushall_count(&broker), 1, "no second pushall within 5 min");
+        // No full report was asked for, so the version answer is the proof
+        // that the printer talks to us.
+        assert_eq!(out.connection, ConnectionState::Connected);
+        assert!(out.got_report);
+        assert_eq!(out.model.as_deref(), Some("H2D"));
     }
 }

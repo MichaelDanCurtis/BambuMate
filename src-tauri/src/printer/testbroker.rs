@@ -27,6 +27,8 @@ struct Shared {
     subscriptions: Mutex<Vec<String>>,
     version_reply: Mutex<Option<Vec<u8>>>,
     connections: AtomicUsize,
+    disconnects: AtomicUsize,
+    client_ids: Mutex<Vec<String>>,
 }
 
 pub struct FakeBroker {
@@ -113,6 +115,16 @@ impl FakeBroker {
         self.shared.connections.load(Ordering::SeqCst)
     }
 
+    /// Clean MQTT DISCONNECT packets received.
+    pub fn disconnect_count(&self) -> usize {
+        self.shared.disconnects.load(Ordering::SeqCst)
+    }
+
+    /// The client id of every connection that passed the password check.
+    pub fn client_ids(&self) -> Vec<String> {
+        self.shared.client_ids.lock().unwrap().clone()
+    }
+
     /// Closes every open connection, as a printer reboot would.
     pub fn drop_connections(&self) {
         self.kill.send_modify(|g| *g += 1);
@@ -144,6 +156,11 @@ where
         return;
     }
     shared.connections.fetch_add(1, Ordering::SeqCst);
+    shared
+        .client_ids
+        .lock()
+        .unwrap()
+        .push(connect.client_id.clone());
     while let Some(packet) = read_packet(&mut stream, &mut buf).await {
         let answer =
             match packet {
@@ -184,7 +201,10 @@ where
                     }
                 }
                 Packet::PingReq => Some(Packet::PingResp),
-                Packet::Disconnect => return,
+                Packet::Disconnect => {
+                    shared.disconnects.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
                 _ => None,
             };
         if let Some(answer) = answer {
