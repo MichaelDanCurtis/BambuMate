@@ -127,10 +127,17 @@ impl PrinterCertVerifier {
         pinned_fingerprint: Option<&str>,
         rejection: RejectionSlot,
     ) -> Result<Self, String> {
+        let serial = serial.trim();
+        if serial.is_empty() {
+            return Err("the printer serial is empty".into());
+        }
         let mut roots = RootCertStore::empty();
-        let (added, _ignored) = roots.add_parsable_certificates(certs_from_pem(roots_pem)?);
+        let (added, ignored) = roots.add_parsable_certificates(certs_from_pem(roots_pem)?);
         if added == 0 {
             return Err("no usable CA certificate".into());
+        }
+        if ignored > 0 {
+            return Err(format!("{ignored} CA certificate(s) could not be parsed"));
         }
         let mut extra_intermediates = Vec::new();
         for pem in intermediates_pem {
@@ -139,7 +146,7 @@ impl PrinterCertVerifier {
         Ok(Self {
             roots,
             extra_intermediates,
-            serial: serial.trim().to_string(),
+            serial: serial.to_string(),
             pinned: pinned_fingerprint
                 .map(normalize_fingerprint)
                 .filter(|p| !p.is_empty()),
@@ -158,32 +165,49 @@ impl ServerCertVerifier for PrinterCertVerifier {
         _ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        let presented = leaf_common_name(end_entity).unwrap_or_default();
-        if presented != self.serial {
-            self.rejection.set(Rejection::WrongSerial { presented });
-            return Err(Error::InvalidCertificate(CertificateError::NotValidForName));
+        // A rejection from an earlier handshake must not be mistaken for this one.
+        self.rejection.take();
+
+        // The leaf must name this printer, whatever else vouches for it. A
+        // missing or unreadable CN never matches.
+        match leaf_common_name(end_entity) {
+            Some(cn) if cn == self.serial => {}
+            other => {
+                self.rejection.set(Rejection::WrongSerial {
+                    presented: other.unwrap_or_default(),
+                });
+                return Err(Error::InvalidCertificate(CertificateError::NotValidForName));
+            }
         }
-        let parsed = ParsedCertificate::try_from(end_entity)?;
+
+        let fp = fingerprint(end_entity);
+        let untrusted = |err: Error| {
+            self.rejection.set(Rejection::Untrusted {
+                fingerprint: fp.clone(),
+            });
+            err
+        };
+
+        // Pinned mode is trust-on-first-use of this exact certificate, so it
+        // deliberately skips chain building and the validity window: printers
+        // have no reliable clock and often carry self-issued certificates.
+        // The CN check above still applies.
+        if self.pinned.as_deref() == Some(normalize_fingerprint(&fp).as_str()) {
+            return Ok(ServerCertVerified::assertion());
+        }
+
+        let parsed = ParsedCertificate::try_from(end_entity).map_err(untrusted)?;
         let mut chain: Vec<CertificateDer<'_>> = intermediates.to_vec();
         chain.extend(self.extra_intermediates.iter().cloned());
-        let chained = rustls::client::verify_server_cert_signed_by_trust_anchor(
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
             &parsed,
             &self.roots,
             &chain,
             now,
             self.provider.signature_verification_algorithms.all,
-        );
-        match chained {
-            Ok(()) => Ok(ServerCertVerified::assertion()),
-            Err(err) => {
-                let fp = fingerprint(end_entity);
-                if self.pinned.as_deref() == Some(normalize_fingerprint(&fp).as_str()) {
-                    return Ok(ServerCertVerified::assertion());
-                }
-                self.rejection.set(Rejection::Untrusted { fingerprint: fp });
-                Err(err)
-            }
-        }
+        )
+        .map_err(untrusted)?;
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -238,30 +262,54 @@ pub(crate) mod testpki {
     //! Generated CAs and printer certificates for tests.
 
     use rcgen::{
-        BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+        date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa,
+        Issuer, KeyPair, KeyUsagePurpose,
     };
 
     pub struct TestCa {
         pub pem: String,
+        pub der: Vec<u8>,
         params: CertificateParams,
         key: KeyPair,
     }
 
     pub struct TestLeaf {
         pub cert_der: Vec<u8>,
+        // Only Task 3's in-process broker reads this.
+        #[allow(dead_code)]
         pub key_pem: String,
+    }
+
+    fn ca_params(name: &str) -> CertificateParams {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name.push(DnType::CommonName, name);
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params
     }
 
     impl TestCa {
         pub fn new(name: &str) -> Self {
-            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-            params.distinguished_name.push(DnType::CommonName, name);
-            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-            params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+            let params = ca_params(name);
             let key = KeyPair::generate().unwrap();
             let cert = params.self_signed(&key).unwrap();
             Self {
                 pem: cert.pem(),
+                der: cert.der().to_vec(),
+                params,
+                key,
+            }
+        }
+
+        /// An intermediate CA signed by this CA.
+        pub fn intermediate(&self, name: &str) -> TestCa {
+            let params = ca_params(name);
+            let key = KeyPair::generate().unwrap();
+            let issuer = Issuer::from_params(&self.params, &self.key);
+            let cert = params.signed_by(&key, &issuer).unwrap();
+            TestCa {
+                pem: cert.pem(),
+                der: cert.der().to_vec(),
                 params,
                 key,
             }
@@ -271,6 +319,26 @@ pub(crate) mod testpki {
         pub fn leaf(&self, serial: &str) -> TestLeaf {
             let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
             params.distinguished_name.push(DnType::CommonName, serial);
+            self.sign_leaf(params)
+        }
+
+        /// A printer certificate with no subject CN at all.
+        pub fn leaf_without_cn(&self) -> TestLeaf {
+            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.distinguished_name = DistinguishedName::new();
+            self.sign_leaf(params)
+        }
+
+        /// A printer certificate whose validity ended long ago.
+        pub fn expired_leaf(&self, serial: &str) -> TestLeaf {
+            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.distinguished_name.push(DnType::CommonName, serial);
+            params.not_before = date_time_ymd(2000, 1, 1);
+            params.not_after = date_time_ymd(2001, 1, 1);
+            self.sign_leaf(params)
+        }
+
+        fn sign_leaf(&self, params: CertificateParams) -> TestLeaf {
             let key = KeyPair::generate().unwrap();
             let issuer = Issuer::from_params(&self.params, &self.key);
             let cert = params.signed_by(&key, &issuer).unwrap();
@@ -290,9 +358,22 @@ mod tests {
     const SERIAL: &str = "0948AB000000001";
 
     fn verify(v: &PrinterCertVerifier, leaf_der: &[u8]) -> Result<ServerCertVerified, Error> {
+        verify_sent(v, leaf_der, &[])
+    }
+
+    /// Like `verify`, with intermediates the printer sends in its handshake.
+    fn verify_sent(
+        v: &PrinterCertVerifier,
+        leaf_der: &[u8],
+        sent: &[Vec<u8>],
+    ) -> Result<ServerCertVerified, Error> {
+        let sent: Vec<CertificateDer<'static>> = sent
+            .iter()
+            .map(|d| CertificateDer::from(d.clone()))
+            .collect();
         v.verify_server_cert(
             &CertificateDer::from(leaf_der.to_vec()),
-            &[],
+            &sent,
             &ServerName::try_from("192.168.1.20").unwrap(),
             &[],
             UnixTime::now(),
@@ -386,8 +467,46 @@ mod tests {
     fn a_pin_does_not_skip_the_cn_check() {
         let trusted = TestCa::new("Test Printer CA");
         let leaf = TestCa::new("Other").leaf("SOMEONE-ELSE");
+        let slot = RejectionSlot::default();
         let v = PrinterCertVerifier::with_trust(
             &trusted.pem,
+            &[],
+            SERIAL,
+            Some(&fingerprint(&leaf.cert_der)),
+            slot.clone(),
+        )
+        .unwrap();
+        assert!(verify(&v, &leaf.cert_der).is_err());
+        assert_eq!(
+            slot.take(),
+            Some(Rejection::WrongSerial {
+                presented: "SOMEONE-ELSE".into()
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_certificate_with_no_common_name() {
+        let ca = TestCa::new("Test Printer CA");
+        let leaf = ca.leaf_without_cn();
+        assert_eq!(leaf_common_name(&leaf.cert_der), None);
+        let slot = RejectionSlot::default();
+        let v = PrinterCertVerifier::with_trust(&ca.pem, &[], SERIAL, None, slot.clone()).unwrap();
+        assert!(verify(&v, &leaf.cert_der).is_err());
+        assert_eq!(
+            slot.take(),
+            Some(Rejection::WrongSerial {
+                presented: String::new()
+            })
+        );
+    }
+
+    #[test]
+    fn a_pinned_certificate_with_no_common_name_is_still_rejected() {
+        let ca = TestCa::new("Test Printer CA");
+        let leaf = ca.leaf_without_cn();
+        let v = PrinterCertVerifier::with_trust(
+            &ca.pem,
             &[],
             SERIAL,
             Some(&fingerprint(&leaf.cert_der)),
@@ -398,9 +517,121 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_serial_is_refused() {
+        let ca = TestCa::new("Test Printer CA");
+        for serial in ["", "   "] {
+            let r = PrinterCertVerifier::with_trust(
+                &ca.pem,
+                &[],
+                serial,
+                None,
+                RejectionSlot::default(),
+            );
+            assert!(r.is_err(), "{serial:?} must be refused");
+        }
+        assert!(PrinterCertVerifier::bambu("", None, RejectionSlot::default()).is_err());
+    }
+
+    #[test]
+    fn an_unparsable_root_is_an_error_not_silently_dropped() {
+        let ca = TestCa::new("Test Printer CA");
+        let junk = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        let pem = format!("{}{junk}", ca.pem);
+        let r = PrinterCertVerifier::with_trust(&pem, &[], SERIAL, None, RejectionSlot::default());
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn accepts_a_chain_through_an_intermediate_the_printer_sends() {
+        let root = TestCa::new("Test Root");
+        let inter = root.intermediate("Test Device CA");
+        let leaf = inter.leaf(SERIAL);
+        let v =
+            PrinterCertVerifier::with_trust(&root.pem, &[], SERIAL, None, RejectionSlot::default())
+                .unwrap();
+        assert!(verify(&v, &leaf.cert_der).is_err(), "not sent, not known");
+        assert!(verify_sent(&v, &leaf.cert_der, std::slice::from_ref(&inter.der)).is_ok());
+    }
+
+    #[test]
+    fn accepts_a_chain_through_a_bundled_intermediate_the_printer_omits() {
+        let root = TestCa::new("Test Root");
+        let inter = root.intermediate("Test Device CA");
+        let leaf = inter.leaf(SERIAL);
+        let v = PrinterCertVerifier::with_trust(
+            &root.pem,
+            &[&inter.pem],
+            SERIAL,
+            None,
+            RejectionSlot::default(),
+        )
+        .unwrap();
+        assert!(verify(&v, &leaf.cert_der).is_ok());
+    }
+
+    #[test]
+    fn a_bundled_intermediate_is_not_a_trust_anchor() {
+        let other_root = TestCa::new("Other Root");
+        let inter = other_root.intermediate("Stray Device CA");
+        let leaf = inter.leaf(SERIAL);
+        let trusted = TestCa::new("Test Printer CA");
+        let slot = RejectionSlot::default();
+        let v = PrinterCertVerifier::with_trust(
+            &trusted.pem,
+            &[&inter.pem],
+            SERIAL,
+            None,
+            slot.clone(),
+        )
+        .unwrap();
+        assert!(verify(&v, &leaf.cert_der).is_err());
+        assert!(matches!(slot.take(), Some(Rejection::Untrusted { .. })));
+    }
+
+    #[test]
+    fn rejects_an_expired_certificate() {
+        let ca = TestCa::new("Test Printer CA");
+        let leaf = ca.expired_leaf(SERIAL);
+        let slot = RejectionSlot::default();
+        let v = PrinterCertVerifier::with_trust(&ca.pem, &[], SERIAL, None, slot.clone()).unwrap();
+        assert!(verify(&v, &leaf.cert_der).is_err());
+        assert!(matches!(slot.take(), Some(Rejection::Untrusted { .. })));
+    }
+
+    #[test]
+    fn a_pin_accepts_an_expired_certificate() {
+        // Trust on first use of an exact certificate skips the validity window.
+        let ca = TestCa::new("Test Printer CA");
+        let other = TestCa::new("Unbundled CA");
+        let leaf = other.expired_leaf(SERIAL);
+        let v = PrinterCertVerifier::with_trust(
+            &ca.pem,
+            &[],
+            SERIAL,
+            Some(&fingerprint(&leaf.cert_der)),
+            RejectionSlot::default(),
+        )
+        .unwrap();
+        assert!(verify(&v, &leaf.cert_der).is_ok());
+    }
+
+    #[test]
+    fn a_stale_rejection_is_cleared_by_the_next_handshake() {
+        let ca = TestCa::new("Test Printer CA");
+        let bad = ca.leaf("01P00A000000002");
+        let good = ca.leaf(SERIAL);
+        let slot = RejectionSlot::default();
+        let v = PrinterCertVerifier::with_trust(&ca.pem, &[], SERIAL, None, slot.clone()).unwrap();
+        assert!(verify(&v, &bad.cert_der).is_err());
+        assert!(verify(&v, &good.cert_der).is_ok());
+        assert_eq!(slot.take(), None);
+    }
+
+    #[test]
     fn the_bundled_bambu_cas_load() {
         let v = PrinterCertVerifier::bambu(SERIAL, None, RejectionSlot::default()).unwrap();
-        assert!(v.roots.len() >= 3, "BBL CA, BBL CA2 RSA, BBL CA2 ECC");
+        // BBL CA, plus BBL CA2 RSA and ECC each self-signed and cross-signed.
+        assert_eq!(v.roots.len(), 5);
         assert_eq!(v.extra_intermediates.len(), 3);
         for der in &v.extra_intermediates {
             let cn = leaf_common_name(der).unwrap();
