@@ -4,7 +4,9 @@
 //! requests. It never sends a control command and never talks to Bambu Cloud.
 
 pub mod client;
+pub mod discovery;
 pub mod hms;
+pub mod settings;
 pub mod slots;
 pub mod state;
 #[cfg(test)]

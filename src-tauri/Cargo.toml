@@ -46,6 +46,7 @@ rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustl
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 x509-parser = "0.18.1"
 sha2 = "0.10"
+socket2 = { version = "0.6", features = ["all"] }
 
 [target.'cfg(windows)'.dependencies]
 md5 = "0.7"
