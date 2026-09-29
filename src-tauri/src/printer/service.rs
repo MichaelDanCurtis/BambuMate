@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 use super::client::{self, ClientEvent, ClientParams, ConnectionState, Timing};
 use super::hms::{ErrorView, HmsCatalog};
 use super::settings::{valid_serial, PrinterConfig};
-use super::slots::{compute_slots, preset_needs_cloud_sync, SlotView};
+use super::slots::{compute_slots, preset_needs_cloud_sync, SlotView, EXTERNAL_AMS_ID};
 use super::state::{parse_report, PrinterState, Report, ReportMerger};
 use super::tls::{client_config, PrinterCertVerifier, RejectionSlot};
 use crate::history::{RefinementHistory, SlotAssignment};
@@ -23,6 +23,9 @@ pub const STATE_EVENT: &str = "printer://state";
 pub const CONNECTION_EVENT: &str = "printer://connection";
 /// `printer://state` is emitted at most once per this interval.
 const EMIT_INTERVAL: Duration = Duration::from_millis(500);
+/// How long a replaced or stopped client gets to send its MQTT DISCONNECT
+/// before it is aborted.
+const STOP_GRACE: Duration = Duration::from_secs(1);
 
 /// Where the service's events go: the webview in the app, a recorder in tests.
 pub trait PrinterEvents: Send + Sync + 'static {
@@ -145,7 +148,33 @@ struct Inner {
     timing: Timing,
     live: Mutex<Live>,
     dirty: watch::Sender<u64>,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// The running client, if any. Held across the whole replace or stop,
+    /// so overlapping calls can't leave a second client running. Nothing
+    /// awaits while holding it. Lock order: `running`, then `live`.
+    running: Mutex<Option<Running>>,
+}
+
+/// One client connection's tasks.
+struct Running {
+    client: JoinHandle<()>,
+    /// Owns the event receiver: ending it makes `client::run` send an MQTT
+    /// DISCONNECT and return.
+    consumer: JoinHandle<()>,
+}
+
+impl Running {
+    /// Ends the consumer, which drops the receiver so the client takes its
+    /// graceful DISCONNECT path. The returned future aborts the client if it
+    /// hasn't ended within `STOP_GRACE`.
+    fn retire(self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.consumer.abort();
+        let mut client = self.client;
+        async move {
+            if tokio::time::timeout(STOP_GRACE, &mut client).await.is_err() {
+                client.abort();
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -172,7 +201,7 @@ impl PrinterService {
             timing,
             live: Mutex::new(Live::empty(0)),
             dirty,
-            tasks: Mutex::new(Vec::new()),
+            running: Mutex::new(None),
         });
         tauri::async_runtime::spawn(emit_loop(Arc::downgrade(&inner), dirty_rx));
         Self { inner }
@@ -187,12 +216,16 @@ impl PrinterService {
 
     /// `start` with explicit client parameters. Tests point it at a local broker.
     pub fn start_with(&self, config: PrinterConfig, params: ClientParams) {
-        self.abort_tasks();
+        let mut running = self.inner.running.lock().unwrap();
+        if let Some(old) = running.take() {
+            tauri::async_runtime::spawn(old.retire());
+        }
         let generation = self.configure(config);
         let (tx, rx) = mpsc::channel(256);
-        let client = tauri::async_runtime::spawn(client::run(params, tx, self.inner.timing));
-        let consumer = tauri::async_runtime::spawn(consume(self.clone(), generation, rx));
-        self.inner.tasks.lock().unwrap().extend([client, consumer]);
+        *running = Some(Running {
+            client: tauri::async_runtime::spawn(client::run(params, tx, self.inner.timing)),
+            consumer: tauri::async_runtime::spawn(consume(self.clone(), generation, rx)),
+        });
     }
 
     /// Resets the live state for `config` and returns the new generation.
@@ -219,22 +252,34 @@ impl PrinterService {
         generation
     }
 
-    /// Disconnects and forgets the printer's live state.
+    /// Disconnects and forgets the printer's live state. The client gets
+    /// `STOP_GRACE` in the background to send its MQTT DISCONNECT.
     pub fn stop(&self) {
-        self.abort_tasks();
+        if let Some(retiring) = self.stop_inner() {
+            tauri::async_runtime::spawn(retiring);
+        }
+    }
+
+    /// `stop` for app exit: waits up to `STOP_GRACE` for the DISCONNECT, so
+    /// the printer frees the connection slot before the process ends.
+    pub fn shutdown(&self) {
+        if let Some(retiring) = self.stop_inner() {
+            tauri::async_runtime::block_on(retiring);
+        }
+    }
+
+    fn stop_inner(&self) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+        let mut running = self.inner.running.lock().unwrap();
+        let retiring = running.take().map(Running::retire);
         {
             let mut live = self.inner.live.lock().unwrap();
             let generation = live.generation + 1;
             *live = Live::empty(generation);
         }
+        drop(running);
         self.inner.events.connection(&ConnectionState::Disconnected);
         self.mark_dirty();
-    }
-
-    fn abort_tasks(&self) {
-        for task in self.inner.tasks.lock().unwrap().drain(..) {
-            task.abort();
-        }
+        retiring
     }
 
     pub fn connection(&self) -> ConnectionState {
@@ -243,6 +288,14 @@ impl PrinterService {
 
     pub fn config(&self) -> Option<PrinterConfig> {
         self.inner.live.lock().unwrap().config.clone()
+    }
+
+    /// The running printer's config with its connection state, read together.
+    pub fn live_connection(&self) -> Option<(PrinterConfig, ConnectionState)> {
+        let live = self.inner.live.lock().unwrap();
+        live.config
+            .clone()
+            .map(|config| (config, live.connection.clone()))
     }
 
     pub fn view(&self) -> PrinterView {
@@ -291,7 +344,8 @@ impl PrinterService {
         filament_id: Option<&str>,
         preset_path: Option<&str>,
     ) -> Result<PrinterView, String> {
-        let serial = self.serial()?;
+        check_slot(ams_id, tray_id)?;
+        let (serial, generation) = self.current()?;
         self.history()?.assign_slot(
             &serial,
             ams_id,
@@ -300,29 +354,31 @@ impl PrinterService {
             filament_id,
             preset_path,
         )?;
-        self.reload_assignments(&serial);
+        self.reload_assignments(&serial, generation);
         Ok(self.view())
     }
 
     pub fn clear_slot(&self, ams_id: u32, tray_id: u32) -> Result<PrinterView, String> {
-        let serial = self.serial()?;
+        check_slot(ams_id, tray_id)?;
+        let (serial, generation) = self.current()?;
         self.history()?.clear_slot(&serial, ams_id, tray_id)?;
-        self.reload_assignments(&serial);
+        self.reload_assignments(&serial, generation);
         Ok(self.view())
     }
 
     /// Re-reads assignments and their presets' cloud-sync state, e.g. when
     /// the Printer page opens after the user synced in Bambu Studio.
     pub fn refresh_assignments(&self) {
-        if let Ok(serial) = self.serial() {
-            self.reload_assignments(&serial);
+        if let Ok((serial, generation)) = self.current() {
+            self.reload_assignments(&serial, generation);
         }
     }
 
-    fn serial(&self) -> Result<String, String> {
-        self.config()
-            .map(|c| c.serial)
-            .ok_or_else(|| "No printer configured".to_string())
+    /// The configured printer's serial and the connection generation.
+    fn current(&self) -> Result<(String, u64), String> {
+        let live = self.inner.live.lock().unwrap();
+        let serial = live_serial(&live).ok_or("No printer configured")?;
+        Ok((serial, live.generation))
     }
 
     fn history(&self) -> Result<RefinementHistory, String> {
@@ -344,11 +400,16 @@ impl PrinterService {
         }
     }
 
-    fn reload_assignments(&self, serial: &str) {
+    /// Re-reads `serial`'s assignments. They are dropped if the printer was
+    /// restarted or replaced (`generation` changed) while they were read.
+    fn reload_assignments(&self, serial: &str, generation: u64) {
         let assignments = self.load_assignments(serial);
         let cloud_sync = cloud_sync_map(&assignments);
         {
             let mut live = self.inner.live.lock().unwrap();
+            if live.generation != generation {
+                return;
+            }
             live.assignments = assignments;
             live.cloud_sync = cloud_sync;
         }
@@ -411,9 +472,41 @@ impl PrinterService {
             });
         }
     }
+    /// The client stopped sending events. Unless it stopped on a state that
+    /// needs the user, the printer is now disconnected.
+    fn client_ended(&self, generation: u64) {
+        {
+            let mut live = self.inner.live.lock().unwrap();
+            if live.generation != generation
+                || live.connection.needs_user()
+                || live.connection == ConnectionState::Disconnected
+            {
+                return;
+            }
+            live.connection = ConnectionState::Disconnected;
+        }
+        self.inner.events.connection(&ConnectionState::Disconnected);
+        self.mark_dirty();
+    }
+
     #[cfg(test)]
     pub(crate) fn configure_for_test(&self, config: PrinterConfig) -> u64 {
         self.configure(config)
+    }
+}
+
+/// AMS units 0–3 and AMS HT units 128–135 (trays 0–3), and the external
+/// spools (`ams_id` 255, trays 254 and 255).
+fn check_slot(ams_id: u32, tray_id: u32) -> Result<(), String> {
+    let ok = match ams_id {
+        0..=3 | 128..=135 => tray_id <= 3,
+        EXTERNAL_AMS_ID => matches!(tray_id, 254 | 255),
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err("That isn't a slot on this printer.".into())
     }
 }
 
@@ -447,6 +540,7 @@ async fn consume(service: PrinterService, generation: u64, mut rx: mpsc::Receive
         }
         service.handle_event(generation, event);
     }
+    service.client_ended(generation);
 }
 
 fn live_serial(live: &Live) -> Option<String> {
@@ -638,6 +732,138 @@ mod tests {
         );
         wait_for(|| svc.connection() == ConnectionState::Connected).await;
         svc.stop();
+    }
+
+    async fn start_connected(svc: &PrinterService, ca: &TestCa, broker: &FakeBroker, serial: &str) {
+        svc.start_with(
+            config_for(serial),
+            broker_params(ca, broker, serial, "12345678"),
+        );
+        wait_for(|| {
+            svc.connection() == ConnectionState::Connected && broker.open_connections() == 1
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn overlapping_restarts_leave_one_broker_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let serial = "0948SV000000003";
+        let ca = TestCa::new("Test Printer CA");
+        let broker = FakeBroker::start(&ca.leaf(serial), serial, "12345678", H2D_FULL).await;
+        start_connected(&svc, &ca, &broker, serial).await;
+        // Two restarts at once, from two threads.
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let (svc, params) = (svc.clone(), broker_params(&ca, &broker, serial, "12345678"));
+                std::thread::spawn(move || svc.start_with(config_for(serial), params))
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        wait_for(|| svc.connection() == ConnectionState::Connected).await;
+        // Past the grace period: any replaced client has ended by now.
+        tokio::time::sleep(STOP_GRACE + Duration::from_millis(500)).await;
+        assert_eq!(broker.open_connections(), 1);
+        assert!(
+            broker.disconnect_count() >= 1,
+            "the replaced connection closes with an MQTT DISCONNECT"
+        );
+        svc.stop();
+    }
+
+    #[tokio::test]
+    async fn stop_disconnects_from_the_broker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let serial = "0948SV000000004";
+        let ca = TestCa::new("Test Printer CA");
+        let broker = FakeBroker::start(&ca.leaf(serial), serial, "12345678", H2D_FULL).await;
+        start_connected(&svc, &ca, &broker, serial).await;
+        svc.stop();
+        wait_for(|| broker.open_connections() == 0).await;
+        assert_eq!(broker.disconnect_count(), 1);
+        assert_eq!(svc.connection(), ConnectionState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_the_disconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let serial = "0948SV000000005";
+        let ca = TestCa::new("Test Printer CA");
+        let broker = FakeBroker::start(&ca.leaf(serial), serial, "12345678", H2D_FULL).await;
+        start_connected(&svc, &ca, &broker, serial).await;
+        // As at app exit: a plain thread, outside any async runtime.
+        let exiting = svc.clone();
+        std::thread::spawn(move || exiting.shutdown())
+            .join()
+            .unwrap();
+        wait_for(|| broker.disconnect_count() == 1 && broker.open_connections() == 0).await;
+        assert!(!svc.view().configured);
+    }
+
+    #[tokio::test]
+    async fn a_client_that_ends_without_needing_the_user_is_disconnected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, rec) = service(&dir);
+        let generation = svc.configure_for_test(config());
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(ClientEvent::Connection(ConnectionState::Connected))
+            .await
+            .unwrap();
+        drop(tx);
+        consume(svc.clone(), generation, rx).await;
+        assert_eq!(svc.connection(), ConnectionState::Disconnected);
+        assert_eq!(
+            rec.connections.lock().unwrap().last(),
+            Some(&ConnectionState::Disconnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn assignments_read_for_a_replaced_printer_are_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let old = svc.configure_for_test(config());
+        svc.assign_slot(0, 0, "Acme PLA", Some("P4d6ae04"), None)
+            .unwrap();
+        svc.configure_for_test(config_for("0948SV000000099"));
+        // A reload that started before the switch finishes after it.
+        svc.reload_assignments(SERIAL, old);
+        assert!(svc.inner.live.lock().unwrap().assignments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slot_ids_out_of_range_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        svc.configure_for_test(config());
+        for (ams, tray) in [
+            (4, 0),
+            (0, 4),
+            (127, 0),
+            (136, 0),
+            (255, 0),
+            (254, 254),
+            (255, 256),
+        ] {
+            assert_eq!(
+                svc.assign_slot(ams, tray, "X", None, None).unwrap_err(),
+                "That isn't a slot on this printer.",
+                "{ams}/{tray}"
+            );
+            assert!(svc.clear_slot(ams, tray).is_err(), "{ams}/{tray}");
+        }
+        for (ams, tray) in [(0, 0), (3, 3), (128, 0), (135, 3), (255, 254), (255, 255)] {
+            assert!(
+                svc.assign_slot(ams, tray, "X", None, None).is_ok(),
+                "{ams}/{tray}"
+            );
+            assert!(svc.clear_slot(ams, tray).is_ok(), "{ams}/{tray}");
+        }
     }
 
     #[test]

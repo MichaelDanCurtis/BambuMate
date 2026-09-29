@@ -7,23 +7,79 @@ use std::time::Duration;
 
 use tauri::{AppHandle, State};
 
-use crate::printer::client::{self, TestOutcome, Timing};
+use crate::printer::client::{self, ConnectionState, TestOutcome, Timing};
 use crate::printer::discovery::{self, DiscoveredPrinter};
 use crate::printer::service::{self, PrinterService, PrinterView};
 use crate::printer::settings::{self, PrinterConfig, PrinterConfigView};
 use crate::printer::slots;
+use crate::printer::tls::normalize_fingerprint;
 use crate::profile::{reader, BambuPaths, ProfileRegistry};
 
 const DISCOVERY_WINDOW: Duration = Duration::from_secs(5);
 const TEST_WAIT: Duration = Duration::from_secs(15);
 const NEED_CODE: &str = "Enter the access code shown on the printer screen.";
+const OTHER_TARGET: &str =
+    "Enter the access code to connect to a different printer or certificate.";
 
-/// The access code typed into the form, else the one in the keychain.
-fn access_code_for(serial: &str, typed: Option<&str>) -> Result<String, String> {
+/// Whether a request without a typed code may use the code stored in the
+/// keychain. Only for the saved printer (same serial) at its saved IP, and
+/// only with no pin, the saved pin, or the certificate the live connection
+/// to that printer just reported as untrusted ("Trust this printer").
+/// Anything else could send the stored code to another host, so it needs
+/// the code typed again. `Err` is the message to show.
+fn may_use_stored_code(
+    saved: Option<&PrinterConfig>,
+    live: Option<&(PrinterConfig, ConnectionState)>,
+    request: &PrinterConfig,
+) -> Result<(), &'static str> {
+    let Some(saved) = saved else {
+        return Err(NEED_CODE);
+    };
+    let same_printer = |c: &PrinterConfig| c.ip == saved.ip && c.serial == saved.serial;
+    if !same_printer(request) {
+        return Err(OTHER_TARGET);
+    }
+    let Some(pin) = request.pinned_fingerprint.as_deref() else {
+        return Ok(());
+    };
+    let pin = normalize_fingerprint(pin);
+    let is_pin = |f: &str| !pin.is_empty() && normalize_fingerprint(f) == pin;
+    let saved_pin = saved.pinned_fingerprint.as_deref().is_some_and(is_pin);
+    let untrusted_now = live.is_some_and(|(config, state)| {
+        same_printer(config)
+            && matches!(state, ConnectionState::CertUntrusted { fingerprint } if is_pin(fingerprint))
+    });
+    if saved_pin || untrusted_now {
+        Ok(())
+    } else {
+        Err(OTHER_TARGET)
+    }
+}
+
+/// The access code typed into the form, else the one in the keychain when
+/// `stored` allows it. Reads the keychain: call from a blocking thread.
+fn access_code_for(
+    serial: &str,
+    typed: Option<&str>,
+    stored: Result<(), &'static str>,
+) -> Result<String, String> {
     match typed.map(str::trim).filter(|c| !c.is_empty()) {
         Some(code) => Ok(settings::check_access_code(code)?.to_string()),
-        None => settings::get_access_code(serial)?.ok_or_else(|| NEED_CODE.to_string()),
+        None => {
+            stored?;
+            settings::get_access_code(serial)?.ok_or_else(|| NEED_CODE.to_string())
+        }
     }
+}
+
+/// Runs blocking IO (keychain, settings store, SQLite, preset files) off the
+/// async runtime's worker threads.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -43,6 +99,8 @@ pub async fn printer_discover() -> Result<Vec<DiscoveredPrinter>, String> {
 
 #[tauri::command]
 pub async fn printer_test_connection(
+    app: AppHandle,
+    service: State<'_, PrinterService>,
     ip: String,
     serial: String,
     access_code: Option<String>,
@@ -55,7 +113,14 @@ pub async fn printer_test_connection(
         ..Default::default()
     }
     .normalized()?;
-    let code = access_code_for(&config.serial, access_code.as_deref())?;
+    let live = service.live_connection();
+    let (config, code) = blocking(move || {
+        let saved = settings::load_config(&app);
+        let stored = may_use_stored_code(saved.as_ref(), live.as_ref(), &config);
+        let code = access_code_for(&config.serial, access_code.as_deref(), stored)?;
+        Ok((config, code))
+    })
+    .await?;
     let params = service::client_params(&config, code)?;
     tracing::info!(serial = %config.serial, ip = %config.ip, "testing the printer connection");
     Ok(client::test_connection(params, Timing::default(), TEST_WAIT).await)
@@ -82,13 +147,25 @@ pub async fn printer_save(
         pinned_fingerprint,
     }
     .normalized()?;
+    let service = service.inner().clone();
+    blocking(move || save_printer(&app, &service, config, access_code.as_deref())).await
+}
+
+fn save_printer(
+    app: &AppHandle,
+    service: &PrinterService,
+    config: PrinterConfig,
+    typed: Option<&str>,
+) -> Result<PrinterConfigView, String> {
     // Checked before anything is written, so a bad code changes nothing.
-    let code = access_code_for(&config.serial, access_code.as_deref())?;
+    let saved = settings::load_config(app);
+    let stored = may_use_stored_code(saved.as_ref(), service.live_connection().as_ref(), &config);
+    let code = access_code_for(&config.serial, typed, stored)?;
     // The config first: `save_config` removes a replaced printer's code, so
     // the old printer keeps its code if saving fails, and the new code is
     // only written for a printer that was saved.
-    settings::save_config(&app, &config)?;
-    if access_code.as_deref().is_some_and(|c| !c.trim().is_empty()) {
+    settings::save_config(app, &config)?;
+    if typed.is_some_and(|c| !c.trim().is_empty()) {
         if let Err(e) = settings::set_access_code(&config.serial, &code) {
             // The saved printer has no usable code; don't leave the
             // previous one connected under the new settings.
@@ -97,7 +174,10 @@ pub async fn printer_save(
         }
     }
     tracing::info!(serial = %config.serial, ip = %config.ip, "printer saved");
-    service.start(config.clone(), code)?;
+    if let Err(e) = service.start(config.clone(), code) {
+        service.stop();
+        return Err(e);
+    }
     Ok(PrinterConfigView::new(&config, true))
 }
 
@@ -129,17 +209,18 @@ pub async fn printer_assign_slot(
     tray_id: u32,
     preset_path: String,
 ) -> Result<PrinterView, String> {
-    let path = PathBuf::from(&preset_path);
-    let (name, filament_id) = tauri::async_runtime::spawn_blocking(move || resolve_preset(&path))
-        .await
-        .map_err(|e| e.to_string())??;
-    service.assign_slot(
-        ams_id,
-        tray_id,
-        &name,
-        filament_id.as_deref(),
-        Some(&preset_path),
-    )
+    let service = service.inner().clone();
+    blocking(move || {
+        let (name, filament_id) = resolve_preset(Path::new(&preset_path))?;
+        service.assign_slot(
+            ams_id,
+            tray_id,
+            &name,
+            filament_id.as_deref(),
+            Some(&preset_path),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -189,6 +270,101 @@ fn is_within_any(path: &Path, dirs: &[PathBuf]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PIN: &str = "AB:CD:EF:01";
+
+    fn saved() -> PrinterConfig {
+        PrinterConfig {
+            ip: "192.168.1.20".into(),
+            serial: "0948AB000000001".into(),
+            ..Default::default()
+        }
+    }
+
+    fn with(ip: &str, serial: &str, pin: Option<&str>) -> PrinterConfig {
+        PrinterConfig {
+            ip: ip.into(),
+            serial: serial.into(),
+            pinned_fingerprint: pin.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_stored_code_is_only_used_for_the_saved_printer_and_address() {
+        let s = saved();
+        let req = with("192.168.1.20", "0948AB000000001", None);
+        assert_eq!(may_use_stored_code(Some(&s), None, &req), Ok(()));
+        assert_eq!(may_use_stored_code(None, None, &req), Err(NEED_CODE));
+        let other_ip = with("10.0.0.66", "0948AB000000001", None);
+        assert_eq!(
+            may_use_stored_code(Some(&s), None, &other_ip),
+            Err(OTHER_TARGET)
+        );
+        let other_serial = with("192.168.1.20", "0948AB000000002", None);
+        assert_eq!(
+            may_use_stored_code(Some(&s), None, &other_serial),
+            Err(OTHER_TARGET)
+        );
+    }
+
+    #[test]
+    fn a_new_pin_needs_the_code_unless_it_is_the_one_the_printer_just_presented() {
+        let s = saved();
+        let req = with("192.168.1.20", "0948AB000000001", Some(PIN));
+        assert_eq!(may_use_stored_code(Some(&s), None, &req), Err(OTHER_TARGET));
+
+        // The saved pin, in any spelling.
+        let pinned = with("192.168.1.20", "0948AB000000001", Some("abcdef01"));
+        assert_eq!(may_use_stored_code(Some(&pinned), None, &req), Ok(()));
+
+        // "Trust this printer" after the live connection reported this cert.
+        let untrusted = |fp: &str| ConnectionState::CertUntrusted {
+            fingerprint: fp.into(),
+        };
+        let live = (s.clone(), untrusted(PIN));
+        assert_eq!(may_use_stored_code(Some(&s), Some(&live), &req), Ok(()));
+        let live_other_cert = (s.clone(), untrusted("11:22:33:44"));
+        assert_eq!(
+            may_use_stored_code(Some(&s), Some(&live_other_cert), &req),
+            Err(OTHER_TARGET)
+        );
+        let live_connected = (s.clone(), ConnectionState::Connected);
+        assert_eq!(
+            may_use_stored_code(Some(&s), Some(&live_connected), &req),
+            Err(OTHER_TARGET)
+        );
+        // A live connection to some other address doesn't count.
+        let live_elsewhere = (with("10.0.0.66", "0948AB000000001", None), untrusted(PIN));
+        assert_eq!(
+            may_use_stored_code(Some(&s), Some(&live_elsewhere), &req),
+            Err(OTHER_TARGET)
+        );
+        // A pin with no hex digits never matches.
+        let junk = with("192.168.1.20", "0948AB000000001", Some("zz"));
+        let live_junk = (s.clone(), untrusted("zz"));
+        assert_eq!(
+            may_use_stored_code(Some(&s), Some(&live_junk), &junk),
+            Err(OTHER_TARGET)
+        );
+    }
+
+    #[test]
+    fn a_typed_code_is_used_without_the_keychain_and_a_refusal_needs_one() {
+        let refused = Err(OTHER_TARGET);
+        assert_eq!(
+            access_code_for("0948AB000000001", Some(" 12345678 "), refused),
+            Ok("12345678".to_string())
+        );
+        assert_eq!(
+            access_code_for("0948AB000000001", Some("  "), refused),
+            Err(OTHER_TARGET.to_string())
+        );
+        assert_eq!(
+            access_code_for("0948AB000000001", None, Err(NEED_CODE)),
+            Err(NEED_CODE.to_string())
+        );
+    }
 
     #[test]
     fn only_files_inside_the_filament_folders_are_accepted() {

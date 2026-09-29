@@ -231,6 +231,16 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager;
+                // Send the printer an MQTT DISCONNECT so it frees the
+                // connection slot now rather than at keep-alive timeout.
+                if let Some(service) = app.try_state::<printer::service::PrinterService>() {
+                    service.shutdown();
+                }
+            }
+        });
 }

@@ -28,6 +28,8 @@ struct Shared {
     version_reply: Mutex<Option<Vec<u8>>>,
     connections: AtomicUsize,
     disconnects: AtomicUsize,
+    /// Logged-in connections still open.
+    open: AtomicUsize,
     client_ids: Mutex<Vec<String>>,
 }
 
@@ -115,6 +117,11 @@ impl FakeBroker {
         self.shared.connections.load(Ordering::SeqCst)
     }
 
+    /// Logged-in connections that are still open.
+    pub fn open_connections(&self) -> usize {
+        self.shared.open.load(Ordering::SeqCst)
+    }
+
     /// Clean MQTT DISCONNECT packets received.
     pub fn disconnect_count(&self) -> usize {
         self.shared.disconnects.load(Ordering::SeqCst)
@@ -128,6 +135,15 @@ impl FakeBroker {
     /// Closes every open connection, as a printer reboot would.
     pub fn drop_connections(&self) {
         self.kill.send_modify(|g| *g += 1);
+    }
+}
+
+/// Counts a connection as open until `serve` returns or is dropped.
+struct OpenGuard<'a>(&'a AtomicUsize);
+
+impl Drop for OpenGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -156,6 +172,8 @@ where
         return;
     }
     shared.connections.fetch_add(1, Ordering::SeqCst);
+    shared.open.fetch_add(1, Ordering::SeqCst);
+    let _open = OpenGuard(&shared.open);
     shared
         .client_ids
         .lock()
