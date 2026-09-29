@@ -53,6 +53,9 @@ pub enum ClientEvent {
     Connection(ConnectionState),
     /// A raw payload from `device/<serial>/report`.
     Report(Vec<u8>),
+    /// Sent right after `Connected` when the printer's certificate chained
+    /// to a Bambu CA (not only to the user's pin).
+    CaVerified,
 }
 
 /// What the client needs to reach one printer.
@@ -199,6 +202,11 @@ impl PushallGate {
 /// access code, untrusted certificate, wrong serial) is sent once and then
 /// `run` returns: retrying can't fix it, so the caller restarts the client
 /// after the user saves a new code or trusts the printer.
+///
+/// `Connecting` is sent before an attempt, except while the printer is
+/// `Unreachable`: then the retries stay quiet and the next state sent is
+/// `Unreachable` again or `Connected`, so a printer that is switched off
+/// doesn't flicker between the two states.
 pub async fn run(params: ClientParams, events: mpsc::Sender<ClientEvent>, timing: Timing) {
     let mut backoff = Backoff::new(timing.backoff_min, timing.backoff_max);
     let gate = PushallGate::new(&params.serial, timing.pushall_interval);
@@ -209,11 +217,16 @@ pub async fn run(params: ClientParams, events: mpsc::Sender<ClientEvent>, timing
         "bambumate-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
+    let mut announce = true;
     loop {
-        if events
-            .send(ClientEvent::Connection(ConnectionState::Connecting))
-            .await
-            .is_err()
+        if events.is_closed() {
+            return;
+        }
+        if announce
+            && events
+                .send(ClientEvent::Connection(ConnectionState::Connecting))
+                .await
+                .is_err()
         {
             return;
         }
@@ -221,6 +234,7 @@ pub async fn run(params: ClientParams, events: mpsc::Sender<ClientEvent>, timing
         let Some(state) = ended else { return };
         tracing::debug!(serial = %params.serial, ?state, "printer connection ended");
         let stop = state.needs_user();
+        announce = state != ConnectionState::Unreachable;
         if events.send(ClientEvent::Connection(state)).await.is_err() || stop {
             return;
         }
@@ -299,6 +313,9 @@ async fn connect_once(
                         .send(ClientEvent::Connection(ConnectionState::Connected))
                         .await
                         .ok()?;
+                    if params.rejection.take_ca_verified() {
+                        events.send(ClientEvent::CaVerified).await.ok()?;
+                    }
                     let _ = client.try_subscribe(report.clone(), QoS::AtMostOnce);
                     *seq += 1;
                     let _ = client.try_publish(
@@ -409,7 +426,7 @@ pub async fn test_connection(params: ClientParams, timing: Timing, wait: Duratio
     let deadline = tokio::time::Instant::now() + wait;
     while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
         match ev {
-            ClientEvent::Connection(ConnectionState::Connecting) => {}
+            ClientEvent::Connection(ConnectionState::Connecting) | ClientEvent::CaVerified => {}
             ClientEvent::Connection(state) => {
                 let done = state != ConnectionState::Connected;
                 outcome.connection = state;
@@ -509,7 +526,7 @@ mod tests {
             match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
                 Ok(Some(ClientEvent::Connection(ConnectionState::Connecting))) => {}
                 Ok(Some(ClientEvent::Connection(s))) => return s,
-                Ok(Some(ClientEvent::Report(_))) => {}
+                Ok(Some(ClientEvent::Report(_) | ClientEvent::CaVerified)) => {}
                 other => panic!("no state change: {other:?}"),
             }
         }
@@ -800,6 +817,97 @@ mod tests {
         task.abort();
     }
 
+    /// The next event, waiting long enough for a refused connect on Windows.
+    async fn next_event(rx: &mut mpsc::Receiver<ClientEvent>) -> ClientEvent {
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(ev)) => ev,
+            other => panic!("no event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_while_unreachable_stay_unreachable_until_connected() {
+        let serial = unique_serial();
+        let ca = TestCa::new("Test Printer CA");
+        let spare = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = spare.local_addr().unwrap();
+        drop(spare);
+        let (tx, mut rx) = mpsc::channel(64);
+        let rejection = RejectionSlot::default();
+        let verifier =
+            PrinterCertVerifier::with_trust(&ca.pem, &[], &serial, None, rejection.clone())
+                .unwrap();
+        let p = ClientParams {
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            serial: serial.clone(),
+            access_code: CODE.into(),
+            tls: client_config(Arc::new(verifier)).unwrap(),
+            rejection,
+        };
+        let task = tokio::spawn(run(p, tx, fast()));
+        let connecting = ClientEvent::Connection(ConnectionState::Connecting);
+        let unreachable = ClientEvent::Connection(ConnectionState::Unreachable);
+        assert_eq!(next_event(&mut rx).await, connecting);
+        // Three failed attempts in a row: no Connecting between them.
+        for _ in 0..3 {
+            assert_eq!(next_event(&mut rx).await, unreachable);
+        }
+        // The printer comes back: the next state is Connected, directly.
+        let broker = FakeBroker::start_at(addr, &ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
+        loop {
+            match next_event(&mut rx).await {
+                ClientEvent::Connection(ConnectionState::Unreachable) => {}
+                ClientEvent::Connection(state) => {
+                    assert_eq!(state, ConnectionState::Connected);
+                    break;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(broker.connection_count(), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_ca_verified_connection_says_so() {
+        let serial = unique_serial();
+        let ca = TestCa::new("Test Printer CA");
+        let broker = FakeBroker::start(&ca.leaf(&serial), &serial, CODE, H2D_FULL).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(run(params(&ca, &broker, &serial, CODE, None), tx, fast()));
+        loop {
+            if let ClientEvent::Connection(ConnectionState::Connected) = next_event(&mut rx).await {
+                break;
+            }
+        }
+        assert_eq!(next_event(&mut rx).await, ClientEvent::CaVerified);
+        task.abort();
+
+        // Accepted only by its pin: no CaVerified.
+        let serial = unique_serial();
+        let other = TestCa::new("Unknown CA");
+        let leaf = other.leaf(&serial);
+        let pin = fingerprint(&leaf.cert_der);
+        let broker = FakeBroker::start(&leaf, &serial, CODE, H2D_FULL).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(run(
+            params(&ca, &broker, &serial, CODE, Some(&pin)),
+            tx,
+            fast(),
+        ));
+        loop {
+            if let ClientEvent::Connection(ConnectionState::Connected) = next_event(&mut rx).await {
+                break;
+            }
+        }
+        assert!(
+            matches!(next_event(&mut rx).await, ClientEvent::Report(_)),
+            "the pinned connection goes straight to reports"
+        );
+        task.abort();
+    }
+
     #[tokio::test]
     async fn reconnects_reuse_one_client_id() {
         let serial = unique_serial();
@@ -863,11 +971,17 @@ mod tests {
         let spare = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         p.port = spare.local_addr().unwrap().port();
         drop(spare);
-        // The production backoff is 2 s; the call must not wait it out.
+        // A long backoff the call must not wait out. Windows retries a
+        // refused SYN for about 2 s, so a refused connect alone can take that
+        // long; the bound only has to prove the backoff wasn't waited.
+        let timing = Timing {
+            backoff_min: Duration::from_secs(30),
+            ..Timing::default()
+        };
         let started = Instant::now();
-        let out = test_connection(p, Timing::default(), Duration::from_secs(5)).await;
+        let out = test_connection(p, timing, Duration::from_secs(5)).await;
         assert_eq!(out.connection, ConnectionState::Unreachable);
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[tokio::test]

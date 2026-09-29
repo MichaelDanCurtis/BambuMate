@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, State};
 
+use crate::history::SlotAssignment;
 use crate::printer::client::{self, ConnectionState, TestOutcome, Timing};
 use crate::printer::discovery::{self, DiscoveredPrinter};
 use crate::printer::service::{self, PrinterService, PrinterView};
@@ -82,13 +83,17 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
+/// The saved printer. Reads the keychain, so it runs on a blocking thread.
 #[tauri::command]
-pub fn printer_get_config(app: AppHandle) -> Result<Option<PrinterConfigView>, String> {
-    let Some(config) = settings::load_config(&app) else {
-        return Ok(None);
-    };
-    let has_code = matches!(settings::get_access_code(&config.serial), Ok(Some(_)));
-    Ok(Some(PrinterConfigView::new(&config, has_code)))
+pub async fn printer_get_config(app: AppHandle) -> Result<Option<PrinterConfigView>, String> {
+    blocking(move || {
+        let Some(config) = settings::load_config(&app) else {
+            return Ok(None);
+        };
+        let has_code = matches!(settings::get_access_code(&config.serial), Ok(Some(_)));
+        Ok(Some(PrinterConfigView::new(&config, has_code)))
+    })
+    .await
 }
 
 /// Listens for printer announcements for five seconds. Sends nothing.
@@ -113,6 +118,14 @@ pub async fn printer_test_connection(
         ..Default::default()
     }
     .normalized()?;
+    // The printer the service is already connected to, with the same code:
+    // report the live connection rather than open a second session to it.
+    if let Some(outcome) = service
+        .live_test(&config, access_code.as_deref(), TEST_WAIT)
+        .await
+    {
+        return Ok(outcome);
+    }
     let live = service.live_connection();
     let (config, code) = blocking(move || {
         let saved = settings::load_config(&app);
@@ -145,6 +158,8 @@ pub async fn printer_save(
         name: name.unwrap_or_default(),
         model: model.unwrap_or_default(),
         pinned_fingerprint,
+        // Carried over from the saved printer by `save_printer`.
+        ca_verified: false,
     }
     .normalized()?;
     let service = service.inner().clone();
@@ -154,11 +169,12 @@ pub async fn printer_save(
 fn save_printer(
     app: &AppHandle,
     service: &PrinterService,
-    config: PrinterConfig,
+    mut config: PrinterConfig,
     typed: Option<&str>,
 ) -> Result<PrinterConfigView, String> {
     // Checked before anything is written, so a bad code changes nothing.
     let saved = settings::load_config(app);
+    settings::carry_ca_verified(saved.as_ref(), &mut config);
     let stored = may_use_stored_code(saved.as_ref(), service.live_connection().as_ref(), &config);
     let code = access_code_for(&config.serial, typed, stored)?;
     // The config first: `save_config` removes a replaced printer's code, so
@@ -182,24 +198,36 @@ fn save_printer(
 }
 
 #[tauri::command]
-pub fn printer_remove(app: AppHandle, service: State<'_, PrinterService>) -> Result<(), String> {
-    service.stop();
-    let previous = settings::load_config(&app);
-    // Also removes the stored printer's code, best effort, even when the
-    // stored settings are no longer valid.
-    settings::remove_config(&app)?;
-    // Again, so a keychain failure is reported. Deleting a missing code is Ok.
-    if let Some(config) = previous {
-        settings::delete_access_code(&config.serial)?;
-    }
-    Ok(())
+pub async fn printer_remove(
+    app: AppHandle,
+    service: State<'_, PrinterService>,
+) -> Result<(), String> {
+    let service = service.inner().clone();
+    blocking(move || {
+        service.stop();
+        let previous = settings::load_config(&app);
+        // Also removes the stored printer's code, best effort, even when the
+        // stored settings are no longer valid.
+        settings::remove_config(&app)?;
+        // Again, so a keychain failure is reported. Deleting a missing code is Ok.
+        if let Some(config) = previous {
+            settings::delete_access_code(&config.serial)?;
+        }
+        Ok(())
+    })
+    .await
 }
 
-/// The current view. Also re-checks assigned presets' cloud-sync state.
+/// The current view. Also re-checks assigned presets' cloud-sync state, and
+/// looks up the filament id of any assigned preset stored without one.
 #[tauri::command]
-pub fn printer_view(service: State<'_, PrinterService>) -> PrinterView {
-    service.refresh_assignments();
-    service.view()
+pub async fn printer_view(service: State<'_, PrinterService>) -> Result<PrinterView, String> {
+    let service = service.inner().clone();
+    blocking(move || {
+        service.refresh_assignments_with(&mut missing_filament_ids());
+        Ok(service.view())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -224,12 +252,62 @@ pub async fn printer_assign_slot(
 }
 
 #[tauri::command]
-pub fn printer_clear_slot(
+pub async fn printer_clear_slot(
     service: State<'_, PrinterService>,
     ams_id: u32,
     tray_id: u32,
 ) -> Result<PrinterView, String> {
-    service.clear_slot(ams_id, tray_id)
+    let service = service.inner().clone();
+    blocking(move || service.clear_slot(ams_id, tray_id)).await
+}
+
+/// Bambu Studio's filament folders and a registry of their presets.
+struct PresetIndex {
+    allowed: Vec<PathBuf>,
+    registry: ProfileRegistry,
+}
+
+impl PresetIndex {
+    fn load() -> Option<Self> {
+        let paths = BambuPaths::detect().ok()?;
+        let system_dir = paths.system_filament_dir();
+        let user_dir = paths.user_filament_dir();
+        let mut registry = ProfileRegistry::discover_system_profiles(&system_dir)
+            .unwrap_or_else(|_| ProfileRegistry::new());
+        if let Some(dir) = &user_dir {
+            let _ = registry.discover_user_profiles(dir);
+        }
+        let allowed = std::iter::once(system_dir).chain(user_dir).collect();
+        Some(Self { allowed, registry })
+    }
+
+    /// The assigned preset's filament id: from its file when that is still
+    /// in the filament folders, else from the preset of the same name.
+    fn filament_id(&self, a: &SlotAssignment) -> Option<String> {
+        let from_file = a
+            .preset_path
+            .as_deref()
+            .map(Path::new)
+            .filter(|p| is_within_any(p, &self.allowed))
+            .and_then(|p| reader::read_profile(p).ok())
+            .and_then(|profile| slots::resolve_filament_id(&profile, &self.registry));
+        from_file.or_else(|| {
+            let profile = self.registry.get_by_name(&a.preset_name)?;
+            slots::resolve_filament_id(profile, &self.registry)
+        })
+    }
+}
+
+/// Resolves assignments stored without a filament id. The presets are
+/// scanned at most once per call, and only if an assignment needs it.
+fn missing_filament_ids() -> impl FnMut(&SlotAssignment) -> Option<String> {
+    let mut index: Option<Option<PresetIndex>> = None;
+    move |a| {
+        index
+            .get_or_insert_with(PresetIndex::load)
+            .as_ref()?
+            .filament_id(a)
+    }
 }
 
 /// A preset's name and filament id. Only presets in Bambu Studio's system

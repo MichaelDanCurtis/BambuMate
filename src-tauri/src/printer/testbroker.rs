@@ -50,6 +50,18 @@ impl Drop for FakeBroker {
 impl FakeBroker {
     /// Serves `leaf` on 127.0.0.1 with an ephemeral port.
     pub async fn start(leaf: &TestLeaf, serial: &str, password: &str, pushall_reply: &str) -> Self {
+        let any = SocketAddr::from(([127, 0, 0, 1], 0));
+        Self::start_at(any, leaf, serial, password, pushall_reply).await
+    }
+
+    /// `start` on a given address, e.g. a port a client is already retrying.
+    pub async fn start_at(
+        addr: SocketAddr,
+        leaf: &TestLeaf,
+        serial: &str,
+        password: &str,
+        pushall_reply: &str,
+    ) -> Self {
         let certs = vec![CertificateDer::from(leaf.cert_der.clone())];
         let key = PrivateKeyDer::from_pem_slice(leaf.key_pem.as_bytes()).unwrap();
         let config = rustls::ServerConfig::builder_with_provider(super::tls::crypto_provider())
@@ -59,7 +71,7 @@ impl FakeBroker {
             .with_single_cert(certs, key)
             .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let shared = Arc::new(Shared::default());
         let (kill, _) = watch::channel(0u64);

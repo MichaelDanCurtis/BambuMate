@@ -48,18 +48,41 @@ pub enum Rejection {
     WrongSerial { presented: String },
 }
 
-/// Where the verifier records its last rejection, so the client can tell a
-/// certificate problem apart from a network one after the handshake fails.
+/// Where the verifier records the outcome of its last handshake, so the
+/// client can tell a certificate problem apart from a network one after the
+/// handshake fails, and can tell whether an accepted certificate was vouched
+/// for by a Bambu CA (rather than only by the user's pin).
 #[derive(Debug, Clone, Default)]
-pub struct RejectionSlot(Arc<Mutex<Option<Rejection>>>);
+pub struct RejectionSlot(Arc<Mutex<Verdict>>);
+
+#[derive(Debug, Default)]
+struct Verdict {
+    rejection: Option<Rejection>,
+    ca_verified: bool,
+}
 
 impl RejectionSlot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Verdict> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
     fn set(&self, r: Rejection) {
-        *self.0.lock().unwrap() = Some(r);
+        self.lock().rejection = Some(r);
     }
     /// Returns and clears the last rejection.
     pub fn take(&self) -> Option<Rejection> {
-        self.0.lock().unwrap().take()
+        self.lock().rejection.take()
+    }
+    /// Clears the outcome of an earlier handshake.
+    fn reset(&self) {
+        *self.lock() = Verdict::default();
+    }
+    fn set_ca_verified(&self) {
+        self.lock().ca_verified = true;
+    }
+    /// Returns and clears whether the last accepted certificate chained to a
+    /// Bambu CA. False when it was accepted only because it is pinned.
+    pub fn take_ca_verified(&self) -> bool {
+        std::mem::take(&mut self.lock().ca_verified)
     }
 }
 
@@ -165,8 +188,8 @@ impl ServerCertVerifier for PrinterCertVerifier {
         _ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        // A rejection from an earlier handshake must not be mistaken for this one.
-        self.rejection.take();
+        // An earlier handshake's outcome must not be mistaken for this one's.
+        self.rejection.reset();
 
         // The leaf must name this printer, whatever else vouches for it. A
         // missing or unreadable CN never matches.
@@ -207,6 +230,7 @@ impl ServerCertVerifier for PrinterCertVerifier {
             self.provider.signature_verification_algorithms.all,
         )
         .map_err(untrusted)?;
+        self.rejection.set_ca_verified();
         Ok(ServerCertVerified::assertion())
     }
 
@@ -386,6 +410,11 @@ mod tests {
         let v = PrinterCertVerifier::with_trust(&ca.pem, &[], SERIAL, None, slot.clone()).unwrap();
         assert!(verify(&v, &leaf.cert_der).is_ok());
         assert_eq!(slot.take(), None);
+        assert!(
+            slot.take_ca_verified(),
+            "a CA chain is recorded as CA-verified"
+        );
+        assert!(!slot.take_ca_verified(), "taking it clears it");
     }
 
     #[test]
@@ -426,15 +455,15 @@ mod tests {
         let other = TestCa::new("Newer Bambu CA");
         let leaf = other.leaf(SERIAL);
         let pin = fingerprint(&leaf.cert_der).to_lowercase();
-        let v = PrinterCertVerifier::with_trust(
-            &trusted.pem,
-            &[],
-            SERIAL,
-            Some(&pin),
-            RejectionSlot::default(),
-        )
-        .unwrap();
+        let slot = RejectionSlot::default();
+        let v =
+            PrinterCertVerifier::with_trust(&trusted.pem, &[], SERIAL, Some(&pin), slot.clone())
+                .unwrap();
         assert!(verify(&v, &leaf.cert_der).is_ok());
+        assert!(
+            !slot.take_ca_verified(),
+            "a certificate accepted only by its pin is not CA-verified"
+        );
     }
 
     #[test]

@@ -215,6 +215,26 @@ impl RefinementHistory {
         Ok(())
     }
 
+    /// Fills in the filament id of an assignment stored without one. An
+    /// assignment that already has an id is left as it is.
+    pub fn set_slot_filament_id(
+        &self,
+        serial: &str,
+        ams_id: u32,
+        tray_id: u32,
+        filament_id: &str,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE slot_assignments SET filament_id = ?4
+                 WHERE serial = ?1 AND ams_id = ?2 AND tray_id = ?3
+                   AND (filament_id IS NULL OR TRIM(filament_id) = '')",
+                params![serial, ams_id, tray_id, filament_id],
+            )
+            .map_err(|e| format!("Failed to update slot assignment: {}", e))?;
+        Ok(())
+    }
+
     /// Every slot assignment for one printer, in slot order.
     pub fn list_slot_assignments(&self, serial: &str) -> Result<Vec<SlotAssignment>, String> {
         let mut stmt = self
@@ -411,5 +431,23 @@ mod tests {
         store.clear_slot("SN1", 0, 2).unwrap();
         store.clear_slot("SN1", 3, 3).unwrap();
         assert_eq!(store.list_slot_assignments("SN1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_missing_filament_id_is_filled_in_but_an_existing_one_is_kept() {
+        let (store, _dir) = create_test_store();
+        store
+            .assign_slot("SN1", 0, 0, "Mine", None, Some("/u/Mine.json"))
+            .unwrap();
+        store
+            .assign_slot("SN1", 0, 1, "Acme", Some("P1234567"), None)
+            .unwrap();
+        let before = store.list_slot_assignments("SN1").unwrap();
+        store.set_slot_filament_id("SN1", 0, 0, "P0000009").unwrap();
+        store.set_slot_filament_id("SN1", 0, 1, "P0000009").unwrap();
+        let rows = store.list_slot_assignments("SN1").unwrap();
+        assert_eq!(rows[0].filament_id.as_deref(), Some("P0000009"));
+        assert_eq!(rows[0].assigned_at, before[0].assigned_at);
+        assert_eq!(rows[1].filament_id.as_deref(), Some("P1234567"));
     }
 }

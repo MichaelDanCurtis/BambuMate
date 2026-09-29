@@ -24,6 +24,11 @@ pub struct PrinterConfig {
     /// SHA-256 of a certificate the user chose to trust (`AB:CD:…`).
     #[serde(default)]
     pub pinned_fingerprint: Option<String>,
+    /// Set the first time a connection to this serial verified against a
+    /// Bambu CA. A later untrusted certificate for a printer that once
+    /// proved itself genuine gets a stronger warning before it is trusted.
+    #[serde(default)]
+    pub ca_verified: bool,
 }
 
 /// A printer serial in its canonical form: trimmed, uppercased, letters and
@@ -68,6 +73,7 @@ pub struct PrinterConfigView {
     pub model: String,
     pub pinned_fingerprint: Option<String>,
     pub has_access_code: bool,
+    pub ca_verified: bool,
 }
 
 impl PrinterConfigView {
@@ -79,6 +85,7 @@ impl PrinterConfigView {
             model: config.model.clone(),
             pinned_fingerprint: config.pinned_fingerprint.clone(),
             has_access_code,
+            ca_verified: config.ca_verified,
         }
     }
 }
@@ -132,6 +139,33 @@ pub fn save_config(app: &AppHandle, config: &PrinterConfig) -> Result<(), String
         }
     }
     Ok(())
+}
+
+/// Records that the saved printer `serial` verified against a Bambu CA.
+/// Does nothing if another printer (or none) is saved now.
+pub fn mark_ca_verified(app: &AppHandle, serial: &str) -> Result<(), String> {
+    let Some(mut config) = read_stored(app) else {
+        return Ok(());
+    };
+    if config.ca_verified || keychain_account(&config.serial) != keychain_account(serial) {
+        return Ok(());
+    }
+    config.ca_verified = true;
+    let store = app.store(STORE_FILE).map_err(|e| e.to_string())?;
+    store.set(
+        STORE_KEY,
+        serde_json::to_value(&config).map_err(|e| e.to_string())?,
+    );
+    store.save().map_err(|e| e.to_string())
+}
+
+/// The flag is per serial: `config` keeps the saved printer's
+/// `ca_verified` when it is the same printer, and starts without it
+/// otherwise.
+pub fn carry_ca_verified(saved: Option<&PrinterConfig>, config: &mut PrinterConfig) {
+    config.ca_verified = saved.is_some_and(|s| {
+        s.ca_verified && keychain_account(&s.serial) == keychain_account(&config.serial)
+    });
 }
 
 /// Removes the saved printer and its access code. Nothing stored is fine.
@@ -209,6 +243,7 @@ mod tests {
             name: "Workshop H2D".into(),
             model: "H2D".into(),
             pinned_fingerprint: Some("  ".into()),
+            ca_verified: false,
         }
     }
 
@@ -236,8 +271,47 @@ mod tests {
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
         assert_eq!(
             keys,
-            ["ip", "serial", "name", "model", "pinned_fingerprint"]
+            [
+                "ip",
+                "serial",
+                "name",
+                "model",
+                "pinned_fingerprint",
+                "ca_verified"
+            ]
         );
+    }
+
+    #[test]
+    fn settings_saved_before_ca_verified_existed_read_as_not_verified() {
+        let old = r#"{"ip":"192.168.1.20","serial":"0948AB000000001","name":"","model":"","pinned_fingerprint":null}"#;
+        let c: PrinterConfig = serde_json::from_str(old).unwrap();
+        assert!(!c.ca_verified);
+    }
+
+    #[test]
+    fn ca_verified_is_kept_only_for_the_same_serial() {
+        let saved = PrinterConfig {
+            ca_verified: true,
+            ..config().normalized().unwrap()
+        };
+        let mut same = PrinterConfig {
+            ip: "10.0.0.9".into(),
+            serial: "0948ab000000001".into(),
+            ..Default::default()
+        };
+        carry_ca_verified(Some(&saved), &mut same);
+        assert!(same.ca_verified, "a new IP for the same printer keeps it");
+        let mut other = PrinterConfig {
+            serial: "0948AB000000002".into(),
+            ca_verified: true,
+            ..Default::default()
+        };
+        carry_ca_verified(Some(&saved), &mut other);
+        assert!(!other.ca_verified, "another printer starts without it");
+        let mut fresh = saved.clone();
+        carry_ca_verified(None, &mut fresh);
+        assert!(!fresh.ca_verified);
     }
 
     #[test]

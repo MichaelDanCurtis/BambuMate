@@ -183,6 +183,7 @@ mod tests {
                 name: "Workshop".into(),
                 model: "H2D".into(),
                 firmware: Some("01.01.01.00".into()),
+                ca_verified: true,
             }),
             connection: ConnectionState::Connected,
             slots: compute_slots(&state, &assignments, &|_| true),
