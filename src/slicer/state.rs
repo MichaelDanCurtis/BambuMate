@@ -98,9 +98,37 @@ pub fn totals(r: &SliceResult) -> Totals {
     }
 }
 
-/// The newest job sliced from `source_path`.
+/// The job whose state the STL list shows for `source_path`.
+///
+/// Cancelled jobs are skipped, so cancelling a re-slice leaves the earlier
+/// result showing. Of the rest, the newest wins, except in a compare run.
+/// A compare queues one job per filament back to back, so the jobs just
+/// before the newest one count as the same run when their ids are
+/// consecutive and they share origin, printer, process and plate, each with
+/// a different filament. The run's first column (lowest id, the main
+/// filament) is shown. Known limit: two separate slices with different
+/// filaments and back-to-back ids read as one run.
 pub fn latest_for_source<'a>(jobs: &'a [JobView], source_path: &str) -> Option<&'a JobView> {
-    jobs.iter().rev().find(|j| j.source_path == source_path)
+    let mine: Vec<&JobView> = jobs
+        .iter()
+        .filter(|j| j.source_path == source_path && j.state != JobState::Cancelled)
+        .collect();
+    let mut first = *mine.last()?;
+    let mut filaments = vec![first.filament.as_str()];
+    for prev in mine.iter().rev().skip(1) {
+        let same_run = prev.id + 1 == first.id
+            && prev.origin == first.origin
+            && prev.printer == first.printer
+            && prev.process == first.process
+            && prev.bed_type == first.bed_type
+            && !filaments.contains(&prev.filament.as_str());
+        if !same_run {
+            break;
+        }
+        filaments.push(prev.filament.as_str());
+        first = prev;
+    }
+    Some(first)
 }
 
 /// The STL indicator's per-file state: "Slicing…", "2h 14m · 38 g" or
@@ -325,6 +353,52 @@ mod tests {
         let jobs = vec![running, done, failed];
         assert_eq!(latest_for_source(&jobs, "/w/a.stl").unwrap().id, 3);
         assert!(latest_for_source(&jobs, "/w/b.stl").is_none());
+        let queued = job(5, "/w/a.stl", JobState::Queued { position: 1 });
+        assert_eq!(badge_text(&queued).as_deref(), Some("Slicing…"));
+    }
+
+    #[test]
+    fn a_cancelled_job_leaves_the_earlier_badge_showing() {
+        let done = job(
+            1,
+            "/w/a.stl",
+            JobState::Done {
+                result: result(840, 3.69, None, 0),
+                cached: false,
+            },
+        );
+        let jobs = vec![done, job(2, "/w/a.stl", JobState::Cancelled)];
+        assert_eq!(latest_for_source(&jobs, "/w/a.stl").unwrap().id, 1);
+        let only_cancelled = vec![job(3, "/w/b.stl", JobState::Cancelled)];
+        assert!(latest_for_source(&only_cancelled, "/w/b.stl").is_none());
+    }
+
+    #[test]
+    fn a_compare_run_shows_its_first_column() {
+        let with = |id, filament: &str| JobView {
+            filament: filament.into(),
+            ..job(id, "/w/a.stl", JobState::Running { progress: None })
+        };
+        // An earlier single slice (1), then a compare run (3 PLA, 4 PETG).
+        let jobs = vec![with(1, "PLA"), with(3, "PLA"), with(4, "PETG")];
+        assert_eq!(latest_for_source(&jobs, "/w/a.stl").unwrap().id, 3);
+        // Ids that aren't back to back are separate slices.
+        let apart = vec![with(3, "PLA"), with(5, "PETG")];
+        assert_eq!(latest_for_source(&apart, "/w/a.stl").unwrap().id, 5);
+        // The same filament again is a re-slice, not a compare column.
+        let again = vec![with(3, "PLA"), with(4, "PLA")];
+        assert_eq!(latest_for_source(&again, "/w/a.stl").unwrap().id, 4);
+        // Another printer is another run.
+        let other = JobView {
+            printer: "P2".into(),
+            ..with(4, "PETG")
+        };
+        assert_eq!(
+            latest_for_source(&[with(3, "PLA"), other], "/w/a.stl")
+                .unwrap()
+                .id,
+            4
+        );
     }
 
     #[test]

@@ -76,26 +76,28 @@ pub fn StlIndicator() -> impl IntoView {
                                 let path_open = f.path.clone();
                                 let path_dismiss = f.path.clone();
                                 let source = f.path.clone();
-                                // Re-evaluated only when this file's newest job changes.
-                                let job = Memo::new(move |_| {
-                                    slicer.jobs.with(|js| latest_for_source(js, &source).cloned())
+                                // Only the job id and its line, so progress events
+                                // that keep "Slicing…" don't re-render the button.
+                                let badge = Memo::new(move |_| {
+                                    slicer.jobs.with(|js| {
+                                        let j = latest_for_source(js, &source)?;
+                                        Some((j.id, badge_text(j)?))
+                                    })
                                 });
                                 let navigate = use_navigate();
                                 view! {
                                     <div class="stl-item">
                                         <span class="stl-filename">{f.filename.clone()}</span>
-                                        {move || job.get().and_then(|j| {
-                                            let text = badge_text(&j)?;
-                                            let id = j.id;
+                                        {move || badge.get().map(|(id, text)| {
                                             let navigate = navigate.clone();
-                                            Some(view! {
+                                            view! {
                                                 <button
                                                     class="stl-slice-state"
                                                     on:click=move |_| navigate(&format!("/slice?job={id}"), Default::default())
                                                 >
                                                     {text}
                                                 </button>
-                                            })
+                                            }
                                         })}
                                         <div class="stl-item-actions">
                                             <button

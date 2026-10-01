@@ -4,22 +4,33 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::slicer::bridge;
-use crate::slicer::types::SlicerSettings;
+use crate::slicer::types::{SlicerSettings, SlicerSettingsView};
+
+/// Whether auto-slice has a printer, process and filament to slice with.
+fn has_defaults(effective: &SlicerSettings) -> bool {
+    effective.printer.is_some() && effective.process.is_some() && effective.filament.is_some()
+}
 
 #[component]
 pub fn SlicerSettingsSection() -> impl IntoView {
     let saved = RwSignal::new(None::<SlicerSettings>);
+    // What auto-slice would use: the saved choices, else Bambu Studio's.
+    let effective = RwSignal::new(None::<SlicerSettings>);
     // While a save is in flight the toggle is disabled, so answers can't
     // arrive out of order.
     let saving = RwSignal::new(false);
+    let clearing = RwSignal::new(false);
     let auto_status = RwSignal::new(None::<String>);
     let cache_status = RwSignal::new(None::<String>);
 
+    let apply = move |view: SlicerSettingsView| {
+        saved.try_set(Some(view.saved));
+        effective.try_set(Some(view.effective));
+    };
+
     spawn_local(async move {
         match bridge::get_settings().await {
-            Ok(view) => {
-                saved.try_set(Some(view.saved));
-            }
+            Ok(view) => apply(view),
             Err(e) => {
                 auto_status.try_set(Some(format!("Failed to load: {e}")));
             }
@@ -41,7 +52,7 @@ pub fn SlicerSettingsSection() -> impl IntoView {
         spawn_local(async move {
             match bridge::set_settings(next).await {
                 Ok(view) => {
-                    saved.try_set(Some(view.saved));
+                    apply(view);
                     auto_status.try_set(Some(if enabled {
                         "New STLs will be sliced with your default printer, process and filament."
                             .to_string()
@@ -58,7 +69,17 @@ pub fn SlicerSettingsSection() -> impl IntoView {
         });
     };
 
+    let missing_defaults = move || {
+        saved.with(|s| s.as_ref().is_some_and(|s| s.auto_slice))
+            && effective.with(|e| e.as_ref().is_some_and(|e| !has_defaults(e)))
+    };
+
     let clear = move |_| {
+        if clearing.try_get_untracked() != Some(false) {
+            return;
+        }
+        clearing.set(true);
+        cache_status.set(None);
         spawn_local(async move {
             // A refusal (e.g. "Finish or cancel the current slice first.")
             // is shown as the backend words it.
@@ -67,12 +88,13 @@ pub fn SlicerSettingsSection() -> impl IntoView {
                 Err(e) => e,
             };
             cache_status.try_set(Some(text));
+            clearing.try_set(false);
         });
     };
 
     view! {
         <div class="form-group slicer-settings">
-            <label class="checkbox-label" style="display: inline-flex; gap: 0.4rem;">
+            <label class="checkbox-label">
                 <input
                     id="slice-auto"
                     type="checkbox"
@@ -83,13 +105,22 @@ pub fn SlicerSettingsSection() -> impl IntoView {
                 "Slice new STLs automatically"
             </label>
             <p class="section-description">
-                "Uses the printer, process and filament you last sliced with on the Slice page."
+                "Uses the printer, process and filament you last sliced with, or Bambu Studio's current selection."
             </p>
+            <Show when=missing_defaults>
+                <span class="status-text status-warning slice-auto-missing">
+                    "Pick a printer, process and filament on the Slice page first."
+                </span>
+            </Show>
             <Show when=move || auto_status.get().is_some()>
                 <span class="status-text slice-auto-status">{move || auto_status.get().unwrap_or_default()}</span>
             </Show>
             <div class="input-row">
-                <button class="btn btn-secondary btn-sm slice-clear-cache" on:click=clear>
+                <button
+                    class="btn btn-secondary btn-sm slice-clear-cache"
+                    disabled=move || clearing.get()
+                    on:click=clear
+                >
                     "Clear slice cache"
                 </button>
             </div>

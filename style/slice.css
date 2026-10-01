@@ -136,3 +136,9 @@
     text-align: left;
 }
 .stl-slice-state:hover { text-decoration: underline; }
+
+/* Settings → Application: the auto-slice toggle (outside the .nd scope). */
+.slicer-settings .checkbox-label {
+    display: inline-flex;
+    gap: 0.4rem;
+}

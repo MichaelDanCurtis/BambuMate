@@ -19,6 +19,7 @@ import { chromium, webkit } from "playwright";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import { deflateSync } from "node:zlib";
 import { extname, join, resolve } from "node:path";
 import {
@@ -898,50 +899,117 @@ async function driveApp(browserType, engine, baseUrl) {
     return `${rows} providers`;
   });
 
-  await step(run, page, "auto-slice toggle and Clear slice cache reach the backend", async () => {
-    await page.waitForSelector("#slice-auto:not([disabled])", { timeout: 10000 });
-    const settings = await page.evaluate(() => window.__fixtures.slicer_set_settings);
-    const on = { ...settings, saved: { ...settings.saved, auto_slice: true } };
-    await withFixtures({ slicer_set_settings: on }, async () => {
+  const waitText = (sel, text) =>
+    page.waitForFunction(([s, t]) => document.querySelector(s)?.innerText === t, [sel, text], { timeout: 5000 });
+  // The `settings` argument of the set_settings calls made after `base` calls.
+  const savedSince = async (base) => (await callsOf("slicer_set_settings")).slice(base).map((c) => c.args.settings);
+  // Saved choices for every field, so the payload checks below compare real
+  // values (a None goes over the wire as an absent key).
+  const fixtureSettings = await page.evaluate(() => window.__fixtures.slicer_get_settings);
+  const choices = { ...fixtureSettings.effective, auto_slice: false };
+
+  await step(run, page, "turning auto-slice on saves the full settings", async () => {
+    const withChoices = { ...fixtureSettings, saved: choices };
+    // Bambu Studio has no printer selected, so auto-slice has nothing to use.
+    const on = {
+      ...fixtureSettings,
+      saved: { ...choices, auto_slice: true },
+      effective: { ...choices, auto_slice: true, printer: null },
+    };
+    await withFixtures({ slicer_get_settings: withChoices, slicer_set_settings: on }, async () => {
+      // Reopen Settings so it loads the saved choices.
+      await page.click('a[href="/about"]');
+      await page.waitForSelector(".about-page", { timeout: 15000 });
+      await page.click('a[href="/settings"]');
+      await page.waitForSelector("#slice-auto:not([disabled])", { timeout: 10000 });
+      const base = await callCount("slicer_set_settings");
       await page.check("#slice-auto");
-      await page.waitForFunction(
-        () => window.__ipc.calls.some((c) => c.cmd === "slicer_set_settings" && c.args.settings.auto_slice === true),
-        null,
-        { timeout: 5000 }
-      );
-      await page.waitForSelector(".slice-auto-status", { timeout: 5000 });
+      await calledPast("slicer_set_settings", base);
+      const sent = await savedSince(base);
+      const want = [{ ...choices, auto_slice: true }];
+      if (!isDeepStrictEqual(sent, want)) throw new Error(JSON.stringify(sent));
+      await waitText(".slice-auto-status", "New STLs will be sliced with your default printer, process and filament.");
+      await waitText(".slice-auto-missing", "Pick a printer, process and filament on the Slice page first.");
+      await page.waitForSelector("#slice-auto:not([disabled])", { timeout: 5000 });
       if (!(await page.isChecked("#slice-auto"))) throw new Error("toggle did not stay on");
     });
+  });
+
+  await step(run, page, "turning auto-slice off saves it and drops the hint", async () => {
+    const base = await callCount("slicer_set_settings");
+    await page.uncheck("#slice-auto");
+    await calledPast("slicer_set_settings", base);
+    const sent = await savedSince(base);
+    const want = [{ ...choices, auto_slice: false }];
+    if (!isDeepStrictEqual(sent, want)) throw new Error(JSON.stringify(sent));
+    await waitText(".slice-auto-status", "Auto-slicing is off.");
+    if ((await page.locator(".slice-auto-missing").count()) !== 0) throw new Error("hint still shown");
+    if (await page.isChecked("#slice-auto")) throw new Error("toggle still on");
+  });
+
+  await step(run, page, "a refused auto-slice change rolls back and says why", async () => {
+    const reason = "Couldn't write preferences.json";
+    await withFixtures({ slicer_set_settings: { __reject: reason } }, async () => {
+      const base = await callCount("slicer_set_settings");
+      // click, not check: the rollback may land before check() re-reads the box.
+      await page.click("#slice-auto");
+      await calledPast("slicer_set_settings", base);
+      await waitText(".slice-auto-status", `Failed to save: ${reason}`);
+      await page.waitForSelector("#slice-auto:not([disabled])", { timeout: 5000 });
+      if (await page.isChecked("#slice-auto")) throw new Error("toggle not rolled back");
+    });
+  });
+
+  await step(run, page, "Clear slice cache reports bytes freed and refusals inline", async () => {
     await page.click(".slice-clear-cache");
-    await page.waitForSelector(".slice-cache-status", { timeout: 5000 });
-    const text = await page.locator(".slice-cache-status").innerText();
-    if (text !== "Cleared 12.0 MB.") throw new Error(text);
+    await waitText(".slice-cache-status", "Cleared 12.0 MB.");
     // While a slice is queued or running the backend refuses; the reason shows inline.
     const busy = "Finish or cancel the current slice first.";
     await withFixtures({ slicer_clear_cache: { __reject: busy } }, async () => {
       await page.click(".slice-clear-cache");
-      await page.waitForFunction((b) => document.querySelector(".slice-cache-status")?.innerText === b, busy, { timeout: 5000 });
+      await waitText(".slice-cache-status", busy);
+    });
+  });
+
+  await step(run, page, "Clear slice cache is disabled until the backend answers", async () => {
+    await withFixtures({ slicer_clear_cache: { __hold: "clear-cache", answer: 12582912 } }, async () => {
+      await page.click(".slice-clear-cache");
+      await page.waitForSelector(".slice-clear-cache[disabled]", { timeout: 5000 });
+      // The previous run's message is gone while this one is in flight.
+      if ((await page.locator(".slice-cache-status").count()) !== 0) throw new Error("old status still shown");
+      await release("clear-cache");
+      await waitText(".slice-cache-status", "Cleared 12.0 MB.");
+      await page.waitForSelector(".slice-clear-cache:not([disabled])", { timeout: 5000 });
     });
   });
 
   await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });
 
-  await step(run, page, "the STL list shows each file's auto-slice state", async () => {
+  {
     const inbox = [{ path: STL_INBOX_FILE, filename: "bracket.stl", received_at: "2026-10-01T12:00:00Z" }];
+    const auto = { origin: "auto", source_path: STL_INBOX_FILE, model_name: "bracket.stl" };
     await withFixtures({ list_received_stls: inbox }, async () => {
-      // The indicator polls every 5 s.
-      await page.waitForSelector(".stl-badge", { timeout: 15000 });
-      await page.click(".stl-badge");
-      const auto = { origin: "auto", source_path: STL_INBOX_FILE, model_name: "bracket.stl" };
-      await emitJob(sliceJob(9, { state: "running", progress: null }, auto));
-      await page.waitForFunction(() => document.querySelector(".stl-slice-state")?.innerText === "Slicing…", null, { timeout: 5000 });
-      await emitJob(done(9, sliceResult(), auto));
-      await page.waitForFunction(() => document.querySelector(".stl-slice-state")?.innerText === "14m · 3.69 g", null, { timeout: 5000 });
-      await page.click(".stl-slice-state");
-      await page.waitForFunction(() => location.pathname === "/slice" && location.search === "?job=9", null, { timeout: 5000 });
-      await page.waitForFunction(() => document.querySelector(".sl-job-model")?.innerText === "bracket.stl", null, { timeout: 5000 });
+      await step(run, page, "a failed auto-slice shows Slice failed in the STL list", async () => {
+        // The indicator polls every 5 s.
+        await page.waitForSelector(".stl-badge", { timeout: 15000 });
+        await page.click(".stl-badge");
+        await page.waitForSelector(".stl-item", { timeout: 5000 });
+        const error = { kind: "slicer", message: "Bambu Studio couldn't slice this model: x" };
+        await emitJob(sliceJob(8, { state: "failed", error }, auto));
+        await waitText(".stl-slice-state", "Slice failed");
+      });
+
+      await step(run, page, "the STL list shows each file's auto-slice state", async () => {
+        await emitJob(sliceJob(9, { state: "running", progress: null }, auto));
+        await waitText(".stl-slice-state", "Slicing…");
+        await emitJob(done(9, sliceResult(), auto));
+        await waitText(".stl-slice-state", "14m · 3.69 g");
+        await page.click(".stl-slice-state");
+        await page.waitForFunction(() => location.pathname === "/slice" && location.search === "?job=9", null, { timeout: 5000 });
+        await waitText(".sl-job-model", "bracket.stl");
+      });
     });
-  });
+  }
 
   // -- health check ----------------------------------------------------------
   await step(run, page, "navigate to Health Check", async () => {
