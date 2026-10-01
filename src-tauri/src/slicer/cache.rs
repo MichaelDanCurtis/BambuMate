@@ -92,17 +92,16 @@ impl SliceCache {
         &self.root
     }
 
-    pub fn entry_dir(&self, key: &str) -> PathBuf {
-        self.root.join(key)
+    /// The folder for `key`, or `None` when `key` isn't a cache key (64
+    /// hex characters), so no other path can be reached through it.
+    pub fn entry_dir(&self, key: &str) -> Option<PathBuf> {
+        is_key(key).then(|| self.root.join(key))
     }
 
     /// A cached result, marked as just used. Its `output_path` points at
     /// the cached file.
     pub fn get(&self, key: &str) -> Option<SliceResult> {
-        if !is_key(key) {
-            return None;
-        }
-        let dir = self.entry_dir(key);
+        let dir = self.entry_dir(key)?;
         let summary = dir.join(SUMMARY_FILE);
         let output = dir.join(OUTPUT_FILE);
         if !output.is_file() {
@@ -121,7 +120,7 @@ impl SliceCache {
         let dir = self
             .root
             .join(format!("{STAGING_PREFIX}{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).map_err(|e| SlicerError::Io(e.to_string()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| SlicerError::io(e.to_string()))?;
         Ok(dir)
     }
 
@@ -133,18 +132,17 @@ impl SliceCache {
         staging: &Path,
         result: &SliceResult,
     ) -> Result<SliceResult, SlicerError> {
-        let io = |e: std::io::Error| SlicerError::Io(e.to_string());
-        if !is_key(key) {
-            return Err(SlicerError::Io(format!("bad cache key {key}")));
-        }
+        let io = |e: std::io::Error| SlicerError::io(e.to_string());
+        let dir = self
+            .entry_dir(key)
+            .ok_or_else(|| SlicerError::io(format!("bad cache key {key}")))?;
         let mut stored = result.clone();
         stored.output_path = String::new();
         std::fs::write(
             staging.join(SUMMARY_FILE),
-            serde_json::to_vec(&stored).map_err(|e| SlicerError::Io(e.to_string()))?,
+            serde_json::to_vec(&stored).map_err(|e| SlicerError::io(e.to_string()))?,
         )
         .map_err(io)?;
-        let dir = self.entry_dir(key);
         if dir.exists() {
             std::fs::remove_dir_all(&dir).map_err(io)?;
         }
@@ -283,6 +281,13 @@ mod tests {
         process.process.push(' ');
         let other_process = cache_key(&model, ModelKind::Stl, &process, "02.08.02.61").unwrap();
         std::fs::write(&model, b"solid b").unwrap();
+        let other_kind = cache_key(
+            &model,
+            ModelKind::ThreeMf,
+            &configs("{\"f\":1}"),
+            "02.08.02.61",
+        )
+        .unwrap();
         let other_model =
             cache_key(&model, ModelKind::Stl, &configs("{\"f\":1}"), "02.08.02.61").unwrap();
         let all = [
@@ -291,6 +296,7 @@ mod tests {
             &other_version,
             &other_machine,
             &other_process,
+            &other_kind,
             &other_model,
         ];
         for (i, a) in all.iter().enumerate() {
@@ -323,6 +329,9 @@ mod tests {
         );
         assert!(cache.get(&key(2)).is_none());
         assert!(cache.get("../../etc").is_none());
+        assert_eq!(cache.entry_dir(&key(1)), Some(dir.path().join(key(1))));
+        assert_eq!(cache.entry_dir("../../etc"), None);
+        assert_eq!(cache.entry_dir(&"g".repeat(64)), None);
     }
 
     #[test]

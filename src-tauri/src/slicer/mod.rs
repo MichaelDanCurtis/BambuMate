@@ -46,11 +46,21 @@ pub enum SlicerError {
     BadOutput,
     #[error("{0}")]
     InvalidModel(String),
-    #[error("BambuMate couldn't prepare the slicing job: {0}")]
+    /// The full user-facing message. Build the usual "couldn't prepare"
+    /// one with [`SlicerError::io`].
+    #[error("{0}")]
     Io(String),
 }
 
 impl SlicerError {
+    /// An [`Io`](SlicerError::Io) error while preparing a job:
+    /// "BambuMate couldn't prepare the slicing job: {detail}".
+    pub fn io(detail: impl std::fmt::Display) -> Self {
+        SlicerError::Io(format!(
+            "BambuMate couldn't prepare the slicing job: {detail}"
+        ))
+    }
+
     /// Stable machine-readable name, used by the frontend and agent tools.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -197,6 +207,15 @@ mod tests {
             SlicerError::BadOutput.to_string(),
             "Bambu Studio's output couldn't be read."
         );
+    }
+
+    #[test]
+    fn io_errors_read_as_preparation_failures() {
+        assert_eq!(
+            SlicerError::io("disk full").to_string(),
+            "BambuMate couldn't prepare the slicing job: disk full"
+        );
+        assert_eq!(SlicerError::io("x").kind(), "io");
     }
 
     #[test]

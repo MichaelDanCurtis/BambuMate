@@ -195,7 +195,7 @@ impl PresetIndex {
                 parent,
             },
             ResolveError::Circular(_) | ResolveError::TooDeep(_) => {
-                SlicerError::Io(format!("preset '{name}' has a broken inheritance chain"))
+                SlicerError::io(format!("preset '{name}' has a broken inheritance chain"))
             }
         })?;
         let source = idx.sources.get(name).copied().unwrap_or(PresetSource::User);
@@ -289,7 +289,7 @@ impl PresetIndex {
     /// [`SlicerError::IncompatibleProcess`].
     pub fn prepare(&self, choice: &PresetChoice) -> Result<PreparedConfigs, SlicerError> {
         if choice.filaments.is_empty() {
-            return Err(SlicerError::Io(not_chosen("filament")));
+            return Err(SlicerError::io(not_chosen("filament")));
         }
         let machine = self.flatten(PresetKind::Machine, &choice.printer)?;
         let printer_system = machine.system_name.clone();
@@ -443,7 +443,7 @@ fn cli_text(kind: PresetKind, name: &str, flat: Flattened) -> String {
 /// Writes the prepared configs into `dir` as `machine.json`,
 /// `process.json` and `filament_<n>.json`.
 pub fn write_configs(dir: &Path, prepared: &PreparedConfigs) -> Result<ConfigPaths, SlicerError> {
-    let io = |e: std::io::Error| SlicerError::Io(e.to_string());
+    let io = |e: std::io::Error| SlicerError::io(e.to_string());
     std::fs::create_dir_all(dir).map_err(io)?;
     let machine = dir.join("machine.json");
     let process = dir.join("process.json");
@@ -1056,7 +1056,7 @@ pub(crate) mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            SlicerError::Io("No filament preset chosen. Pick one on the Slice page.".into())
+            SlicerError::io("No filament preset chosen. Pick one on the Slice page.")
         );
     }
 

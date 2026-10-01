@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,7 +14,9 @@ use tokio::sync::{watch, Notify};
 use super::binary::SlicerBinary;
 use super::cache::{cache_key, SliceCache};
 use super::command::{build_args, Progress, SliceCommand, OUTPUT_FILE, RESULT_FILE};
-use super::result::{cli_error_message, parse_cli_result, parse_output, SliceResult};
+use super::result::{
+    cli_error_message, cli_reported_error, parse_cli_result, parse_output, SliceResult,
+};
 use super::run::{RunError, RunOutput, RunSpec};
 use super::settings::{write_configs, PresetChoice, PresetIndex};
 use super::{validate_model_path, ErrorView, ModelKind, SlicerError};
@@ -99,6 +101,11 @@ pub trait SlicerEnv: Send + Sync {
 }
 
 /// Receives every job update.
+///
+/// The service calls this while holding its state lock, so updates arrive in
+/// exactly the order the states changed. An implementation must return
+/// promptly and must never call back into the [`SlicerService`] (that would
+/// deadlock). A Tauri `emit` is fine.
 pub trait JobEvents: Send + Sync {
     fn job(&self, view: &JobView);
 }
@@ -138,6 +145,16 @@ impl SlicerEnv for BambuStudioEnv {
     }
 }
 
+/// The name the service's work folder must have, e.g.
+/// `<temp>/bambumate-slicer`. [`SlicerService::new`] only clears crash
+/// leftovers from a folder with this name.
+pub const WORK_DIR_NAME: &str = "bambumate-slicer";
+/// Every job folder inside the work folder starts with this.
+const JOB_DIR_PREFIX: &str = "job-";
+/// What a job that died inside BambuMate reports. The details are logged.
+const INTERNAL_ERROR: &str =
+    "BambuMate couldn't finish the slicing job: an internal error stopped it.";
+
 struct Entry {
     view: JobView,
     model: PathBuf,
@@ -170,8 +187,8 @@ pub struct SlicerService {
     inner: Arc<Inner>,
 }
 
-/// Removes a job's working folder (configs, Bambu Studio's data dir, loose
-/// G-code) however the job ends.
+/// Removes a job's working folder (model copy, configs, Bambu Studio's data
+/// dir, loose G-code) however the job ends.
 struct WorkDir(PathBuf);
 
 impl Drop for WorkDir {
@@ -196,9 +213,46 @@ fn model_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// A job that died inside BambuMate (a panic, a failed task). The cause is
+/// logged rather than shown.
+fn internal_error(cause: impl std::fmt::Display) -> SlicerError {
+    tracing::debug!("slicing job stopped by an internal error: {cause}");
+    SlicerError::Io(INTERNAL_ERROR.into())
+}
+
+/// Removes job folders a crash left in `work_root`. Only a folder named
+/// [`WORK_DIR_NAME`] is touched, and in it only `job-*` folders, so a
+/// misconfigured path can't cost the user their files.
+fn remove_leftover_jobs(work_root: &Path) {
+    if work_root.file_name() != Some(std::ffi::OsStr::new(WORK_DIR_NAME)) {
+        tracing::warn!(
+            "slicer work folder {} isn't named {WORK_DIR_NAME}; not clearing it",
+            work_root.display()
+        );
+        return;
+    }
+    // Not following a symlink: only a real folder is cleared.
+    match std::fs::symlink_metadata(work_root) {
+        Ok(meta) if meta.is_dir() => {}
+        _ => return,
+    }
+    let Ok(read) = std::fs::read_dir(work_root) else {
+        return;
+    };
+    for e in read.flatten() {
+        if e.file_name().to_string_lossy().starts_with(JOB_DIR_PREFIX) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 impl SlicerService {
     /// Builds the service and its worker. The caller spawns the worker
     /// future once (`tauri::async_runtime::spawn` in the app).
+    ///
+    /// `work_root` must be a folder only this service uses, named
+    /// [`WORK_DIR_NAME`]. Job folders a crash left there are removed; a
+    /// folder with any other name is used but never cleared.
     pub fn new(
         env: Arc<dyn SlicerEnv>,
         events: Arc<dyn JobEvents>,
@@ -207,7 +261,7 @@ impl SlicerService {
         timeout: Duration,
     ) -> (Self, impl std::future::Future<Output = ()> + Send + 'static) {
         // Leftovers from a crash: no job can be running yet.
-        let _ = std::fs::remove_dir_all(&work_root);
+        remove_leftover_jobs(&work_root);
         cache.remove_staging();
         let (changed, _) = watch::channel(0);
         let svc = Self {
@@ -230,12 +284,15 @@ impl SlicerService {
         &self.inner.cache
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock(&self) -> MutexGuard<'_, State> {
         self.inner.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn publish(&self, views: Vec<JobView>) {
-        for v in &views {
+    /// Publishes `views`. Takes the state guard so it can only be called
+    /// with the lock held: two changes can then never be published in the
+    /// opposite order to the one they were made in.
+    fn publish(&self, _held: &MutexGuard<'_, State>, views: &[JobView]) {
+        for v in views {
             self.inner.events.job(v);
         }
         self.inner.changed.send_modify(|n| *n += 1);
@@ -257,22 +314,22 @@ impl SlicerService {
         changed
     }
 
-    fn set_state(&self, id: u64, state: JobState) -> Option<JobView> {
-        let view = {
-            let mut s = self.lock();
-            let e = s.jobs.iter_mut().find(|e| e.view.id == id)?;
-            e.view.state = state;
-            e.view.clone()
+    /// Sets a job's state and publishes it, under one lock.
+    fn set_state(&self, id: u64, state: JobState) {
+        let mut s = self.lock();
+        let Some(e) = s.jobs.iter_mut().find(|e| e.view.id == id) else {
+            return;
         };
-        self.publish(vec![view.clone()]);
-        Some(view)
+        e.view.state = state;
+        let view = e.view.clone();
+        self.publish(&s, &[view]);
     }
 
     /// Queues a job. Fails at once (nothing queued) when the model path is
     /// not an existing `.stl` or `.3mf` file.
     pub fn enqueue(&self, req: JobRequest) -> Result<JobView, SlicerError> {
         let (model, kind) = validate_model_path(&req.source_path)?;
-        let (view, mut updates) = {
+        let view = {
             let mut s = self.lock();
             s.next_id += 1;
             let id = s.next_id;
@@ -306,17 +363,21 @@ impl SlicerService {
                 let drop: Vec<u64> = finished[..finished.len() - KEEP_FINISHED].to_vec();
                 s.jobs.retain(|e| !drop.contains(&e.view.id));
             }
-            (view, Self::renumber(&mut s))
+            let mut updates = Self::renumber(&mut s);
+            updates.retain(|v| v.id != view.id);
+            updates.insert(0, view.clone());
+            self.publish(&s, &updates);
+            view
         };
-        updates.retain(|v| v.id != view.id);
-        updates.insert(0, view.clone());
-        self.publish(updates);
         self.inner.wake.notify_one();
         Ok(view)
     }
 
-    /// Cancels a queued or running job. `false` when it already finished
-    /// or doesn't exist.
+    /// Asks a queued or running job to stop. `true` means the request was
+    /// taken: a queued job is `Cancelled` at once, and a running one ends
+    /// `Cancelled` at its next check, unless it already got as far as
+    /// storing its result, in which case it ends `Done`. `false` when the
+    /// job already finished or doesn't exist.
     pub fn cancel(&self, id: u64) -> bool {
         let mut s = self.lock();
         if let Some((running, tx)) = &s.running {
@@ -334,8 +395,7 @@ impl SlicerService {
             e.view.state = JobState::Cancelled;
             updates.insert(0, e.view.clone());
         }
-        drop(s);
-        self.publish(updates);
+        self.publish(&s, &updates);
         true
     }
 
@@ -372,24 +432,28 @@ impl SlicerService {
         }
     }
 
+    /// Takes the next job off the queue and marks it running, publishing
+    /// the new queue positions with it.
+    fn start_next(&self) -> Option<(u64, watch::Receiver<bool>)> {
+        let mut s = self.lock();
+        let id = s.queue.pop_front()?;
+        let (tx, rx) = watch::channel(false);
+        s.running = Some((id, tx));
+        let mut updates = Self::renumber(&mut s);
+        if let Some(e) = s.jobs.iter_mut().find(|e| e.view.id == id) {
+            e.view.state = JobState::Running { progress: None };
+            updates.insert(0, e.view.clone());
+        }
+        self.publish(&s, &updates);
+        Some((id, rx))
+    }
+
     async fn worker(self) {
         loop {
-            let next = {
-                let mut s = self.lock();
-                let id = s.queue.pop_front();
-                let updates = Self::renumber(&mut s);
-                id.map(|id| {
-                    let (tx, rx) = watch::channel(false);
-                    s.running = Some((id, tx));
-                    (id, rx, updates)
-                })
-            };
-            let Some((id, cancel, updates)) = next else {
+            let Some((id, cancel)) = self.start_next() else {
                 self.inner.wake.notified().await;
                 continue;
             };
-            self.publish(updates);
-            self.set_state(id, JobState::Running { progress: None });
             let outcome = self.run_isolated(id, cancel).await;
             let state = match outcome {
                 Ok((result, cached)) => JobState::Done { result, cached },
@@ -398,16 +462,12 @@ impl SlicerService {
             };
             // One step, so there is no moment where the job is neither
             // running nor finished.
-            let view = {
-                let mut s = self.lock();
-                s.running = None;
-                s.jobs.iter_mut().find(|e| e.view.id == id).map(|e| {
-                    e.view.state = state;
-                    e.view.clone()
-                })
-            };
-            if let Some(view) = view {
-                self.publish(vec![view]);
+            let mut s = self.lock();
+            s.running = None;
+            if let Some(e) = s.jobs.iter_mut().find(|e| e.view.id == id) {
+                e.view.state = state;
+                let view = e.view.clone();
+                self.publish(&s, &[view]);
             }
         }
     }
@@ -424,10 +484,7 @@ impl SlicerService {
         let mut task = AbortOnDrop(tokio::spawn(async move { svc.run_job(id, cancel).await }));
         match (&mut task.0).await {
             Ok(outcome) => outcome,
-            Err(e) => {
-                tracing::error!("slicing job {id} stopped unexpectedly: {e}");
-                Err(Some(SlicerError::Io("an internal error stopped it".into())))
-            }
+            Err(e) => Err(Some(internal_error(e))),
         }
     }
 
@@ -437,55 +494,68 @@ impl SlicerService {
         id: u64,
         cancel: watch::Receiver<bool>,
     ) -> Result<(SliceResult, bool), Option<SlicerError>> {
-        let (model, kind, choice) = {
+        let (source, kind, choice) = {
             let s = self.lock();
             let e = s
                 .jobs
                 .iter()
                 .find(|e| e.view.id == id)
-                .ok_or(Some(SlicerError::Io("job vanished".into())))?;
+                .ok_or_else(|| Some(internal_error(format!("job {id} vanished"))))?;
             (e.model.clone(), e.kind, e.choice.clone())
         };
         let env = self.inner.env.clone();
         let binary = env.detect().await?;
         let version = binary.version.to_string();
-        let (prepared, key) = {
-            let env = env.clone();
-            let model = model.clone();
-            tokio::task::spawn_blocking(move || {
-                let prepared = env.presets()?.prepare(&choice)?;
-                let key = cache_key(&model, kind, &prepared, &version)
-                    .map_err(|e| SlicerError::Io(e.to_string()))?;
-                Ok::<_, SlicerError>((prepared, key))
-            })
-            .await
-            .map_err(|e| Some(SlicerError::Io(e.to_string())))??
-        };
-        if let Some(hit) = self.inner.cache.get(&key) {
-            return Ok((hit, true));
-        }
-        if *cancel.borrow() {
-            return Err(None);
-        }
 
         let work_dir = self
             .inner
             .work_root
-            .join(format!("job-{id}-{}", uuid::Uuid::new_v4()));
+            .join(format!("{JOB_DIR_PREFIX}{id}-{}", uuid::Uuid::new_v4()));
         // Bambu Studio takes the config files as one ';'-separated list, so
         // `build_args` refuses a path with ';' in it. Say why up front.
         if work_dir.to_string_lossy().contains(';') {
-            return Err(Some(SlicerError::Io(format!(
+            return Err(Some(SlicerError::io(format!(
                 "its working folder {} has a ';' in its path, which Bambu Studio can't load settings from",
                 self.inner.work_root.display()
             ))));
         }
         let work = WorkDir(work_dir);
+        // Hash and slice one private copy, so a model that changes on disk
+        // (the watch folder, the user saving again) can't make the cache key
+        // describe different bytes than Bambu Studio read. The file name is
+        // kept: Bambu Studio names the object after it.
+        let model = work.0.join("model").join(
+            source
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("model")),
+        );
+        let (prepared, key) = {
+            let env = env.clone();
+            let model = model.clone();
+            tokio::task::spawn_blocking(move || {
+                let io = |e: std::io::Error| SlicerError::io(e.to_string());
+                let prepared = env.presets()?.prepare(&choice)?;
+                std::fs::create_dir_all(model.parent().unwrap_or(&model)).map_err(io)?;
+                std::fs::copy(&source, &model).map_err(io)?;
+                let key = cache_key(&model, kind, &prepared, &version).map_err(io)?;
+                Ok::<_, SlicerError>((prepared, key))
+            })
+            .await
+            .map_err(|e| Some(internal_error(e)))??
+        };
+        if *cancel.borrow() {
+            return Err(None);
+        }
+        if let Some(hit) = self.inner.cache.get(&key) {
+            return Ok((hit, true));
+        }
+
         let configs = write_configs(&work.0.join("configs"), &prepared)?;
         let out_dir = work.0.join("out");
         let data_dir = work.0.join("datadir");
         for d in [&out_dir, &data_dir] {
-            std::fs::create_dir_all(d).map_err(|e| SlicerError::Io(e.to_string()))?;
+            std::fs::create_dir_all(d).map_err(|e| SlicerError::io(e.to_string()))?;
         }
         let cmd = SliceCommand {
             model,
@@ -505,7 +575,7 @@ impl SlicerService {
                 &binary.exe,
                 &cmd,
                 self.inner.timeout,
-                cancel,
+                cancel.clone(),
                 &mut on_progress,
             )
             .await;
@@ -513,25 +583,37 @@ impl SlicerService {
             Ok(o) => o,
             Err(RunError::Cancelled) => return Err(None),
             Err(RunError::Timeout) => return Err(Some(SlicerError::Timeout)),
-            Err(RunError::Spawn(e)) => {
-                return Err(Some(SlicerError::Slicer {
-                    message: format!("it could not be started ({e})"),
-                }))
-            }
-            Err(RunError::Wait(e)) => {
-                return Err(Some(SlicerError::Slicer {
-                    message: format!("BambuMate couldn't wait for it to finish ({e})"),
-                }))
+            Err(RunError::Spawn(e) | RunError::Wait(e)) => {
+                return Err(Some(SlicerError::Io(format!(
+                    "BambuMate couldn't run Bambu Studio: {e}"
+                ))))
             }
         };
+        // A cancel that arrived as Bambu Studio exited is still honoured.
+        if *cancel.borrow() {
+            return Err(None);
+        }
 
         let cli_text = std::fs::read_to_string(out_dir.join(RESULT_FILE)).ok();
         let cli = cli_text.as_deref().and_then(parse_cli_result);
         let output_file = out_dir.join(OUTPUT_FILE);
-        if output.exit_code != Some(0) || !output_file.is_file() {
+        if output.exit_code != Some(0) {
             return Err(Some(SlicerError::Slicer {
                 message: cli_error_message(cli.as_ref(), &output.stderr, output.exit_code),
             }));
+        }
+        if !output_file.is_file() {
+            // Exit 0 with nothing written: only blame the model when the CLI
+            // said why.
+            return Err(Some(
+                match cli_reported_error(cli.as_ref(), &output.stderr) {
+                    Some(message) => SlicerError::Slicer { message },
+                    None => {
+                        tracing::debug!("Bambu Studio exited 0 without writing {OUTPUT_FILE}");
+                        SlicerError::BadOutput
+                    }
+                },
+            ));
         }
         // Parsing, copying and eviction are blocking file work. `work`
         // outlives this, so the output is still there.
@@ -542,7 +624,7 @@ impl SlicerService {
             let finish = || -> Result<SliceResult, SlicerError> {
                 let parsed = parse_output(&output_file, cli_text.as_deref(), Some(&staging))?;
                 std::fs::copy(&output_file, staging.join(OUTPUT_FILE))
-                    .map_err(|e| SlicerError::Io(e.to_string()))?;
+                    .map_err(|e| SlicerError::io(e.to_string()))?;
                 cache.put(&key, &staging, &parsed)
             };
             let result = finish();
@@ -552,7 +634,7 @@ impl SlicerService {
             result
         })
         .await
-        .map_err(|e| Some(SlicerError::Io(e.to_string())))??;
+        .map_err(|e| Some(internal_error(e)))??;
         drop(work);
         Ok((stored, false))
     }
@@ -578,6 +660,10 @@ mod tests {
         Gated(Arc<Notify>),
         /// A bug: panic mid-run.
         Panic,
+        /// Exit 0 having written nothing.
+        SilentExit,
+        /// Exit 0 having written a file that isn't a sliced 3MF.
+        Garbage,
     }
 
     struct FakeEnv {
@@ -588,6 +674,10 @@ mod tests {
         concurrent: AtomicUsize,
         max_concurrent: AtomicUsize,
         seen_dirs: Mutex<Vec<PathBuf>>,
+        /// The model path each run got and its bytes once the run ended.
+        models: Mutex<Vec<(PathBuf, Vec<u8>)>>,
+        /// When set, `detect` waits for it.
+        detect_gate: Mutex<Option<Arc<Notify>>>,
     }
 
     impl FakeEnv {
@@ -603,6 +693,8 @@ mod tests {
                 concurrent: AtomicUsize::new(0),
                 max_concurrent: AtomicUsize::new(0),
                 seen_dirs: Mutex::new(Vec::new()),
+                models: Mutex::new(Vec::new()),
+                detect_gate: Mutex::new(None),
             })
         }
     }
@@ -610,6 +702,10 @@ mod tests {
     #[async_trait]
     impl SlicerEnv for FakeEnv {
         async fn detect(&self) -> Result<SlicerBinary, SlicerError> {
+            let gate = self.detect_gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             self.detect.lock().unwrap().clone()
         }
         fn presets(&self) -> Result<PresetIndex, SlicerError> {
@@ -681,6 +777,17 @@ mod tests {
                     _ = tokio::time::sleep(timeout) => Err(RunError::Timeout),
                 },
                 Script::Panic => panic!("fake slicer bug"),
+                Script::SilentExit => Ok(RunOutput {
+                    exit_code: Some(0),
+                    stderr: "[2026-10-01] [error] noise on a good run".into(),
+                }),
+                Script::Garbage => {
+                    std::fs::write(cmd.out_dir.join(OUTPUT_FILE), b"not a zip").unwrap();
+                    Ok(RunOutput {
+                        exit_code: Some(0),
+                        stderr: String::new(),
+                    })
+                }
                 Script::Gated(gate) => tokio::select! {
                     _ = cancelled => Err(RunError::Cancelled),
                     _ = gate.notified() => {
@@ -689,6 +796,8 @@ mod tests {
                     }
                 },
             };
+            let bytes = std::fs::read(&cmd.model).unwrap();
+            self.models.lock().unwrap().push((cmd.model.clone(), bytes));
             self.concurrent.fetch_sub(1, Ordering::SeqCst);
             out
         }
@@ -713,7 +822,8 @@ mod tests {
         harness_with_work(scripts, timeout, "work")
     }
 
-    fn harness_with_work(scripts: Vec<Script>, timeout: Duration, work: &str) -> Harness {
+    /// The work folder is `<tempdir>/<parent>/bambumate-slicer`.
+    fn harness_with_work(scripts: Vec<Script>, timeout: Duration, parent: &str) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let env = FakeEnv::new(scripts);
         let events = Arc::new(Recorder::default());
@@ -724,7 +834,7 @@ mod tests {
                 dir.path().join("slices"),
                 super::super::cache::DEFAULT_CAP_BYTES,
             ),
-            dir.path().join(work),
+            dir.path().join(parent).join(WORK_DIR_NAME),
             timeout,
         );
         tokio::spawn(worker);
@@ -990,6 +1100,7 @@ mod tests {
             panic!()
         };
         assert_eq!(error.kind, "io");
+        assert_eq!(error.message, INTERNAL_ERROR);
         assert!(matches!(
             h.finish(b.id).await.state,
             JobState::Done { cached: false, .. }
@@ -1021,6 +1132,211 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exit_0_without_output_is_bad_output() {
+        let h = harness(vec![Script::SilentExit], Duration::from_secs(30));
+        let a = h
+            .svc
+            .enqueue(h.request(&h.model("a.stl", b"a"), PLA))
+            .unwrap();
+        let JobState::Failed { error } = h.finish(a.id).await.state else {
+            panic!()
+        };
+        assert_eq!(error, SlicerError::BadOutput.view());
+    }
+
+    #[tokio::test]
+    async fn exit_0_with_unreadable_output_is_bad_output() {
+        let h = harness(vec![Script::Garbage], Duration::from_secs(30));
+        let a = h
+            .svc
+            .enqueue(h.request(&h.model("a.stl", b"a"), PLA))
+            .unwrap();
+        let JobState::Failed { error } = h.finish(a.id).await.state else {
+            panic!()
+        };
+        assert_eq!(error, SlicerError::BadOutput.view());
+        assert_eq!(std::fs::read_dir(h.svc.cache().root()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_before_a_cache_hit_still_cancels() {
+        let h = harness(vec![], Duration::from_secs(30));
+        let m = h.model("cube.stl", b"solid cube");
+        let a = h.svc.enqueue(h.request(&m, PLA)).unwrap();
+        assert!(matches!(h.finish(a.id).await.state, JobState::Done { .. }));
+        // The same job again would be a cache hit; cancel it mid-detect.
+        let gate = Arc::new(Notify::new());
+        *h.env.detect_gate.lock().unwrap() = Some(gate.clone());
+        let b = h.svc.enqueue(h.request(&m, PLA)).unwrap();
+        let svc = h.svc.clone();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !matches!(svc.job(b.id).unwrap().state, JobState::Running { .. }) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(h.svc.cancel(b.id));
+        gate.notify_one();
+        assert_eq!(h.finish(b.id).await.state, JobState::Cancelled);
+        assert_eq!(h.env.ran.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bambu_studio_slices_a_private_copy_of_the_model() {
+        let gate = Arc::new(Notify::new());
+        let h = harness(vec![Script::Gated(gate.clone())], Duration::from_secs(30));
+        let m = h.model("cube.stl", b"solid original");
+        let a = h.svc.enqueue(h.request(&m, PLA)).unwrap();
+        let env = h.env.clone();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while env.ran.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The watch folder rewrites the model mid-slice.
+        std::fs::write(&m, b"solid changed").unwrap();
+        gate.notify_one();
+        assert!(matches!(h.finish(a.id).await.state, JobState::Done { .. }));
+        let models = h.env.models.lock().unwrap().clone();
+        let (path, bytes) = &models[0];
+        assert_ne!(path, &PathBuf::from(&m));
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("cube.stl"));
+        assert_eq!(bytes.as_slice(), b"solid original".as_slice());
+    }
+
+    /// Blocks inside `job` the first time `hold` matches, until released,
+    /// and only then records that event.
+    struct HoldingRecorder {
+        events: Mutex<Vec<JobView>>,
+        hold: Box<dyn Fn(&JobView) -> bool + Send + Sync>,
+        reached: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl JobEvents for HoldingRecorder {
+        fn job(&self, view: &JobView) {
+            if (self.hold)(view) {
+                let reached = self.reached.lock().unwrap().take();
+                if let Some(reached) = reached {
+                    reached.send(()).unwrap();
+                    let release = self.release.lock().unwrap().take().unwrap();
+                    release.recv().unwrap();
+                }
+            }
+            self.events.lock().unwrap().push(view.clone());
+        }
+    }
+
+    /// The worker pops A and publishes B's move to position 0 while
+    /// `cancel(B)` races it: B's last event must be `Cancelled`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn events_arrive_in_the_order_the_states_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = FakeEnv::new(vec![Script::Hang]);
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let events = Arc::new(HoldingRecorder {
+            events: Mutex::new(Vec::new()),
+            hold: Box::new(|v: &JobView| v.id == 2 && v.state == JobState::Queued { position: 0 }),
+            reached: Mutex::new(Some(reached_tx)),
+            release: Mutex::new(Some(release_rx)),
+        });
+        let (svc, worker) = SlicerService::new(
+            env.clone(),
+            events.clone(),
+            SliceCache::new(
+                dir.path().join("slices"),
+                super::super::cache::DEFAULT_CAP_BYTES,
+            ),
+            dir.path().join(WORK_DIR_NAME),
+            Duration::from_secs(600),
+        );
+        let model = |n: &str| {
+            let p = dir.path().join(n);
+            std::fs::write(&p, n).unwrap();
+            JobRequest {
+                source_path: p.to_string_lossy().into_owned(),
+                choice: PresetChoice {
+                    printer: "Bambu Lab H2C 0.4 nozzle".into(),
+                    process: "0.20mm Standard @BBL H2C".into(),
+                    filaments: vec![PLA.into()],
+                    bed_type: "Textured PEI Plate".into(),
+                },
+                origin: JobOrigin::Manual,
+            }
+        };
+        // Both queued before the worker starts, so popping A renumbers B.
+        let a = svc.enqueue(model("a.stl")).unwrap();
+        let b = svc.enqueue(model("b.stl")).unwrap();
+        assert_eq!(b.id, 2);
+        tokio::spawn(worker);
+        tokio::task::spawn_blocking(move || reached_rx.recv_timeout(Duration::from_secs(30)))
+            .await
+            .unwrap()
+            .expect("the worker never published B's new position");
+        let canceller = {
+            let svc = svc.clone();
+            let id = b.id;
+            std::thread::spawn(move || svc.cancel(id))
+        };
+        // Give the cancel every chance to overtake the held event. This
+        // only makes a regression likelier to show; the order is enforced
+        // by the lock either way.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release_tx.send(()).unwrap();
+        let cancelled = tokio::task::spawn_blocking(move || canceller.join().unwrap())
+            .await
+            .unwrap();
+        assert!(cancelled);
+        let last_b = events
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|v| v.id == b.id)
+            .cloned()
+            .unwrap();
+        assert_eq!(last_b.state, JobState::Cancelled);
+        assert!(svc.cancel(a.id));
+        assert_eq!(
+            svc.wait(a.id, Duration::from_secs(30)).await.unwrap().state,
+            JobState::Cancelled
+        );
+    }
+
+    #[test]
+    fn only_job_folders_in_a_properly_named_work_folder_are_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = |work: PathBuf| {
+            let _ = SlicerService::new(
+                FakeEnv::new(vec![]),
+                Arc::new(Recorder::default()),
+                SliceCache::new(dir.path().join("slices"), 1),
+                work,
+                Duration::from_secs(1),
+            );
+        };
+        let work = dir.path().join(WORK_DIR_NAME);
+        std::fs::create_dir_all(work.join("job-1-old")).unwrap();
+        std::fs::write(work.join("notes.txt"), b"keep").unwrap();
+        start(work.clone());
+        assert!(!work.join("job-1-old").exists(), "crash leftover removed");
+        assert!(work.join("notes.txt").exists(), "nothing else touched");
+
+        let wrong = dir.path().join("Documents");
+        std::fs::create_dir_all(wrong.join("job-1-mine")).unwrap();
+        start(wrong.clone());
+        assert!(
+            wrong.join("job-1-mine").exists(),
+            "a misnamed folder is left alone"
+        );
+    }
+
+    #[tokio::test]
     async fn invalid_models_are_refused_before_queueing() {
         let h = harness(vec![], Duration::from_secs(30));
         let txt = h.model("notes.txt", b"x");
@@ -1045,7 +1361,7 @@ mod tests {
                 dir.path().join("slices"),
                 super::super::cache::DEFAULT_CAP_BYTES,
             ),
-            dir.path().join("work"),
+            dir.path().join(WORK_DIR_NAME),
             crate::slicer::TIMEOUT,
         );
         tokio::spawn(worker);

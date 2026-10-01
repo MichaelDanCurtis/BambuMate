@@ -170,6 +170,15 @@ pub fn cli_error_message(
     stderr: &str,
     exit_code: Option<i32>,
 ) -> String {
+    cli_reported_error(result, stderr).unwrap_or_else(|| match exit_code {
+        Some(code) => format!("it exited with status {code}"),
+        None => "it stopped unexpectedly".to_string(),
+    })
+}
+
+/// What the CLI itself said went wrong, trimmed: `result.json`'s error or
+/// the last plain stderr line. `None` when it said nothing.
+pub fn cli_reported_error(result: Option<&CliResult>, stderr: &str) -> Option<String> {
     let stderr_line = stderr
         .lines()
         .map(str::trim)
@@ -182,12 +191,9 @@ pub fn cli_error_message(
         (Some((CLI_SLICING_ERROR, _)), Some(line)) => line,
         (Some((_, text)), _) => text,
         (None, Some(line)) => line,
-        (None, None) => match exit_code {
-            Some(code) => format!("it exited with status {code}"),
-            None => "it stopped unexpectedly".to_string(),
-        },
+        (None, None) => return None,
     };
-    truncate_chars(&message, MAX_MESSAGE_CHARS)
+    Some(truncate_chars(&message, MAX_MESSAGE_CHARS))
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -212,7 +218,7 @@ pub fn parse_output(
     parse_output_inner(gcode_3mf, cli_result, thumbnails_to).map_err(|failure| {
         let (detail, error) = match failure {
             Failure::Bad(detail) => (detail, SlicerError::BadOutput),
-            Failure::Io(detail) => (detail.clone(), SlicerError::Io(detail)),
+            Failure::Io(detail) => (detail.clone(), SlicerError::io(detail)),
         };
         debug!(
             "could not read slicer output {}: {detail}",
@@ -800,6 +806,24 @@ pub(crate) mod tests {
         assert_eq!(cli_error_message(None, "", None), "it stopped unexpectedly");
         let long = "x".repeat(400);
         assert_eq!(cli_error_message(None, &long, None).chars().count(), 301);
+    }
+
+    #[test]
+    fn cli_reported_error_is_none_when_the_cli_said_nothing() {
+        let ok = CliResult {
+            return_code: 0,
+            error_string: "Success.".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            cli_reported_error(Some(&ok), "[2026-10-01] [error] noise\n"),
+            None
+        );
+        assert_eq!(cli_reported_error(None, ""), None);
+        assert_eq!(
+            cli_reported_error(None, "Out of memory\n").as_deref(),
+            Some("Out of memory")
+        );
     }
 
     fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
