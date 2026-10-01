@@ -8,6 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -138,18 +140,7 @@ impl PresetIndex {
     /// Blocking: it reads every preset file, so call it from
     /// `spawn_blocking`, and cache the index rather than reloading per job.
     pub fn load(config_root: &Path, preset_folder: Option<&str>) -> Self {
-        let user_root = config_root.join("user");
-        let user_folders: Vec<PathBuf> = match preset_folder {
-            Some(f) if user_root.join(f).is_dir() => vec![user_root.join(f)],
-            _ => std::fs::read_dir(&user_root)
-                .map(|it| {
-                    it.flatten()
-                        .map(|e| e.path())
-                        .filter(|p| p.is_dir())
-                        .collect()
-                })
-                .unwrap_or_default(),
-        };
+        let user_folders = user_folders(config_root, preset_folder);
         let mut kinds = HashMap::new();
         for kind in PresetKind::ALL {
             let mut idx = KindIndex {
@@ -357,6 +348,98 @@ fn printer_aliases(printer: &str, system_name: Option<&str>) -> Vec<String> {
 /// means "every printer".
 fn made_for(compatible: &[String], printers: &[String]) -> bool {
     compatible.is_empty() || compatible.iter().any(|c| printers.contains(c))
+}
+
+/// The user preset folders [`PresetIndex::load`] reads: `user/<preset_folder>`
+/// when it exists, else every folder under `user/`.
+fn user_folders(config_root: &Path, preset_folder: Option<&str>) -> Vec<PathBuf> {
+    let user_root = config_root.join("user");
+    match preset_folder {
+        Some(f) if user_root.join(f).is_dir() => vec![user_root.join(f)],
+        _ => std::fs::read_dir(&user_root)
+            .map(|it| {
+                it.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// A summary of everything [`PresetIndex::load`] would read: per folder, how
+/// many entries it holds and the newest modification time among them and the
+/// folder itself. Adding, removing, renaming or editing a preset changes it.
+/// Only metadata is read; no preset is parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetStamp(Vec<(PathBuf, usize, Option<SystemTime>)>);
+
+impl PresetStamp {
+    /// Blocking: it walks the preset folders.
+    pub fn read(config_root: &Path, preset_folder: Option<&str>) -> Self {
+        let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        // `user/` itself, so a new user folder is noticed.
+        let user_root = config_root.join("user");
+        let mut out = vec![(user_root.clone(), 0, modified(&user_root))];
+        let mut dirs: Vec<PathBuf> = PresetKind::ALL
+            .iter()
+            .map(|k| config_root.join("system").join("BBL").join(k.as_str()))
+            .collect();
+        for folder in user_folders(config_root, preset_folder) {
+            dirs.extend(PresetKind::ALL.iter().map(|k| folder.join(k.as_str())));
+        }
+        for dir in dirs {
+            let mut count = 0;
+            let mut newest = None;
+            for entry in WalkDir::new(&dir).into_iter().filter_map(Result::ok) {
+                count += 1;
+                let t = entry.metadata().ok().and_then(|m| m.modified().ok());
+                newest = newest.max(t);
+            }
+            out.push((dir, count, newest));
+        }
+        Self(out)
+    }
+}
+
+/// The last [`PresetIndex`] loaded, reused until its folders change
+/// ([`PresetStamp`]). Loading parses thousands of preset files; checking
+/// the stamp only reads their metadata.
+#[derive(Default)]
+pub struct PresetCache(Mutex<Option<CachedIndex>>);
+
+struct CachedIndex {
+    config_root: PathBuf,
+    preset_folder: Option<String>,
+    stamp: PresetStamp,
+    index: Arc<PresetIndex>,
+}
+
+impl PresetCache {
+    /// The index for `config_root`, loaded again only when something in its
+    /// preset folders changed. Blocking: call it from `spawn_blocking`.
+    pub fn load(&self, config_root: &Path, preset_folder: Option<&str>) -> Arc<PresetIndex> {
+        // Read before loading: a change made during the load leaves the
+        // stamp older than the index, so the next call loads again.
+        let stamp = PresetStamp::read(config_root, preset_folder);
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = slot.as_ref() {
+            if c.config_root == config_root
+                && c.preset_folder.as_deref() == preset_folder
+                && c.stamp == stamp
+            {
+                return c.index.clone();
+            }
+        }
+        let index = Arc::new(PresetIndex::load(config_root, preset_folder));
+        *slot = Some(CachedIndex {
+            config_root: config_root.to_path_buf(),
+            preset_folder: preset_folder.map(str::to_string),
+            stamp,
+            index: index.clone(),
+        });
+        index
+    }
 }
 
 fn add_dir(idx: &mut KindIndex, dir: &Path, source: PresetSource, kind: PresetKind) {
@@ -615,6 +698,56 @@ fn not_chosen(what: &str) -> String {
 pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_preset_cache_reloads_only_when_a_preset_folder_changes() {
+        let root = fake_bambu_root();
+        let cache = PresetCache::default();
+        let first = cache.load(root.path(), Some("1881310893"));
+        let again = cache.load(root.path(), Some("1881310893"));
+        assert!(Arc::ptr_eq(&first, &again), "nothing changed: reused");
+
+        // A new user filament (in a nested folder, as Bambu Studio keeps
+        // them) is picked up.
+        let name = "My New PLA";
+        assert!(!first.contains(PresetKind::Filament, name));
+        let dir = root.path().join("user/1881310893/filament/base");
+        std::fs::write(
+            dir.join("My New PLA.json"),
+            serde_json::to_string(&json!({
+                "type":"filament","name":name,"from":"User","inherits":"Bambu PLA Basic @BBL H2C"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let touched = cache.load(root.path(), Some("1881310893"));
+        assert!(!Arc::ptr_eq(&first, &touched), "a touched folder reloads");
+        assert!(touched.contains(PresetKind::Filament, name));
+        let settled = cache.load(root.path(), Some("1881310893"));
+        assert!(Arc::ptr_eq(&touched, &settled));
+
+        // Another root or user folder is another index.
+        let other = cache.load(root.path(), None);
+        assert!(!Arc::ptr_eq(&settled, &other));
+    }
+
+    #[test]
+    fn the_preset_stamp_sees_an_edited_preset() {
+        let root = fake_bambu_root();
+        let before = PresetStamp::read(root.path(), Some("1881310893"));
+        assert_eq!(before, PresetStamp::read(root.path(), Some("1881310893")));
+        let file = root.path().join("user/1881310893/process/My Fine.json");
+        // Moved forward explicitly: some file systems keep coarse times.
+        let later = std::fs::metadata(&file).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(10);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_ne!(before, PresetStamp::read(root.path(), Some("1881310893")));
+    }
 
     fn write(root: &Path, rel: &str, v: Value) {
         let p = root.join(rel);

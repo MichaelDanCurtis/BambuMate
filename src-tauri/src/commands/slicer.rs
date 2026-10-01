@@ -16,7 +16,7 @@ use crate::slicer::auto::{auto_request, wait_until_stable, STABLE_INTERVAL, STAB
 use crate::slicer::binary::{self, SlicerStatus};
 use crate::slicer::cache::{SliceCache, DEFAULT_CAP_BYTES};
 use crate::slicer::jobs::{
-    BambuStudioEnv, JobEvents, JobOrigin, JobRequest, JobState, JobView, SlicerEnv, SlicerService,
+    BambuStudioEnv, JobEvents, JobOrigin, JobRequest, JobState, JobView, SlicerService,
     WORK_DIR_NAME,
 };
 use crate::slicer::settings::{
@@ -117,10 +117,13 @@ pub async fn slicer_status() -> SlicerStatus {
 }
 
 #[tauri::command]
-pub async fn slicer_presets(printer: Option<String>) -> Result<PresetLists, String> {
+pub async fn slicer_presets(
+    svc: State<'_, SlicerService>,
+    printer: Option<String>,
+) -> Result<PresetLists, String> {
+    let svc = svc.inner().clone();
     blocking(move || {
-        BambuStudioEnv
-            .presets()
+        svc.presets()
             .map(|idx| idx.list(printer.as_deref()))
             .map_err(|e| e.to_string())
     })

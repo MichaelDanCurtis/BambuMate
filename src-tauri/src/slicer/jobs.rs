@@ -18,7 +18,7 @@ use super::result::{
     cli_error_message, cli_reported_error, parse_cli_result, parse_output, SliceResult,
 };
 use super::run::{RunError, RunOutput, RunSpec};
-use super::settings::{write_configs, PresetChoice, PresetIndex};
+use super::settings::{write_configs, PresetCache, PresetChoice, PresetIndex};
 use super::{validate_model_path, ErrorView, ModelKind, SlicerError};
 
 /// Finished jobs kept for the UI and `bm_slice_result`.
@@ -93,8 +93,9 @@ pub struct JobRequest {
 #[async_trait]
 pub trait SlicerEnv: Send + Sync {
     async fn detect(&self) -> Result<SlicerBinary, SlicerError>;
-    /// Called on a blocking thread.
-    fn presets(&self) -> Result<PresetIndex, SlicerError>;
+    /// Where the presets are. Called on a blocking thread; the service
+    /// loads and caches the [`PresetIndex`] ([`SlicerService::presets`]).
+    fn preset_root(&self) -> Result<PresetRoot, SlicerError>;
     async fn run(
         &self,
         exe: &Path,
@@ -115,6 +116,13 @@ pub trait JobEvents: Send + Sync {
     fn job(&self, view: &JobView);
 }
 
+/// Bambu Studio's data folder and the user's preset folder in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetRoot {
+    pub config_root: PathBuf,
+    pub preset_folder: Option<String>,
+}
+
 pub struct BambuStudioEnv;
 
 #[async_trait]
@@ -123,12 +131,12 @@ impl SlicerEnv for BambuStudioEnv {
         super::binary::detect().await
     }
 
-    fn presets(&self) -> Result<PresetIndex, SlicerError> {
+    fn preset_root(&self) -> Result<PresetRoot, SlicerError> {
         let paths = crate::profile::BambuPaths::detect().map_err(|_| SlicerError::NotInstalled)?;
-        Ok(PresetIndex::load(
-            &paths.config_root,
-            paths.preset_folder.as_deref(),
-        ))
+        Ok(PresetRoot {
+            config_root: paths.config_root,
+            preset_folder: paths.preset_folder,
+        })
     }
 
     async fn run(
@@ -183,6 +191,7 @@ struct Inner {
     env: Arc<dyn SlicerEnv>,
     events: Arc<dyn JobEvents>,
     cache: SliceCache,
+    presets: PresetCache,
     work_root: PathBuf,
     timeout: Duration,
     state: Mutex<State>,
@@ -303,6 +312,7 @@ impl SlicerService {
                 env,
                 events,
                 cache,
+                presets: PresetCache::default(),
                 work_root,
                 timeout,
                 state: Mutex::new(State::default()),
@@ -316,6 +326,16 @@ impl SlicerService {
 
     pub fn cache(&self) -> &SliceCache {
         &self.inner.cache
+    }
+
+    /// Bambu Studio's presets, loaded again only when they changed on disk.
+    /// Blocking: call it from `spawn_blocking`.
+    pub fn presets(&self) -> Result<Arc<PresetIndex>, SlicerError> {
+        let root = self.inner.env.preset_root()?;
+        Ok(self
+            .inner
+            .presets
+            .load(&root.config_root, root.preset_folder.as_deref()))
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -630,11 +650,11 @@ impl SlicerService {
                 .unwrap_or_else(|| PathBuf::from("model")),
         );
         let (prepared, key) = {
-            let env = env.clone();
+            let svc = self.clone();
             let model = model.clone();
             tokio::task::spawn_blocking(move || {
                 let io = |e: std::io::Error| SlicerError::io(e.to_string());
-                let prepared = env.presets()?.prepare(&choice)?;
+                let prepared = svc.presets()?.prepare(&choice)?;
                 std::fs::create_dir_all(model.parent().unwrap_or(&model)).map_err(io)?;
                 std::fs::copy(&source, &model).map_err(io)?;
                 let key = cache_key(&model, kind, &prepared, &version).map_err(io)?;
@@ -646,16 +666,32 @@ impl SlicerService {
         if *cancel.borrow() {
             return Err(None);
         }
-        if let Some(hit) = self.inner.cache.get(&key) {
-            return Ok((hit, true));
-        }
-
-        let configs = write_configs(&work.0.join("configs"), &prepared)?;
+        // A cache hit, or the job's config files and folders: blocking file
+        // work either way.
         let out_dir = work.0.join("out");
         let data_dir = work.0.join("datadir");
-        for d in [&out_dir, &data_dir] {
-            std::fs::create_dir_all(d).map_err(|e| SlicerError::io(e.to_string()))?;
-        }
+        let prepared_files = {
+            let svc = self.clone();
+            let key = key.clone();
+            let configs_dir = work.0.join("configs");
+            let dirs = [out_dir.clone(), data_dir.clone()];
+            tokio::task::spawn_blocking(move || {
+                if let Some(hit) = svc.inner.cache.get(&key) {
+                    return Ok(Err(hit));
+                }
+                let configs = write_configs(&configs_dir, &prepared)?;
+                for d in &dirs {
+                    std::fs::create_dir_all(d).map_err(|e| SlicerError::io(e.to_string()))?;
+                }
+                Ok::<_, SlicerError>(Ok(configs))
+            })
+            .await
+            .map_err(|e| Some(internal_error(e)))??
+        };
+        let configs = match prepared_files {
+            Ok(configs) => configs,
+            Err(hit) => return Ok((hit, true)),
+        };
         let cmd = SliceCommand {
             model,
             kind,
@@ -693,7 +729,12 @@ impl SlicerService {
             return Err(None);
         }
 
-        let cli_text = std::fs::read_to_string(out_dir.join(RESULT_FILE)).ok();
+        let cli_text = {
+            let path = out_dir.join(RESULT_FILE);
+            tokio::task::spawn_blocking(move || std::fs::read_to_string(path).ok())
+                .await
+                .map_err(|e| Some(internal_error(e)))?
+        };
         let cli = cli_text.as_deref().and_then(parse_cli_result);
         let output_file = out_dir.join(OUTPUT_FILE);
         if output.exit_code != Some(0) {
@@ -807,8 +848,11 @@ mod tests {
             }
             self.detect.lock().unwrap().clone()
         }
-        fn presets(&self) -> Result<PresetIndex, SlicerError> {
-            Ok(PresetIndex::load(self.root.path(), Some("1881310893")))
+        fn preset_root(&self) -> Result<PresetRoot, SlicerError> {
+            Ok(PresetRoot {
+                config_root: self.root.path().to_path_buf(),
+                preset_folder: Some("1881310893".into()),
+            })
         }
         async fn run(
             &self,
@@ -1002,6 +1046,26 @@ mod tests {
             })
             .collect();
         assert_eq!(states, vec!["queued", "running", "progress", "done"]);
+    }
+
+    #[tokio::test]
+    async fn jobs_and_the_preset_lists_share_one_preset_index() {
+        let h = harness(
+            vec![Script::Succeed("cube_h2c"), Script::Succeed("cube_h2c")],
+            Duration::from_secs(30),
+        );
+        let listed = h.svc.presets().unwrap();
+        let model = h.model("cube.stl", b"solid cube");
+        let id = h
+            .svc
+            .enqueue(h.request(&model, "Bambu PLA Basic @BBL H2C"))
+            .unwrap()
+            .id;
+        assert!(matches!(h.finish(id).await.state, JobState::Done { .. }));
+        assert!(
+            Arc::ptr_eq(&listed, &h.svc.presets().unwrap()),
+            "nothing changed, so the job reused the index"
+        );
     }
 
     #[tokio::test]
