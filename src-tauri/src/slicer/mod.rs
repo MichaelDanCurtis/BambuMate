@@ -6,6 +6,7 @@
 //! handed back to the user, who prints through Bambu's own path.
 
 pub mod binary;
+pub mod command;
 pub mod result;
 pub mod settings;
 
