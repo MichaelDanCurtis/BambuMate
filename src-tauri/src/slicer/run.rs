@@ -22,7 +22,11 @@ pub struct RunSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutput {
-    /// `None` when the process was ended by a signal.
+    /// The process's exit code. On Unix it is `None` when a signal ended the
+    /// process. On Windows it is always `Some`: a killed process reports the
+    /// code it was terminated with (1 after `taskkill /F`), and a crash
+    /// reports its NTSTATUS as a negative number (e.g. `0xC0000005` reads as
+    /// `-1073741819`).
     pub exit_code: Option<i32>,
     /// The last lines of stderr, where the CLI writes its specific errors.
     pub stderr: String,
@@ -30,13 +34,20 @@ pub struct RunOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunError {
+    /// The process could not be started.
     Spawn(String),
+    /// Waiting for the process failed; it was killed to be safe.
+    Wait(String),
     Timeout,
     Cancelled,
 }
 
 const STDERR_LINES: usize = 64;
 const MAX_LINE_BYTES: usize = 2000;
+/// How long the pipe readers get to finish once the process is gone.
+const READER_GRACE: Duration = Duration::from_secs(2);
+/// How long a killed process gets to be reaped.
+const REAP_GRACE: Duration = Duration::from_secs(10);
 
 /// Resolves once `cancel` reads `true`. A dropped sender never cancels.
 async fn cancelled(cancel: &mut watch::Receiver<bool>) {
@@ -46,43 +57,120 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
 }
 
 /// Reads lines without requiring UTF-8 and without ever stopping early, so
-/// the child can never block on a full pipe.
+/// the child can never block on a full pipe. At most `MAX_LINE_BYTES` of a
+/// line are kept; the rest, up to the newline, is read and dropped, so even
+/// a line that never ends uses bounded memory.
 async fn for_each_line(reader: impl AsyncRead + Unpin, mut f: impl FnMut(String)) {
+    fn emit(line: &[u8], f: &mut impl FnMut(String)) {
+        f(String::from_utf8_lossy(line).trim_end().to_string());
+    }
     let mut reader = BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                buf.truncate(MAX_LINE_BYTES);
-                f(String::from_utf8_lossy(&buf).trim_end().to_string());
+    let mut line: Vec<u8> = Vec::new();
+    // A read error ends the stream like EOF does.
+    while let Ok(chunk) = reader.fill_buf().await {
+        if chunk.is_empty() {
+            // EOF: a last line without a newline still counts.
+            if !line.is_empty() {
+                emit(&line, &mut f);
             }
+            break;
         }
+        let (part, used, ended) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (&chunk[..i], i + 1, true),
+            None => (chunk, chunk.len(), false),
+        };
+        let room = MAX_LINE_BYTES - line.len();
+        line.extend_from_slice(&part[..part.len().min(room)]);
+        reader.consume(used);
+        if ended {
+            emit(&line, &mut f);
+            line.clear();
+        }
+    }
+}
+
+/// Sends SIGKILL to the whole process group. The child was spawned with
+/// `process_group(0)`, so its group id is its pid and holds only it and its
+/// descendants.
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    // SAFETY: killpg only sends a signal.
+    unsafe {
+        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
     }
 }
 
 /// Kills the child and its whole process group (Unix) or process tree
 /// (Windows). Bambu Studio 02.08.02.61 starts no child processes, but a
 /// later release might, and an orphaned slicer would keep a CPU busy.
-fn kill_tree(child: &mut Child) {
+async fn kill_tree(child: &mut Child) {
     if let Some(pid) = child.id() {
         #[cfg(unix)]
-        // SAFETY: killpg only sends a signal. The child was spawned with
-        // process_group(0), so its group id is its pid and holds only it
-        // and its descendants.
-        unsafe {
-            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        kill_group(pid);
+        #[cfg(windows)]
+        {
+            let mut cmd =
+                tokio::process::Command::from(crate::process_command::new_command("taskkill"));
+            cmd.args(["/T", "/F", "/PID"])
+                .arg(pid.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            let _ = tokio::time::timeout(Duration::from_secs(10), cmd.status()).await;
         }
+    }
+    let _ = child.start_kill();
+}
+
+/// Kills the process group or tree if `run` is dropped while the slicer is
+/// still running (an aborted job). Disarmed once the child has been reaped,
+/// so a reused pid is never signalled. Declared after the `Child` so it
+/// drops first, while the child is still unreaped.
+struct TreeGuard(Option<u32>);
+
+impl TreeGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        let Some(pid) = self.0.take() else {
+            return;
+        };
+        #[cfg(unix)]
+        kill_group(pid);
+        // Drop can't wait, so taskkill is started and left to finish.
         #[cfg(windows)]
         {
             let _ = crate::process_command::new_command("taskkill")
                 .args(["/T", "/F", "/PID"])
                 .arg(pid.to_string())
-                .output();
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
         }
     }
-    let _ = child.start_kill();
+}
+
+/// Waits up to `READER_GRACE` for a pipe reader, then aborts it, so no
+/// reader outlives `run`.
+async fn join_reader<T>(mut handle: tokio::task::JoinHandle<T>, name: &str) -> Option<T> {
+    match tokio::time::timeout(READER_GRACE, &mut handle).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(e)) => {
+            tracing::debug!("slicer {name} reader failed: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("slicer {name} reader did not finish; aborting it");
+            handle.abort();
+            None
+        }
+    }
 }
 
 /// Runs the process to completion, timeout or cancellation. Progress is
@@ -104,6 +192,7 @@ pub async fn run(
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
     let mut child = cmd.spawn().map_err(|e| RunError::Spawn(e.to_string()))?;
+    let mut guard = TreeGuard(child.id());
     let stdout = child
         .stdout
         .take()
@@ -140,7 +229,7 @@ pub async fn run(
     let mut progress_open = true;
     let outcome = loop {
         tokio::select! {
-            status = child.wait() => break status.map_err(|e| RunError::Spawn(e.to_string())),
+            status = child.wait() => break status.map_err(|e| RunError::Wait(e.to_string())),
             p = rx.recv(), if progress_open => match p {
                 Some(p) => on_progress(p),
                 None => progress_open = false,
@@ -149,20 +238,25 @@ pub async fn run(
             _ = cancelled(&mut cancel) => break Err(RunError::Cancelled),
         }
     };
-    if outcome.is_err() {
-        kill_tree(&mut child);
-        let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    if outcome.is_ok() {
+        // `wait` returned, so the child is reaped.
+        guard.disarm();
+    } else {
+        kill_tree(&mut child).await;
+        if let Ok(Ok(_)) = tokio::time::timeout(REAP_GRACE, child.wait()).await {
+            guard.disarm();
+        }
     }
     // The pipes close when the process (and anything holding them) is gone.
-    let grace = Duration::from_secs(2);
-    if tokio::time::timeout(grace, out_task).await.is_err() {
-        tracing::debug!("slicer stdout reader did not finish");
-    }
-    let stderr = match tokio::time::timeout(grace, err_task).await {
-        Ok(Ok(s)) => s,
-        _ => String::new(),
-    };
+    join_reader(out_task, "stdout").await;
+    let stderr = join_reader(err_task, "stderr").await.unwrap_or_default();
     let status = outcome?;
+    // The process can exit before its last lines have been read. Now that
+    // the stdout reader is done, deliver what it parsed after the loop
+    // stopped listening. (Not after a cancel or timeout: that is final.)
+    while let Ok(p) = rx.try_recv() {
+        on_progress(p);
+    }
     Ok(RunOutput {
         exit_code: status.code(),
         stderr,
@@ -255,9 +349,10 @@ pub(crate) mod tests {
         }
     }
 
+    /// A receiver whose sender is already gone, which must never cancel.
     fn never_cancelled() -> watch::Receiver<bool> {
         let (tx, rx) = watch::channel(false);
-        std::mem::forget(tx);
+        drop(tx);
         rx
     }
 
@@ -338,28 +433,77 @@ pub(crate) mod tests {
         assert!(matches!(r, Err(RunError::Spawn(_))), "{r:?}");
     }
 
-    /// The process group kill also takes down anything the slicer started.
-    #[cfg(unix)]
     #[tokio::test]
-    async fn timeout_kills_grandchildren_too() {
-        let dir = tempfile::tempdir().unwrap();
-        let pidfile = dir.path().join("grandchild.pid");
+    async fn a_dropped_cancel_sender_does_not_cancel() {
         let r = run(
-            fake_spec(
-                "hang_with_child",
-                Duration::from_secs(3),
-                &[(PIDFILE_ENV, pidfile.to_string_lossy().into_owned())],
-            ),
+            fake_spec("hang", Duration::from_secs(1), &[]),
             never_cancelled(),
             |_| {},
         )
         .await;
         assert_eq!(r, Err(RunError::Timeout));
-        let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+    }
+
+    async fn lines_of(input: &[u8]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for_each_line(input, |l| lines.push(l)).await;
+        lines
+    }
+
+    #[tokio::test]
+    async fn a_line_with_no_newline_is_capped() {
+        let huge = vec![b'x'; 1024 * 1024];
+        assert_eq!(lines_of(&huge).await, vec!["x".repeat(MAX_LINE_BYTES)]);
+    }
+
+    #[tokio::test]
+    async fn a_long_line_is_capped_and_the_next_line_still_read() {
+        let mut input = vec![b'x'; 1024 * 1024];
+        input.extend_from_slice(b"\r\nnext\nlast");
+        assert_eq!(
+            lines_of(&input).await,
+            vec!["x".repeat(MAX_LINE_BYTES), "next".into(), "last".into()]
+        );
+    }
+
+    /// Starts `hang_with_child` and returns the running job, its cancel
+    /// sender and the grandchild's pid once the fake has written it.
+    #[cfg(unix)]
+    async fn start_with_grandchild(
+        dir: &std::path::Path,
+    ) -> (
+        tokio::task::JoinHandle<Result<RunOutput, RunError>>,
+        watch::Sender<bool>,
+        libc::pid_t,
+    ) {
+        let pidfile = dir.join("grandchild.pid");
+        let (tx, rx) = watch::channel(false);
+        let handle = tokio::spawn(run(
+            fake_spec(
+                "hang_with_child",
+                Duration::from_secs(600),
+                &[(PIDFILE_ENV, pidfile.to_string_lossy().into_owned())],
+            ),
+            rx,
+            |_| {},
+        ));
+        let pid = async {
+            loop {
+                let read = std::fs::read_to_string(&pidfile).unwrap_or_default();
+                if let Ok(pid) = read.trim().parse::<libc::pid_t>() {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        let pid = tokio::time::timeout(Duration::from_secs(60), pid)
+            .await
+            .expect("fake slicer never wrote the grandchild's pid");
+        (handle, tx, pid)
+    }
+
+    #[cfg(unix)]
+    async fn assert_gone(pid: libc::pid_t) {
         let gone = async {
             loop {
                 // SAFETY: signal 0 only checks whether the pid exists.
@@ -372,5 +516,32 @@ pub(crate) mod tests {
         tokio::time::timeout(Duration::from_secs(30), gone)
             .await
             .expect("grandchild still alive after the group kill");
+    }
+
+    /// The process group kill also takes down anything the slicer started.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_kills_grandchildren_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, tx, pid) = start_with_grandchild(dir.path()).await;
+        tx.send(true).unwrap();
+        let r = tokio::time::timeout(Duration::from_secs(60), handle)
+            .await
+            .expect("run returned after cancel")
+            .unwrap();
+        assert_eq!(r, Err(RunError::Cancelled));
+        assert_gone(pid).await;
+    }
+
+    /// Dropping the `run` future mid-run (an aborted job) also kills the
+    /// whole group.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_the_run_kills_grandchildren_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, _tx, pid) = start_with_grandchild(dir.path()).await;
+        handle.abort();
+        let _ = handle.await;
+        assert_gone(pid).await;
     }
 }
