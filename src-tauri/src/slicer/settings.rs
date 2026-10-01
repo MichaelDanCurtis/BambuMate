@@ -6,7 +6,7 @@
 //! Every config handed to it is flattened here with
 //! [`resolve_with_includes`], which mirrors Bambu Studio's own loader.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use walkdir::WalkDir;
 
 use super::SlicerError;
-use crate::profile::inheritance::{resolve_with_includes, ResolveError};
+use crate::profile::inheritance::{resolve_with_includes, ResolveError, MAX_INHERITANCE_DEPTH};
 use crate::profile::types::FilamentProfile;
 use crate::profile::{reader, ProfileRegistry};
 
@@ -84,7 +84,7 @@ pub fn normalize_bed_type(raw: Option<&str>) -> String {
 struct KindIndex {
     registry: ProfileRegistry,
     sources: HashMap<String, PresetSource>,
-    selectable: Vec<String>,
+    selectable: HashSet<String>,
 }
 
 /// Every machine, process and filament preset Bambu Studio has: system
@@ -132,7 +132,11 @@ pub struct ConfigPaths {
 impl PresetIndex {
     /// Indexes `config_root` (Bambu Studio's data folder). User presets come
     /// from `user/<preset_folder>` when it is known, else from every folder
-    /// under `user/`. Unreadable files are skipped.
+    /// under `user/`. Unreadable files are skipped, and so is a user preset
+    /// named like a system preset (Bambu Studio refuses those too).
+    ///
+    /// Blocking: it reads every preset file, so call it from
+    /// `spawn_blocking`, and cache the index rather than reloading per job.
     pub fn load(config_root: &Path, preset_folder: Option<&str>) -> Self {
         let user_root = config_root.join("user");
         let user_folders: Vec<PathBuf> = match preset_folder {
@@ -151,7 +155,7 @@ impl PresetIndex {
             let mut idx = KindIndex {
                 registry: ProfileRegistry::new(),
                 sources: HashMap::new(),
-                selectable: Vec::new(),
+                selectable: HashSet::new(),
             };
             let system_dir = config_root.join("system").join("BBL").join(kind.as_str());
             add_dir(&mut idx, &system_dir, PresetSource::System, kind);
@@ -186,7 +190,10 @@ impl PresetIndex {
                 name: name.to_string(),
             })?;
         let resolved = resolve_with_includes(profile, &idx.registry).map_err(|e| match e {
-            ResolveError::MissingParent(parent) => SlicerError::UnknownPreset { name: parent },
+            ResolveError::MissingParent(parent) => SlicerError::MissingParent {
+                name: name.to_string(),
+                parent,
+            },
             ResolveError::Circular(_) | ResolveError::TooDeep(_) => {
                 SlicerError::Io(format!("preset '{name}' has a broken inheritance chain"))
             }
@@ -216,7 +223,7 @@ impl PresetIndex {
                 }
             }
             depth += 1;
-            if depth > 10 {
+            if depth >= MAX_INHERITANCE_DEPTH {
                 break;
             }
             current = p
@@ -233,11 +240,8 @@ impl PresetIndex {
         let printer_names: Option<Vec<String>> = printer
             .filter(|p| self.contains(PresetKind::Machine, p))
             .map(|p| {
-                let mut names = vec![p.to_string()];
-                if let Ok(flat) = self.flatten(PresetKind::Machine, p) {
-                    names.push(flat.system_name);
-                }
-                names
+                let system = self.flatten(PresetKind::Machine, p).ok();
+                printer_aliases(p, system.as_ref().map(|f| f.system_name.as_str()))
             });
         let options = |kind: PresetKind| -> Vec<PresetOption> {
             let idx = self.kind(kind);
@@ -246,8 +250,7 @@ impl PresetIndex {
                 .iter()
                 .filter(|name| match (&printer_names, kind) {
                     (Some(printers), PresetKind::Process | PresetKind::Filament) => {
-                        let compat = self.compatible_printers(kind, name);
-                        compat.is_empty() || compat.iter().any(|c| printers.contains(c))
+                        made_for(&self.compatible_printers(kind, name), printers)
                     }
                     _ => true,
                 })
@@ -257,10 +260,17 @@ impl PresetIndex {
                 })
                 .collect();
             out.sort_by(|a, b| {
-                (a.source != PresetSource::User, a.name.to_lowercase())
-                    .cmp(&(b.source != PresetSource::User, b.name.to_lowercase()))
+                (
+                    a.source != PresetSource::User,
+                    a.name.to_lowercase(),
+                    &a.name,
+                )
+                    .cmp(&(
+                        b.source != PresetSource::User,
+                        b.name.to_lowercase(),
+                        &b.name,
+                    ))
             });
-            out.dedup_by(|a, b| a.name == b.name);
             out
         };
         PresetLists {
@@ -271,17 +281,37 @@ impl PresetIndex {
     }
 
     /// Flattens the chosen presets into the exact text of the config files.
+    ///
+    /// The process must be made for the printer: its `compatible_printers`
+    /// (from the nearest level that sets a non-empty one, as the pickers
+    /// use) is empty or names the printer
+    /// or the printer's system preset. Otherwise this is
+    /// [`SlicerError::IncompatibleProcess`].
     pub fn prepare(&self, choice: &PresetChoice) -> Result<PreparedConfigs, SlicerError> {
+        if choice.filaments.is_empty() {
+            return Err(SlicerError::Io(not_chosen("filament")));
+        }
         let machine = self.flatten(PresetKind::Machine, &choice.printer)?;
         let printer_system = machine.system_name.clone();
         let mut process = self.flatten(PresetKind::Process, &choice.process)?;
+        let printers = printer_aliases(&choice.printer, Some(&printer_system));
+        if !made_for(
+            &self.compatible_printers(PresetKind::Process, &choice.process),
+            &printers,
+        ) {
+            return Err(SlicerError::IncompatibleProcess {
+                process: choice.process.clone(),
+                printer: choice.printer.clone(),
+            });
+        }
         process.config.insert(
             "curr_bed_type".into(),
             Value::String(normalize_bed_type(Some(&choice.bed_type))),
         );
-        // The CLI refuses a process whose compatible_printers lacks the
-        // printer's system name. BambuMate's picker already decided they
-        // go together, so make sure the list says so.
+        // The CLI refuses a process whose own compatible_printers lacks the
+        // printer's system name, even when the list is empty or only
+        // inherited. The check above established they go together, so make
+        // sure the flattened list says so.
         let mut compat: Vec<Value> = process
             .config
             .get("compatible_printers")
@@ -297,9 +327,6 @@ impl PresetIndex {
         process
             .config
             .insert("compatible_printers".into(), Value::Array(compat));
-        if choice.filaments.is_empty() {
-            return Err(SlicerError::Io("no filament preset chosen".into()));
-        }
         let filaments = choice
             .filaments
             .iter()
@@ -314,6 +341,22 @@ impl PresetIndex {
             filaments,
         })
     }
+}
+
+/// The names a preset's `compatible_printers` may use for a printer: its own
+/// and, for a user printer, its system preset's.
+fn printer_aliases(printer: &str, system_name: Option<&str>) -> Vec<String> {
+    let mut names = vec![printer.to_string()];
+    if let Some(system) = system_name.filter(|s| *s != printer) {
+        names.push(system.to_string());
+    }
+    names
+}
+
+/// Whether a `compatible_printers` list admits one of `printers`. Empty
+/// means "every printer".
+fn made_for(compatible: &[String], printers: &[String]) -> bool {
+    compatible.is_empty() || compatible.iter().any(|c| printers.contains(c))
 }
 
 fn add_dir(idx: &mut KindIndex, dir: &Path, source: PresetSource, kind: PresetKind) {
@@ -335,8 +378,17 @@ fn add_dir(idx: &mut KindIndex, dir: &Path, source: PresetSource, kind: PresetKi
         let Some(name) = profile.name().map(str::to_string) else {
             continue;
         };
-        if is_selectable(&profile, source, kind) && !idx.selectable.contains(&name) {
-            idx.selectable.push(name.clone());
+        // Bambu Studio skips a user preset named like a system one
+        // ("Preset already present, not loading" in
+        // PresetCollection::load_presets, src/libslic3r/Preset.cpp,
+        // v02.08.02.61). Letting it replace the system preset would also
+        // take over every system preset inheriting from it.
+        if source == PresetSource::User && idx.sources.get(&name) == Some(&PresetSource::System) {
+            tracing::warn!("user preset {name:?} has a system preset's name; skipped");
+            continue;
+        }
+        if is_selectable(&profile, source, kind) {
+            idx.selectable.insert(name.clone());
         }
         idx.sources.insert(name, source);
         idx.registry.insert(profile);
@@ -420,6 +472,31 @@ pub struct BambuStudioSelection {
     pub bed_type: Option<String>,
 }
 
+/// The only parts of `BambuStudio.conf` ever deserialized. Every other key,
+/// including the printer access codes, is skipped by the parser without
+/// being stored. Leaves are lenient: a value of the wrong type reads as
+/// unset instead of failing the whole file.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ConfSelection {
+    app: ConfApp,
+    presets: ConfPresets,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ConfApp {
+    curr_bed_type: Option<Value>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ConfPresets {
+    machine: Option<Value>,
+    process: Option<Value>,
+    filaments: Option<Value>,
+}
+
 /// Reads `presets.machine`, `presets.process`, `presets.filaments[0]` and
 /// `app.curr_bed_type` from `BambuStudio.conf`. Nothing else in that file is
 /// read; it also holds printer access codes.
@@ -427,16 +504,29 @@ pub fn bambu_studio_selection(config_root: &Path) -> BambuStudioSelection {
     let Ok(text) = std::fs::read_to_string(config_root.join("BambuStudio.conf")) else {
         return BambuStudioSelection::default();
     };
-    let Ok(conf) = serde_json::from_str::<Value>(crate::profile::writer::strip_md5_checksum(&text))
+    let Ok(conf) =
+        serde_json::from_str::<ConfSelection>(crate::profile::writer::strip_md5_checksum(&text))
     else {
         return BambuStudioSelection::default();
     };
+    drop(text);
     let s = |v: Option<&Value>| {
         v.and_then(Value::as_str)
             .map(str::to_string)
             .filter(|s| !s.is_empty())
     };
-    let bed_type = s(conf.pointer("/app/curr_bed_type")).and_then(|raw| match raw.as_str() {
+    // Bambu Studio stores the plate as the number of its `BedType` enum
+    // (`app_config->set("curr_bed_type", std::to_string(int(bed_type)))` in
+    // src/slic3r/GUI/Plater.cpp). The enum, in src/libslic3r/PrintConfig.hpp
+    // at v02.08.02.61, is btDefault = 0, btPC (Cool Plate), btEP
+    // (Engineering Plate), btPEI (High Temp Plate), btPTE (Textured PEI
+    // Plate), btSuperTack (Supertack Plate): 1 to 5 in `BED_TYPES` order.
+    // 0 ("Default Plate") is not a real plate and reads as unset.
+    let bed_raw = match conf.app.curr_bed_type.as_ref() {
+        Some(Value::Number(n)) => Some(n.to_string()),
+        other => s(other),
+    };
+    let bed_type = bed_raw.and_then(|raw| match raw.trim() {
         "1" => Some(BED_TYPES[0].to_string()),
         "2" => Some(BED_TYPES[1].to_string()),
         "3" => Some(BED_TYPES[2].to_string()),
@@ -448,9 +538,14 @@ pub fn bambu_studio_selection(config_root: &Path) -> BambuStudioSelection {
             .map(|b| b.to_string()),
     });
     BambuStudioSelection {
-        printer: s(conf.pointer("/presets/machine")),
-        process: s(conf.pointer("/presets/process")),
-        filament: s(conf.pointer("/presets/filaments/0")),
+        printer: s(conf.presets.machine.as_ref()),
+        process: s(conf.presets.process.as_ref()),
+        filament: s(conf
+            .presets
+            .filaments
+            .as_ref()
+            .and_then(|f| f.as_array())
+            .and_then(|f| f.first())),
         bed_type,
     }
 }
@@ -497,7 +592,7 @@ impl SlicerSettings {
     ) -> Result<PresetChoice, String> {
         let need = |v: Option<String>, what: &str| {
             v.filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| format!("No {what} preset chosen. Pick one on the Slice page."))
+                .ok_or_else(|| not_chosen(what))
         };
         Ok(PresetChoice {
             printer: need(printer.or_else(|| self.printer.clone()), "printer")?,
@@ -509,6 +604,11 @@ impl SlicerSettings {
             bed_type: normalize_bed_type(self.bed_type.as_deref()),
         })
     }
+}
+
+/// The copy for a job with no preset of one kind.
+fn not_chosen(what: &str) -> String {
+    format!("No {what} preset chosen. Pick one on the Slice page.")
 }
 
 #[cfg(test)]
@@ -803,12 +903,185 @@ pub(crate) mod tests {
             }),
         );
         let idx = PresetIndex::load(root.path(), None);
+        let err = idx.flatten(PresetKind::Filament, "Orphan").unwrap_err();
         assert_eq!(
-            idx.flatten(PresetKind::Filament, "Orphan").unwrap_err(),
-            SlicerError::UnknownPreset {
-                name: "Missing @base".into()
+            err,
+            SlicerError::MissingParent {
+                name: "Orphan".into(),
+                parent: "Missing @base".into()
             }
         );
+        assert_eq!(
+            err.to_string(),
+            "Preset 'Orphan' is missing its parent 'Missing @base'."
+        );
+    }
+
+    fn h2c_choice(process: &str, filament: &str) -> PresetChoice {
+        PresetChoice {
+            printer: "Bambu Lab H2C 0.4 nozzle".into(),
+            process: process.into(),
+            filaments: vec![filament.into()],
+            bed_type: DEFAULT_BED_TYPE.into(),
+        }
+    }
+
+    #[test]
+    fn a_user_preset_cannot_take_a_system_presets_name() {
+        let root = fake_bambu_root();
+        // Named like the system @base, and inheriting its own child: if it
+        // replaced the system preset it would hijack the chain and loop.
+        write(
+            root.path(),
+            "user/1881310893/filament/base/Bambu PLA Basic @base.json",
+            json!({
+                "type":"filament","name":"Bambu PLA Basic @base","from":"User",
+                "inherits":"Bambu PLA Basic @BBL H2C","filament_density":["9.99"]
+            }),
+        );
+        let idx = PresetIndex::load(root.path(), Some("1881310893"));
+        let flat = idx
+            .flatten(PresetKind::Filament, "Bambu PLA Basic @base")
+            .unwrap();
+        assert_eq!(flat.source, PresetSource::System);
+        let prepared = idx
+            .prepare(&h2c_choice(
+                "0.20mm Standard @BBL H2C",
+                "Bambu PLA Basic @BBL H2C",
+            ))
+            .unwrap();
+        let f: Value = serde_json::from_str(&prepared.filaments[0]).unwrap();
+        assert_eq!(f["filament_density"], json!(["1.26"]));
+        assert_eq!(f["from"], "system");
+        assert!(!names(&idx.list(None).filaments).contains(&"Bambu PLA Basic @base"));
+    }
+
+    #[test]
+    fn a_process_made_for_another_printer_is_refused() {
+        let root = fake_bambu_root();
+        let idx = PresetIndex::load(root.path(), Some("1881310893"));
+        let err = idx
+            .prepare(&h2c_choice(
+                "0.20mm Standard @BBL H2S",
+                "Bambu PLA Basic @BBL H2C",
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            SlicerError::IncompatibleProcess {
+                process: "0.20mm Standard @BBL H2S".into(),
+                printer: "Bambu Lab H2C 0.4 nozzle".into(),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "Process '0.20mm Standard @BBL H2S' isn't made for printer 'Bambu Lab H2C 0.4 nozzle'."
+        );
+        // An empty list of its own doesn't free a user process from its
+        // parent's: My Fine descends from the H2C process.
+        let err = idx
+            .prepare(&PresetChoice {
+                printer: "Bambu Lab H2S 0.4 nozzle".into(),
+                process: "My Fine".into(),
+                filaments: vec!["Bambu PLA Basic @BBL H2S".into()],
+                bed_type: DEFAULT_BED_TYPE.into(),
+            })
+            .unwrap_err();
+        assert_eq!(err.kind(), "incompatible_process");
+    }
+
+    #[test]
+    fn a_process_for_every_printer_or_the_printers_system_preset_is_accepted() {
+        let root = fake_bambu_root();
+        write(
+            root.path(),
+            "system/BBL/process/0.20mm Any.json",
+            json!({
+                "type":"process","name":"0.20mm Any","inherits":"fdm_process_common",
+                "from":"system","instantiation":"true"
+            }),
+        );
+        write(
+            root.path(),
+            "user/1881310893/machine/My H2C.json",
+            json!({
+                "type":"machine","name":"My H2C","inherits":"Bambu Lab H2C 0.4 nozzle",
+                "from":"User","nozzle_diameter":["0.4","0.4"]
+            }),
+        );
+        let idx = PresetIndex::load(root.path(), Some("1881310893"));
+        let prepared = idx
+            .prepare(&PresetChoice {
+                printer: "Bambu Lab H2S 0.4 nozzle".into(),
+                process: "0.20mm Any".into(),
+                filaments: vec!["Bambu PLA Basic @BBL H2S".into()],
+                bed_type: DEFAULT_BED_TYPE.into(),
+            })
+            .unwrap();
+        let p: Value = serde_json::from_str(&prepared.process).unwrap();
+        assert_eq!(
+            p["compatible_printers"],
+            json!(["Bambu Lab H2S 0.4 nozzle"]),
+            "an empty list means every printer; the CLI still needs the name"
+        );
+        // A user printer matches a process made for its system preset.
+        let prepared = idx
+            .prepare(&PresetChoice {
+                printer: "My H2C".into(),
+                process: "0.20mm Standard @BBL H2C".into(),
+                filaments: vec!["Bambu PLA Basic @BBL H2C".into()],
+                bed_type: DEFAULT_BED_TYPE.into(),
+            })
+            .unwrap();
+        let m: Value = serde_json::from_str(&prepared.machine).unwrap();
+        assert_eq!(m["inherits"], "Bambu Lab H2C 0.4 nozzle");
+        let p: Value = serde_json::from_str(&prepared.process).unwrap();
+        assert_eq!(
+            p["compatible_printers"],
+            json!(["Bambu Lab H2C 0.4 nozzle"])
+        );
+    }
+
+    #[test]
+    fn no_filament_is_reported_before_anything_else() {
+        let root = fake_bambu_root();
+        let idx = PresetIndex::load(root.path(), None);
+        let err = idx
+            .prepare(&PresetChoice {
+                printer: "No Such Printer".into(),
+                process: "No Such Process".into(),
+                filaments: vec![],
+                bed_type: DEFAULT_BED_TYPE.into(),
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            SlicerError::Io("No filament preset chosen. Pick one on the Slice page.".into())
+        );
+    }
+
+    #[test]
+    fn a_user_filament_inherits_from_its_system_ancestor() {
+        let root = fake_bambu_root();
+        write(
+            root.path(),
+            "user/1881310893/filament/My PLA.json",
+            json!({
+                "type":"filament","name":"My PLA","inherits":"Bambu PLA Basic @BBL H2C",
+                "from":"User","filament_cost":["25"]
+            }),
+        );
+        let idx = PresetIndex::load(root.path(), Some("1881310893"));
+        let prepared = idx
+            .prepare(&h2c_choice("0.20mm Standard @BBL H2C", "My PLA"))
+            .unwrap();
+        let f: Value = serde_json::from_str(&prepared.filaments[0]).unwrap();
+        assert_eq!(f["from"], "User");
+        assert_eq!(f["inherits"], "Bambu PLA Basic @BBL H2C");
+        assert_eq!(f["name"], "My PLA");
+        assert_eq!(f["filament_cost"], json!(["25"]));
+        assert_eq!(f["filament_density"], json!(["1.26"]));
+        assert_eq!(f["filament_id"], "GFA00");
     }
 
     #[test]
@@ -845,6 +1118,40 @@ pub(crate) mod tests {
             bambu_studio_selection(&root.path().join("missing")),
             BambuStudioSelection::default()
         );
+    }
+
+    /// Bed numbers follow Bambu Studio's `BedType` enum (PrintConfig.hpp,
+    /// v02.08.02.61): 1 Cool, 2 Engineering, 3 High Temp, 4 Textured PEI,
+    /// 5 Supertack; 0 is "Default Plate", not a real plate.
+    #[test]
+    fn bed_numbers_follow_bambu_studios_enum_and_bad_leaves_read_as_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let bed = |raw: Value| {
+            write(
+                dir.path(),
+                "BambuStudio.conf",
+                json!({"app":{"curr_bed_type":raw},"presets":{"machine":42,"process":"Q"}}),
+            );
+            bambu_studio_selection(dir.path())
+        };
+        let expected = [
+            (json!("1"), Some("Cool Plate")),
+            (json!("2"), Some("Engineering Plate")),
+            (json!("3"), Some("High Temp Plate")),
+            (json!("4"), Some("Textured PEI Plate")),
+            (json!("5"), Some("Supertack Plate")),
+            (json!(1), Some("Cool Plate")),
+            (json!("0"), None),
+            (json!("6"), None),
+            (json!("high temp plate"), Some("High Temp Plate")),
+            (json!(["4"]), None),
+        ];
+        for (raw, want) in expected {
+            let sel = bed(raw.clone());
+            assert_eq!(sel.bed_type.as_deref(), want, "{raw}");
+            assert_eq!(sel.printer, None, "a non-string machine reads as unset");
+            assert_eq!(sel.process.as_deref(), Some("Q"));
+        }
     }
 
     #[test]

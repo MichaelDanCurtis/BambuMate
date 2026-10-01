@@ -29,7 +29,7 @@ const SKIP_INHERIT_FIELDS: &[&str] = &[
 ];
 
 /// Maximum inheritance depth to prevent infinite loops.
-const MAX_INHERITANCE_DEPTH: usize = 10;
+pub(crate) const MAX_INHERITANCE_DEPTH: usize = 10;
 
 /// Resolve the inheritance chain for a profile.
 ///
@@ -434,6 +434,30 @@ mod tests {
         let leaf = mk(json!({"name":"leaf","include":["nowhere"],"k":"v"}));
         let r = resolve_with_includes(&leaf, &ProfileRegistry::new()).unwrap();
         assert_eq!(r.config["k"], json!("v"));
+    }
+
+    /// A chain one level longer than `MAX_INHERITANCE_DEPTH` allows is
+    /// refused, naming the preset being resolved; one level shorter resolves.
+    #[test]
+    fn chains_deeper_than_the_limit_are_too_deep() {
+        let chain = |ancestors: usize| {
+            let mut profiles = Vec::new();
+            for i in 0..ancestors {
+                let mut p = json!({"name": format!("p{i}")});
+                if i + 1 < ancestors {
+                    p["inherits"] = json!(format!("p{}", i + 1));
+                }
+                profiles.push(mk(p));
+            }
+            registry_of(profiles)
+        };
+        let leaf = mk(json!({"name":"leaf","inherits":"p0"}));
+        assert_eq!(
+            resolve_with_includes(&leaf, &chain(MAX_INHERITANCE_DEPTH)),
+            Err(ResolveError::TooDeep("leaf".into()))
+        );
+        let r = resolve_with_includes(&leaf, &chain(MAX_INHERITANCE_DEPTH - 1)).unwrap();
+        assert_eq!(r.ancestors.len(), MAX_INHERITANCE_DEPTH - 1);
     }
 
     // -- nil preservation --

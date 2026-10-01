@@ -30,6 +30,10 @@ pub enum SlicerError {
     UnsupportedVersion { found: String, min: String },
     #[error("Preset '{name}' wasn't found.")]
     UnknownPreset { name: String },
+    #[error("Preset '{name}' is missing its parent '{parent}'.")]
+    MissingParent { name: String, parent: String },
+    #[error("Process '{process}' isn't made for printer '{printer}'.")]
+    IncompatibleProcess { process: String, printer: String },
     #[error("Bambu Studio couldn't slice this model: {message}")]
     Slicer { message: String },
     #[error("Slicing took longer than 5 minutes and was stopped.")]
@@ -49,6 +53,8 @@ impl SlicerError {
             SlicerError::NotInstalled => "not_installed",
             SlicerError::UnsupportedVersion { .. } => "unsupported_version",
             SlicerError::UnknownPreset { .. } => "unknown_preset",
+            SlicerError::MissingParent { .. } => "missing_parent",
+            SlicerError::IncompatibleProcess { .. } => "incompatible_process",
             SlicerError::Slicer { .. } => "slicer",
             SlicerError::Timeout => "timeout",
             SlicerError::BadOutput => "bad_output",
@@ -155,6 +161,22 @@ mod tests {
             }
             .to_string(),
             "Preset 'My PLA' wasn't found."
+        );
+        assert_eq!(
+            SlicerError::MissingParent {
+                name: "My PLA".into(),
+                parent: "Generic PLA @base".into()
+            }
+            .to_string(),
+            "Preset 'My PLA' is missing its parent 'Generic PLA @base'."
+        );
+        assert_eq!(
+            SlicerError::IncompatibleProcess {
+                process: "0.20mm Standard @BBL H2S".into(),
+                printer: "Bambu Lab H2C 0.4 nozzle".into()
+            }
+            .to_string(),
+            "Process '0.20mm Standard @BBL H2S' isn't made for printer 'Bambu Lab H2C 0.4 nozzle'."
         );
         assert_eq!(
             SlicerError::Slicer {
