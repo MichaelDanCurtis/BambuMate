@@ -24,8 +24,9 @@ use crate::slicer::settings::{
 
 /// The event every job update is emitted on.
 pub const JOB_EVENT: &str = "slicer://job";
-/// Dropped models are staged here; emptied at launch and by "Clear slice
-/// cache".
+/// Dropped models are staged here, one `<uuid>` folder each. Emptied at
+/// launch and by "Clear slice cache"; staging a new model removes the older
+/// folders no waiting or running job uses.
 pub const INPUTS_DIR: &str = "slice-inputs";
 /// Largest model the Slice page accepts by drag and drop.
 const MAX_STAGED_BYTES: usize = 512 * 1024 * 1024;
@@ -369,11 +370,56 @@ fn stage_bytes(inputs: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, Strin
     Ok(path)
 }
 
+/// The `<uuid>` folder name when `source` is a staged model
+/// (`<inputs>/<uuid>/…`); `None` for any other path.
+fn staged_folder(inputs: &Path, source: &str) -> Option<String> {
+    let rest = Path::new(source).strip_prefix(inputs).ok()?;
+    let std::path::Component::Normal(name) = rest.components().next()? else {
+        return None;
+    };
+    let name = name.to_str()?;
+    let id = uuid::Uuid::parse_str(name).ok()?;
+    (id.hyphenated().to_string() == name).then(|| name.to_string())
+}
+
+/// Removes the staged `<uuid>` folders directly in `inputs` that aren't in
+/// `keep`. Anything else there (other names, files, symlinks) is left
+/// alone. Returns the bytes freed.
+fn prune_staged(inputs: &Path, keep: &[String]) -> u64 {
+    let Ok(read) = std::fs::read_dir(inputs) else {
+        return 0;
+    };
+    let mut freed = 0;
+    for e in read.flatten() {
+        let path = e.path();
+        let Some(name) = staged_folder(inputs, &path.to_string_lossy()) else {
+            continue;
+        };
+        if keep.contains(&name) {
+            continue;
+        }
+        // Not following a symlink: only a real folder is removed.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            _ => continue,
+        }
+        let size = remove_inputs(&path);
+        freed += size;
+    }
+    freed
+}
+
 /// Saves a model dropped on the Slice page (the webview gives bytes, not a
 /// path) and returns its path.
+///
+/// The page keeps one staged model at a time and may slice it again (other
+/// presets, "Slice and compare"), so a staged model is kept until the next
+/// one is staged; then older ones that no waiting or running job uses are
+/// removed.
 #[tauri::command]
 pub async fn slicer_stage_model(
     app: AppHandle,
+    svc: State<'_, SlicerService>,
     file_name: String,
     data_base64: String,
 ) -> Result<String, String> {
@@ -389,10 +435,23 @@ pub async fn slicer_stage_model(
         }
     })?;
     let inputs = inputs_dir(&app)?;
+    let svc = svc.inner().clone();
     blocking(move || {
         let bytes = decode_model(&data_base64, MAX_STAGED_BYTES)?;
         drop(data_base64);
-        stage_bytes(&inputs, &name, &bytes).map(|p| p.to_string_lossy().into_owned())
+        let path = stage_bytes(&inputs, &name, &bytes)?
+            .to_string_lossy()
+            .into_owned();
+        let keep: Vec<String> = svc
+            .jobs()
+            .iter()
+            .filter(|j| !j.state.is_terminal())
+            .map(|j| j.source_path.as_str())
+            .chain(std::iter::once(path.as_str()))
+            .filter_map(|p| staged_folder(&inputs, p))
+            .collect();
+        prune_staged(&inputs, &keep);
+        Ok(path)
     })
     .await?
 }
@@ -425,7 +484,13 @@ pub fn stop(app: &AppHandle) {
     };
     let svc = svc.inner().clone();
     if let Some(id) = svc.shutdown() {
-        tauri::async_runtime::block_on(async move { svc.wait(id, SHUTDOWN_WAIT).await });
+        let last = tauri::async_runtime::block_on(async move { svc.wait(id, SHUTDOWN_WAIT).await });
+        if !last.is_some_and(|v| v.state.is_terminal()) {
+            tracing::warn!(
+                "slicing job {id} hadn't stopped {}s after quitting; exiting anyway",
+                SHUTDOWN_WAIT.as_secs()
+            );
+        }
     }
 }
 
@@ -480,6 +545,65 @@ mod tests {
         assert_eq!(decode_model(&b64(b"solid"), 16).unwrap(), b"solid");
         assert_eq!(decode_model(&b64(&[7u8; 17]), 16).unwrap_err(), TOO_LARGE);
         assert!(decode_model("%%% not base64", 16).is_err());
+    }
+
+    #[test]
+    fn oversized_data_is_refused_before_it_is_decoded() {
+        assert_eq!(decode_model(&"A".repeat(400), 16).unwrap_err(), TOO_LARGE);
+        // Not even valid base64: only the length was looked at.
+        assert_eq!(decode_model(&"%".repeat(400), 16).unwrap_err(), TOO_LARGE);
+    }
+
+    #[test]
+    fn staged_folders_are_recognised_only_directly_under_the_inputs_folder() {
+        let inputs = Path::new("/data/slice-inputs");
+        let id = uuid::Uuid::new_v4().to_string();
+        let staged = format!("/data/slice-inputs/{id}/cube.stl");
+        assert_eq!(staged_folder(inputs, &staged), Some(id.clone()));
+        assert_eq!(
+            staged_folder(inputs, "/data/slice-inputs/not-a-uuid/c.stl"),
+            None
+        );
+        assert_eq!(
+            staged_folder(inputs, &format!("/elsewhere/{id}/c.stl")),
+            None
+        );
+        assert_eq!(staged_folder(inputs, "/data/slice-inputs"), None);
+        assert_eq!(staged_folder(inputs, "relative/cube.stl"), None);
+    }
+
+    #[test]
+    fn pruning_removes_only_unused_staged_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let inputs = root.path().join(INPUTS_DIR);
+        let old = stage_bytes(&inputs, "old.stl", b"old").unwrap();
+        let queued = stage_bytes(&inputs, "queued.stl", b"queued").unwrap();
+        let new = stage_bytes(&inputs, "new.stl", b"new").unwrap();
+        // Things that aren't staged folders are never touched.
+        let other = inputs.join("not-a-uuid");
+        std::fs::create_dir_all(&other).unwrap();
+        let loose = inputs.join(uuid::Uuid::new_v4().to_string());
+        std::fs::write(&loose, b"a file, not a folder").unwrap();
+        #[cfg(unix)]
+        let outside = {
+            let outside = root.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(outside.join("keep.stl"), b"x").unwrap();
+            std::os::unix::fs::symlink(&outside, inputs.join(uuid::Uuid::new_v4().to_string()))
+                .unwrap();
+            outside
+        };
+        let folder = |p: &Path| staged_folder(&inputs, &p.to_string_lossy()).unwrap();
+        let keep = [folder(&queued), folder(&new)];
+        let freed = prune_staged(&inputs, &keep);
+        assert_eq!(freed, 3);
+        assert!(!old.exists() && !old.parent().unwrap().exists());
+        assert!(queued.is_file() && new.is_file());
+        assert!(other.is_dir() && loose.is_file());
+        #[cfg(unix)]
+        assert!(outside.join("keep.stl").is_file());
+        // A missing inputs folder is fine.
+        assert_eq!(prune_staged(&root.path().join("nope"), &keep), 0);
     }
 
     /// A finished job whose result lives in `dir` (output and plate_1.png).

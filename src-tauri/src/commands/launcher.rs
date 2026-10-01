@@ -354,6 +354,16 @@ pub(crate) fn search_bs_path() -> Option<String> {
     None
 }
 
+/// `path` when it is an absolute path to something that exists. Relative
+/// paths are refused, so a value like `-W` can never be read as an option
+/// by `open` or Bambu Studio.
+fn usable_file(path: Option<&str>) -> Option<&str> {
+    path.filter(|p| {
+        let p = std::path::Path::new(p);
+        p.is_absolute() && p.exists()
+    })
+}
+
 /// The `/usr/bin/open` arguments that launch Bambu Studio on macOS.
 ///
 /// A model is passed as a *document*, before any `--args`: macOS hands
@@ -394,11 +404,11 @@ fn launch_platform(
     stl_path: Option<&str>,
     profile_path: Option<&str>,
 ) -> Result<(), String> {
-    let model = stl_path.filter(|p| std::path::Path::new(p).exists());
+    let model = usable_file(stl_path);
     if let Some(model) = model {
         info!("  with model: {}", model);
     }
-    let profile = profile_path.filter(|p| std::path::Path::new(p).exists());
+    let profile = usable_file(profile_path);
     if let Some(profile) = profile {
         info!("  with profile: {}", profile);
     }
@@ -428,18 +438,14 @@ fn launch_platform(
 ) -> Result<(), String> {
     let mut cmd = process_command::new_command(bs_path);
 
-    if let Some(stl) = stl_path {
-        if std::path::Path::new(stl).exists() {
-            cmd.arg(stl);
-            info!("  with STL: {}", stl);
-        }
+    if let Some(stl) = usable_file(stl_path) {
+        cmd.arg(stl);
+        info!("  with STL: {}", stl);
     }
 
-    if let Some(profile) = profile_path {
-        if std::path::Path::new(profile).exists() {
-            cmd.arg("--load-filaments").arg(profile);
-            info!("  with profile: {}", profile);
-        }
+    if let Some(profile) = usable_file(profile_path) {
+        cmd.arg("--load-filaments").arg(profile);
+        info!("  with profile: {}", profile);
     }
 
     cmd.spawn()
@@ -508,5 +514,23 @@ mod tests {
             macos_open_args("/A/BS.app", None, None),
             ["-a", "/A/BS.app"]
         );
+    }
+
+    #[test]
+    fn only_existing_absolute_files_are_passed_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cube.stl");
+        std::fs::write(&file, b"solid").unwrap();
+        let abs = file.to_string_lossy().into_owned();
+        assert_eq!(usable_file(Some(&abs)), Some(abs.as_str()));
+        assert_eq!(usable_file(None), None);
+        // Relative paths never get through, even when they exist (tests run
+        // in the crate folder), so none can become an option like `-W`.
+        assert!(std::path::Path::new("Cargo.toml").exists());
+        assert_eq!(usable_file(Some("Cargo.toml")), None);
+        assert_eq!(usable_file(Some("-W")), None);
+        assert_eq!(usable_file(Some("--args")), None);
+        let missing = dir.path().join("missing.stl");
+        assert_eq!(usable_file(Some(&missing.to_string_lossy())), None);
     }
 }
