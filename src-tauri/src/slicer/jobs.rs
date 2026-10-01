@@ -23,6 +23,13 @@ use super::{validate_model_path, ErrorView, ModelKind, SlicerError};
 
 /// Finished jobs kept for the UI and `bm_slice_result`.
 const KEEP_FINISHED: usize = 100;
+/// Most jobs one automatic origin (the agent, the watch folder) may have
+/// waiting at once. Jobs the user starts are not limited.
+pub const MAX_QUEUED_PER_ORIGIN: usize = 10;
+/// Why the cache can't be cleared right now.
+const BUSY_CLEARING: &str = "Finish or cancel the current slice first.";
+/// Why nothing more is queued once the app is quitting.
+const CLOSING: &str = "BambuMate is closing.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -168,6 +175,10 @@ struct State {
     jobs: Vec<Entry>,
     queue: VecDeque<u64>,
     running: Option<(u64, watch::Sender<bool>)>,
+    /// The cache is being cleared: no job starts until it is done.
+    clearing: bool,
+    /// The app is quitting: nothing is queued or started any more.
+    closed: bool,
 }
 
 struct Inner {
@@ -205,6 +216,31 @@ impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// The refusal for one more `origin` job, when that origin already has
+/// [`MAX_QUEUED_PER_ORIGIN`] jobs waiting.
+fn queue_full_message(state: &State, origin: JobOrigin) -> Option<String> {
+    let from = match origin {
+        JobOrigin::Manual => return None,
+        JobOrigin::Agent => "from the agent",
+        JobOrigin::Auto => "from the watch folder",
+    };
+    let waiting = state
+        .queue
+        .iter()
+        .filter(|id| {
+            state
+                .jobs
+                .iter()
+                .any(|e| e.view.id == **id && e.view.origin == origin)
+        })
+        .count();
+    (waiting >= MAX_QUEUED_PER_ORIGIN).then(|| {
+        format!(
+            "{MAX_QUEUED_PER_ORIGIN} slices {from} are already waiting; let some finish before adding more."
+        )
+    })
 }
 
 fn model_name(path: &Path) -> String {
@@ -327,10 +363,19 @@ impl SlicerService {
 
     /// Queues a job. Fails at once (nothing queued) when the model path is
     /// not an existing `.stl` or `.3mf` file.
+    ///
+    /// Agent and automatic jobs are refused once [`MAX_QUEUED_PER_ORIGIN`]
+    /// of that origin are waiting; jobs the user starts never are.
     pub fn enqueue(&self, req: JobRequest) -> Result<JobView, SlicerError> {
         let (model, kind) = validate_model_path(&req.source_path)?;
         let view = {
             let mut s = self.lock();
+            if s.closed {
+                return Err(SlicerError::Io(CLOSING.into()));
+            }
+            if let Some(full) = queue_full_message(&s, req.origin) {
+                return Err(SlicerError::Io(full));
+            }
             s.next_id += 1;
             let id = s.next_id;
             let view = JobView {
@@ -432,10 +477,59 @@ impl SlicerService {
         }
     }
 
+    /// Empties the slice cache, then runs `also` (more cleanup, e.g. staged
+    /// models; it returns the bytes it freed). Refused while a job is
+    /// running or waiting, since a job may be storing its result or about
+    /// to read a staged model. No job starts until the clearing is done.
+    /// Returns the bytes freed. Blocking file work: call it off the async
+    /// runtime.
+    pub fn clear_cache(&self, also: impl FnOnce() -> u64) -> Result<u64, SlicerError> {
+        {
+            let mut s = self.lock();
+            if s.running.is_some() || !s.queue.is_empty() || s.clearing {
+                return Err(SlicerError::Io(BUSY_CLEARING.into()));
+            }
+            s.clearing = true;
+        }
+        /// Lets the queue run again however the clearing ends.
+        struct Reopen<'a>(&'a SlicerService);
+        impl Drop for Reopen<'_> {
+            fn drop(&mut self) {
+                self.0.lock().clearing = false;
+                self.0.inner.wake.notify_one();
+            }
+        }
+        let _reopen = Reopen(self);
+        Ok(self.inner.cache.clear() + also())
+    }
+
+    /// For app exit: stops taking jobs, cancels every waiting job and asks
+    /// the running one to stop (which kills Bambu Studio's process group).
+    /// Returns the running job's id, so the caller can wait for it to end.
+    pub fn shutdown(&self) -> Option<u64> {
+        let mut s = self.lock();
+        s.closed = true;
+        let waiting: Vec<u64> = s.queue.drain(..).collect();
+        let mut updates = Vec::new();
+        for e in s.jobs.iter_mut().filter(|e| waiting.contains(&e.view.id)) {
+            e.view.state = JobState::Cancelled;
+            updates.push(e.view.clone());
+        }
+        if !updates.is_empty() {
+            self.publish(&s, &updates);
+        }
+        let (id, tx) = s.running.as_ref()?;
+        let _ = tx.send(true);
+        Some(*id)
+    }
+
     /// Takes the next job off the queue and marks it running, publishing
     /// the new queue positions with it.
     fn start_next(&self) -> Option<(u64, watch::Receiver<bool>)> {
         let mut s = self.lock();
+        if s.clearing || s.closed {
+            return None;
+        }
         let id = s.queue.pop_front()?;
         let (tx, rx) = watch::channel(false);
         s.running = Some((id, tx));
@@ -1345,6 +1439,155 @@ mod tests {
             Err(SlicerError::InvalidModel(_))
         ));
         assert!(h.svc.jobs().is_empty());
+    }
+
+    impl Harness {
+        async fn until_running(&self, id: u64) {
+            let svc = self.svc.clone();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !matches!(svc.job(id).unwrap().state, JobState::Running { .. }) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_and_auto_jobs_are_capped_but_manual_ones_are_not() {
+        let gate = Arc::new(Notify::new());
+        let h = harness(vec![Script::Gated(gate.clone())], Duration::from_secs(600));
+        let m = h.model("cube.stl", b"solid cube");
+        // Something running, so everything after it waits.
+        let first = h.svc.enqueue(h.request(&m, PLA)).unwrap();
+        h.until_running(first.id).await;
+        for origin in [JobOrigin::Agent, JobOrigin::Auto] {
+            let req = JobRequest {
+                origin,
+                ..h.request(&m, PLA)
+            };
+            for _ in 0..MAX_QUEUED_PER_ORIGIN {
+                h.svc.enqueue(req.clone()).unwrap();
+            }
+            let err = h.svc.enqueue(req.clone()).unwrap_err();
+            assert_eq!(err.kind(), "io");
+            assert!(err.to_string().contains("already waiting"), "{err}");
+        }
+        for _ in 0..MAX_QUEUED_PER_ORIGIN + 5 {
+            h.svc.enqueue(h.request(&m, PLA)).unwrap();
+        }
+        // A cancelled job frees its place.
+        let agent_job = h
+            .svc
+            .jobs()
+            .into_iter()
+            .find(|j| j.origin == JobOrigin::Agent)
+            .unwrap();
+        assert!(h.svc.cancel(agent_job.id));
+        h.svc
+            .enqueue(JobRequest {
+                origin: JobOrigin::Agent,
+                ..h.request(&m, PLA)
+            })
+            .unwrap();
+        h.svc.shutdown();
+    }
+
+    #[tokio::test]
+    async fn clearing_the_cache_waits_for_an_idle_queue() {
+        let gate = Arc::new(Notify::new());
+        let h = harness(vec![Script::Gated(gate.clone())], Duration::from_secs(600));
+        let m = h.model("cube.stl", b"solid cube");
+        let a = h.svc.enqueue(h.request(&m, PLA)).unwrap();
+        h.until_running(a.id).await;
+        let mut extra_ran = false;
+        let err = h
+            .svc
+            .clear_cache(|| {
+                extra_ran = true;
+                0
+            })
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Finish or cancel the current slice first.");
+        assert!(!extra_ran, "nothing is removed while a job runs");
+        gate.notify_one();
+        let JobState::Done { result, .. } = h.finish(a.id).await.state else {
+            panic!()
+        };
+        assert!(Path::new(&result.output_path).is_file());
+
+        // Queued but not yet running also blocks it.
+        let gate2 = Arc::new(Notify::new());
+        h.env
+            .scripts
+            .lock()
+            .unwrap()
+            .push_back(Script::Gated(gate2.clone()));
+        let b = h
+            .svc
+            .enqueue(h.request(&h.model("b.stl", b"b"), PLA))
+            .unwrap();
+        let c = h
+            .svc
+            .enqueue(h.request(&h.model("c.stl", b"c"), PLA))
+            .unwrap();
+        // Wait for the (fake) slicer itself, so b uses up its gated script.
+        let env = h.env.clone();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while env.ran.lock().unwrap().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(h.svc.clear_cache(|| 0).is_err());
+        assert!(h.svc.cancel(b.id) && h.svc.cancel(c.id));
+        h.finish(b.id).await;
+
+        // Idle: everything goes, the extra cleanup's bytes are added.
+        let freed = h.svc.clear_cache(|| 5).unwrap();
+        assert!(freed > 5, "{freed}");
+        assert!(!Path::new(&result.output_path).exists());
+        assert_eq!(h.svc.cache().size(), 0);
+        // The queue still works afterwards.
+        let d = h.svc.enqueue(h.request(&m, PLA)).unwrap();
+        let dv = h.finish(d.id).await;
+        assert!(matches!(dv.state, JobState::Done { .. }), "{dv:?}");
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_the_running_job_and_empties_the_queue() {
+        let h = harness(vec![Script::Hang], Duration::from_secs(600));
+        let a = h
+            .svc
+            .enqueue(h.request(&h.model("a.stl", b"a"), PLA))
+            .unwrap();
+        let b = h
+            .svc
+            .enqueue(h.request(&h.model("b.stl", b"b"), PLA))
+            .unwrap();
+        h.until_running(a.id).await;
+        // Wait until Bambu Studio itself is running.
+        let env = h.env.clone();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while env.ran.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(h.svc.shutdown(), Some(a.id));
+        assert_eq!(h.svc.job(b.id).unwrap().state, JobState::Cancelled);
+        assert_eq!(h.finish(a.id).await.state, JobState::Cancelled);
+        assert_eq!(h.env.concurrent.load(Ordering::SeqCst), 0);
+        assert_eq!(*h.env.ran.lock().unwrap(), vec!["a.stl"], "b never ran");
+        let err = h
+            .svc
+            .enqueue(h.request(&h.model("c.stl", b"c"), PLA))
+            .unwrap_err();
+        assert_eq!(err.to_string(), "BambuMate is closing.");
+        assert_eq!(h.svc.shutdown(), None, "nothing left to stop");
     }
 
     /// End to end with the real Bambu Studio and the real presets on this

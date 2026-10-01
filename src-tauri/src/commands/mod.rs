@@ -10,5 +10,6 @@ pub mod launcher;
 pub mod models;
 pub mod profile;
 pub mod scraper;
+pub mod slicer;
 pub mod stl_bridge;
 pub mod updater;

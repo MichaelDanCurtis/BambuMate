@@ -82,6 +82,18 @@ pub fn run() {
             commands::launcher::open_external_url,
             commands::batch::list_catalog_brands,
             commands::batch::batch_generate_brand,
+            commands::slicer::slicer_status,
+            commands::slicer::slicer_presets,
+            commands::slicer::slicer_get_settings,
+            commands::slicer::slicer_set_settings,
+            commands::slicer::slicer_slice,
+            commands::slicer::slicer_cancel,
+            commands::slicer::slicer_jobs,
+            commands::slicer::slicer_thumbnail,
+            commands::slicer::slicer_open_in_bambu_studio,
+            commands::slicer::slicer_clear_cache,
+            commands::slicer::slicer_pick_model,
+            commands::slicer::slicer_stage_model,
             commands::stl_bridge::set_stl_watch_dir,
             commands::stl_bridge::get_stl_watch_dir,
             commands::stl_bridge::list_received_stls,
@@ -126,6 +138,9 @@ pub fn run() {
                     }
                 }
             }
+
+            // -- Slicing with Bambu Studio -----------------------------------
+            commands::slicer::start(app.handle());
 
             // -- Agent backends --------------------------------------------
             {
@@ -197,6 +212,12 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // No Bambu Studio CLI may outlive BambuMate.
+                commands::slicer::stop(app);
+            }
+        });
 }
