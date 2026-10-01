@@ -7,7 +7,8 @@ pub struct ThemeContext {
 }
 
 /// Normalize stored or incoming theme values to the supported set.
-/// Unknown values fall back to the Bambu Studio light theme.
+/// "light" and the legacy "bambu" both select the light theme; anything else
+/// unknown also falls back to light so a corrupt value never hides the UI.
 pub fn normalize_theme(theme: &str) -> &'static str {
     match theme {
         "dark" => "dark",
@@ -23,5 +24,22 @@ pub fn apply_theme(theme: &str) {
                 let _ = html.set_attribute("data-theme", normalize_theme(theme));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_theme;
+
+    #[test]
+    fn dark_stays_dark() {
+        assert_eq!(normalize_theme("dark"), "dark");
+    }
+
+    #[test]
+    fn light_and_legacy_values_select_the_light_theme() {
+        assert_eq!(normalize_theme("light"), "bambu");
+        assert_eq!(normalize_theme("bambu"), "bambu");
+        assert_eq!(normalize_theme("something-else"), "bambu");
     }
 }

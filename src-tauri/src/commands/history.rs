@@ -100,9 +100,13 @@ pub async fn revert_to_backup(app: tauri::AppHandle, session_id: i64) -> Result<
 
     let backup_owned = backup.to_path_buf();
     let profile_owned = profile_path.to_path_buf();
+    let ledger_db = data_dir.join("refinement_history.db");
     tokio::task::spawn_blocking(move || {
-        crate::profile::writer::restore_from_backup(&backup_owned, &profile_owned)
-            .map_err(|e| format!("Failed to restore: {}", e))
+        let outcome = crate::profile::writer::restore_from_backup(&backup_owned, &profile_owned)
+            .map_err(|e| format!("Failed to restore: {}", e))?;
+        // Best effort: records the preset if the revert left it new.
+        crate::history::ledger::note_new_preset_write_at(&ledger_db, &outcome, &profile_owned);
+        Ok::<(), String>(())
     })
     .await
     .map_err(|e| format!("restore join error: {}", e))??;

@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use chrono::Utc;
 use std::path::Path;
 use tracing::debug;
 
@@ -41,16 +40,6 @@ pub fn base_profile_name(material: &MaterialType) -> &'static str {
 pub fn generate_filament_id() -> String {
     let bytes: [u8; 4] = rand::random();
     format!("P{:07x}", u32::from_be_bytes(bytes) & 0x0FFF_FFFF)
-}
-
-/// Generate a random setting_id in the format "PFUS" + 14 hex chars.
-///
-/// User profiles use "PFUS" prefix (not "GFS" which is for system profiles).
-/// Uses format!("{:02x}") per byte to avoid depending on the hex crate.
-pub fn generate_setting_id() -> String {
-    let bytes: [u8; 7] = rand::random();
-    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("PFUS{}", hex)
 }
 
 /// Search the user filament directory for an existing profile that belongs to the
@@ -499,13 +488,9 @@ pub fn generate_profile(
         .and_then(|p| p.preset_folder.clone())
         .unwrap_or_default();
 
-    let metadata = ProfileMetadata {
-        sync_info: String::new(),
-        user_id,
-        setting_id: generate_setting_id(),
-        base_id: String::new(),
-        updated_time: Utc::now().timestamp() as u64,
-    };
+    // An empty setting_id is what makes Bambu Studio upload the preset; the
+    // cloud assigns the real id. See profile::sync.
+    let metadata = super::sync::metadata_for_new(user_id);
 
     // 10. Generate filename
     let filename = if specs.serial.is_empty() {
@@ -626,6 +611,36 @@ mod tests {
             json!(["0", "0"]),
             "spec-derived value must not be overwritten by compat default"
         );
+    }
+
+    #[test]
+    fn generated_metadata_is_new_to_bambu_studio() {
+        let mut registry = ProfileRegistry::new();
+        registry.insert(
+            FilamentProfile::from_json(r#"{"name":"fdm_filament_pla","filament_type":["PLA"]}"#)
+                .unwrap(),
+        );
+        let specs = FilamentSpecs {
+            brand: "Acme".into(),
+            material: "PLA".into(),
+            ..Default::default()
+        };
+
+        let (_profile, meta, _filename) = generate_profile(
+            &specs,
+            &registry,
+            Some("Bambu Lab X1 Carbon 0.4 nozzle"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            meta.setting_id, "",
+            "Bambu Studio only uploads a preset whose setting_id is empty"
+        );
+        assert_eq!(meta.sync_info, "");
+        assert_eq!(meta.base_id, "");
     }
 }
 

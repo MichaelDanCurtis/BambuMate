@@ -62,6 +62,8 @@ pub fn run() {
             commands::profile::search_base_profiles,
             commands::profile::refresh_base_profile_index,
             commands::profile::list_target_printer_options,
+            commands::preset_sync::list_unsynced_presets,
+            commands::preset_sync::repair_preset_sync,
             commands::scraper::search_filament,
             commands::scraper::get_cached_filament,
             commands::scraper::clear_filament_cache,

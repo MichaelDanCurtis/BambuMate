@@ -37,3 +37,4 @@ tests/webkit/webkit-css-report.json
 tests/webkit/overlay-*.png
 tests/webkit/flow-*.png
 tests/webkit/fail-*.png
+tests/webkit/screens/

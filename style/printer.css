@@ -1,18 +1,10 @@
-/* Printer page, rail dot and Settings → Printer. Built on the .nd tokens
-   (style/tokens.css). --nd-signal arrives with the design-system branch
-   (PR #25); until then the dot falls back to --nd-success. */
+/* Printer page, rail dot and Settings → Printer. Built on the app-wide
+   Nothing tokens (style/tokens.css). */
 
 /* -- rail dot ------------------------------------------------------------ */
-/* flex, not inline-flex: the text sidebar's links span the full row. */
-.nav-link-printer { display: flex; align-items: center; gap: 8px; }
-.printer-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--nd-text-disabled);
-}
-.printer-dot[data-state="connected"] { background: var(--nd-signal, var(--nd-success)); }
+/* Position and size are shared with .nav-update-dot in style/main.css. */
+.printer-dot { background: var(--nd-text-disabled); }
+.printer-dot[data-state="connected"] { background: var(--nd-signal); }
 .printer-dot[data-state="connecting"] { background: var(--nd-warning); }
 .printer-dot[data-state="error"] { background: var(--nd-accent); }
 
@@ -78,7 +70,7 @@
 .pr-rfid { padding: 1px 6px; border: 1px solid var(--nd-border-visible); border-radius: 999px; }
 .pr-status { margin-left: auto; font-size: 12px; color: var(--nd-text-secondary); }
 .pr-slot[data-status="matches"] .pr-status,
-.pr-slot[data-status="rfid"] .pr-status { color: var(--nd-signal, var(--nd-success)); }
+.pr-slot[data-status="rfid"] .pr-status { color: var(--nd-signal); }
 .pr-slot[data-status="different"] .pr-status { color: var(--nd-text-display); font-weight: 600; }
 .pr-steps { margin: 0; padding: var(--nd-space-sm) var(--nd-space-md) var(--nd-space-sm) var(--nd-space-xl); border-top: 1px solid var(--nd-border); font-size: 12px; display: grid; gap: 4px; }
 .pr-sync-note { color: var(--nd-accent); }

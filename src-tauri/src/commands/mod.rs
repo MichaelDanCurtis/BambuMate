@@ -8,6 +8,7 @@ pub mod history;
 pub mod keychain;
 pub mod launcher;
 pub mod models;
+pub mod preset_sync;
 pub mod printer;
 pub mod profile;
 pub mod scraper;

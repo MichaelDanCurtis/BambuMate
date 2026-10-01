@@ -30,6 +30,7 @@ import {
   PRINTER_SERIAL,
   PRINTER_UNCONFIGURED,
   PRINTER_VIEW,
+  UNSYNCED_CONFIRMED_PATH,
   withSlot,
 } from "./fixtures.mjs";
 
@@ -86,8 +87,20 @@ function installTauriMock(fixtures) {
   window.__ipc = { calls, unknown };
   // Steps swap a command's canned answer mid-run through this.
   window.__fixtures = fixtures;
+  // The real backend recomputes get_feature_flags from stored preferences, so
+  // flipping the Settings page's AI toggle off should be reflected the next
+  // time the frontend re-fetches flags. The fixture itself is static, so this
+  // is the cheapest way to get a real AI-off state without a second fixture
+  // set: track the one preference write that matters and answer accordingly.
+  let analysisEnabled = fixtures.get_feature_flags?.analysis_enabled ?? true;
   const invoke = async (cmd, args) => {
     calls.push({ cmd, args });
+    if (cmd === "set_preference" && args?.key === "filament_search_use_ai" && args?.value === "false") {
+      analysisEnabled = false;
+    }
+    if (cmd === "get_feature_flags") {
+      return { ...fixtures.get_feature_flags, analysis_enabled: analysisEnabled };
+    }
     if (!(cmd in fixtures)) {
       unknown.push(cmd);
       throw new Error(`no fixture for command '${cmd}'`);
@@ -194,6 +207,92 @@ async function driveApp(browserType, engine, baseUrl) {
       ...new Set(window.__ipc.calls.map((c) => c.cmd)),
     ]);
     return cmds.join(", ");
+  });
+
+  // -- rail sidebar ----------------------------------------------------------
+  await step(run, page, "rail is collapsed to 64px with icons only", async () => {
+    const w = await page.locator("nav.sidebar").evaluate((el) => el.getBoundingClientRect().width);
+    if (Math.round(w) !== 64) throw new Error(`rail width ${w}`);
+    const labelOpacity = await page.locator(".nav-label").first().evaluate((el) => getComputedStyle(el).opacity);
+    if (labelOpacity !== "0") throw new Error(`label opacity ${labelOpacity}`);
+  });
+
+  await step(run, page, "hovering expands the rail over the content", async () => {
+    const before = await page.locator(".content").evaluate((el) => el.getBoundingClientRect().left);
+    await page.hover("nav.sidebar");
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219, null, { timeout: 3000 });
+    const after = await page.locator(".content").evaluate((el) => el.getBoundingClientRect().left);
+    if (before !== after) throw new Error(`content moved from ${before} to ${after}`);
+    // "220px with labels visible" -- opacity is a transition, so poll for it
+    // rather than reading it once.
+    await page.waitForFunction(
+      () => getComputedStyle(document.querySelector(".nav-label")).opacity === "1",
+      null,
+      { timeout: 3000 }
+    );
+    if (await page.locator(".sidebar-wordmark").count()) {
+      await page.waitForFunction(
+        () => getComputedStyle(document.querySelector(".sidebar-wordmark")).opacity === "1",
+        null,
+        { timeout: 3000 }
+      );
+    }
+    await page.mouse.move(900, 400);
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65, null, { timeout: 3000 });
+  });
+
+  // Real Tab presses were tried first (the concern being that programmatic
+  // focus() doesn't reliably set :focus-visible), but WebKit's headless
+  // engine -- like real Safari's default "Text boxes and lists only" keyboard
+  // setting -- never gives an <a> Tab focus at all here, in either direction,
+  // so a key-driven approach can't reach this link in that engine. Verified
+  // directly: after the preceding hover step, page.locator(...).focus() does
+  // set :focus-visible (and expands the rail) in both engines, so it is used
+  // here instead. See Task 6 report for the measurements.
+  //
+  // What this step proves: once a link is focus-visible, the rail's CSS
+  // reacts correctly (expands, labels become visible). What it does NOT
+  // prove: that the link is reachable by an actual Tab key press -- WebKit's
+  // headless engine can't exercise that here (see above), so the tabIndex
+  // check below is the closest available guard against a link silently
+  // dropping out of the tab order (tabindex="-1"), which programmatic
+  // .focus() would not otherwise reveal.
+  await step(run, page, "keyboard focus expands the rail", async () => {
+    await page.locator('nav.sidebar a[href="/profiles"]').focus();
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219, null, { timeout: 3000 });
+    await page.waitForFunction(
+      () => getComputedStyle(document.querySelector(".nav-label")).opacity === "1",
+      null,
+      { timeout: 3000 }
+    );
+    if (await page.locator(".sidebar-wordmark").count()) {
+      await page.waitForFunction(
+        () => getComputedStyle(document.querySelector(".sidebar-wordmark")).opacity === "1",
+        null,
+        { timeout: 3000 }
+      );
+    }
+    const outOfOrder = await page
+      .locator("nav.sidebar a")
+      .evaluateAll((els) => els.filter((el) => el.tabIndex < 0).map((el) => el.getAttribute("href")));
+    if (outOfOrder.length) throw new Error(`removed from tab order: ${outOfOrder.join(", ")}`);
+    await page.evaluate(() => document.activeElement.blur());
+  });
+
+  await step(run, page, "active route shows the signal tick", async () => {
+    const current = await page.locator('nav.sidebar a[aria-current="page"]').getAttribute("href");
+    if (current !== "/") throw new Error(`aria-current on ${current}`);
+    const tick = await page.locator('nav.sidebar a[aria-current="page"]').evaluate((el) => getComputedStyle(el, "::before").backgroundColor);
+    if (!tick || tick === "rgba(0, 0, 0, 0)") throw new Error(`no tick colour (${tick})`);
+  });
+
+  // Regression for the exact bug the Task 5 fix round addressed: Chromium
+  // focuses a link on mousedown, and with :focus-within that kept the rail
+  // stuck open after an ordinary click. :has(:focus-visible) should not.
+  await step(run, page, "clicking a nav link does not leave the rail open", async () => {
+    await page.click('nav.sidebar a[href="/analysis"]');
+    await page.mouse.move(900, 400);
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65, null, { timeout: 3000 });
   });
 
   // -- filament search and selection ---------------------------------------
@@ -564,7 +663,8 @@ async function driveApp(browserType, engine, baseUrl) {
     if (t.args.accessCode !== "12345678" || t.args.serial !== PRINTER_SERIAL) {
       throw new Error(JSON.stringify(t.args));
     }
-    const label = (await page.locator(".printer-trust-btn").innerText()).trim();
+    // textContent: the design system shows button labels in capitals.
+    const label = ((await page.locator(".printer-trust-btn").textContent()) ?? "").trim();
     if (label !== "Trust this printer") throw new Error(`button reads "${label}"`);
   });
 
@@ -644,12 +744,12 @@ async function driveApp(browserType, engine, baseUrl) {
     const expected =
       "This printer previously proved it's a genuine Bambu printer. A new, unrecognised certificate could mean another device is impersonating it. Only trust it if you've just replaced or reset the printer.";
     if (warning !== expected) throw new Error(`warning reads "${warning}"`);
-    const label = async () => (await page.locator(".printer-trust-btn").innerText()).trim();
+    const label = async () => ((await page.locator(".printer-trust-btn").textContent()) ?? "").trim();
     if ((await label()) !== "Trust this printer") throw new Error(`button reads "${await label()}"`);
     const before = (await ipcCalls("printer_save")).length;
     await page.click(".printer-trust-btn");
     await page.waitForFunction(
-      () => document.querySelector(".printer-trust-btn")?.innerText.trim() === "Yes, trust this certificate",
+      () => document.querySelector(".printer-trust-btn")?.textContent.trim() === "Yes, trust this certificate",
       null,
       { timeout: 5000 }
     );
@@ -851,6 +951,37 @@ async function driveApp(browserType, engine, baseUrl) {
     await setFixture(cmd, FIXTURES[cmd]);
   }
 
+  // Regression for the Task 5 fix that made .nav-lock absolutely positioned
+  // over the icon's corner instead of flowing after the (opacity:0, but still
+  // full-width) label -- otherwise it would sit past the edge of the 64px
+  // collapsed rail. Turning AI off here, after the two prior steps that need
+  // it on, keeps this order-independent of the rest of the flow: nothing
+  // after this point revisits Print Analysis or the AI-gated Settings UI.
+  await step(run, page, "AI-off lock is visible on the collapsed rail", async () => {
+    // Earlier steps click rail links; start from a rail at rest, not one
+    // still animating closed after the pointer left it.
+    await page.mouse.move(900, 400);
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65, null, { timeout: 3000 });
+    await page.locator(".settings-page .wizard-mode-card", { hasText: "Manufacturer Specs Only" }).click();
+    await page.waitForFunction(
+      () => window.__ipc.calls.some(
+        (c) => c.cmd === "set_preference" && c.args?.key === "filament_search_use_ai" && c.args?.value === "false"
+      ),
+      null,
+      { timeout: 5000 }
+    );
+    const lock = page.locator('nav.sidebar a[href="/analysis"] .nav-lock');
+    await lock.waitFor({ state: "visible", timeout: 5000 });
+    const rail = await page.locator("nav.sidebar").boundingBox();
+    const box = await lock.boundingBox();
+    if (!box || !rail) throw new Error("lock or rail has no box");
+    if (rail.width > 65) throw new Error(`rail not collapsed: ${rail.width}px`);
+    if (box.x + box.width > rail.x + rail.width + 1) {
+      throw new Error(`lock (x=${box.x}, w=${box.width}) extends past the ${Math.round(rail.width)}px rail`);
+    }
+    return `lock at x=${Math.round(box.x)} within ${Math.round(rail.width)}px rail`;
+  });
+
   await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });
 
   // -- health check ----------------------------------------------------------
@@ -874,6 +1005,47 @@ async function driveApp(browserType, engine, baseUrl) {
     const remedy = await page.locator(".diagnostics-remedy").count();
     if (remedy < 1) throw new Error("the warned check rendered no remedy");
     return `${pass} pass, ${warn} warn, ${remedy} remedy`;
+  });
+
+  await step(run, page, "preset sync check offers Review and repair", async () => {
+    const button = page.locator('.diagnostics-action[data-action="repair_preset_sync"]');
+    if ((await button.count()) !== 1) throw new Error("no repair action button");
+    // textContent is the label as written; the design system may display it
+    // in capitals via text-transform, which innerText would report.
+    const label = ((await button.textContent()) ?? "").trim();
+    if (label !== "Review and repair") throw new Error(`button reads "${label}"`);
+    const row = page.locator(".diagnostics-row-warn", { has: button });
+    const detail = (await row.locator(".diagnostics-detail").innerText()).trim();
+    if (detail !== "2 presets won't sync to Bambu Cloud") throw new Error(`detail reads "${detail}"`);
+    return detail;
+  });
+
+  await step(run, page, "repair panel lists candidates, confirmed ones ticked", async () => {
+    await page.click('.diagnostics-action[data-action="repair_preset_sync"]');
+    await page.waitForSelector(".preset-sync-panel .preset-sync-row", { timeout: 15000 });
+    const ticked = await page
+      .locator(".preset-sync-row input[type=checkbox]")
+      .evaluateAll((els) => els.map((e) => e.checked));
+    if (JSON.stringify(ticked) !== "[true,false]") throw new Error(`ticked ${JSON.stringify(ticked)}`);
+    const note = (await page.locator(".preset-sync-note").innerText()).trim();
+    const expected = "Might already be synced — only tick if it's missing from your printer";
+    if (note !== expected) throw new Error(`note reads "${note}"`);
+    return `${ticked.length} rows`;
+  });
+
+  await step(run, page, "Repair selected sends the ticked paths and reports", async () => {
+    await page.click(".preset-sync-repair");
+    await page.waitForSelector(".preset-sync-result", { timeout: 15000 });
+    const sent = await page.evaluate(() =>
+      window.__ipc.calls.filter((c) => c.cmd === "repair_preset_sync").map((c) => c.args.paths)
+    );
+    if (JSON.stringify(sent) !== JSON.stringify([[UNSYNCED_CONFIRMED_PATH]])) {
+      throw new Error(`sent ${JSON.stringify(sent)}`);
+    }
+    const msg = (await page.locator(".preset-sync-result").innerText()).trim();
+    const expected = "Repaired 1 preset. Open Bambu Studio while signed in to upload them.";
+    if (msg !== expected) throw new Error(`result reads "${msg}"`);
+    return msg;
   });
 
   await page.screenshot({ path: `flow-${engine}-health.png`, fullPage: false });
@@ -1353,8 +1525,15 @@ async function driveApp(browserType, engine, baseUrl) {
 
   await step(run, page, "invalid-profile warning is shown in accent", async () => {
     await emit({ kind: "invalid_profiles", session_id: "sess-1", seq: 1, paths: ["/p/Broken.json"] });
-    const color = await page.locator(".ag-notice.ag-error").last().evaluate((el) => getComputedStyle(el).color);
-    if (!/215,\s*25,\s*33/.test(color)) throw new Error(`notice color ${color}`);
+    const { color, accent } = await page.locator(".ag-notice.ag-error").last().evaluate((el) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--nd-accent)";
+      el.parentElement.appendChild(probe);
+      const accent = getComputedStyle(probe).color;
+      probe.remove();
+      return { color: getComputedStyle(el).color, accent };
+    });
+    if (color !== accent) throw new Error(`notice color ${color}, accent ${accent}`);
   });
 
   await page.screenshot({ path: `flow-${engine}-agent.png`, fullPage: false });

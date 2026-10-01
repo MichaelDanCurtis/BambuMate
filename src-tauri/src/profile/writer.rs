@@ -59,8 +59,11 @@ pub fn write_profile_metadata_atomic(metadata: &ProfileMetadata, target_path: &P
 /// Write a profile and its companion metadata file atomically.
 ///
 /// The metadata file path is derived from `json_path` by changing the
-/// extension to `.info`. If the metadata write fails, the JSON file
-/// is kept (a valid profile with stale metadata is better than no profile).
+/// extension to `.info`. The JSON is written first. If the metadata write
+/// then fails, the JSON is kept (a valid profile with stale metadata is
+/// better than no profile) but the failure is returned as an error: the
+/// `.info` decides whether Bambu Studio uploads the preset, so callers must
+/// not report success, or record the preset as written new, without it.
 pub fn write_profile_with_metadata(
     profile: &FilamentProfile,
     json_path: &Path,
@@ -69,18 +72,17 @@ pub fn write_profile_with_metadata(
     // Write the profile JSON first
     write_profile_atomic(profile, json_path)?;
 
-    // Compute .info path
     let info_path = json_path.with_extension("info");
-
-    // Write metadata -- log warning on failure but don't rollback the JSON
-    if let Err(e) = write_profile_metadata_atomic(metadata, &info_path) {
+    write_profile_metadata_atomic(metadata, &info_path).map_err(|e| {
         warn!(
-            "Failed to write metadata to {:?}: {}. Profile JSON was written successfully.",
+            "Failed to write metadata to {:?}: {}. Profile JSON was written.",
             info_path, e
         );
-    }
-
-    Ok(())
+        e.context(format!(
+            "profile JSON was written, but its .info could not be ({})",
+            info_path.display()
+        ))
+    })
 }
 
 /// Create a timestamped backup of a profile before modification.
@@ -113,12 +115,19 @@ pub fn backup_profile(profile_path: &Path) -> Result<PathBuf> {
 
 /// Restore a profile from a backup file.
 ///
-/// Reads the backup profile and atomically writes it to the target profile path.
-pub fn restore_from_backup(backup_path: &Path, profile_path: &Path) -> Result<()> {
+/// Reads the backup profile and writes it to the target profile path. A
+/// revert is an edit, so it goes through `sync::write_profile_edit`, which
+/// marks the preset for upload. That covers the history revert, the agent's
+/// `bm_rollback` and its auto-restore after a rejected write. The outcome is
+/// returned for the caller to pass to `history::ledger::note_new_preset_write`.
+pub fn restore_from_backup(
+    backup_path: &Path,
+    profile_path: &Path,
+) -> Result<super::sync::NewPresetWrite> {
     let backup_profile = super::reader::read_profile(backup_path)?;
-    write_profile_atomic(&backup_profile, profile_path)?;
+    let outcome = super::sync::write_profile_edit(&backup_profile, profile_path)?;
     info!("Restored profile from {:?}", backup_path);
-    Ok(())
+    Ok(outcome)
 }
 
 /// Register a filament profile name in BambuStudio.conf's "filaments" array.
@@ -413,5 +422,38 @@ mod tests {
         let json_slice = strip_md5_checksum(&content);
         let parsed: serde_json::Value = serde_json::from_str(json_slice).unwrap();
         assert_eq!(parsed["filaments"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn restore_from_backup_marks_the_preset_for_upload() {
+        let dir = TempDir::new().unwrap();
+        let base = dir
+            .path()
+            .join("user")
+            .join("1881310893")
+            .join("filament")
+            .join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        let profile_path = create_test_profile_file(&base, "profile.json");
+        let synced = ProfileMetadata {
+            sync_info: String::new(),
+            user_id: "1881310893".into(),
+            setting_id: "PFUS0123456789abcd".into(),
+            base_id: String::new(),
+            updated_time: 1_700_000_000,
+        };
+        write_profile_metadata_atomic(&synced, &profile_path.with_extension("info")).unwrap();
+        let backup_path = backup_profile(&profile_path).unwrap();
+
+        restore_from_backup(&backup_path, &profile_path).unwrap();
+
+        let meta = crate::profile::reader::read_profile_metadata(&profile_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.sync_info, "update",
+            "a revert is an edit Bambu Studio must push"
+        );
+        assert_eq!(meta.setting_id, "PFUS0123456789abcd");
     }
 }

@@ -32,6 +32,15 @@ impl CheckStatus {
     }
 }
 
+/// A follow-up the UI can offer for a check, rendered as a button.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckAction {
+    /// Stable id the frontend dispatches on, e.g. `repair_preset_sync`.
+    pub id: String,
+    /// Button label.
+    pub label: String,
+}
+
 /// The result a check body produces, before timing/identity metadata is added.
 #[derive(Debug, Clone)]
 pub struct CheckOutcome {
@@ -39,6 +48,8 @@ pub struct CheckOutcome {
     pub detail: String,
     /// Operator-facing guidance shown when the check is not `Pass`.
     pub remedy: Option<String>,
+    /// Optional UI action (most checks have none).
+    pub action: Option<CheckAction>,
 }
 
 impl CheckOutcome {
@@ -47,6 +58,7 @@ impl CheckOutcome {
             status: CheckStatus::Pass,
             detail: detail.into(),
             remedy: None,
+            action: None,
         }
     }
 
@@ -55,6 +67,7 @@ impl CheckOutcome {
             status: CheckStatus::Warn,
             detail: detail.into(),
             remedy: Some(remedy.into()),
+            action: None,
         }
     }
 
@@ -63,6 +76,7 @@ impl CheckOutcome {
             status: CheckStatus::Fail,
             detail: detail.into(),
             remedy: Some(remedy.into()),
+            action: None,
         }
     }
 
@@ -71,7 +85,17 @@ impl CheckOutcome {
             status: CheckStatus::Skip,
             detail: detail.into(),
             remedy: None,
+            action: None,
         }
+    }
+
+    /// Attach a UI action to this outcome.
+    pub fn with_action(mut self, id: impl Into<String>, label: impl Into<String>) -> Self {
+        self.action = Some(CheckAction {
+            id: id.into(),
+            label: label.into(),
+        });
+        self
     }
 }
 
@@ -87,6 +111,9 @@ pub struct CheckReport {
     pub status: CheckStatus,
     pub detail: String,
     pub remedy: Option<String>,
+    /// Optional UI action, e.g. the preset-sync repair panel.
+    #[serde(default)]
+    pub action: Option<CheckAction>,
     pub duration_ms: u64,
 }
 
