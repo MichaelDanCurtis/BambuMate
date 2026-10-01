@@ -37,6 +37,11 @@ const MAX_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
 /// How long quitting waits for a cancelled job to stop. Its process group
 /// is killed at once; this only covers reaping it.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+/// A staged folder younger than this is never pruned. Staging and
+/// enqueueing don't share the queue's lock, so this covers a slice of an
+/// older staged model that is on its way in, and the other files of a
+/// multi-file drop being staged at the same time.
+const STAGE_GRACE: Duration = Duration::from_secs(30 * 60);
 
 const JOB_GONE: &str = "That slicing job is no longer available.";
 const NOT_FINISHED: &str = "That job hasn't finished slicing.";
@@ -391,10 +396,25 @@ fn staged_folder(inputs: &Path, source: &str) -> Option<String> {
     (id.hyphenated().to_string() == name).then(|| name.to_string())
 }
 
+/// When a staged folder last changed: its own mtime or its files', whichever
+/// is newer.
+fn last_modified(dir: &Path) -> Option<std::time::SystemTime> {
+    let own = std::fs::symlink_metadata(dir)
+        .and_then(|m| m.modified())
+        .ok();
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .chain(own)
+        .max()
+}
+
 /// Removes the staged `<uuid>` folders directly in `inputs` that aren't in
-/// `keep`. Anything else there (other names, files, symlinks) is left
-/// alone. Returns the bytes freed.
-fn prune_staged(inputs: &Path, keep: &[String]) -> u64 {
+/// `keep` and haven't changed for `grace`. Anything else there (other
+/// names, files, symlinks) is left alone. Returns the bytes freed.
+fn prune_staged(inputs: &Path, keep: &[String], grace: Duration) -> u64 {
     let Ok(read) = std::fs::read_dir(inputs) else {
         return 0;
     };
@@ -412,10 +432,39 @@ fn prune_staged(inputs: &Path, keep: &[String]) -> u64 {
             Ok(meta) if meta.is_dir() => {}
             _ => continue,
         }
+        // A folder from the future (clock change) counts as young.
+        let old_enough = last_modified(&path)
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= grace);
+        if !old_enough {
+            continue;
+        }
         let size = remove_inputs(&path);
         freed += size;
     }
     freed
+}
+
+/// Stages a model ([`stage_bytes`]), then prunes older staged folders except
+/// those `in_use` (the model paths of waiting and running jobs) and those
+/// younger than `grace`.
+fn stage_and_prune(
+    inputs: &Path,
+    name: &str,
+    bytes: &[u8],
+    in_use: &[String],
+    grace: Duration,
+) -> Result<PathBuf, String> {
+    let path = stage_bytes(inputs, name, bytes)?;
+    let new = path.to_string_lossy();
+    let keep: Vec<String> = in_use
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(new.as_ref()))
+        .filter_map(|p| staged_folder(inputs, p))
+        .collect();
+    prune_staged(inputs, &keep, grace);
+    Ok(path)
 }
 
 /// Saves a model dropped on the Slice page (the webview gives bytes, not a
@@ -423,8 +472,8 @@ fn prune_staged(inputs: &Path, keep: &[String]) -> u64 {
 ///
 /// The page keeps one staged model at a time and may slice it again (other
 /// presets, "Slice and compare"), so a staged model is kept until the next
-/// one is staged; then older ones that no waiting or running job uses are
-/// removed.
+/// one is staged; then older ones that no waiting or running job uses, and
+/// that are older than [`STAGE_GRACE`], are removed.
 #[tauri::command]
 pub async fn slicer_stage_model(
     app: AppHandle,
@@ -448,19 +497,14 @@ pub async fn slicer_stage_model(
     blocking(move || {
         let bytes = decode_model(&data_base64, MAX_STAGED_BYTES)?;
         drop(data_base64);
-        let path = stage_bytes(&inputs, &name, &bytes)?
-            .to_string_lossy()
-            .into_owned();
-        let keep: Vec<String> = svc
+        let in_use: Vec<String> = svc
             .jobs()
-            .iter()
+            .into_iter()
             .filter(|j| !j.state.is_terminal())
-            .map(|j| j.source_path.as_str())
-            .chain(std::iter::once(path.as_str()))
-            .filter_map(|p| staged_folder(&inputs, p))
+            .map(|j| j.source_path)
             .collect();
-        prune_staged(&inputs, &keep);
-        Ok(path)
+        stage_and_prune(&inputs, &name, &bytes, &in_use, STAGE_GRACE)
+            .map(|p| p.to_string_lossy().into_owned())
     })
     .await?
 }
@@ -660,7 +704,7 @@ mod tests {
         };
         let folder = |p: &Path| staged_folder(&inputs, &p.to_string_lossy()).unwrap();
         let keep = [folder(&queued), folder(&new)];
-        let freed = prune_staged(&inputs, &keep);
+        let freed = prune_staged(&inputs, &keep, Duration::ZERO);
         assert_eq!(freed, 3);
         assert!(!old.exists() && !old.parent().unwrap().exists());
         assert!(queued.is_file() && new.is_file());
@@ -668,7 +712,45 @@ mod tests {
         #[cfg(unix)]
         assert!(outside.join("keep.stl").is_file());
         // A missing inputs folder is fine.
-        assert_eq!(prune_staged(&root.path().join("nope"), &keep), 0);
+        assert_eq!(
+            prune_staged(&root.path().join("nope"), &keep, Duration::ZERO),
+            0
+        );
+    }
+
+    #[test]
+    fn recently_staged_folders_survive_a_prune() {
+        let root = tempfile::tempdir().unwrap();
+        let inputs = root.path().join(INPUTS_DIR);
+        let young = stage_bytes(&inputs, "young.stl", b"young").unwrap();
+        // Not kept, not in use, but staged moments ago.
+        assert_eq!(prune_staged(&inputs, &[], STAGE_GRACE), 0);
+        assert!(young.is_file());
+        // A grace shorter than its age lets it go.
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(prune_staged(&inputs, &[], Duration::from_millis(10)), 5);
+        assert!(!young.exists());
+    }
+
+    #[test]
+    fn back_to_back_stages_both_keep_their_files() {
+        let root = tempfile::tempdir().unwrap();
+        let inputs = root.path().join(INPUTS_DIR);
+        // A multi-file drop: the second stage must not prune the first.
+        let a = stage_and_prune(&inputs, "a.stl", b"a", &[], STAGE_GRACE).unwrap();
+        let b = stage_and_prune(&inputs, "b.3mf", b"b", &[], STAGE_GRACE).unwrap();
+        assert!(a.is_file() && b.is_file());
+        // Without the grace period the older one would go, unless a job
+        // still uses it.
+        let c = stage_and_prune(
+            &inputs,
+            "c.stl",
+            b"c",
+            &[a.to_string_lossy().into_owned()],
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(a.is_file() && !b.exists() && c.is_file());
     }
 
     /// A finished job whose result lives in `dir` (output and plate_1.png).
