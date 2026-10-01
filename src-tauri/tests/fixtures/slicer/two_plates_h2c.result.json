@@ -1,0 +1,110 @@
+{
+    "error_string": "Success.",
+    "export_time": 360,
+    "layer_height": 0.20000000298023224,
+    "plate_index": 0,
+    "prepare_time": 10,
+    "return_code": 0,
+    "sliced_plates": [
+        {
+            "feature_type_times": {
+                "Bottom surface": 1444.1748046875,
+                "Custom": 302.38812255859375,
+                "Flush": 15.0,
+                "Inner wall": 30.4964656829834,
+                "Internal solid infill": 2080.01953125,
+                "Outer wall": 40.988525390625,
+                "Top surface": 857.0025024414063,
+                "Travel": 58.02076721191406,
+                "Undefined": 48.104801177978516
+            },
+            "filament_change_times": 0,
+            "filaments": [
+                {
+                    "filament_id": "GFA00",
+                    "id": 1,
+                    "main_used_g": 77.98469543457031,
+                    "total_used_g": 77.98469543457031
+                }
+            ],
+            "generate_support_material_time": 0,
+            "id": 1,
+            "infill_time": 211,
+            "layer_filament_change": 0,
+            "main_predication": 4495.2890625,
+            "make_perimeters_time": 1,
+            "obj_cached_cnt": 0,
+            "objects": [
+                {
+                    "bbox": {
+                        "depth": 250.0,
+                        "height": 1.0,
+                        "width": 250.0,
+                        "x": 50.0,
+                        "y": 35.0,
+                        "z": 0.0
+                    },
+                    "id": 38,
+                    "name": "plateA.stl",
+                    "triangle_count": 12
+                }
+            ],
+            "sliced_time": 245,
+            "sliced_time_with_cache": 28,
+            "total_predication": 4817.76123046875,
+            "triangle_count": 12,
+            "warning_message": ""
+        },
+        {
+            "feature_type_times": {
+                "Bottom surface": 1336.1590576171875,
+                "Custom": 302.38299560546875,
+                "Flush": 15.0,
+                "Inner wall": 29.296466827392578,
+                "Internal solid infill": 1919.350830078125,
+                "Outer wall": 39.388526916503906,
+                "Top surface": 790.8825073242188,
+                "Travel": 56.33424758911133,
+                "Undefined": 46.41828155517578
+            },
+            "filament_change_times": 0,
+            "filaments": [
+                {
+                    "filament_id": "GFA00",
+                    "id": 1,
+                    "main_used_g": 71.87278747558594,
+                    "total_used_g": 71.87278747558594
+                }
+            ],
+            "generate_support_material_time": 0,
+            "id": 2,
+            "infill_time": 137,
+            "layer_filament_change": 0,
+            "main_predication": 4156.1025390625,
+            "make_perimeters_time": 1,
+            "obj_cached_cnt": 0,
+            "objects": [
+                {
+                    "bbox": {
+                        "depth": 240.0,
+                        "height": 1.0,
+                        "width": 240.0,
+                        "x": 451.0,
+                        "y": 40.0,
+                        "z": 0.0
+                    },
+                    "id": 49,
+                    "name": "plateB.stl",
+                    "triangle_count": 12
+                }
+            ],
+            "sliced_time": 164,
+            "sliced_time_with_cache": 23,
+            "total_predication": 4478.5693359375,
+            "triangle_count": 12,
+            "warning_message": ""
+        }
+    ],
+    "sparse_infill_density": 15.0,
+    "wall_loops": 2
+}

@@ -1,0 +1,65 @@
+{
+    "error_string": "Success.",
+    "export_time": 353,
+    "layer_height": 0.20000000298023224,
+    "plate_index": 0,
+    "prepare_time": 6,
+    "return_code": 0,
+    "sliced_plates": [
+        {
+            "feature_type_times": {
+                "Bottom surface": 1.0214542150497437,
+                "Bridge": 145.94627380371094,
+                "Brim": 8.335389137268066,
+                "Custom": 301.2486267089844,
+                "Flush": 15.0,
+                "Inner wall": 81.01824951171875,
+                "Internal solid infill": 263.3551330566406,
+                "Outer wall": 104.15717315673828,
+                "Overhang wall": 31.457578659057617,
+                "Sparse infill": 6.356797695159912,
+                "Top surface": 25.516054153442383,
+                "Travel": 62.58790588378906,
+                "Undefined": 53.72193908691406
+            },
+            "filament_change_times": 0,
+            "filaments": [
+                {
+                    "filament_id": "GFA00",
+                    "id": 1,
+                    "main_used_g": 4.212840557098389,
+                    "total_used_g": 4.212840557098389
+                }
+            ],
+            "generate_support_material_time": 1,
+            "id": 1,
+            "infill_time": 13,
+            "layer_filament_change": 0,
+            "main_predication": 714.7518920898438,
+            "make_perimeters_time": 8,
+            "obj_cached_cnt": 0,
+            "objects": [
+                {
+                    "bbox": {
+                        "depth": 39.999996185302734,
+                        "height": 22.0,
+                        "width": 39.999996185302734,
+                        "x": 155.00001525878906,
+                        "y": 140.00001525878906,
+                        "z": 0.0
+                    },
+                    "id": 5,
+                    "name": "tee.stl",
+                    "triangle_count": 24
+                }
+            ],
+            "sliced_time": 136,
+            "sliced_time_with_cache": 105,
+            "total_predication": 1037.134521484375,
+            "triangle_count": 24,
+            "warning_message": "It seems object tee.stl has floating cantilever. Please re-orient the object or enable support generation."
+        }
+    ],
+    "sparse_infill_density": 15.0,
+    "wall_loops": 2
+}

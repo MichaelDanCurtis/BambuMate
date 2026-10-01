@@ -1,0 +1,10 @@
+{
+    "error_string": "One of the plate is empty or has no object fully inside it. Please check that the 3mf contains no empty plate in Bambu Studio before uploading.",
+    "export_time": 511017283392,
+    "layer_height": 0.0,
+    "plate_index": 1,
+    "prepare_time": 2,
+    "return_code": -50,
+    "sparse_infill_density": 0.0,
+    "wall_loops": 0
+}
