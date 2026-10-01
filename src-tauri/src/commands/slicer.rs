@@ -11,16 +11,19 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
 
+use crate::slicer::auto::{auto_request, wait_until_stable, STABLE_INTERVAL, STABLE_MAX};
 use crate::slicer::binary::{self, SlicerStatus};
 use crate::slicer::cache::{SliceCache, DEFAULT_CAP_BYTES};
 use crate::slicer::jobs::{
     BambuStudioEnv, JobEvents, JobOrigin, JobRequest, JobState, JobView, SlicerEnv, SlicerService,
-    WORK_DIR_NAME,
+    CLOSING, WORK_DIR_NAME,
 };
 use crate::slicer::settings::{
     bambu_studio_selection, normalize_bed_type, BambuStudioSelection, PresetChoice, PresetLists,
     SlicerSettings, BED_TYPES, SETTINGS_KEY,
 };
+use crate::slicer::SlicerError;
+use crate::stl_watcher::StlFile;
 
 /// The event every job update is emitted on.
 pub const JOB_EVENT: &str = "slicer://job";
@@ -70,6 +73,12 @@ pub fn read_settings(app: &AppHandle) -> SlicerSettings {
         .and_then(|s| s.get(SETTINGS_KEY))
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
+}
+
+/// The defaults auto-slice and the agent use when no preset is given. Reads
+/// the store and `BambuStudio.conf`: call it off the async runtime.
+pub fn effective_settings(app: &AppHandle) -> SlicerSettings {
+    read_settings(app).effective(&bambu_selection())
 }
 
 /// Reads `BambuStudio.conf`.
@@ -492,6 +501,62 @@ pub fn stop(app: &AppHandle) {
             );
         }
     }
+}
+
+/// Queues one new STL from the watch folder, when "Slice new STLs
+/// automatically" is on. Every way out is quiet: nothing here retries, and
+/// the wait for the file to settle is bounded by [`STABLE_MAX`].
+async fn auto_slice(app: AppHandle, file: StlFile) {
+    let name = file.filename.as_str();
+    let settings = {
+        let app = app.clone();
+        match blocking(move || effective_settings(&app)).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("auto-slice skipped {name}: {e}");
+                return;
+            }
+        }
+    };
+    let request = match auto_request(&settings, &file.path) {
+        None => return,
+        Some(Err(e)) => {
+            tracing::warn!("auto-slice skipped {name}: {e}");
+            return;
+        }
+        Some(Ok(r)) => r,
+    };
+    if !wait_until_stable(Path::new(&file.path), STABLE_INTERVAL, STABLE_MAX).await {
+        if Path::new(&file.path).exists() {
+            tracing::warn!("auto-slice skipped {name}: the file never settled");
+        } else {
+            tracing::debug!("auto-slice dropped {name}: it was removed or renamed");
+        }
+        return;
+    }
+    // Absent only while the app is starting or has already torn down.
+    let Some(svc) = app.try_state::<SlicerService>() else {
+        return;
+    };
+    match svc.enqueue(request) {
+        Ok(_) => {}
+        Err(SlicerError::Io(m)) if m == CLOSING => {
+            tracing::debug!("auto-slice of {name} not queued: BambuMate is closing");
+        }
+        // Includes the cap on waiting automatic jobs: the file is left alone.
+        Err(e) => tracing::warn!("auto-slice of {name} not queued: {e}"),
+    }
+}
+
+/// Queues each new STL from the watch folder when "Slice new STLs
+/// automatically" is on. Called once from `setup`, after [`start`].
+pub fn install_auto_slice(app: &AppHandle) {
+    let handle = app.clone();
+    let hook: crate::stl_watcher::NewStlHook = Arc::new(move |file| {
+        tauri::async_runtime::spawn(auto_slice(handle.clone(), file));
+    });
+    app.state::<crate::stl_watcher::StlWatcherState>()
+        .set_on_new(hook);
 }
 
 #[cfg(test)]

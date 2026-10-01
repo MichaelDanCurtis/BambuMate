@@ -29,7 +29,8 @@ pub const MAX_QUEUED_PER_ORIGIN: usize = 10;
 /// Why the cache can't be cleared right now.
 const BUSY_CLEARING: &str = "Finish or cancel the current slice first.";
 /// Why nothing more is queued once the app is quitting.
-const CLOSING: &str = "BambuMate is closing.";
+/// The refusal `enqueue` gives once [`SlicerService::shutdown`] has run.
+pub(crate) const CLOSING: &str = "BambuMate is closing.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

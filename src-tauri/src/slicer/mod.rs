@@ -5,6 +5,7 @@
 //! to or copies its code. BambuMate never prints or uploads: the sliced 3MF is
 //! handed back to the user, who prints through Bambu's own path.
 
+pub mod auto;
 pub mod binary;
 pub mod cache;
 pub mod command;

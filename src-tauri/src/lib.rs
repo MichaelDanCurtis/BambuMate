@@ -141,6 +141,7 @@ pub fn run() {
 
             // -- Slicing with Bambu Studio -----------------------------------
             commands::slicer::start(app.handle());
+            commands::slicer::install_auto_slice(app.handle());
 
             // -- Agent backends --------------------------------------------
             {
