@@ -38,6 +38,16 @@ pub fn swatch_color(color: &str) -> Option<String> {
         .then(|| c.to_string())
 }
 
+/// Rows of one plate (filaments, warnings) for a keyed list. The key covers
+/// the plate, the row's position and everything the row shows, so a row is
+/// rebuilt when any of it differs and kept when none of it does.
+pub fn keyed_rows<T: Clone + std::fmt::Debug>(plate: u32, rows: &[T]) -> Vec<(String, T)> {
+    rows.iter()
+        .enumerate()
+        .map(|(i, r)| (format!("{plate}/{i}/{r:?}"), r.clone()))
+        .collect()
+}
+
 /// `2h 14m`, `14m`, `42s`. Same as the agent tools.
 pub fn format_duration(secs: u64) -> String {
     let (h, m) = (secs / 3600, secs % 3600 / 60);
@@ -121,19 +131,29 @@ pub struct CompareRow {
     pub best: Option<usize>,
 }
 
+/// The column with the lowest value. `None` with fewer than two results (a
+/// "best" among one says nothing) and when the lowest value is shared (no
+/// column wins a tie).
 fn best_index(values: &[Option<f64>]) -> Option<usize> {
-    let mut best: Option<(usize, f64)> = None;
-    for (i, v) in values.iter().enumerate() {
-        if let Some(v) = v {
-            if best.is_none_or(|(_, b)| *v < b) {
-                best = Some((i, *v));
-            }
-        }
+    let present: Vec<(usize, f64)> = values
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| v.map(|v| (i, v)))
+        .collect();
+    if present.len() < 2 {
+        return None;
     }
-    // A "best" among one result says nothing.
-    (values.iter().filter(|v| v.is_some()).count() > 1)
-        .then_some(best.map(|(i, _)| i))
-        .flatten()
+    let low = present
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(f64::INFINITY, f64::min);
+    let mut at_low = present
+        .iter()
+        .filter(|(_, v)| (*v - low).abs() <= f64::EPSILON);
+    match (at_low.next(), at_low.next()) {
+        (Some((i, _)), None) => Some(*i),
+        _ => None,
+    }
 }
 
 fn signed(delta: f64, fmt: impl Fn(f64) -> String) -> String {
@@ -172,7 +192,7 @@ pub fn compare_rows(columns: &[Option<Totals>]) -> Vec<CompareRow> {
         row("Time", &|t| Some(t.time_seconds as f64), &|v| {
             format_duration(v.round() as u64)
         }),
-        row("Weight", &|t| Some(t.weight_g), &|v| format!("{v:.2} g")),
+        row("Weight", &|t| Some(t.weight_g), &format_grams),
         row("Cost", &|t| t.cost, &format_cost),
         row("Warnings", &|t| Some(t.warnings as f64), &|v| {
             format!("{}", v as i64)
@@ -321,6 +341,55 @@ mod tests {
         ] {
             assert_eq!(swatch_color(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn ties_for_best_mark_no_column_and_weights_read_like_the_result() {
+        let cols = vec![
+            Some(totals(&result(900, 38.2, Some(0.20), 0))),
+            Some(totals(&result(840, 38.2, Some(0.20), 0))),
+            Some(totals(&result(840, 40.0, Some(0.30), 1))),
+        ];
+        let rows = compare_rows(&cols);
+        assert_eq!(rows[0].best, None, "two columns share the best time");
+        assert_eq!(rows[1].best, None, "two columns share the best weight");
+        assert_eq!(rows[2].best, None, "two columns share the best cost");
+        assert_eq!(rows[3].best, None, "two columns share the fewest warnings");
+        assert_eq!(
+            rows[1].cells,
+            vec![
+                Some("38 g".into()),
+                Some("38 g".into()),
+                Some("40 g".into())
+            ]
+        );
+        assert_eq!(rows[1].deltas[2].as_deref(), Some("+1.80 g"));
+    }
+
+    #[test]
+    fn row_keys_change_with_anything_the_row_shows() {
+        use crate::slicer::types::FilamentUse;
+        let use_ = |grams: f64| FilamentUse {
+            slot: 1,
+            filament_type: "PLA".into(),
+            color: "#00AE42".into(),
+            used_g: grams,
+            used_m: 1.0,
+            cost: None,
+        };
+        let key = |plate, grams| keyed_rows(plate, &[use_(grams)])[0].0.clone();
+        assert_eq!(key(1, 3.69), key(1, 3.69));
+        assert_ne!(key(1, 3.69), key(1, 7.25), "same slot, other grams");
+        assert_ne!(key(1, 3.69), key(2, 3.69), "same row, other plate");
+        let warn = |level| SliceWarning {
+            level,
+            message: "m".into(),
+            code: None,
+        };
+        assert_ne!(
+            keyed_rows(1, &[warn(WarningLevel::Warning)])[0].0,
+            keyed_rows(1, &[warn(WarningLevel::Notice)])[0].0
+        );
     }
 
     #[test]

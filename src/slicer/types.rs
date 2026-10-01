@@ -16,6 +16,20 @@ pub struct ErrorView {
     pub message: String,
 }
 
+/// `ErrorView::kind` when a finished job's files were cleared
+/// (`slicer_thumbnail`, `slicer_open_in_bambu_studio`).
+pub const FILES_CLEARED_KIND: &str = "files_cleared";
+
+impl ErrorView {
+    /// A refusal that came as plain text.
+    pub fn text(message: String) -> Self {
+        Self {
+            kind: String::new(),
+            message,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WarningLevel {

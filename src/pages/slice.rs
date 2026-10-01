@@ -14,11 +14,12 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, StlFile};
 use crate::slicer::state::{
-    compare_rows, format_cost, format_duration, format_grams, insert_if_absent, status_line,
-    swatch_color, totals, Totals,
+    compare_rows, format_cost, format_duration, format_grams, insert_if_absent, keyed_rows,
+    status_line, swatch_color, totals, Totals,
 };
 use crate::slicer::types::{
-    JobState, PresetLists, PresetOption, PresetSource, SlicerSettings, SlicerStatus, WarningLevel,
+    ErrorView, JobState, PresetLists, PresetOption, PresetSource, SlicerSettings, SlicerStatus,
+    WarningLevel, FILES_CLEARED_KIND,
 };
 use crate::slicer::{bridge, SlicerShared};
 
@@ -30,9 +31,6 @@ const RECENT: usize = 10;
 /// before they are read into memory and sent over IPC.
 const MAX_DROP_BYTES: f64 = 512.0 * 1024.0 * 1024.0;
 const TOO_LARGE: &str = "That file is too large to slice from BambuMate.";
-/// The backend's answer when a finished job's files were cleared
-/// (`commands::slicer::FILES_CLEARED`). The page offers to slice it again.
-const FILES_CLEARED: &str = "That slice's files were cleared; slice it again.";
 
 /// Reads a dropped file and stages it in the backend, which needs a path.
 async fn stage_dropped(file: web_sys::File) -> Result<String, String> {
@@ -154,6 +152,15 @@ pub fn SlicePage() -> impl IntoView {
             };
             fix(process, &l.processes);
             fix(filament, &l.filaments);
+            // A compare pick the new printer doesn't offer goes back to
+            // "Choose a filament", so what is shown is what gets sliced.
+            extra.try_update(|picks| {
+                for pick in picks.iter_mut() {
+                    if !l.filaments.iter().any(|o| o.name == *pick) {
+                        pick.clear();
+                    }
+                }
+            });
             if printer.try_get_untracked().unwrap_or_default().is_empty() {
                 printer.try_set(
                     l.printers
@@ -299,9 +306,12 @@ pub fn SlicePage() -> impl IntoView {
                     }
                 }
             }
-            if let Some(first) = ids.first() {
-                selected.try_set(Some(*first));
-            }
+            let Some(first) = ids.first().copied() else {
+                // Nothing was queued: keep the slice error and the settings.
+                busy.try_set(false);
+                return;
+            };
+            selected.try_set(Some(first));
             compare_ids.try_set(if ids.len() > 1 { ids } else { Vec::new() });
             match bridge::set_settings(remember).await {
                 Ok(view) => {
@@ -424,9 +434,13 @@ pub fn SlicePage() -> impl IntoView {
                                     }
                                 >
                                     <option value="">"Choose a filament"</option>
-                                    {move || filaments.get().into_iter().map(|o| view! {
-                                        <option value=o.name.clone()>{o.name.clone()}</option>
-                                    }).collect::<Vec<_>>()}
+                                    {move || {
+                                        let pick = extra.with_untracked(|e| e.get(i).cloned().unwrap_or_default());
+                                        filaments.get().into_iter().map(|o| {
+                                            let selected = o.name == pick;
+                                            view! { <option value=o.name.clone() selected=selected>{o.name.clone()}</option> }
+                                        }).collect::<Vec<_>>()
+                                    }}
                                 </select>
                             </label>
                         </For>
@@ -498,7 +512,7 @@ fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
     let shared = expect_context::<SlicerShared>();
     let job = shared.job(id);
     // An inline message from Cancel, the thumbnail, Open or Slice again.
-    let notice = RwSignal::new(None::<String>);
+    let notice = RwSignal::new(None::<ErrorView>);
     let cancelling = RwSignal::new(false);
     let reslicing = RwSignal::new(false);
     let phase = Memo::new(move |_| {
@@ -523,7 +537,7 @@ fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
         notice.set(None);
         spawn_local(async move {
             if let Err(e) = bridge::cancel(id).await {
-                notice.try_set(Some(e));
+                notice.try_set(Some(ErrorView::text(e)));
             }
             cancelling.try_set(false);
         });
@@ -552,13 +566,13 @@ fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
                     selected.try_set(Some(new_id));
                 }
                 Err(e) => {
-                    notice.try_set(Some(e));
+                    notice.try_set(Some(ErrorView::text(e)));
                 }
             }
             reslicing.try_set(false);
         });
     };
-    let cleared = move || notice.with(|n| n.as_deref() == Some(FILES_CLEARED));
+    let cleared = move || notice.with(|n| n.as_ref().is_some_and(|n| n.kind == FILES_CLEARED_KIND));
     view! {
         <section class="sl-job">
             <header class="sl-job-head">
@@ -583,7 +597,7 @@ fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
             }}
             {move || notice.get().map(|n| view! {
                 <div class="sl-notice">
-                    <p class="sl-error sl-action-error">{n}</p>
+                    <p class="sl-error sl-action-error">{n.message}</p>
                     <Show when=cleared>
                         <button class="sl-btn sl-reslice" disabled=move || reslicing.get() on:click=reslice>"Slice again"</button>
                     </Show>
@@ -594,7 +608,7 @@ fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
 }
 
 #[component]
-fn ResultView(id: u64, notice: RwSignal<Option<String>>) -> impl IntoView {
+fn ResultView(id: u64, notice: RwSignal<Option<ErrorView>>) -> impl IntoView {
     let job = expect_context::<SlicerShared>().job(id);
     let result = Memo::new(move |_| {
         job.with(|j| match j.as_ref().map(|j| &j.state) {
@@ -648,15 +662,22 @@ fn ResultView(id: u64, notice: RwSignal<Option<String>>) -> impl IntoView {
             }
         });
     };
+    // Rows are keyed on the plate, the position and the whole row, so a row
+    // is rebuilt whenever anything it shows differs (another plate's grams,
+    // a warning's level), and kept when nothing does.
     let warnings = Memo::new(move |_| {
         current.with(|c| {
             c.as_ref()
-                .map(|p| p.warnings.iter().cloned().enumerate().collect::<Vec<_>>())
+                .map(|p| keyed_rows(p.index, &p.warnings))
                 .unwrap_or_default()
         })
     });
     let filaments = Memo::new(move |_| {
-        current.with(|c| c.as_ref().map(|p| p.filaments.clone()).unwrap_or_default())
+        current.with(|c| {
+            c.as_ref()
+                .map(|p| keyed_rows(p.index, &p.filaments))
+                .unwrap_or_default()
+        })
     });
     let field = move |f: fn(&crate::slicer::types::PlateResult) -> String| {
         move || current.with(|c| c.as_ref().map(f).unwrap_or_default())
@@ -689,17 +710,22 @@ fn ResultView(id: u64, notice: RwSignal<Option<String>>) -> impl IntoView {
                         <div><dt class="nd-label">"Cost"</dt><dd class="sl-cost">{field(|p| p.cost.map(format_cost).unwrap_or_else(|| "—".into()))}</dd></div>
                     </dl>
                     <ul class="sl-filaments">
-                        <For each=move || filaments.get() key=|f| f.slot let:f>
-                            <li class="sl-filament">
-                                <span class="sl-swatch" style:background=swatch_color(&f.color).unwrap_or_default()></span>
-                                {format!("Slot {} · {} · {} · {:.2} m", f.slot, f.filament_type, format_grams(f.used_g), f.used_m)}
-                            </li>
+                        <For each=move || filaments.get() key=|(k, _)| k.clone() let:row>
+                            {
+                                let (_, f) = row;
+                                view! {
+                                    <li class="sl-filament">
+                                        <span class="sl-swatch" style:background=swatch_color(&f.color).unwrap_or_default()></span>
+                                        {format!("Slot {} · {} · {} · {:.2} m", f.slot, f.filament_type, format_grams(f.used_g), f.used_m)}
+                                    </li>
+                                }
+                            }
                         </For>
                     </ul>
                     <ul class="sl-warnings">
-                        <For each=move || warnings.get() key=|(i, w)| (*i, w.message.clone()) let:item>
+                        <For each=move || warnings.get() key=|(k, _)| k.clone() let:row>
                             {
-                                let (_, w) = item;
+                                let (_, w) = row;
                                 let level = match w.level {
                                     WarningLevel::Warning => "warning",
                                     WarningLevel::Notice => "notice",

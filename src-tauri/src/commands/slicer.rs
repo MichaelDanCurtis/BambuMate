@@ -23,7 +23,7 @@ use crate::slicer::settings::{
     bambu_studio_selection, normalize_bed_type, BambuStudioSelection, PresetChoice, PresetLists,
     SlicerSettings, BED_TYPES, SETTINGS_KEY,
 };
-use crate::slicer::SlicerError;
+use crate::slicer::{ErrorView, SlicerError};
 use crate::stl_watcher::StlFile;
 
 /// The event every job update is emitted on.
@@ -202,6 +202,23 @@ pub(crate) fn finished_output(view: &JobView) -> Result<PathBuf, &'static str> {
     Ok(path)
 }
 
+/// How `slicer_thumbnail` and `slicer_open_in_bambu_studio` refuse: the
+/// copy plus a `kind` (`files_cleared`, `job_gone`, `not_finished` or
+/// `other`), so the Slice page can offer to slice a cleared job again without
+/// matching the copy.
+fn job_file_error(message: &str) -> ErrorView {
+    let kind = match message {
+        FILES_CLEARED => "files_cleared",
+        JOB_GONE => "job_gone",
+        NOT_FINISHED => "not_finished",
+        _ => "other",
+    };
+    ErrorView {
+        kind: kind.into(),
+        message: message.into(),
+    }
+}
+
 /// Plate `plate`'s thumbnail as a `data:` URL. Only `plate_<plate>.png` next
 /// to the job's own output is read, and only up to `max` bytes; `None`
 /// when the plate has no thumbnail (or it is too large).
@@ -238,33 +255,37 @@ fn plate_thumbnail(view: &JobView, plate: u32, max: u64) -> Result<Option<String
 }
 
 /// A plate thumbnail as a `data:` URL, or `None` when the plate has none.
+/// Refuses with a [`job_file_error`].
 #[tauri::command]
 pub async fn slicer_thumbnail(
     svc: State<'_, SlicerService>,
     job_id: u64,
     plate: u32,
-) -> Result<Option<String>, String> {
-    let view = svc.job(job_id).ok_or(JOB_GONE)?;
-    blocking(move || plate_thumbnail(&view, plate, MAX_THUMBNAIL_BYTES).map_err(String::from))
-        .await?
+) -> Result<Option<String>, ErrorView> {
+    let view = svc.job(job_id).ok_or_else(|| job_file_error(JOB_GONE))?;
+    blocking(move || plate_thumbnail(&view, plate, MAX_THUMBNAIL_BYTES).map_err(job_file_error))
+        .await
+        .map_err(|e| job_file_error(&e))?
 }
 
 /// Opens the sliced file in Bambu Studio for the user to check and print.
-/// BambuMate itself never prints or uploads.
+/// BambuMate itself never prints or uploads. Refuses with a
+/// [`job_file_error`].
 #[tauri::command]
 pub async fn slicer_open_in_bambu_studio(
     app: AppHandle,
     svc: State<'_, SlicerService>,
     job_id: u64,
-) -> Result<crate::commands::launcher::LaunchResult, String> {
-    let view = svc.job(job_id).ok_or(JOB_GONE)?;
-    let output = finished_output(&view)?;
+) -> Result<crate::commands::launcher::LaunchResult, ErrorView> {
+    let view = svc.job(job_id).ok_or_else(|| job_file_error(JOB_GONE))?;
+    let output = finished_output(&view).map_err(job_file_error)?;
     crate::commands::launcher::launch_bambu_studio(
         app,
         Some(output.to_string_lossy().into_owned()),
         None,
     )
     .await
+    .map_err(|e| job_file_error(&e))
 }
 
 fn inputs_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -842,5 +863,29 @@ mod tests {
         let mut queued = job.clone();
         queued.state = JobState::Queued { position: 0 };
         assert_eq!(finished_output(&queued).unwrap_err(), NOT_FINISHED);
+    }
+
+    #[test]
+    fn job_file_errors_carry_a_kind_the_slice_page_can_match() {
+        let view = |kind: &str, message: &str| ErrorView {
+            kind: kind.into(),
+            message: message.into(),
+        };
+        assert_eq!(
+            job_file_error(FILES_CLEARED),
+            view(
+                "files_cleared",
+                "That slice's files were cleared; slice it again."
+            )
+        );
+        assert_eq!(job_file_error(JOB_GONE), view("job_gone", JOB_GONE));
+        assert_eq!(
+            job_file_error(NOT_FINISHED),
+            view("not_finished", NOT_FINISHED)
+        );
+        assert_eq!(
+            job_file_error("Bambu Studio couldn't be opened."),
+            view("other", "Bambu Studio couldn't be opened.")
+        );
     }
 }

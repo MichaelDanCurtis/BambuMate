@@ -4,7 +4,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use super::types::{JobView, PresetLists, SlicerSettings, SlicerSettingsView, SlicerStatus};
+use super::types::{
+    ErrorView, JobView, PresetLists, SlicerSettings, SlicerSettingsView, SlicerStatus,
+};
 
 #[wasm_bindgen]
 extern "C" {
@@ -18,6 +20,21 @@ async fn call<A: Serialize, R: DeserializeOwned>(cmd: &str, args: &A) -> Result<
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| format!("{cmd} failed")))?;
     serde_wasm_bindgen::from_value(out).map_err(|e| e.to_string())
+}
+
+/// For commands that refuse with an [`ErrorView`] (`kind` and `message`).
+/// A plain-string refusal keeps its text, with an empty `kind`.
+async fn call_kind<A: Serialize, R: DeserializeOwned>(cmd: &str, args: &A) -> Result<R, ErrorView> {
+    let other = ErrorView::text;
+    let args = serde_wasm_bindgen::to_value(args).map_err(|e| other(e.to_string()))?;
+    let out = tauri_invoke(cmd, args)
+        .await
+        .map_err(|e| match e.as_string() {
+            Some(text) => other(text),
+            None => serde_wasm_bindgen::from_value::<ErrorView>(e)
+                .unwrap_or_else(|_| other(format!("{cmd} failed"))),
+        })?;
+    serde_wasm_bindgen::from_value(out).map_err(|e| other(e.to_string()))
 }
 
 #[derive(Serialize)]
@@ -108,12 +125,12 @@ pub async fn jobs() -> Result<Vec<JobView>, String> {
     call("slicer_jobs", &NoArgs {}).await
 }
 
-pub async fn thumbnail(job_id: u64, plate: u32) -> Result<Option<String>, String> {
-    call("slicer_thumbnail", &ThumbArgs { job_id, plate }).await
+pub async fn thumbnail(job_id: u64, plate: u32) -> Result<Option<String>, ErrorView> {
+    call_kind("slicer_thumbnail", &ThumbArgs { job_id, plate }).await
 }
 
-pub async fn open_in_bambu_studio(job_id: u64) -> Result<serde_json::Value, String> {
-    call("slicer_open_in_bambu_studio", &JobArgs { job_id }).await
+pub async fn open_in_bambu_studio(job_id: u64) -> Result<serde_json::Value, ErrorView> {
+    call_kind("slicer_open_in_bambu_studio", &JobArgs { job_id }).await
 }
 
 pub async fn pick_model() -> Result<Option<String>, String> {
