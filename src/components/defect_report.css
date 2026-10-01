@@ -35,18 +35,18 @@
 }
 
 .quality-good {
-    background: rgba(59, 130, 246, 0.15);
-    color: #3b82f6;
+    background: var(--nd-surface-raised);
+    color: var(--nd-interactive);
 }
 
 .quality-acceptable {
-    background: rgba(245, 158, 11, 0.15);
-    color: #f59e0b;
+    background: var(--nd-surface-raised);
+    color: var(--nd-warning);
 }
 
 .quality-poor {
-    background: rgba(249, 115, 22, 0.15);
-    color: #f97316;
+    background: var(--nd-surface-raised);
+    color: var(--nd-accent);
 }
 
 .quality-failed {
@@ -100,18 +100,18 @@
 }
 
 .severity-minor {
-    background: rgba(59, 130, 246, 0.15);
-    color: #3b82f6;
+    background: var(--nd-surface-raised);
+    color: var(--nd-interactive);
 }
 
 .severity-noticeable {
-    background: rgba(245, 158, 11, 0.15);
-    color: #f59e0b;
+    background: var(--nd-surface-raised);
+    color: var(--nd-warning);
 }
 
 .severity-significant {
-    background: rgba(249, 115, 22, 0.15);
-    color: #f97316;
+    background: var(--nd-surface-raised);
+    color: var(--nd-accent);
 }
 
 .severity-severe {
@@ -147,7 +147,7 @@
 
 .severity-fill {
     height: 100%;
-    background: linear-gradient(90deg, #f59e0b, var(--color-danger));
+    background: var(--color-danger);
     border-radius: 4px;
 }
 
@@ -270,8 +270,8 @@
 .conflict-card {
     display: flex;
     gap: 1rem;
-    background: rgba(245, 158, 11, 0.1);
-    border: 1px solid rgba(245, 158, 11, 0.3);
+    background: var(--nd-surface-raised);
+    border: 1px solid var(--nd-warning);
     border-radius: 8px;
     padding: 1rem;
 }
@@ -312,16 +312,21 @@
     text-align: center;
 }
 
+/* Styled as the shared primary pill. --accent is the display colour (white in
+   the dark theme), so the label takes the page colour, not white. */
 .apply-btn {
-    padding: 0.75rem 1.5rem;
-    font-size: 1rem;
-    font-weight: 600;
+    padding: 9px 18px;
+    font-family: var(--nd-font-mono);
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     background: var(--accent);
-    color: white;
+    color: var(--nd-black);
     border: none;
-    border-radius: 6px;
+    border-radius: var(--nd-radius-pill);
     cursor: pointer;
-    transition: background 0.15s ease;
+    transition: background-color 150ms var(--nd-ease);
 }
 
 .apply-btn:hover {

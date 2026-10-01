@@ -387,7 +387,6 @@ pub fn SettingsPage() -> impl IntoView {
                             class={move || if filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
                             on:click=move |_| set_filament_ai_mode(true)
                         >
-                            <div class="wizard-mode-icon">"🤖"</div>
                             <h4>"Use AI Provider (Recommended)"</h4>
                             <p>
                                 "Use your configured AI provider for filament spec extraction and Print Analysis."
@@ -404,7 +403,6 @@ pub fn SettingsPage() -> impl IntoView {
                             class={move || if !filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
                             on:click=move |_| set_filament_ai_mode(false)
                         >
-                            <div class="wizard-mode-icon">"🌐"</div>
                             <h4>"Use Manufacturer Specs Only"</h4>
                             <p>
                                 "Use manufacturer sites and SpoolScout without any AI provider."
@@ -456,7 +454,7 @@ pub fn SettingsPage() -> impl IntoView {
                             <span>"Light"</span>
                                 <span class="theme-preview-badge">"Theme"</span>
                             </span>
-                            <span class="theme-preview-frame theme-preview-frame-light">
+                            <span class="theme-preview-frame theme-preview-frame-light" data-theme="bambu">
                                 <span class="theme-preview-sidebar"></span>
                                 <span class="theme-preview-canvas">
                                     <span class="theme-preview-line short"></span>
@@ -475,7 +473,7 @@ pub fn SettingsPage() -> impl IntoView {
                                 <span>"Dark"</span>
                                 <span class="theme-preview-badge">"Focus"</span>
                             </span>
-                            <span class="theme-preview-frame theme-preview-frame-dark">
+                            <span class="theme-preview-frame theme-preview-frame-dark" data-theme="dark">
                                 <span class="theme-preview-sidebar"></span>
                                 <span class="theme-preview-canvas">
                                     <span class="theme-preview-line short"></span>
@@ -577,14 +575,14 @@ pub fn SettingsPage() -> impl IntoView {
                     <label for="ai-model">"Model"</label>
                     <Show when=move || !vision_available.get() && !models_loading.get() && models_error.get().is_none()>
                         <div class="status-text status-error" style="margin-bottom: 0.5rem;">
-                            <strong>"⚠ No vision-capable model on this account. "</strong>
+                            <strong>"No vision-capable model on this account. "</strong>
                             "Print analysis and defect detection are disabled. "
                             "Enable \"Show all models\" to pick a text-only model for filament search, or switch providers."
                         </div>
                     </Show>
                     <Show when=move || catalog_recommended.get().is_some() && vision_available.get()>
                         <div class="status-text" style="margin-bottom: 0.5rem;">
-                            "⭐ Recommended: latest non-preview vision model, cheapest in its release cohort."
+                            "Recommended: latest non-preview vision model, cheapest in its release cohort."
                         </div>
                     </Show>
                     <label class="checkbox-label" style="margin-bottom: 0.5rem; display: inline-flex; gap: 0.4rem;">
@@ -666,7 +664,7 @@ pub fn SettingsPage() -> impl IntoView {
                                             m.id.clone()
                                         };
                                         let mut display = if m.recommended {
-                                            format!("⭐ Recommended — {}", display_base)
+                                            format!("Recommended — {}", display_base)
                                         } else {
                                             display_base
                                         };

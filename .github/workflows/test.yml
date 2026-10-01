@@ -237,6 +237,12 @@ jobs:
         working-directory: tests/webkit
         run: node css-compat.mjs ../..
 
+      # The flow tests and the rail-overlap check in layout.mjs drive the
+      # real wasm build, so build it before them.
+      - name: Build frontend
+        if: ${{ !cancelled() }}
+        run: trunk build
+
       - name: Overlay geometry
         # Run even when the CSS scan failed: the two checks look for different
         # kinds of breakage and one run should report both.
@@ -244,10 +250,10 @@ jobs:
         working-directory: tests/webkit
         run: node layout.mjs ../..
 
-      # The flow tests drive the real wasm build, so they need the real build.
-      - name: Build frontend
+      - name: Token contrast
         if: ${{ !cancelled() }}
-        run: trunk build
+        working-directory: tests/webkit
+        run: node contrast.mjs ../..
 
       - name: App flows
         if: ${{ !cancelled() }}
