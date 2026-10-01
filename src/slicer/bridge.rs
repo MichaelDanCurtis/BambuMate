@@ -133,6 +133,10 @@ pub async fn open_in_bambu_studio(job_id: u64) -> Result<serde_json::Value, Erro
     call_kind("slicer_open_in_bambu_studio", &JobArgs { job_id }).await
 }
 
+pub async fn clear_cache() -> Result<u64, String> {
+    call("slicer_clear_cache", &NoArgs {}).await
+}
+
 pub async fn pick_model() -> Result<Option<String>, String> {
     call("slicer_pick_model", &NoArgs {}).await
 }

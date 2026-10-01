@@ -98,6 +98,29 @@ pub fn totals(r: &SliceResult) -> Totals {
     }
 }
 
+/// The newest job sliced from `source_path`.
+pub fn latest_for_source<'a>(jobs: &'a [JobView], source_path: &str) -> Option<&'a JobView> {
+    jobs.iter().rev().find(|j| j.source_path == source_path)
+}
+
+/// The STL indicator's per-file state: "Slicing…", "2h 14m · 38 g" or
+/// "Slice failed". `None` for a cancelled job.
+pub fn badge_text(job: &JobView) -> Option<String> {
+    match &job.state {
+        JobState::Queued { .. } | JobState::Running { .. } => Some("Slicing…".to_string()),
+        JobState::Done { result, .. } => {
+            let t = totals(result);
+            Some(format!(
+                "{} · {}",
+                format_duration(t.time_seconds),
+                format_grams(t.weight_g)
+            ))
+        }
+        JobState::Failed { .. } => Some("Slice failed".to_string()),
+        JobState::Cancelled => None,
+    }
+}
+
 /// A running or queued job's one-line status.
 pub fn status_line(job: &JobView) -> String {
     match &job.state {
@@ -203,7 +226,7 @@ pub fn compare_rows(columns: &[Option<Totals>]) -> Vec<CompareRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slicer::types::{JobOrigin, PlateResult, Progress, SliceWarning};
+    use crate::slicer::types::{ErrorView, JobOrigin, PlateResult, Progress, SliceWarning};
 
     fn result(time: u64, weight: f64, cost: Option<f64>, warnings: usize) -> SliceResult {
         SliceResult {
@@ -272,6 +295,36 @@ mod tests {
         assert_eq!(format_duration(8040), "2h 14m");
         assert_eq!(format_grams(38.2), "38 g");
         assert_eq!(format_grams(3.6925), "3.69 g");
+    }
+
+    #[test]
+    fn badges_cover_each_state() {
+        let running = job(1, "/w/a.stl", JobState::Running { progress: None });
+        assert_eq!(badge_text(&running).as_deref(), Some("Slicing…"));
+        let done = job(
+            2,
+            "/w/a.stl",
+            JobState::Done {
+                result: result(8040, 38.2, None, 0),
+                cached: false,
+            },
+        );
+        assert_eq!(badge_text(&done).as_deref(), Some("2h 14m · 38 g"));
+        let failed = job(
+            3,
+            "/w/a.stl",
+            JobState::Failed {
+                error: ErrorView {
+                    kind: "slicer".into(),
+                    message: "x".into(),
+                },
+            },
+        );
+        assert_eq!(badge_text(&failed).as_deref(), Some("Slice failed"));
+        assert_eq!(badge_text(&job(4, "/w/a.stl", JobState::Cancelled)), None);
+        let jobs = vec![running, done, failed];
+        assert_eq!(latest_for_source(&jobs, "/w/a.stl").unwrap().id, 3);
+        assert!(latest_for_source(&jobs, "/w/b.stl").is_none());
     }
 
     #[test]

@@ -27,6 +27,7 @@ import {
   makePng,
   PETG,
   SLICE_MODEL,
+  STL_INBOX_FILE,
   sliceJob,
   sliceResult,
 } from "./fixtures.mjs";
@@ -897,7 +898,50 @@ async function driveApp(browserType, engine, baseUrl) {
     return `${rows} providers`;
   });
 
+  await step(run, page, "auto-slice toggle and Clear slice cache reach the backend", async () => {
+    await page.waitForSelector("#slice-auto:not([disabled])", { timeout: 10000 });
+    const settings = await page.evaluate(() => window.__fixtures.slicer_set_settings);
+    const on = { ...settings, saved: { ...settings.saved, auto_slice: true } };
+    await withFixtures({ slicer_set_settings: on }, async () => {
+      await page.check("#slice-auto");
+      await page.waitForFunction(
+        () => window.__ipc.calls.some((c) => c.cmd === "slicer_set_settings" && c.args.settings.auto_slice === true),
+        null,
+        { timeout: 5000 }
+      );
+      await page.waitForSelector(".slice-auto-status", { timeout: 5000 });
+      if (!(await page.isChecked("#slice-auto"))) throw new Error("toggle did not stay on");
+    });
+    await page.click(".slice-clear-cache");
+    await page.waitForSelector(".slice-cache-status", { timeout: 5000 });
+    const text = await page.locator(".slice-cache-status").innerText();
+    if (text !== "Cleared 12.0 MB.") throw new Error(text);
+    // While a slice is queued or running the backend refuses; the reason shows inline.
+    const busy = "Finish or cancel the current slice first.";
+    await withFixtures({ slicer_clear_cache: { __reject: busy } }, async () => {
+      await page.click(".slice-clear-cache");
+      await page.waitForFunction((b) => document.querySelector(".slice-cache-status")?.innerText === b, busy, { timeout: 5000 });
+    });
+  });
+
   await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });
+
+  await step(run, page, "the STL list shows each file's auto-slice state", async () => {
+    const inbox = [{ path: STL_INBOX_FILE, filename: "bracket.stl", received_at: "2026-10-01T12:00:00Z" }];
+    await withFixtures({ list_received_stls: inbox }, async () => {
+      // The indicator polls every 5 s.
+      await page.waitForSelector(".stl-badge", { timeout: 15000 });
+      await page.click(".stl-badge");
+      const auto = { origin: "auto", source_path: STL_INBOX_FILE, model_name: "bracket.stl" };
+      await emitJob(sliceJob(9, { state: "running", progress: null }, auto));
+      await page.waitForFunction(() => document.querySelector(".stl-slice-state")?.innerText === "Slicing…", null, { timeout: 5000 });
+      await emitJob(done(9, sliceResult(), auto));
+      await page.waitForFunction(() => document.querySelector(".stl-slice-state")?.innerText === "14m · 3.69 g", null, { timeout: 5000 });
+      await page.click(".stl-slice-state");
+      await page.waitForFunction(() => location.pathname === "/slice" && location.search === "?job=9", null, { timeout: 5000 });
+      await page.waitForFunction(() => document.querySelector(".sl-job-model")?.innerText === "bracket.stl", null, { timeout: 5000 });
+    });
+  });
 
   // -- health check ----------------------------------------------------------
   await step(run, page, "navigate to Health Check", async () => {

@@ -4,6 +4,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::app::FeatureFlagsContext;
 use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
+use crate::components::slicer_settings::SlicerSettingsSection;
 use crate::theme::ThemeContext;
 
 /// Detect whether the app is running on macOS.
@@ -773,6 +774,8 @@ pub fn SettingsPage() -> impl IntoView {
                         <span class="status-text">{move || stl_status.get().unwrap_or_default()}</span>
                     </Show>
                 </div>
+
+                <SlicerSettingsSection />
             </section>
 
             <section class="settings-section settings-section-danger">

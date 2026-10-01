@@ -121,3 +121,18 @@
 @media (max-width: 720px) {
     .sl-result-body { grid-template-columns: 1fr; }
 }
+
+/* Auto-slice state in the sidebar's STL list (outside the .nd scope). */
+.stl-slice-state {
+    margin: 2px 0;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 11px;
+    opacity: 0.8;
+    cursor: pointer;
+    text-align: left;
+}
+.stl-slice-state:hover { text-decoration: underline; }
