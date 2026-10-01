@@ -8,6 +8,7 @@
 pub mod binary;
 pub mod command;
 pub mod result;
+pub mod run;
 pub mod settings;
 
 use std::path::{Path, PathBuf};

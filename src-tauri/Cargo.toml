@@ -44,6 +44,10 @@ uuid = { version = "1", features = ["v4"] }
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 quick-xml = "0.42"
 
+[target.'cfg(unix)'.dependencies]
+# killpg: stop the slicer's whole process group on cancel or timeout.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 md5 = "0.7"
 

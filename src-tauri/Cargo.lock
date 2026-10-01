@@ -384,6 +384,7 @@ dependencies = [
  "html2text",
  "image",
  "keyring",
+ "libc",
  "md5",
  "notify",
  "quick-xml 0.42.0",
