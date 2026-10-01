@@ -328,7 +328,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names.len(), 21);
+        assert_eq!(names.len(), 23);
         assert!(names.contains(&"bm_app_state".to_string()));
         assert!(names.contains(&PERMISSION_TOOL_NAME.to_string()));
     }

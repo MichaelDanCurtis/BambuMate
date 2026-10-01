@@ -5,6 +5,7 @@
 //! run. Checks must never panic — a panicking check is itself a bug, so the
 //! runner catches unwinds and turns them into `Fail`.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ pub fn all_check_ids() -> Vec<&'static str> {
         "bambu.app_binary",
         "bambu.process_detection",
         "bambu.live_conf_parse",
+        "bambu.preset_sync",
         "profile.write_roundtrip",
         "profile.backup_restore",
         "profile.conf_registration",
@@ -193,6 +195,12 @@ pub fn run_all(opts: DiagnosticsOptions) -> DiagnosticsReport {
         "bambu",
         check_live_conf_parse(opts)
     );
+    run!(
+        "bambu.preset_sync",
+        "BambuMate presets are set to sync to Bambu Cloud",
+        "bambu",
+        check_preset_sync(opts)
+    );
 
     run!(
         "profile.write_roundtrip",
@@ -302,6 +310,7 @@ fn timed(id: &str, name: &str, category: &str, body: impl FnOnce() -> CheckOutco
         status: outcome.status,
         detail: outcome.detail,
         remedy: outcome.remedy,
+        action: outcome.action,
         duration_ms: start.elapsed().as_millis() as u64,
     }
 }
@@ -1015,6 +1024,49 @@ fn check_live_conf_parse(opts: DiagnosticsOptions) -> CheckOutcome {
     }
 }
 
+/// Presets BambuMate wrote that Bambu Studio will never upload (see
+/// `profile::sync`). The Health page turns the action into a repair panel.
+fn check_preset_sync(opts: DiagnosticsOptions) -> CheckOutcome {
+    if !opts.include_live_bambu {
+        return CheckOutcome::skip("live Bambu Studio checks disabled");
+    }
+    let Ok(paths) = crate::profile::BambuPaths::detect() else {
+        return bambu_not_installed("preset sync state");
+    };
+    let Some(user_dir) = paths.user_filament_dir() else {
+        return CheckOutcome::skip("no user filament directory, so no presets to sync");
+    };
+    let ledger = crate::history::ledger::load_ledger();
+    preset_sync_for_dir(&user_dir, &ledger)
+}
+
+/// Testable core of [`check_preset_sync`]. `find_unsynced_presets` silently
+/// returns an empty list when the directory can't be read, which would
+/// otherwise read as a false "all synced" Pass — so this probes the
+/// directory itself first and reports that failure distinctly.
+fn preset_sync_for_dir(dir: &Path, ledger: &HashSet<String>) -> CheckOutcome {
+    if let Err(e) = std::fs::read_dir(dir) {
+        return CheckOutcome::warn(
+            format!("Couldn't read the user filament folder: {e}"),
+            "Check that BambuMate can read your Bambu Studio user folder, then run the check again.",
+        );
+    }
+    preset_sync_outcome(crate::profile::sync::find_unsynced_presets(dir, ledger).len())
+}
+
+fn preset_sync_outcome(unsynced: usize) -> CheckOutcome {
+    if unsynced == 0 {
+        return CheckOutcome::pass("All BambuMate presets are set to sync.");
+    }
+    let noun = if unsynced == 1 { "preset" } else { "presets" };
+    CheckOutcome::warn(
+        format!("{} {} won't sync to Bambu Cloud", unsynced, noun),
+        "Choose Review and repair, tick the presets missing from your printer, then open \
+         Bambu Studio while signed in so it uploads them.",
+    )
+    .with_action("repair_preset_sync", "Review and repair")
+}
+
 // ---------------------------------------------------------------------------
 // profile read/write
 // ---------------------------------------------------------------------------
@@ -1121,6 +1173,8 @@ fn check_backup_restore(scratch: &Path) -> CheckOutcome {
     if let Err(e) = crate::profile::write_profile_atomic(&mutated, &target) {
         return CheckOutcome::fail(format!("mutate failed: {}", e), "Profile writes broken.");
     }
+    // Scratch directory: the outcome is deliberately not ledgered, so the
+    // user's real ledger never gains a row for a probe file.
     if let Err(e) = crate::profile::writer::restore_from_backup(&backup, &target) {
         return CheckOutcome::fail(
             format!("restore failed: {}", e),
@@ -1554,6 +1608,59 @@ mod tests {
         assert!(
             matches!(outcome.status, CheckStatus::Pass | CheckStatus::Skip),
             "external tool probe should not warn or fail here: {:?}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn preset_sync_passes_when_nothing_is_stuck() {
+        let outcome = preset_sync_outcome(0);
+        assert_eq!(outcome.status, CheckStatus::Pass);
+        assert_eq!(outcome.detail, "All BambuMate presets are set to sync.");
+        assert!(outcome.action.is_none());
+    }
+
+    #[test]
+    fn preset_sync_warns_with_the_repair_action() {
+        let outcome = preset_sync_outcome(3);
+        assert_eq!(outcome.status, CheckStatus::Warn);
+        assert_eq!(outcome.detail, "3 presets won't sync to Bambu Cloud");
+        assert!(outcome.remedy.is_some());
+        let action = outcome.action.expect("warn carries an action");
+        assert_eq!(action.id, "repair_preset_sync");
+        assert_eq!(action.label, "Review and repair");
+    }
+
+    #[test]
+    fn preset_sync_uses_the_singular_for_one_preset() {
+        assert_eq!(
+            preset_sync_outcome(1).detail,
+            "1 preset won't sync to Bambu Cloud"
+        );
+    }
+
+    #[test]
+    fn timed_carries_the_action_into_the_report() {
+        let report = timed("bambu.preset_sync", "n", "bambu", || preset_sync_outcome(2));
+        assert_eq!(report.action.expect("action").id, "repair_preset_sync");
+        let plain = timed("env.home_dir", "n", "env", || CheckOutcome::pass("ok"));
+        assert!(plain.action.is_none());
+    }
+
+    #[test]
+    fn preset_sync_is_advertised() {
+        assert!(all_check_ids().contains(&"bambu.preset_sync"));
+    }
+
+    #[test]
+    fn preset_sync_warns_without_an_action_when_the_dir_cant_be_read() {
+        let missing = Path::new("/nonexistent/definitely-not-a-real-bambumate-dir");
+        let outcome = preset_sync_for_dir(missing, &HashSet::new());
+        assert_eq!(outcome.status, CheckStatus::Warn);
+        assert!(outcome.action.is_none());
+        assert!(
+            outcome.detail.starts_with("Couldn't read"),
+            "unexpected detail: {:?}",
             outcome.detail
         );
     }

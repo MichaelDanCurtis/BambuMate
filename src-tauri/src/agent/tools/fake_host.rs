@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 use super::{ToolHost, ToolRegistry};
 use crate::agent::asks::AskBroker;
 use crate::agent::types::{AgentEvent, AppState, UiCommand};
+use crate::printer::service::PrinterView;
 use crate::slicer::jobs::{JobOrigin, JobState, JobView};
 
 /// A finished job built from the real cube fixture.
@@ -41,6 +42,7 @@ pub struct FakeHost {
     pub ui: Mutex<Vec<UiCommand>>,
     pub calls: Mutex<Vec<String>>,
     pub bs_running: AtomicBool,
+    pub printer: Mutex<PrinterView>,
     /// Makes `slice` wait forever, like a long queue.
     pub slice_hangs: AtomicBool,
     /// Set once a hanging `slice` is waiting.
@@ -66,6 +68,7 @@ impl FakeHost {
             ui: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             bs_running: AtomicBool::new(false),
+            printer: Mutex::new(PrinterView::unconfigured()),
             slice_hangs: AtomicBool::new(false),
             slice_waiting: AtomicBool::new(false),
             slice_dropped: Arc::new(AtomicBool::new(false)),
@@ -105,6 +108,9 @@ impl ToolHost for FakeHost {
     }
     fn bambu_studio_running(&self) -> bool {
         self.bs_running.load(Ordering::SeqCst)
+    }
+    fn printer_view(&self) -> PrinterView {
+        self.printer.lock().unwrap().clone()
     }
     async fn search_filament(&self, name: &str) -> Result<Value, String> {
         self.log(format!("search_filament:{name}"));

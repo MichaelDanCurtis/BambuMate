@@ -7,6 +7,7 @@ pub mod diagnostics;
 pub mod history;
 pub mod mapper;
 pub mod model_catalog;
+pub mod printer;
 mod process_command;
 pub mod profile;
 pub mod scraper;
@@ -62,6 +63,8 @@ pub fn run() {
             commands::profile::search_base_profiles,
             commands::profile::refresh_base_profile_index,
             commands::profile::list_target_printer_options,
+            commands::preset_sync::list_unsynced_presets,
+            commands::preset_sync::repair_preset_sync,
             commands::scraper::search_filament,
             commands::scraper::get_cached_filament,
             commands::scraper::clear_filament_cache,
@@ -118,6 +121,14 @@ pub fn run() {
             commands::agent::agent_stage_image,
             commands::agent::agent_get_settings,
             commands::agent::agent_set_settings,
+            commands::printer::printer_get_config,
+            commands::printer::printer_discover,
+            commands::printer::printer_test_connection,
+            commands::printer::printer_save,
+            commands::printer::printer_remove,
+            commands::printer::printer_view,
+            commands::printer::printer_assign_slot,
+            commands::printer::printer_clear_slot,
         ])
         .setup(|app| {
             // Apply the user-configured Bambu Studio config folder before any
@@ -212,14 +223,46 @@ pub fn run() {
                 app.manage(host);
                 app.manage(claude);
             }
+
+            // -- Printer live connection -------------------------------------
+            {
+                use std::sync::Arc;
+
+                let data_dir = app.path().app_data_dir().ok();
+                let service = printer::service::PrinterService::new(
+                    Arc::new(printer::service::TauriEvents(app.handle().clone())),
+                    data_dir.as_ref().map(|d| d.join("refinement_history.db")),
+                    data_dir.unwrap_or_else(std::env::temp_dir),
+                    printer::hms::HMS_URL,
+                    printer::client::Timing::default(),
+                );
+                if let Some(config) = printer::settings::load_config(app.handle()) {
+                    match printer::settings::get_access_code(&config.serial) {
+                        Ok(Some(code)) => {
+                            if let Err(e) = service.start(config, code) {
+                                tracing::warn!("printer connection not started: {e}");
+                            }
+                        }
+                        Ok(None) => tracing::info!("printer configured without an access code"),
+                        Err(e) => tracing::warn!("printer access code unavailable: {e}"),
+                    }
+                }
+                app.manage(service);
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                use tauri::Manager;
                 // No Bambu Studio CLI may outlive BambuMate.
                 commands::slicer::stop(app);
+                // Send the printer an MQTT DISCONNECT so it frees the
+                // connection slot now rather than at keep-alive timeout.
+                if let Some(service) = app.try_state::<printer::service::PrinterService>() {
+                    service.shutdown();
+                }
             }
         });
 }

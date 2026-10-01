@@ -12,11 +12,13 @@ use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
 use crate::pages::home::HomePage;
 use crate::pages::print_analysis::PrintAnalysisPage;
+use crate::pages::printer::PrinterPage;
 use crate::pages::profile_diff::ProfileDiffPage;
 use crate::pages::profile_management::ProfileManagementPage;
 use crate::pages::settings::SettingsPage;
 use crate::pages::setup_wizard::SetupWizard;
 use crate::pages::slice::SlicePage;
+use crate::printer::{PrinterEvents, PrinterShared};
 use crate::slicer::{SlicerEvents, SlicerShared};
 use crate::theme::{apply_theme, normalize_theme, ThemeContext};
 
@@ -35,13 +37,14 @@ pub struct UpdateContext {
 
 #[component]
 pub fn App() -> impl IntoView {
-    let (theme, set_theme) = signal(String::from("bambu"));
+    let (theme, set_theme) = signal(String::from("dark"));
     provide_context(ThemeContext { theme, set_theme });
 
     let update_info = RwSignal::new(Option::<UpdateInfo>::None);
     provide_context(UpdateContext { update_info });
     provide_context(AgentRefresh(RwSignal::new(0)));
     provide_context(AgentShared::default());
+    provide_context(PrinterShared::new());
     provide_context(SlicerShared::default());
 
     // Feature flags with both enabled by default
@@ -106,6 +109,7 @@ pub fn App() -> impl IntoView {
         <Router>
             // Mounted once, outside the Shows below: its listeners can't be removed.
             <AgentEvents />
+            <PrinterEvents />
             <SlicerEvents />
 
             // Show wizard overlay if setup is not complete
@@ -129,6 +133,7 @@ pub fn App() -> impl IntoView {
                             <Route path=path!("/settings") view=SettingsPage />
                             <Route path=path!("/health") view=HealthPage />
                             <Route path=path!("/about") view=AboutPage />
+                            <Route path=path!("/printer") view=PrinterPage />
                         </Routes>
                     </main>
                     <AgentDrawer />

@@ -4,6 +4,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::app::FeatureFlagsContext;
 use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
+use crate::components::printer_settings::PrinterSettings;
 use crate::components::slicer_settings::SlicerSettingsSection;
 use crate::theme::ThemeContext;
 
@@ -41,6 +42,7 @@ pub fn SettingsPage() -> impl IntoView {
     let (local_url_status, set_local_url_status) = signal::<Option<String>>(None);
     let (is_searching_path, set_is_searching_path) = signal(false);
     let (reset_confirm, set_reset_confirm) = signal(false);
+    let use_printer = use_context::<crate::printer::PrinterShared>();
     let (resetting, set_resetting) = signal(false);
     let (reset_status, set_reset_status) = signal::<Option<String>>(None);
     let (filament_ai_enabled, set_filament_ai_enabled) = signal(true);
@@ -388,7 +390,6 @@ pub fn SettingsPage() -> impl IntoView {
                             class={move || if filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
                             on:click=move |_| set_filament_ai_mode(true)
                         >
-                            <div class="wizard-mode-icon">"🤖"</div>
                             <h4>"Use AI Provider (Recommended)"</h4>
                             <p>
                                 "Use your configured AI provider for filament spec extraction and Print Analysis."
@@ -405,7 +406,6 @@ pub fn SettingsPage() -> impl IntoView {
                             class={move || if !filament_ai_enabled.get() { "wizard-mode-card selected" } else { "wizard-mode-card" }}
                             on:click=move |_| set_filament_ai_mode(false)
                         >
-                            <div class="wizard-mode-icon">"🌐"</div>
                             <h4>"Use Manufacturer Specs Only"</h4>
                             <p>
                                 "Use manufacturer sites and SpoolScout without any AI provider."
@@ -457,7 +457,7 @@ pub fn SettingsPage() -> impl IntoView {
                             <span>"Light"</span>
                                 <span class="theme-preview-badge">"Theme"</span>
                             </span>
-                            <span class="theme-preview-frame theme-preview-frame-light">
+                            <span class="theme-preview-frame theme-preview-frame-light" data-theme="bambu">
                                 <span class="theme-preview-sidebar"></span>
                                 <span class="theme-preview-canvas">
                                     <span class="theme-preview-line short"></span>
@@ -476,7 +476,7 @@ pub fn SettingsPage() -> impl IntoView {
                                 <span>"Dark"</span>
                                 <span class="theme-preview-badge">"Focus"</span>
                             </span>
-                            <span class="theme-preview-frame theme-preview-frame-dark">
+                            <span class="theme-preview-frame theme-preview-frame-dark" data-theme="dark">
                                 <span class="theme-preview-sidebar"></span>
                                 <span class="theme-preview-canvas">
                                     <span class="theme-preview-line short"></span>
@@ -578,14 +578,14 @@ pub fn SettingsPage() -> impl IntoView {
                     <label for="ai-model">"Model"</label>
                     <Show when=move || !vision_available.get() && !models_loading.get() && models_error.get().is_none()>
                         <div class="status-text status-error" style="margin-bottom: 0.5rem;">
-                            <strong>"⚠ No vision-capable model on this account. "</strong>
+                            <strong>"No vision-capable model on this account. "</strong>
                             "Print analysis and defect detection are disabled. "
                             "Enable \"Show all models\" to pick a text-only model for filament search, or switch providers."
                         </div>
                     </Show>
                     <Show when=move || catalog_recommended.get().is_some() && vision_available.get()>
                         <div class="status-text" style="margin-bottom: 0.5rem;">
-                            "⭐ Recommended: latest non-preview vision model, cheapest in its release cohort."
+                            "Recommended: latest non-preview vision model, cheapest in its release cohort."
                         </div>
                     </Show>
                     <label class="checkbox-label" style="margin-bottom: 0.5rem; display: inline-flex; gap: 0.4rem;">
@@ -667,7 +667,7 @@ pub fn SettingsPage() -> impl IntoView {
                                             m.id.clone()
                                         };
                                         let mut display = if m.recommended {
-                                            format!("⭐ Recommended — {}", display_base)
+                                            format!("Recommended — {}", display_base)
                                         } else {
                                             display_base
                                         };
@@ -710,6 +710,8 @@ pub fn SettingsPage() -> impl IntoView {
                     </Show>
                 </div>
             </section>
+
+            <PrinterSettings />
 
             <section class="settings-section">
                 <h3>"Application"</h3>
@@ -806,7 +808,13 @@ pub fn SettingsPage() -> impl IntoView {
                                     set_resetting.set(true);
                                     set_reset_confirm.set(false);
                                     spawn_local(async move {
-                                        match commands::reset_to_clean_install().await {
+                                        let result = commands::reset_to_clean_install().await;
+                                        // The printer was removed too (or may
+                                        // have been, if the reset failed part way).
+                                        if let Some(printer) = use_printer {
+                                            printer.config_changed();
+                                        }
+                                        match result {
                                             Ok(()) => {
                                                 set_reset_status.set(Some("Reset complete. Reload the application to start fresh.".to_string()));
                                             }

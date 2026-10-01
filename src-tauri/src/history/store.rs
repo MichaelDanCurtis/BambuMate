@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use rusqlite::{params, Connection};
 use tracing::info;
 
-use super::types::{AppliedChange, SessionDetail, SessionSummary};
+use super::types::{AppliedChange, SessionDetail, SessionSummary, SlotAssignment};
 
 /// SQLite store for refinement history.
 /// All operations are synchronous (rusqlite is blocking).
@@ -25,6 +26,12 @@ impl RefinementHistory {
 
         let conn =
             Connection::open(db_path).map_err(|e| format!("Failed to open history db: {}", e))?;
+
+        // Give concurrent history and ledger access (install/duplicate/batch/delete
+        // can all touch this file from different commands) a brief window to
+        // wait for a lock instead of failing immediately with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(2))
+            .map_err(|e| format!("Failed to set busy timeout: {}", e))?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS refinement_sessions (
@@ -52,6 +59,36 @@ impl RefinementHistory {
             [],
         )
         .map_err(|e| format!("Failed to create date index: {}", e))?;
+
+        // Which filament preset the user says is loaded in each printer slot.
+        // External spools use ams_id 255 with their own tray ids (254, 255).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS slot_assignments (
+                serial TEXT NOT NULL,
+                ams_id INTEGER NOT NULL,
+                tray_id INTEGER NOT NULL,
+                preset_name TEXT NOT NULL,
+                filament_id TEXT,
+                preset_path TEXT,
+                assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (serial, ams_id, tray_id)
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create slot_assignments table: {}", e))?;
+
+        // Ledger of presets BambuMate wrote as new (empty setting_id). See
+        // history::ledger for how the Health check uses it.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS generated_presets (
+                path TEXT PRIMARY KEY,
+                filament_id TEXT,
+                profile_name TEXT,
+                created_at INTEGER
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create generated_presets table: {}", e))?;
 
         info!("Opened refinement history database at {:?}", db_path);
         Ok(Self { conn })
@@ -156,6 +193,137 @@ impl RefinementHistory {
                 },
             )
             .map_err(|e| format!("Session not found: {}", e))
+    }
+
+    /// Records (or replaces) the preset the user says is in one slot.
+    pub fn assign_slot(
+        &self,
+        serial: &str,
+        ams_id: u32,
+        tray_id: u32,
+        preset_name: &str,
+        filament_id: Option<&str>,
+        preset_path: Option<&str>,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO slot_assignments
+                 (serial, ams_id, tray_id, preset_name, filament_id, preset_path, assigned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+                params![
+                    serial,
+                    ams_id,
+                    tray_id,
+                    preset_name,
+                    filament_id,
+                    preset_path
+                ],
+            )
+            .map_err(|e| format!("Failed to save slot assignment: {}", e))?;
+        Ok(())
+    }
+
+    /// Forgets the preset assigned to one slot. Clearing an unassigned slot
+    /// is not an error.
+    pub fn clear_slot(&self, serial: &str, ams_id: u32, tray_id: u32) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM slot_assignments WHERE serial = ?1 AND ams_id = ?2 AND tray_id = ?3",
+                params![serial, ams_id, tray_id],
+            )
+            .map_err(|e| format!("Failed to clear slot assignment: {}", e))?;
+        Ok(())
+    }
+
+    /// Fills in the filament id of an assignment stored without one. An
+    /// assignment that already has an id is left as it is, and so is a slot
+    /// that has since been reassigned to a different preset.
+    pub fn set_slot_filament_id(
+        &self,
+        serial: &str,
+        ams_id: u32,
+        tray_id: u32,
+        preset_name: &str,
+        filament_id: &str,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE slot_assignments SET filament_id = ?5
+                 WHERE serial = ?1 AND ams_id = ?2 AND tray_id = ?3 AND preset_name = ?4
+                   AND (filament_id IS NULL OR TRIM(filament_id) = '')",
+                params![serial, ams_id, tray_id, preset_name, filament_id],
+            )
+            .map_err(|e| format!("Failed to update slot assignment: {}", e))?;
+        Ok(())
+    }
+
+    /// Every slot assignment for one printer, in slot order.
+    pub fn list_slot_assignments(&self, serial: &str) -> Result<Vec<SlotAssignment>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT serial, ams_id, tray_id, preset_name, filament_id, preset_path, assigned_at
+                 FROM slot_assignments WHERE serial = ?1 ORDER BY ams_id, tray_id",
+            )
+            .map_err(|e| format!("Failed to prepare query: {}", e))?;
+        let rows = stmt
+            .query_map(params![serial], |row| {
+                Ok(SlotAssignment {
+                    serial: row.get(0)?,
+                    ams_id: row.get(1)?,
+                    tray_id: row.get(2)?,
+                    preset_name: row.get(3)?,
+                    filament_id: row.get(4)?,
+                    preset_path: row.get(5)?,
+                    assigned_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query slot assignments: {}", e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read slot assignments: {}", e))
+    }
+
+    /// Record a preset BambuMate wrote as new. Replaces any earlier row for
+    /// the same path.
+    pub fn record_generated_preset(
+        &self,
+        path: &str,
+        filament_id: &str,
+        profile_name: &str,
+    ) -> Result<(), String> {
+        let created_at = chrono::Utc::now().timestamp();
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO generated_presets (path, filament_id, profile_name, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+                params![path, filament_id, profile_name, created_at],
+            )
+            .map_err(|e| format!("Failed to record generated preset: {}", e))?;
+        Ok(())
+    }
+
+    /// Forget a preset (it was deleted).
+    pub fn remove_generated_preset(&self, path: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM generated_presets WHERE path = ?1",
+                params![path],
+            )
+            .map_err(|e| format!("Failed to remove generated preset: {}", e))?;
+        Ok(())
+    }
+
+    /// Every path in the ledger.
+    pub fn generated_preset_paths(&self) -> Result<HashSet<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM generated_presets")
+            .map_err(|e| format!("Failed to prepare ledger query: {}", e))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query ledger: {}", e))?;
+        rows.collect::<Result<HashSet<_>, _>>()
+            .map_err(|e| format!("Failed to collect ledger: {}", e))
     }
 }
 
@@ -290,5 +458,103 @@ mod tests {
         let result = store.get_session(999);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Session not found"));
+    }
+
+    #[test]
+    fn slot_assignments_round_trip_and_replace() {
+        let (store, _dir) = create_test_store();
+        store
+            .assign_slot(
+                "SN1",
+                0,
+                2,
+                "Acme PLA",
+                Some("P1234567"),
+                Some("/u/Acme PLA.json"),
+            )
+            .unwrap();
+        store
+            .assign_slot("SN1", 255, 254, "Generic PETG", None, None)
+            .unwrap();
+        store
+            .assign_slot("SN2", 0, 0, "Other printer", None, None)
+            .unwrap();
+        // Assigning the same slot again replaces the preset.
+        store
+            .assign_slot("SN1", 0, 2, "Acme PLA Silk", Some("P7654321"), None)
+            .unwrap();
+
+        let rows = store.list_slot_assignments("SN1").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].ams_id, rows[0].tray_id), (0, 2));
+        assert_eq!(rows[0].preset_name, "Acme PLA Silk");
+        assert_eq!(rows[0].filament_id.as_deref(), Some("P7654321"));
+        assert_eq!(rows[0].preset_path, None);
+        assert!(!rows[0].assigned_at.is_empty());
+        assert_eq!((rows[1].ams_id, rows[1].tray_id), (255, 254));
+
+        store.clear_slot("SN1", 0, 2).unwrap();
+        store.clear_slot("SN1", 3, 3).unwrap();
+        assert_eq!(store.list_slot_assignments("SN1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_missing_filament_id_is_filled_in_but_an_existing_one_is_kept() {
+        let (store, _dir) = create_test_store();
+        store
+            .assign_slot("SN1", 0, 0, "Mine", None, Some("/u/Mine.json"))
+            .unwrap();
+        store
+            .assign_slot("SN1", 0, 1, "Acme", Some("P1234567"), None)
+            .unwrap();
+        let before = store.list_slot_assignments("SN1").unwrap();
+        store
+            .set_slot_filament_id("SN1", 0, 0, "Mine", "P0000009")
+            .unwrap();
+        store
+            .set_slot_filament_id("SN1", 0, 1, "Acme", "P0000009")
+            .unwrap();
+        let rows = store.list_slot_assignments("SN1").unwrap();
+        assert_eq!(rows[0].filament_id.as_deref(), Some("P0000009"));
+        assert_eq!(rows[0].assigned_at, before[0].assigned_at);
+        assert_eq!(rows[1].filament_id.as_deref(), Some("P1234567"));
+    }
+
+    #[test]
+    fn a_reassigned_slot_does_not_take_the_old_presets_filament_id() {
+        let (store, _dir) = create_test_store();
+        store
+            .assign_slot("SN1", 0, 0, "New", None, Some("/u/New.json"))
+            .unwrap();
+        store
+            .set_slot_filament_id("SN1", 0, 0, "Old", "P0000009")
+            .unwrap();
+        let rows = store.list_slot_assignments("SN1").unwrap();
+        assert_eq!(rows[0].filament_id, None);
+    }
+
+    #[test]
+    fn test_generated_preset_insert_replace_and_delete() {
+        let (store, _dir) = create_test_store();
+
+        store
+            .record_generated_preset("/u/A.json", "P1", "A")
+            .unwrap();
+        store
+            .record_generated_preset("/u/A.json", "P1", "A renamed")
+            .unwrap();
+        store
+            .record_generated_preset("/u/B.json", "P2", "B")
+            .unwrap();
+
+        let paths = store.generated_preset_paths().unwrap();
+        assert_eq!(paths.len(), 2, "insert-or-replace keeps one row per path");
+        assert!(paths.contains("/u/A.json"));
+
+        store.remove_generated_preset("/u/A.json").unwrap();
+
+        let paths = store.generated_preset_paths().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(paths.contains("/u/B.json"));
     }
 }

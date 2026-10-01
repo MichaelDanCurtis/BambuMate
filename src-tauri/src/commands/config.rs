@@ -183,6 +183,26 @@ const KEYCHAIN_SERVICES: &[&str] = &[
 pub fn reset_to_clean_install(app: AppHandle) -> Result<(), String> {
     info!("Resetting BambuMate to clean installation state");
 
+    // The printer's access code is keyed by its serial, which lives in the
+    // store about to be cleared, so remove it first.
+    let mut keychain_errors = Vec::new();
+    if let Some(printer) = crate::printer::settings::load_config(&app) {
+        if let Err(e) = crate::printer::settings::delete_access_code(&printer.serial) {
+            keychain_errors.push(format!("printer access code: {}", e));
+        }
+    }
+    // Also covers stored printer settings that are no longer valid (which
+    // `load_config` ignores). Deleting a code twice is fine.
+    if let Err(e) = crate::printer::settings::remove_config(&app) {
+        warn!("Failed to remove the printer settings: {}", e);
+    }
+    {
+        use tauri::Manager;
+        if let Some(service) = app.try_state::<crate::printer::service::PrinterService>() {
+            service.stop();
+        }
+    }
+
     // Clear the preferences store
     let store = app.store("preferences.json").map_err(|e| {
         warn!("Failed to open store: {}", e);
@@ -199,7 +219,6 @@ pub fn reset_to_clean_install(app: AppHandle) -> Result<(), String> {
     info!("Preferences store cleared");
 
     // Delete all API keys from the system keychain
-    let mut keychain_errors = Vec::new();
     for service in KEYCHAIN_SERVICES {
         match keyring::Entry::new(service, "bambumate") {
             Ok(entry) => match entry.delete_credential() {

@@ -1,0 +1,17 @@
+{
+  "print": {
+    "command": "push_status",
+    "msg": 1,
+    "sequence_id": "2023",
+    "ams": {
+      "ams": [
+        {
+          "id": "1",
+          "tray": [
+            { "id": "1", "state": 11, "tray_type": "PLA", "tray_sub_brands": "", "tray_info_idx": "P1234567", "tray_color": "F95959FF", "nozzle_temp_min": "190", "nozzle_temp_max": "240", "remain": 0, "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000" }
+          ]
+        }
+      ]
+    }
+  }
+}

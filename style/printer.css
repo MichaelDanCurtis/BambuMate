@@ -1,0 +1,112 @@
+/* Printer page, rail dot and Settings → Printer. Built on the app-wide
+   Nothing tokens (style/tokens.css). */
+
+/* -- rail dot ------------------------------------------------------------ */
+/* Position and size are shared with .nav-update-dot in style/main.css. */
+.printer-dot { background: var(--nd-text-disabled); }
+.printer-dot[data-state="connected"] { background: var(--nd-signal); }
+.printer-dot[data-state="connecting"] { background: var(--nd-warning); }
+.printer-dot[data-state="error"] { background: var(--nd-accent); }
+
+/* -- page ------------------------------------------------------------------ */
+.printer-page { display: grid; gap: var(--nd-space-lg); max-width: 1100px; }
+.pr-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--nd-space-md); flex-wrap: wrap; }
+.pr-head h2 { margin: 0; color: var(--nd-text-display); }
+.pr-ident { font-size: 12px; color: var(--nd-text-secondary); }
+.pr-empty { padding: var(--nd-space-xl); border: 1px dashed var(--nd-border-visible); border-radius: 12px; text-align: center; }
+.pr-setup-link { color: var(--nd-interactive); }
+.pr-notice { margin: 0; padding: var(--nd-space-sm) var(--nd-space-md); border-left: 3px solid var(--nd-warning); background: var(--nd-surface); overflow-wrap: anywhere; }
+.pr-notice[data-state="error"] { border-left-color: var(--nd-accent); }
+.pr-settings-link { color: var(--nd-interactive); white-space: nowrap; }
+.pr-waiting { margin: 0; padding: var(--nd-space-lg); border: 1px solid var(--nd-border); border-radius: 12px; background: var(--nd-surface); color: var(--nd-text-secondary); }
+.pr-body { display: grid; gap: var(--nd-space-lg); transition: opacity 200ms var(--nd-ease); }
+.pr-body.pr-stale { opacity: 0.45; filter: grayscale(1); }
+.pr-section { padding: var(--nd-space-lg); border: 1px solid var(--nd-border); border-radius: 12px; background: var(--nd-surface); display: grid; gap: var(--nd-space-md); }
+.pr-section > .nd-label { margin: 0; }
+
+.pr-hero-top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--nd-space-md); }
+.pr-hero-state { font-size: 14px; letter-spacing: 0.08em; color: var(--nd-text-secondary); }
+.pr-hero-percent { font-size: 48px; line-height: 1; font-weight: 300; color: var(--nd-text-display); }
+.pr-progress { height: 4px; background: var(--nd-border); border-radius: 2px; overflow: hidden; }
+.pr-progress-fill { height: 100%; background: var(--nd-text-display); }
+.pr-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--nd-space-md); margin: 0; }
+.pr-facts dt { font-family: var(--nd-font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--nd-text-secondary); }
+.pr-facts dd { margin: 2px 0 0; color: var(--nd-text-primary); overflow-wrap: anywhere; }
+.pr-temps { display: flex; flex-wrap: wrap; gap: var(--nd-space-md); }
+.pr-temp { display: grid; gap: 2px; padding: var(--nd-space-sm) var(--nd-space-md); border: 1px solid var(--nd-border); border-radius: 8px; min-width: 140px; }
+.pr-temp-active { border-color: var(--nd-text-primary); }
+.pr-temp-note { font-size: 12px; color: var(--nd-text-secondary); }
+
+.pr-ams-row { display: grid; gap: var(--nd-space-sm); }
+.pr-ams-head { display: flex; justify-content: space-between; gap: var(--nd-space-md); }
+.pr-ams-title { font-weight: 600; color: var(--nd-text-display); }
+.pr-ams-meta { font-size: 12px; color: var(--nd-text-secondary); }
+.pr-slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--nd-space-sm); }
+.pr-slot { border: 1px solid var(--nd-border-visible); border-radius: 10px; background: var(--nd-surface-raised); overflow: hidden; }
+.pr-slot[data-status="empty"] { opacity: 0.55; }
+.pr-slot[data-status="different"] { border-color: var(--nd-warning); }
+.pr-slot-main {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    grid-template-areas: "swatch label" "swatch material" "preset preset" "prev prev" "foot foot";
+    gap: 2px var(--nd-space-sm);
+    width: 100%;
+    padding: var(--nd-space-sm) var(--nd-space-md);
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.pr-slot-main:hover { background: var(--nd-surface); }
+.pr-swatch { grid-area: swatch; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--nd-border-visible); align-self: center; }
+.pr-slot-label { grid-area: label; font-size: 12px; color: var(--nd-text-secondary); }
+.pr-material { grid-area: material; font-weight: 600; color: var(--nd-text-display); }
+.pr-preset { grid-area: preset; font-size: 13px; color: var(--nd-text-primary); overflow-wrap: anywhere; }
+.pr-prev { grid-area: prev; font-size: 12px; color: var(--nd-text-secondary); overflow-wrap: anywhere; }
+.pr-slot-foot { grid-area: foot; display: flex; align-items: center; gap: var(--nd-space-sm); flex-wrap: wrap; }
+.pr-remain { font-size: 12px; }
+.pr-rfid { padding: 1px 6px; border: 1px solid var(--nd-border-visible); border-radius: 999px; }
+.pr-status { margin-left: auto; font-size: 12px; color: var(--nd-text-secondary); }
+.pr-slot[data-status="matches"] .pr-status,
+.pr-slot[data-status="rfid"] .pr-status { color: var(--nd-signal); }
+.pr-slot[data-status="different"] .pr-status { color: var(--nd-text-display); font-weight: 600; }
+.pr-steps { margin: 0; padding: var(--nd-space-sm) var(--nd-space-md) var(--nd-space-sm) var(--nd-space-xl); border-top: 1px solid var(--nd-border); font-size: 12px; display: grid; gap: 4px; }
+.pr-sync-note { color: var(--nd-accent); }
+.pr-no-id { margin: 0; padding: var(--nd-space-sm) var(--nd-space-md); border-top: 1px solid var(--nd-border); font-size: 12px; overflow-wrap: anywhere; }
+
+.pr-error-list { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--nd-space-sm); }
+.pr-error { display: flex; gap: var(--nd-space-md); align-items: baseline; flex-wrap: wrap; }
+.pr-error-code { font-size: 12px; color: var(--nd-accent); }
+.pr-error-link { color: var(--nd-interactive); }
+.pr-quiet { margin: 0; color: var(--nd-text-secondary); }
+
+/* -- slot picker ------------------------------------------------------------ */
+.pr-picker-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.pr-picker { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 64px); display: flex; flex-direction: column; gap: var(--nd-space-sm); padding: var(--nd-space-lg); border-radius: 12px; background: var(--nd-surface); border: 1px solid var(--nd-border-visible); }
+.pr-picker h3 { margin: 0; color: var(--nd-text-display); }
+.pr-picker-search { padding: 8px 10px; border: 1px solid var(--nd-border-visible); border-radius: 8px; background: var(--nd-surface-raised); color: var(--nd-text-primary); font: inherit; }
+.pr-picker-results { overflow-y: auto; min-height: 120px; }
+.pr-picker-group { margin: var(--nd-space-sm) 0 4px; }
+.pr-picker-list { margin: 0; padding: 0; list-style: none; }
+.pr-picker-item { width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--nd-text-primary); font: inherit; text-align: left; cursor: pointer; }
+.pr-picker-item:hover { background: var(--nd-surface-raised); }
+.pr-picker-item:disabled, .pr-picker-clear:disabled { cursor: progress; opacity: 0.6; }
+.pr-picker-status { margin: 0; font-size: 12px; color: var(--nd-text-secondary); }
+.pr-picker-error { margin: 0; color: var(--nd-accent); }
+.pr-picker-actions { display: flex; justify-content: flex-end; gap: var(--nd-space-sm); }
+.pr-picker-clear, .pr-picker-cancel { padding: 6px 14px; border: 1px solid var(--nd-border-visible); border-radius: 999px; background: transparent; color: var(--nd-text-primary); font: inherit; cursor: pointer; }
+
+/* -- Settings → Printer (uses the Settings page's own classes otherwise) ----- */
+.printer-found { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; }
+.printer-found-item { width: 100%; text-align: left; padding: 8px 10px; border: 1px solid var(--border-primary); border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; display: grid; gap: 2px; }
+.printer-found-title { font-weight: 600; }
+.printer-found-serial code, .printer-trust-serial { font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; letter-spacing: 0.04em; }
+.printer-found-ip { font-size: 12px; opacity: 0.8; }
+.printer-conflict { margin: 4px 0 0; }
+.printer-serial-input { font-family: ui-monospace, monospace; letter-spacing: 0.04em; }
+.printer-trust { display: grid; gap: 8px; margin-top: 12px; }
+.printer-trust-details { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+.printer-trust-details dd { margin: 0; min-width: 0; }
+.printer-fingerprint { font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }

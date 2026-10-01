@@ -4,6 +4,7 @@ pub mod nozzle;
 pub mod paths;
 pub mod reader;
 pub mod registry;
+pub mod sync;
 pub mod types;
 pub mod writer;
 

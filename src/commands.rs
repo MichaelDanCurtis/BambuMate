@@ -206,6 +206,13 @@ pub async fn run_health_check() -> Result<HealthReport, String> {
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
 
+/// A follow-up the UI can offer for a check, rendered as a button.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CheckAction {
+    pub id: String,
+    pub label: String,
+}
+
 /// Result of a single diagnostics check.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CheckReport {
@@ -216,6 +223,9 @@ pub struct CheckReport {
     pub status: String,
     pub detail: String,
     pub remedy: Option<String>,
+    /// Optional UI action, e.g. `repair_preset_sync`.
+    #[serde(default)]
+    pub action: Option<CheckAction>,
     pub duration_ms: u64,
 }
 
@@ -261,6 +271,57 @@ pub async fn run_diagnostics(include_network: bool) -> Result<DiagnosticsReport,
         .map_err(|e| e.to_string())?;
 
     let result = invoke("run_diagnostics", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// A user preset Bambu Studio will not upload as it stands.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct UnsyncedPreset {
+    pub path: String,
+    pub profile_name: String,
+    pub file_name: String,
+    /// `confirmed` (a made-up id) or `signature` (only the file shape matches).
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnsyncedPresetList {
+    pub presets: Vec<UnsyncedPreset>,
+    pub bambu_studio_running: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepairResult {
+    pub repaired: Vec<String>,
+    /// `(path, reason)` for each preset that was not repaired.
+    pub skipped: Vec<(String, String)>,
+}
+
+#[derive(Serialize)]
+struct RepairPresetSyncArgs {
+    paths: Vec<String>,
+}
+
+/// Presets the `bambu.preset_sync` check found, and whether Bambu Studio is open.
+pub async fn list_unsynced_presets() -> Result<UnsyncedPresetList, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("list_unsynced_presets", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+/// Reset the chosen presets to "new" so Bambu Studio uploads them.
+pub async fn repair_preset_sync(paths: Vec<String>) -> Result<RepairResult, String> {
+    let args =
+        serde_wasm_bindgen::to_value(&RepairPresetSyncArgs { paths }).map_err(|e| e.to_string())?;
+
+    let result = invoke("repair_preset_sync", args)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 
@@ -1789,4 +1850,29 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
         .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
 
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_reports_without_an_action_still_parse() {
+        let json = r#"{"id":"env.home_dir","name":"Home","category":"env","status":"pass","detail":"ok","remedy":null,"duration_ms":1}"#;
+        let report: CheckReport = serde_json::from_str(json).unwrap();
+        assert!(report.action.is_none());
+    }
+
+    #[test]
+    fn check_reports_carry_their_action() {
+        let json = r#"{"id":"bambu.preset_sync","name":"n","category":"bambu","status":"warn","detail":"d","remedy":"r","duration_ms":1,"action":{"id":"repair_preset_sync","label":"Review and repair"}}"#;
+        let report: CheckReport = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            report.action,
+            Some(CheckAction {
+                id: "repair_preset_sync".into(),
+                label: "Review and repair".into()
+            })
+        );
+    }
 }
