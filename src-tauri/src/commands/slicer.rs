@@ -391,7 +391,7 @@ fn prune_opened(opened: &Path, current: &Path, keep: usize) {
         })
         .collect();
     // Newest first.
-    copies.sort_by(|a, b| b.0.cmp(&a.0));
+    copies.sort_by_key(|c| std::cmp::Reverse(c.0));
     for (_, path) in copies.into_iter().skip(keep) {
         if path != current {
             let _ = std::fs::remove_file(path);
