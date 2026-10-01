@@ -11,6 +11,7 @@ pub enum IconKind {
     Printer,
     Batch,
     Compare,
+    Slice,
     Settings,
     Health,
     About,
@@ -27,6 +28,8 @@ pub fn Icon(kind: IconKind) -> impl IntoView {
         IconKind::Printer => view! { <rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M4 8h16M10.5 8v3h3V8M12 11v1.5M7.5 16.5h9"/> }.into_any(),
         IconKind::Batch => view! { <rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/> }.into_any(),
         IconKind::Compare => view! { <path d="M8 4v16M16 4v16M4 8h4M16 16h4"/> }.into_any(),
+        // Stacked layers: a model cut into slices.
+        IconKind::Slice => view! { <path d="M4 7.5l8-3.5 8 3.5-8 3.5z"/><path d="M4 12l8 3.5 8-3.5M4 16.5l8 3.5 8-3.5"/> }.into_any(),
         IconKind::Settings => view! { <circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/> }.into_any(),
         IconKind::Health => view! { <path d="M3 12h4l2-5 4 10 2-5h6"/> }.into_any(),
         IconKind::About => view! { <circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8v.01"/> }.into_any(),

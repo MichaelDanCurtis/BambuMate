@@ -629,6 +629,7 @@ impl AgentBackend for ClaudeBackend {
         self.asks.cancel_session(session_id);
         let mut sessions = self.sessions.lock().await;
         let s = sessions.get_mut(session_id).ok_or("unknown session")?;
+        s.opts.registry.cancel_calls();
         Self::mark_interrupted(&s.proc);
         self.stop_proc(session_id, s.proc.take()).await;
         Ok(())
@@ -638,6 +639,7 @@ impl AgentBackend for ClaudeBackend {
         self.asks.cancel_session(session_id);
         let removed = self.sessions.lock().await.remove(session_id);
         if let Some(mut s) = removed {
+            s.opts.registry.cancel_calls();
             Self::mark_interrupted(&s.proc);
             self.stop_proc(session_id, s.proc.take()).await;
         }
@@ -1001,6 +1003,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn interrupt_stops_tool_calls_in_flight_but_not_later_ones() {
+        let (p, mut cli) = fake_cli();
+        let mut r = rig(Some("k"), vec![p]);
+        r.backend.start_session("s1", r.opts.clone()).await.unwrap();
+        r.backend.send("s1", 1, text("slice it")).await.unwrap();
+        cli.read_user().await;
+        let in_flight = r.opts.registry.cancel_watch();
+        r.backend.interrupt("s1").await.unwrap();
+        assert!(in_flight.is_fired());
+        // The next turn's calls start from a clean slate.
+        assert!(!r.opts.registry.cancel_watch().is_fired());
+        drop(cli);
+        until(&mut r.rx, |e| matches!(e, AgentEvent::TurnDone { .. })).await;
     }
 
     #[tokio::test]

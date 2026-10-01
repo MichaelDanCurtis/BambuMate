@@ -27,7 +27,7 @@ if (!existsSync(join(distDir, "index.html"))) {
 const THEMES = ["dark", "bambu"];
 const WIDTHS = [1280, 900];
 const HEIGHT = 860; // the minimum; taller pages grow the viewport, see below
-const ROUTES = ["/", "/filament", "/analysis", "/profiles", "/batch", "/compare", "/settings", "/health", "/about"];
+const ROUTES = ["/", "/filament", "/analysis", "/profiles", "/printer", "/batch", "/compare", "/slice", "/settings", "/health", "/about"];
 
 // Copied from serve() in app-flows.mjs, which runs its flows at import time
 // and so cannot export it. Keep the two in step.

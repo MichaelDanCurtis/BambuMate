@@ -28,9 +28,10 @@ pub struct ReceivedFiles {
 }
 
 impl ReceivedFiles {
-    fn push(&mut self, file: StlFile) {
+    /// Adds a file; `false` when its path was already listed.
+    fn push(&mut self, file: StlFile) -> bool {
         if self.seen.contains(&file.path) {
-            return;
+            return false;
         }
         self.seen.insert(file.path.clone());
         self.entries.push(file);
@@ -39,6 +40,7 @@ impl ReceivedFiles {
             let old = self.entries.remove(0);
             self.seen.remove(&old.path);
         }
+        true
     }
 
     pub fn snapshot(&self) -> Vec<StlFile> {
@@ -69,11 +71,51 @@ fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Called once for each newly received STL (auto-slice uses it).
+pub type NewStlHook = Arc<dyn Fn(StlFile) + Send + Sync>;
+
+/// Records the `.stl` files a watcher event created. Each file that is new
+/// to the list is passed to `hook`, outside the list's lock.
+fn handle_event(event: &Event, files: &Mutex<ReceivedFiles>, hook: &Mutex<Option<NewStlHook>>) {
+    if !matches!(event.kind, EventKind::Create(_)) {
+        return;
+    }
+    for path in &event.paths {
+        let is_stl = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("stl"))
+            .unwrap_or(false);
+        if !is_stl {
+            continue;
+        }
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.stl")
+            .to_string();
+        info!("STL file detected: {}", filename);
+        let file = StlFile {
+            path: path.to_string_lossy().to_string(),
+            filename,
+            received_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let added = lock_recover(files).push(file.clone());
+        if added {
+            let hook = lock_recover(hook).clone();
+            if let Some(hook) = hook {
+                hook(file);
+            }
+        }
+    }
+}
+
 /// Shared state for the STL file watcher.
 pub struct StlWatcherState {
     pub watcher: Mutex<Option<RecommendedWatcher>>,
     pub watch_dir: Mutex<Option<String>>,
     pub received_files: Arc<Mutex<ReceivedFiles>>,
+    on_new: Arc<Mutex<Option<NewStlHook>>>,
 }
 
 impl StlWatcherState {
@@ -82,7 +124,13 @@ impl StlWatcherState {
             watcher: Mutex::new(None),
             watch_dir: Mutex::new(None),
             received_files: Arc::new(Mutex::new(ReceivedFiles::default())),
+            on_new: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Sets the hook run for each newly received STL.
+    pub fn set_on_new(&self, hook: NewStlHook) {
+        *lock_recover(&self.on_new) = Some(hook);
     }
 
     /// Start watching a directory for new .stl files.
@@ -96,37 +144,11 @@ impl StlWatcherState {
         self.stop_watching();
 
         let files = self.received_files.clone();
+        let hook = self.on_new.clone();
 
         let mut watcher =
             notify::recommended_watcher(move |res: Result<Event, notify::Error>| match res {
-                Ok(event) => {
-                    if matches!(event.kind, EventKind::Create(_)) {
-                        for path in &event.paths {
-                            if path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .map(|e| e.eq_ignore_ascii_case("stl"))
-                                .unwrap_or(false)
-                            {
-                                let filename = path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown.stl")
-                                    .to_string();
-
-                                info!("STL file detected: {}", filename);
-
-                                let path_str = path.to_string_lossy().to_string();
-                                let mut f = lock_recover(&files);
-                                f.push(StlFile {
-                                    path: path_str,
-                                    filename,
-                                    received_at: chrono::Utc::now().to_rfc3339(),
-                                });
-                            }
-                        }
-                    }
-                }
+                Ok(event) => handle_event(&event, &files, &hook),
                 Err(e) => {
                     warn!("File watcher error: {}", e);
                 }
@@ -184,6 +206,42 @@ mod tests {
             snap.last().unwrap().path,
             format!("/tmp/f{}.stl", MAX_RECEIVED_FILES + 24)
         );
+    }
+
+    #[test]
+    fn push_reports_whether_the_file_was_new() {
+        let mut rf = ReceivedFiles::default();
+        assert!(rf.push(mk("/tmp/a.stl")));
+        assert!(!rf.push(mk("/tmp/a.stl")));
+    }
+
+    fn create_event(paths: &[&str]) -> Event {
+        let mut e = Event::new(EventKind::Create(notify::event::CreateKind::File));
+        for p in paths {
+            e = e.add_path(PathBuf::from(p));
+        }
+        e
+    }
+
+    #[test]
+    fn new_stls_reach_the_hook_once_and_other_files_never() {
+        let files = Mutex::new(ReceivedFiles::default());
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = seen.clone();
+        let hook: Mutex<Option<NewStlHook>> = Mutex::new(Some(Arc::new(move |f: StlFile| {
+            sink.lock().unwrap().push(f.filename)
+        })));
+        handle_event(
+            &create_event(&["/w/a.stl", "/w/notes.txt", "/w/B.STL"]),
+            &files,
+            &hook,
+        );
+        handle_event(&create_event(&["/w/a.stl"]), &files, &hook);
+        let mut modify = create_event(&["/w/c.stl"]);
+        modify.kind = EventKind::Modify(notify::event::ModifyKind::Any);
+        handle_event(&modify, &files, &hook);
+        assert_eq!(*seen.lock().unwrap(), vec!["a.stl", "B.STL"]);
+        assert_eq!(files.lock().unwrap().len(), 2);
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod profile_preview;
 pub mod searchable_select;
 pub mod settings_merge;
 pub mod sidebar;
+pub mod slicer_settings;
 pub mod specs_editor;
 pub mod status_badge;
 pub mod stl_indicator;

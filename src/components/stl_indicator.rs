@@ -1,20 +1,24 @@
 use leptos::prelude::*;
+use leptos_router::hooks::use_navigate;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, StlFile};
+use crate::slicer::state::{badge_text, latest_for_source};
+use crate::slicer::SlicerShared;
 
 #[component]
 pub fn StlIndicator() -> impl IntoView {
     let (stl_files, set_stl_files) = signal::<Vec<StlFile>>(vec![]);
     let (expanded, set_expanded) = signal(false);
+    let slicer = expect_context::<SlicerShared>();
 
     // Poll for STL files every 5 seconds
     Effect::new(move |_| {
         let callback = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
             spawn_local(async move {
                 if let Ok(files) = commands::list_received_stls().await {
-                    set_stl_files.set(files);
+                    set_stl_files.try_set(files);
                 }
             });
         }) as Box<dyn Fn()>);
@@ -46,7 +50,7 @@ pub fn StlIndicator() -> impl IntoView {
         spawn_local(async move {
             let _ = commands::dismiss_stl(&path).await;
             if let Ok(files) = commands::list_received_stls().await {
-                set_stl_files.set(files);
+                set_stl_files.try_set(files);
             }
         });
     };
@@ -65,29 +69,54 @@ pub fn StlIndicator() -> impl IntoView {
 
                 <Show when=move || expanded.get()>
                     <div class="stl-dropdown">
-                        {move || stl_files.get().iter().map(|f| {
-                            let path_open = f.path.clone();
-                            let path_dismiss = f.path.clone();
-                            view! {
-                                <div class="stl-item">
-                                    <span class="stl-filename">{f.filename.clone()}</span>
-                                    <div class="stl-item-actions">
-                                        <button
-                                            class="btn-small"
-                                            on:click=move |_| open_in_bs(path_open.clone())
-                                        >
-                                            "Open in BS"
-                                        </button>
-                                        <button
-                                            class="btn-small btn-dismiss"
-                                            on:click=move |_| dismiss(path_dismiss.clone())
-                                        >
-                                            "Dismiss"
-                                        </button>
+                        <For
+                            each=move || stl_files.get()
+                            key=|f| f.path.clone()
+                            children=move |f: StlFile| {
+                                let path_open = f.path.clone();
+                                let path_dismiss = f.path.clone();
+                                let source = f.path.clone();
+                                // Only the job id and its line, so progress events
+                                // that keep "Slicing…" don't re-render the button.
+                                let badge = Memo::new(move |_| {
+                                    slicer.jobs.with(|js| {
+                                        let j = latest_for_source(js, &source)?;
+                                        Some((j.id, badge_text(j)?))
+                                    })
+                                });
+                                let navigate = use_navigate();
+                                view! {
+                                    <div class="stl-item">
+                                        <span class="stl-filename">{f.filename.clone()}</span>
+                                        {move || badge.get().map(|(id, text)| {
+                                            let navigate = navigate.clone();
+                                            view! {
+                                                <button
+                                                    class="stl-slice-state"
+                                                    on:click=move |_| navigate(&format!("/slice?job={id}"), Default::default())
+                                                >
+                                                    {text}
+                                                </button>
+                                            }
+                                        })}
+                                        <div class="stl-item-actions">
+                                            <button
+                                                class="btn-small"
+                                                on:click=move |_| open_in_bs(path_open.clone())
+                                            >
+                                                "Open in BS"
+                                            </button>
+                                            <button
+                                                class="btn-small btn-dismiss"
+                                                on:click=move |_| dismiss(path_dismiss.clone())
+                                            >
+                                                "Dismiss"
+                                            </button>
+                                        </div>
                                     </div>
-                                </div>
+                                }
                             }
-                        }).collect::<Vec<_>>()}
+                        />
                     </div>
                 </Show>
             </div>

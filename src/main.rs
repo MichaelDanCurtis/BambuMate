@@ -4,6 +4,7 @@ mod commands;
 mod components;
 mod pages;
 mod printer;
+mod slicer;
 mod theme;
 
 use app::App;

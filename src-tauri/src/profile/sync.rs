@@ -910,7 +910,7 @@ mod tests {
             "diagnostics/checks.rs",
         ];
         // (file, raw calls allowed, why). Keep this narrow.
-        let raw_io_allowed: [(&str, usize, &str); 5] = [
+        let raw_io_allowed: [(&str, usize, &str); 6] = [
             // backup_profile copies into `.backups/`; the conf backup copies
             // BambuStudio.conf. Neither writes a preset.
             ("profile/writer.rs", 2, "backups, not presets"),
@@ -922,6 +922,12 @@ mod tests {
             ("agent/snapshot.rs", 1, "snapshot store"),
             // Test-only (`#[cfg(test)]`) fake of the real host.
             ("agent/tools/fake_host.rs", 1, "test support"),
+            // `write_configs` stages a slice job's flattened machine, process
+            // and filament configs (3 calls) in the job's own temp directory
+            // for the Bambu Studio CLI; it never writes a preset folder. The
+            // other 2 are fixtures in its `pub(crate) mod tests`, which
+            // `without_test_module` does not strip.
+            ("slicer/settings.rs", 5, "slice job staging dir"),
             // This module's tests build fixtures; its own code has none.
             ("profile/sync.rs", 0, "uses the writers"),
         ];

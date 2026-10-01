@@ -11,6 +11,7 @@ pub mod printer;
 mod process_command;
 pub mod profile;
 pub mod scraper;
+pub mod slicer;
 pub mod stl_watcher;
 pub mod str_utils;
 
@@ -84,6 +85,19 @@ pub fn run() {
             commands::launcher::open_external_url,
             commands::batch::list_catalog_brands,
             commands::batch::batch_generate_brand,
+            commands::slicer::slicer_status,
+            commands::slicer::slicer_presets,
+            commands::slicer::slicer_get_settings,
+            commands::slicer::slicer_set_settings,
+            commands::slicer::slicer_slice,
+            commands::slicer::slicer_cancel,
+            commands::slicer::slicer_jobs,
+            commands::slicer::slicer_thumbnail,
+            commands::slicer::slicer_open_in_bambu_studio,
+            commands::slicer::slicer_clear_cache,
+            commands::slicer::slicer_pick_model,
+            commands::slicer::slicer_stage_model,
+            commands::slicer::slicer_model_exists,
             commands::stl_bridge::set_stl_watch_dir,
             commands::stl_bridge::get_stl_watch_dir,
             commands::stl_bridge::list_received_stls,
@@ -136,6 +150,10 @@ pub fn run() {
                     }
                 }
             }
+
+            // -- Slicing with Bambu Studio -----------------------------------
+            commands::slicer::start(app.handle());
+            commands::slicer::install_auto_slice(app.handle());
 
             // -- Agent backends --------------------------------------------
             {
@@ -234,10 +252,12 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while running tauri application")
+        .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 use tauri::Manager;
+                // No Bambu Studio CLI may outlive BambuMate.
+                commands::slicer::stop(app);
                 // Send the printer an MQTT DISCONNECT so it frees the
                 // connection slot now rather than at keep-alive timeout.
                 if let Some(service) = app.try_state::<printer::service::PrinterService>() {

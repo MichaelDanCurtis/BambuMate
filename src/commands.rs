@@ -1575,7 +1575,7 @@ pub async fn batch_generate_brand(
 // -- STL Bridge --
 
 /// An STL file received from the watch directory.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct StlFile {
     pub path: String,
     pub filename: String,

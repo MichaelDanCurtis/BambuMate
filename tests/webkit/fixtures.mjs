@@ -62,6 +62,75 @@ const CATALOG_ENTRY = {
 const USER_PROFILE_PATH =
   "/Users/runner/Library/Application Support/BambuStudio/user/00000001/filament/Polymaker PolyLite PLA @BBL X1C 0.4 nozzle.json";
 
+// -- slicing ----------------------------------------------------------------
+//
+// Shapes mirror src-tauri/src/slicer (JobView, SliceResult). Values come from
+// the real cube fixture sliced with Bambu Studio 02.08.02.61 for an H2C.
+
+export const SLICE_MODEL = "/Users/runner/models/cube.stl";
+export const STL_INBOX_FILE = "/Users/runner/stl-inbox/bracket.stl";
+const H2C = "Bambu Lab H2C 0.4 nozzle";
+const H2C_PROCESS = "0.20mm Standard @BBL H2C";
+const PLA = "Bambu PLA Basic @BBL H2C";
+export const PETG = "Generic PETG @BBL H2C 0.4 nozzle";
+// A 1x1 PNG; WebKit refuses a data: URL whose bytes aren't the declared type.
+const PNG_1X1 =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+export function sliceResult({ time = 843, weight = 3.69, cost = 0.07, warnings = 1 } = {}) {
+  return {
+    plates: [
+      {
+        index: 1,
+        time_seconds: time,
+        weight_g: weight,
+        cost,
+        filaments: [
+          { slot: 1, filament_type: "PLA", color: "#00AE42", used_g: weight, used_m: 1.22, cost },
+        ],
+        warnings: Array.from({ length: warnings }, () => ({
+          level: "warning",
+          message:
+            "It seems object cube.stl has floating cantilever. Please re-orient the object or enable support generation.",
+          code: null,
+        })),
+        objects: [{ id: "15", name: "cube.stl" }],
+        thumbnail: "plate_1.png",
+      },
+    ],
+    printer: H2C,
+    printer_model: "Bambu Lab H2C",
+    process: H2C_PROCESS,
+    filaments: [
+      { slot: 1, preset: PLA, filament_type: "PLA", color: "#00AE42", cost_per_kg: 19.99, density: 1.26 },
+    ],
+    bed_type: "Textured PEI Plate",
+    bambu_studio_version: "02.08.02.61",
+    output_path: "/Users/runner/Library/Application Support/com.bambumate.app/slices/ab/output.gcode.3mf",
+  };
+}
+
+export function sliceJob(id, state, extra = {}) {
+  return {
+    id,
+    origin: "manual",
+    source_path: SLICE_MODEL,
+    model_name: "cube.stl",
+    printer: H2C,
+    process: H2C_PROCESS,
+    filament: PLA,
+    bed_type: "Textured PEI Plate",
+    state,
+    ...extra,
+  };
+}
+
+const SLICER_SETTINGS = {
+  saved: { printer: null, process: null, filament: null, bed_type: null, auto_slice: false },
+  effective: { printer: H2C, process: H2C_PROCESS, filament: PLA, bed_type: "Textured PEI Plate", auto_slice: false },
+  bed_types: ["Cool Plate", "Engineering Plate", "High Temp Plate", "Textured PEI Plate", "Supertack Plate"],
+};
+
 // -- printer ------------------------------------------------------------------
 //
 // Shapes mirror src/printer/types.rs, which mirrors the backend's
@@ -675,6 +744,45 @@ export const FIXTURES = {
   agent_delete_session: null,
   agent_stage_image: "/tmp/agent-upload.png",
   agent_login: null,
+
+  // -- slicing --
+  slicer_status: {
+    installed: true,
+    version: "02.08.02.61",
+    supported: true,
+    min_version: "02.08.00.00",
+    tested_version: "02.08.02.61",
+    message: null,
+  },
+  slicer_presets: {
+    printers: [
+      { name: H2C, source: "system" },
+      { name: "Bambu Lab H2S 0.4 nozzle", source: "system" },
+    ],
+    processes: [
+      { name: "My 0.16 Fine", source: "user" },
+      { name: H2C_PROCESS, source: "system" },
+    ],
+    filaments: [
+      { name: "SUNLU PETG High Speed @Bambu Lab H2C 0.4 nozzle", source: "user" },
+      { name: PLA, source: "system" },
+      { name: PETG, source: "system" },
+    ],
+  },
+  slicer_get_settings: SLICER_SETTINGS,
+  slicer_set_settings: SLICER_SETTINGS,
+  slicer_jobs: [],
+  // Each Slice press returns the next queued job; the last one repeats.
+  slicer_slice: {
+    __sequence: [1, 2, 3, 4].map((id) => sliceJob(id, { state: "queued", position: 0 })),
+  },
+  slicer_cancel: true,
+  slicer_thumbnail: PNG_1X1,
+  slicer_open_in_bambu_studio: { launched: true, app_path: "/Applications/BambuStudio.app", was_already_running: false },
+  slicer_clear_cache: 12582912,
+  slicer_pick_model: SLICE_MODEL,
+  slicer_stage_model: SLICE_MODEL,
+  slicer_model_exists: true,
 
   // -- printer --
   // Not set up in Settings yet, so the discovery flow has an empty form.

@@ -9,3 +9,4 @@ pub mod profile_diff;
 pub mod profile_management;
 pub mod settings;
 pub mod setup_wizard;
+pub mod slice;

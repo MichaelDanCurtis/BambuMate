@@ -29,7 +29,7 @@ const SKIP_INHERIT_FIELDS: &[&str] = &[
 ];
 
 /// Maximum inheritance depth to prevent infinite loops.
-const MAX_INHERITANCE_DEPTH: usize = 10;
+pub(crate) const MAX_INHERITANCE_DEPTH: usize = 10;
 
 /// Resolve the inheritance chain for a profile.
 ///
@@ -167,6 +167,118 @@ pub fn resolve_inheritance(
     Ok(FilamentProfile::from_map(resolved))
 }
 
+/// Why a preset couldn't be resolved with [`resolve_with_includes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    /// A parent named by `inherits` isn't in the registry.
+    MissingParent(String),
+    /// The `inherits` chain loops back on itself at this name.
+    Circular(String),
+    /// The chain is deeper than `MAX_INHERITANCE_DEPTH`.
+    TooDeep(String),
+}
+
+/// A preset flattened the way Bambu Studio flattens it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedPreset {
+    /// Every key, merged root to leaf. The leaf's own metadata (`name`,
+    /// `inherits`, `compatible_printers`, ...) is kept as written.
+    pub config: Map<String, Value>,
+    /// Ancestor names, nearest parent first.
+    pub ancestors: Vec<String>,
+}
+
+/// Flattens a machine, process or filament preset exactly as Bambu Studio's
+/// `PresetBundle` does before handing it to the slicer: for every level from
+/// the root to the leaf, that level's `include` templates are applied first,
+/// then the level's own keys. Ancestor metadata (see `SKIP_INHERIT_FIELDS`)
+/// is not inherited, except that a leaf without `filament_id` takes its
+/// nearest ancestor's, as Bambu Studio does.
+///
+/// A `"nil"` value never replaces a real one; it is kept only where nothing
+/// else set the key, so Bambu Studio still sees the key.
+///
+/// Unlike [`resolve_inheritance`] this resolves `include`, which system
+/// machine presets use for their G-code and filament presets for per-nozzle
+/// templates. An `include` that isn't in the registry is skipped with a
+/// warning, as Bambu Studio does.
+pub fn resolve_with_includes(
+    profile: &FilamentProfile,
+    registry: &ProfileRegistry,
+) -> std::result::Result<ResolvedPreset, ResolveError> {
+    let leaf_name = profile.name().unwrap_or("<unnamed>").to_string();
+    let mut chain: Vec<&FilamentProfile> = vec![profile];
+    let mut visited: HashSet<String> = HashSet::from([leaf_name.clone()]);
+    let mut current = profile;
+    while let Some(parent_name) = current.inherits().filter(|p| !p.is_empty()) {
+        if !visited.insert(parent_name.to_string()) {
+            return Err(ResolveError::Circular(parent_name.to_string()));
+        }
+        if chain.len() >= MAX_INHERITANCE_DEPTH {
+            return Err(ResolveError::TooDeep(leaf_name));
+        }
+        let parent = registry
+            .get_by_name(parent_name)
+            .ok_or_else(|| ResolveError::MissingParent(parent_name.to_string()))?;
+        chain.push(parent);
+        current = parent;
+    }
+
+    let mut config = Map::new();
+    let leaf_index = chain.len() - 1;
+    for (i, level) in chain.iter().rev().enumerate() {
+        for include in include_names(level.raw().get("include")) {
+            match registry.get_by_name(&include) {
+                Some(template) => merge_level(&mut config, template.raw(), true),
+                None => tracing::warn!(
+                    "include {include:?} of preset {:?} not found; skipped",
+                    level.name().unwrap_or("<unnamed>")
+                ),
+            }
+        }
+        merge_level(&mut config, level.raw(), i != leaf_index);
+    }
+    if !config.contains_key("filament_id") {
+        if let Some(id) = chain[1..].iter().find_map(|p| p.raw().get("filament_id")) {
+            config.insert("filament_id".to_string(), id.clone());
+        }
+    }
+    config.remove("include");
+
+    Ok(ResolvedPreset {
+        config,
+        ancestors: chain[1..]
+            .iter()
+            .filter_map(|p| p.name().map(str::to_string))
+            .collect(),
+    })
+}
+
+fn include_names(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn merge_level(config: &mut Map<String, Value>, src: &Map<String, Value>, skip_metadata: bool) {
+    for (key, value) in src {
+        if key == "include" || (skip_metadata && SKIP_INHERIT_FIELDS.contains(&key.as_str())) {
+            continue;
+        }
+        if is_nil_value(value) && config.get(key).is_some_and(|v| !is_nil_value(v)) {
+            continue;
+        }
+        config.insert(key.clone(), value.clone());
+    }
+}
+
 /// Check if a value represents "nil" (inherit from parent).
 ///
 /// Returns true if:
@@ -223,6 +335,129 @@ mod tests {
             r.insert(p);
         }
         r
+    }
+
+    // -- resolve_with_includes --
+
+    fn mk(json: serde_json::Value) -> FilamentProfile {
+        FilamentProfile::from_map(json.as_object().unwrap().clone())
+    }
+
+    /// Mirrors `Bambu Lab H2D 0.4 nozzle`: its G-code lives only in `include`
+    /// templates, and its parent carries a different (generic) G-code.
+    #[test]
+    fn includes_apply_after_the_parent_and_before_own_keys() {
+        let registry = registry_of(vec![
+            mk(
+                json!({"name":"common","machine_start_gcode":"G28 ; generic","retraction_length":["0.8"]}),
+            ),
+            mk(
+                json!({"name":"tmpl start","instantiation":"false","machine_start_gcode":";===== machine: H2D"}),
+            ),
+            mk(
+                json!({"name":"tmpl flow","filament_flow_ratio":["0.95"],"filament_cooling_before_tower":["0"]}),
+            ),
+        ]);
+        let leaf = mk(json!({
+            "name":"Bambu Lab H2D 0.4 nozzle","inherits":"common","from":"system",
+            "include":["tmpl start","tmpl flow"],
+            "filament_cooling_before_tower":["10"]
+        }));
+        let r = resolve_with_includes(&leaf, &registry).unwrap();
+        assert_eq!(
+            r.config["machine_start_gcode"],
+            json!(";===== machine: H2D")
+        );
+        assert_eq!(r.config["filament_flow_ratio"], json!(["0.95"]));
+        assert_eq!(
+            r.config["filament_cooling_before_tower"],
+            json!(["10"]),
+            "own keys win over includes"
+        );
+        assert_eq!(r.config["retraction_length"], json!(["0.8"]));
+        assert_eq!(r.config["name"], json!("Bambu Lab H2D 0.4 nozzle"));
+        assert!(!r.config.contains_key("include"));
+        assert_eq!(r.ancestors, vec!["common".to_string()]);
+    }
+
+    #[test]
+    fn ancestor_metadata_is_not_inherited_but_filament_id_is() {
+        let registry = registry_of(vec![mk(json!({
+            "name":"Bambu PLA Basic @base","filament_id":"GFA00","setting_id":"GFSA00",
+            "compatible_printers":["x"],"filament_density":["1.26"]
+        }))]);
+        let leaf = mk(
+            json!({"name":"Bambu PLA Basic @BBL H2C","inherits":"Bambu PLA Basic @base","compatible_printers":["Bambu Lab H2C 0.4 nozzle"]}),
+        );
+        let r = resolve_with_includes(&leaf, &registry).unwrap();
+        assert_eq!(r.config["filament_id"], json!("GFA00"));
+        assert!(!r.config.contains_key("setting_id"));
+        assert_eq!(
+            r.config["compatible_printers"],
+            json!(["Bambu Lab H2C 0.4 nozzle"])
+        );
+        assert_eq!(r.config["filament_density"], json!(["1.26"]));
+    }
+
+    #[test]
+    fn nil_never_replaces_a_real_value_but_replaces_nil() {
+        let registry = registry_of(vec![
+            mk(json!({"name":"base","a":["5"],"b":["nil"]})),
+            mk(json!({"name":"tmpl","a":["nil","nil","nil"],"b":["nil","nil","nil"]})),
+        ]);
+        let leaf = mk(json!({"name":"leaf","inherits":"base","include":["tmpl"]}));
+        let r = resolve_with_includes(&leaf, &registry).unwrap();
+        assert_eq!(r.config["a"], json!(["5"]));
+        assert_eq!(r.config["b"], json!(["nil", "nil", "nil"]));
+    }
+
+    #[test]
+    fn missing_parent_and_loops_are_reported_by_name() {
+        let leaf = mk(json!({"name":"leaf","inherits":"gone"}));
+        assert_eq!(
+            resolve_with_includes(&leaf, &ProfileRegistry::new()),
+            Err(ResolveError::MissingParent("gone".into()))
+        );
+        let registry = registry_of(vec![
+            mk(json!({"name":"a","inherits":"b"})),
+            mk(json!({"name":"b","inherits":"a"})),
+        ]);
+        let start = mk(json!({"name":"start","inherits":"a"}));
+        assert_eq!(
+            resolve_with_includes(&start, &registry),
+            Err(ResolveError::Circular("a".into()))
+        );
+    }
+
+    #[test]
+    fn missing_include_is_skipped() {
+        let leaf = mk(json!({"name":"leaf","include":["nowhere"],"k":"v"}));
+        let r = resolve_with_includes(&leaf, &ProfileRegistry::new()).unwrap();
+        assert_eq!(r.config["k"], json!("v"));
+    }
+
+    /// A chain one level longer than `MAX_INHERITANCE_DEPTH` allows is
+    /// refused, naming the preset being resolved; one level shorter resolves.
+    #[test]
+    fn chains_deeper_than_the_limit_are_too_deep() {
+        let chain = |ancestors: usize| {
+            let mut profiles = Vec::new();
+            for i in 0..ancestors {
+                let mut p = json!({"name": format!("p{i}")});
+                if i + 1 < ancestors {
+                    p["inherits"] = json!(format!("p{}", i + 1));
+                }
+                profiles.push(mk(p));
+            }
+            registry_of(profiles)
+        };
+        let leaf = mk(json!({"name":"leaf","inherits":"p0"}));
+        assert_eq!(
+            resolve_with_includes(&leaf, &chain(MAX_INHERITANCE_DEPTH)),
+            Err(ResolveError::TooDeep("leaf".into()))
+        );
+        let r = resolve_with_includes(&leaf, &chain(MAX_INHERITANCE_DEPTH - 1)).unwrap();
+        assert_eq!(r.ancestors.len(), MAX_INHERITANCE_DEPTH - 1);
     }
 
     // -- nil preservation --

@@ -28,7 +28,7 @@ texting_robots = "0.2"
 rusqlite = { version = "0.38", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
-tokio = { version = "1", features = ["time", "process", "io-util", "sync", "macros", "rt-multi-thread", "net"] }
+tokio = { version = "1", features = ["time", "process", "io-util", "sync", "macros", "rt-multi-thread", "net", "fs"] }
 rand = "0.9"
 urlencoding = "2.1"
 regex = "1"
@@ -45,8 +45,16 @@ uuid = { version = "1", features = ["v4"] }
 rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 x509-parser = "0.18.1"
+# Printer certificate fingerprints and slice cache keys.
 sha2 = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
+# Slicing with Bambu Studio: read the output .gcode.3mf (a ZIP) and its XML metadata.
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+quick-xml = "0.42"
+
+[target.'cfg(unix)'.dependencies]
+# killpg: stop the slicer's whole process group on cancel or timeout.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 md5 = "0.7"

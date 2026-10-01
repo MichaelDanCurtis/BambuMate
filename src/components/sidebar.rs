@@ -49,6 +49,11 @@ pub const NAV_ITEMS: &[NavItem] = &[
         icon: IconKind::Compare,
     },
     NavItem {
+        href: "/slice",
+        label: "Slice",
+        icon: IconKind::Slice,
+    },
+    NavItem {
         href: "/settings",
         label: "Settings",
         icon: IconKind::Settings,
@@ -152,6 +157,7 @@ mod tests {
                 "/printer",
                 "/batch",
                 "/compare",
+                "/slice",
                 "/settings",
                 "/health",
                 "/about"

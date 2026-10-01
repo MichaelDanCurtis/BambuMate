@@ -354,6 +354,37 @@ pub(crate) fn search_bs_path() -> Option<String> {
     None
 }
 
+/// `path` when it is an absolute path to something that exists. Relative
+/// paths are refused, so a value like `-W` can never be read as an option
+/// by `open` or Bambu Studio.
+fn usable_file(path: Option<&str>) -> Option<&str> {
+    path.filter(|p| {
+        let p = std::path::Path::new(p);
+        p.is_absolute() && p.exists()
+    })
+}
+
+/// The `/usr/bin/open` arguments that launch Bambu Studio on macOS.
+///
+/// A model is passed as a *document*, before any `--args`: macOS hands
+/// documents to an already-running Bambu Studio as an "open document" Apple
+/// Event, so the file opens either way. Everything after `--args` is only
+/// seen by a freshly started instance; if Bambu Studio is already running,
+/// macOS activates it and drops those arguments. `--load-filaments` has no
+/// document form, so a filament profile still only loads on a fresh launch
+/// (`LaunchResult::was_already_running` tells the caller).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_open_args(bs_path: &str, model: Option<&str>, profile: Option<&str>) -> Vec<String> {
+    let mut args = vec!["-a".to_string(), bs_path.to_string()];
+    if let Some(model) = model {
+        args.push(model.to_string());
+    }
+    if let Some(profile) = profile {
+        args.extend(["--args".into(), "--load-filaments".into(), profile.into()]);
+    }
+    args
+}
+
 /// Platform-specific application launch.
 ///
 /// macOS goes through `/usr/bin/open` because the on-disk target is an
@@ -364,40 +395,26 @@ pub(crate) fn search_bs_path() -> Option<String> {
 ///    original code therefore reported `launched: true` even when Bambu Studio
 ///    was missing, damaged or quarantined. We wait for `open` and surface its
 ///    stderr instead.
-/// 2. `--args` is only honoured when `open` actually starts a *new* instance.
-///    If Bambu Studio is already running, macOS just activates the existing
-///    instance and drops the arguments, so we tell the caller rather than
-///    silently doing nothing.
+/// 2. The model goes in as a document so a running Bambu Studio still opens
+///    it; `--args` (the filament profile) is only honoured when `open` starts
+///    a *new* instance. See [`macos_open_args`].
 #[cfg(target_os = "macos")]
 fn launch_platform(
     bs_path: &str,
     stl_path: Option<&str>,
     profile_path: Option<&str>,
 ) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("/usr/bin/open");
-    // -a <bundle>; -W is deliberately NOT used so we don't block the UI.
-    cmd.arg("-a").arg(bs_path);
-
-    let mut extra_args: Vec<&str> = Vec::new();
-    if let Some(stl) = stl_path {
-        if std::path::Path::new(stl).exists() {
-            extra_args.push(stl);
-            info!("  with STL: {}", stl);
-        }
+    let model = usable_file(stl_path);
+    if let Some(model) = model {
+        info!("  with model: {}", model);
     }
-    if let Some(profile) = profile_path {
-        if std::path::Path::new(profile).exists() {
-            extra_args.push("--load-filaments");
-            extra_args.push(profile);
-            info!("  with profile: {}", profile);
-        }
+    let profile = usable_file(profile_path);
+    if let Some(profile) = profile {
+        info!("  with profile: {}", profile);
     }
-    if !extra_args.is_empty() {
-        cmd.arg("--args");
-        cmd.args(&extra_args);
-    }
-
-    let output = cmd
+    // -W is deliberately NOT used so we don't block the UI.
+    let output = std::process::Command::new("/usr/bin/open")
+        .args(macos_open_args(bs_path, model, profile))
         .output()
         .map_err(|e| format!("Failed to run `open` to launch Bambu Studio: {}", e))?;
 
@@ -421,18 +438,14 @@ fn launch_platform(
 ) -> Result<(), String> {
     let mut cmd = process_command::new_command(bs_path);
 
-    if let Some(stl) = stl_path {
-        if std::path::Path::new(stl).exists() {
-            cmd.arg(stl);
-            info!("  with STL: {}", stl);
-        }
+    if let Some(stl) = usable_file(stl_path) {
+        cmd.arg(stl);
+        info!("  with STL: {}", stl);
     }
 
-    if let Some(profile) = profile_path {
-        if std::path::Path::new(profile).exists() {
-            cmd.arg("--load-filaments").arg(profile);
-            info!("  with profile: {}", profile);
-        }
+    if let Some(profile) = usable_file(profile_path) {
+        cmd.arg("--load-filaments").arg(profile);
+        info!("  with profile: {}", profile);
     }
 
     cmd.spawn()
@@ -456,4 +469,68 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
     info!("Opening external URL: {}", url);
     tauri_plugin_opener::open_url(&url, None::<&str>)
         .map_err(|e| format!("Failed to open URL: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_model_is_opened_as_a_document_before_any_args() {
+        // Documents reach an already-running Bambu Studio as an Apple
+        // Event; anything after `--args` would be dropped.
+        assert_eq!(
+            macos_open_args(
+                "/Applications/BambuStudio.app",
+                Some("/m/cube.gcode.3mf"),
+                None
+            ),
+            ["-a", "/Applications/BambuStudio.app", "/m/cube.gcode.3mf"]
+        );
+    }
+
+    #[test]
+    fn filaments_stay_after_args_and_the_model_before() {
+        assert_eq!(
+            macos_open_args(
+                "/Applications/BambuStudio.app",
+                Some("/m/cube.stl"),
+                Some("/p/My PLA.json")
+            ),
+            [
+                "-a",
+                "/Applications/BambuStudio.app",
+                "/m/cube.stl",
+                "--args",
+                "--load-filaments",
+                "/p/My PLA.json"
+            ]
+        );
+        assert_eq!(
+            macos_open_args("/A/BS.app", None, Some("/p/x.json")),
+            ["-a", "/A/BS.app", "--args", "--load-filaments", "/p/x.json"]
+        );
+        assert_eq!(
+            macos_open_args("/A/BS.app", None, None),
+            ["-a", "/A/BS.app"]
+        );
+    }
+
+    #[test]
+    fn only_existing_absolute_files_are_passed_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cube.stl");
+        std::fs::write(&file, b"solid").unwrap();
+        let abs = file.to_string_lossy().into_owned();
+        assert_eq!(usable_file(Some(&abs)), Some(abs.as_str()));
+        assert_eq!(usable_file(None), None);
+        // Relative paths never get through, even when they exist (tests run
+        // in the crate folder), so none can become an option like `-W`.
+        assert!(std::path::Path::new("Cargo.toml").exists());
+        assert_eq!(usable_file(Some("Cargo.toml")), None);
+        assert_eq!(usable_file(Some("-W")), None);
+        assert_eq!(usable_file(Some("--args")), None);
+        let missing = dir.path().join("missing.stl");
+        assert_eq!(usable_file(Some(&missing.to_string_lossy())), None);
+    }
 }
