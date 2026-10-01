@@ -6,6 +6,7 @@ pub mod diagnostics_panel;
 pub mod filament_card;
 pub mod history_panel;
 pub mod icons;
+pub mod preset_sync_panel;
 pub mod profile_preview;
 pub mod searchable_select;
 pub mod settings_merge;

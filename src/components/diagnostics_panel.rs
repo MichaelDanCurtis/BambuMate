@@ -2,6 +2,10 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, CheckReport, DiagnosticsReport};
+use crate::components::preset_sync_panel::PresetSyncPanel;
+
+/// Action id of the preset-sync repair (see the `bambu.preset_sync` check).
+const REPAIR_PRESET_SYNC: &str = "repair_preset_sync";
 
 /// Self-test panel that runs the backend diagnostics suite.
 ///
@@ -141,6 +145,10 @@ fn DiagnosticsRow(check: CheckReport) -> impl IntoView {
         _ => "SKIP",
     };
     let show_remedy = check.status != "pass" && check.remedy.is_some();
+    // Any check may carry an action; the button toggles an inline panel. Only
+    // the preset-sync repair has a panel today.
+    let action = check.action.clone();
+    let (panel_open, set_panel_open) = signal(false);
 
     view! {
         <li class=row_class>
@@ -154,6 +162,21 @@ fn DiagnosticsRow(check: CheckReport) -> impl IntoView {
                         {check.remedy.clone().unwrap_or_default()}
                     </p>
                 </Show>
+                {action.map(|action| {
+                    let opens_repair = action.id == REPAIR_PRESET_SYNC;
+                    view! {
+                        <button
+                            class="btn btn-secondary btn-sm diagnostics-action"
+                            data-action=action.id
+                            on:click=move |_| set_panel_open.update(|open| *open = !*open)
+                        >
+                            {action.label}
+                        </button>
+                        <Show when=move || opens_repair && panel_open.get()>
+                            <PresetSyncPanel />
+                        </Show>
+                    }
+                })}
             </div>
         </li>
     }

@@ -298,9 +298,11 @@ pub async fn apply_recommendations(
 
     let modified = FilamentProfile::from_map(data);
 
-    // 6. Write modified profile atomically
-    crate::profile::writer::write_profile_atomic(&modified, profile_path)
+    // 6. Write modified profile atomically and mark it for upload
+    let outcome = crate::profile::sync::write_profile_edit(&modified, profile_path)
         .map_err(|e| format!("Failed to write profile: {}", e))?;
+    // Best effort: records the preset if the edit left it new to Bambu Studio.
+    crate::history::ledger::note_new_preset_write_at(&db_path, &outcome, profile_path);
 
     // 7. Record apply in history (blocking rusqlite off the async runtime)
     let backup_path_string = backup_path.to_string_lossy().to_string();

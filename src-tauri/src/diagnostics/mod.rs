@@ -24,5 +24,6 @@ mod types;
 
 pub use checks::{all_check_ids, run_all};
 pub use types::{
-    CheckOutcome, CheckReport, CheckStatus, DiagnosticsOptions, DiagnosticsReport, ReportSummary,
+    CheckAction, CheckOutcome, CheckReport, CheckStatus, DiagnosticsOptions, DiagnosticsReport,
+    ReportSummary,
 };

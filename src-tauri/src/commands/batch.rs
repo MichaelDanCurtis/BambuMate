@@ -6,7 +6,7 @@ use crate::profile::generator;
 use crate::profile::paths::BambuPaths;
 use crate::profile::reader::read_profile;
 use crate::profile::registry::ProfileRegistry;
-use crate::profile::writer::write_profile_with_metadata;
+use crate::profile::sync::write_profile_new;
 
 /// Default target printer label used when the caller doesn't specify one.
 /// Must match `generator::generate_profile`'s internal default so the filename
@@ -186,20 +186,37 @@ pub async fn batch_generate_brand(
                 if install {
                     if let Some(ref ud) = user_dir {
                         let target_path = ud.join(&filename);
-                        if let Err(e) =
-                            write_profile_with_metadata(&profile, &target_path, &metadata)
-                        {
-                            warn!("Failed to install {}: {}", filament_name, e);
-                            failed += 1;
-                            results.push(BatchEntry {
-                                filament_name,
-                                brand: entry.brand.clone(),
-                                material: entry.material.clone(),
-                                success: false,
-                                profile_name: Some(profile_name),
-                                error: Some(format!("Install failed: {}", e)),
-                            });
-                            continue;
+                        match write_profile_new(&profile, &target_path, &metadata.user_id) {
+                            Ok(outcome) => {
+                                // Best effort: never fails the batch entry. Reuse the
+                                // AppHandle we already have to avoid a second, possibly
+                                // divergent, resolution of the app data directory; fall
+                                // back to the handle-free lookup if that fails.
+                                match app.path().app_data_dir() {
+                                    Ok(dir) => crate::history::ledger::note_new_preset_write_at(
+                                        &dir.join("refinement_history.db"),
+                                        &outcome,
+                                        &target_path,
+                                    ),
+                                    Err(_) => crate::history::ledger::note_new_preset_write(
+                                        &outcome,
+                                        &target_path,
+                                    ),
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to install {}: {}", filament_name, e);
+                                failed += 1;
+                                results.push(BatchEntry {
+                                    filament_name,
+                                    brand: entry.brand.clone(),
+                                    material: entry.material.clone(),
+                                    success: false,
+                                    profile_name: Some(profile_name),
+                                    error: Some(format!("Install failed: {}", e)),
+                                });
+                                continue;
+                            }
                         }
                     }
                 }

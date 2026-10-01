@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use rusqlite::{params, Connection};
@@ -26,6 +27,12 @@ impl RefinementHistory {
         let conn =
             Connection::open(db_path).map_err(|e| format!("Failed to open history db: {}", e))?;
 
+        // Give concurrent history and ledger access (install/duplicate/batch/delete
+        // can all touch this file from different commands) a brief window to
+        // wait for a lock instead of failing immediately with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(2))
+            .map_err(|e| format!("Failed to set busy timeout: {}", e))?;
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS refinement_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +59,19 @@ impl RefinementHistory {
             [],
         )
         .map_err(|e| format!("Failed to create date index: {}", e))?;
+
+        // Ledger of presets BambuMate wrote as new (empty setting_id). See
+        // history::ledger for how the Health check uses it.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS generated_presets (
+                path TEXT PRIMARY KEY,
+                filament_id TEXT,
+                profile_name TEXT,
+                created_at INTEGER
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create generated_presets table: {}", e))?;
 
         info!("Opened refinement history database at {:?}", db_path);
         Ok(Self { conn })
@@ -156,6 +176,49 @@ impl RefinementHistory {
                 },
             )
             .map_err(|e| format!("Session not found: {}", e))
+    }
+
+    /// Record a preset BambuMate wrote as new. Replaces any earlier row for
+    /// the same path.
+    pub fn record_generated_preset(
+        &self,
+        path: &str,
+        filament_id: &str,
+        profile_name: &str,
+    ) -> Result<(), String> {
+        let created_at = chrono::Utc::now().timestamp();
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO generated_presets (path, filament_id, profile_name, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+                params![path, filament_id, profile_name, created_at],
+            )
+            .map_err(|e| format!("Failed to record generated preset: {}", e))?;
+        Ok(())
+    }
+
+    /// Forget a preset (it was deleted).
+    pub fn remove_generated_preset(&self, path: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM generated_presets WHERE path = ?1",
+                params![path],
+            )
+            .map_err(|e| format!("Failed to remove generated preset: {}", e))?;
+        Ok(())
+    }
+
+    /// Every path in the ledger.
+    pub fn generated_preset_paths(&self) -> Result<HashSet<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM generated_presets")
+            .map_err(|e| format!("Failed to prepare ledger query: {}", e))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query ledger: {}", e))?;
+        rows.collect::<Result<HashSet<_>, _>>()
+            .map_err(|e| format!("Failed to collect ledger: {}", e))
     }
 }
 
@@ -290,5 +353,30 @@ mod tests {
         let result = store.get_session(999);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Session not found"));
+    }
+
+    #[test]
+    fn test_generated_preset_insert_replace_and_delete() {
+        let (store, _dir) = create_test_store();
+
+        store
+            .record_generated_preset("/u/A.json", "P1", "A")
+            .unwrap();
+        store
+            .record_generated_preset("/u/A.json", "P1", "A renamed")
+            .unwrap();
+        store
+            .record_generated_preset("/u/B.json", "P2", "B")
+            .unwrap();
+
+        let paths = store.generated_preset_paths().unwrap();
+        assert_eq!(paths.len(), 2, "insert-or-replace keeps one row per path");
+        assert!(paths.contains("/u/A.json"));
+
+        store.remove_generated_preset("/u/A.json").unwrap();
+
+        let paths = store.generated_preset_paths().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(paths.contains("/u/B.json"));
     }
 }

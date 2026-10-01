@@ -76,16 +76,53 @@ impl AgentService {
         self.events.subscribe()
     }
 
+    /// The history database, which also holds the ledger of presets
+    /// BambuMate wrote as new.
+    fn ledger_db(&self) -> PathBuf {
+        self.app_data.join("refinement_history.db")
+    }
+
+    /// Brings the `.info` of every preset whose JSON the agent changed
+    /// directly (its own Edit/Write tools, not `bm_*`) in line with the new
+    /// content, so Bambu Studio pushes the edit instead of treating the
+    /// preset as already synced. `changed` is the turn's changed files.
+    ///
+    /// Only a `.json` whose `.info` did not change in the turn is touched: a
+    /// `bm_*` write already updated its `.info`, and an `.info` the agent
+    /// wrote itself is left as it is (the agent keeps full file access; we
+    /// reconcile after it acts). Files that do not parse are skipped; they
+    /// are reported as invalid instead.
+    fn reconcile_edited_presets(&self, changed: &[PathBuf]) {
+        let changed_set: std::collections::HashSet<&PathBuf> = changed.iter().collect();
+        for json in changed {
+            if json.extension().and_then(|e| e.to_str()) != Some("json")
+                || changed_set.contains(&json.with_extension("info"))
+                || crate::profile::reader::read_profile(json).is_err()
+            {
+                continue;
+            }
+            match crate::profile::sync::mark_edited_elsewhere(json) {
+                Ok(Some(outcome)) => crate::history::ledger::note_new_preset_write_at(
+                    &self.ledger_db(),
+                    &outcome,
+                    json,
+                ),
+                Ok(None) => {}
+                Err(e) => tracing::warn!("could not mark {json:?} for upload: {e:#}"),
+            }
+        }
+    }
+
     fn clear_busy(&self, session_id: &str) {
         if let Some(a) = self.active.lock().unwrap().get_mut(session_id) {
             a.busy = false;
         }
     }
 
-    /// Watches for finished turns: clears the session's busy flag (so the
-    /// next `send` or `rewind` can proceed) and reports profile files the
-    /// turn broke. Subscribes before returning, so no TurnDone sent
-    /// afterwards is missed.
+    /// Watches for finished turns: marks presets the agent edited directly
+    /// for upload, clears the session's busy flag (so the next `send` or
+    /// `rewind` can proceed) and reports profile files the turn broke.
+    /// Subscribes before returning, so no TurnDone sent afterwards is missed.
     pub fn validator_loop(self: &Arc<Self>) -> impl Future<Output = ()> + Send + 'static {
         let mut rx = self.events.subscribe();
         let weak = Arc::downgrade(self);
@@ -103,14 +140,22 @@ impl AgentService {
                     continue;
                 };
                 let Some(svc) = weak.upgrade() else { break };
-                svc.clear_busy(&session_id);
                 let Ok(dir) = svc.host.user_filament_dir() else {
+                    svc.clear_busy(&session_id);
                     continue;
                 };
                 let changed = svc
                     .snapshots
                     .changed_since(&session_id, seq, &dir)
                     .unwrap_or_default();
+                // Before clearing `busy`, so the next turn's snapshot or a
+                // rewind never races these writes. Only against a real
+                // snapshot: without one every file looks changed, and every
+                // preset would be marked for upload.
+                if svc.snapshots.has_turn(&session_id, seq) {
+                    svc.reconcile_edited_presets(&changed);
+                }
+                svc.clear_busy(&session_id);
                 let bad = invalid_profiles(&changed);
                 if !bad.is_empty() {
                     let _ = svc.events.send(AgentEvent::InvalidProfiles {
@@ -406,7 +451,10 @@ impl AgentService {
             self.clear_busy(session_id);
             return Err(format!("could not back up profiles before rewinding: {e}"));
         }
-        if let Err(e) = self.snapshots.restore(session_id, seq, &dir) {
+        if let Err(e) = self
+            .snapshots
+            .restore(session_id, seq, &dir, &self.ledger_db())
+        {
             self.clear_busy(session_id);
             return Err(e.to_string());
         }
@@ -750,9 +798,13 @@ mod tests {
 
         r.events.send(turn_done(&sid, 1)).unwrap();
         bounded(rewind_when_free(&r.svc, &sid, 1)).await.unwrap();
+        // The rewind writes presets back through the sync helpers, which
+        // re-serialize them, so compare content rather than bytes.
+        let restored: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&a_path).unwrap()).unwrap();
         assert_eq!(
-            fs::read_to_string(&a_path).unwrap(),
-            r#"{"name":"A","inherits":"Generic PLA"}"#,
+            restored,
+            serde_json::json!({"name": "A", "inherits": "Generic PLA"}),
             "the pre-send snapshot must hold the original content"
         );
     }
@@ -1309,5 +1361,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seq3, 3);
+    }
+
+    // --- Raw agent edits are reconciled at turn end. --------------------
+
+    #[tokio::test]
+    async fn a_turn_that_edits_preset_json_directly_marks_it_for_upload() {
+        use crate::history::ledger::{ledger_key, load_ledger_at};
+        use crate::profile::reader::read_profile_metadata;
+        use crate::profile::ProfileMetadata;
+
+        // A user filament folder shaped like Bambu Studio's, so a preset
+        // with no .info gets a new one.
+        let bambu = tempfile::tempdir().unwrap();
+        let filament = bambu.path().join("user/1881310893/filament");
+        fs::create_dir_all(&filament).unwrap();
+        let mut host = FakeHost::new();
+        host.user_dir = tempfile::tempdir_in(&filament).unwrap();
+        let dir = host.user_dir.path().to_path_buf();
+        let info = |setting_id: &str| {
+            ProfileMetadata {
+                sync_info: String::new(),
+                user_id: "1881310893".into(),
+                setting_id: setting_id.into(),
+                base_id: String::new(),
+                updated_time: 1_700_000_000,
+            }
+            .to_info_string()
+        };
+        for (stem, id) in [
+            ("Edited", "PFUS00000000000001"),
+            ("Untouched", "PFUS00000000000002"),
+        ] {
+            fs::write(
+                dir.join(format!("{stem}.json")),
+                format!(r#"{{"name":"{stem}"}}"#),
+            )
+            .unwrap();
+            fs::write(dir.join(format!("{stem}.info")), info(id)).unwrap();
+        }
+        let r = rig_with(Arc::new(host), FakeBackend::default());
+        tokio::spawn(r.svc.validator_loop());
+        let sid = bounded(r.svc.start(Provider::Codex, None, None))
+            .await
+            .unwrap();
+        bounded(r.svc.send(&sid, "one".into(), vec![]))
+            .await
+            .unwrap();
+
+        // What the agent's own Edit/Write tools do during the turn.
+        fs::write(
+            dir.join("Edited.json"),
+            r#"{"name":"Edited","nozzle_temperature":["230"]}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("Created.json"), r#"{"name":"Created"}"#).unwrap();
+        fs::write(dir.join("Own.json"), r#"{"name":"Own"}"#).unwrap();
+        fs::write(dir.join("Own.info"), info("PFUS00000000000003")).unwrap();
+        let untouched_info = fs::read(dir.join("Untouched.info")).unwrap();
+
+        r.events.send(turn_done(&sid, 1)).unwrap();
+        // `busy` clears only after reconciliation, so this waits for it.
+        bounded(send_when_free(&r.svc, &sid, "two")).await.unwrap();
+
+        let edited = read_profile_metadata(&dir.join("Edited.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.setting_id, "PFUS00000000000001");
+        assert_eq!(edited.sync_info, "update", "a raw edit must be pushed");
+        assert_eq!(
+            fs::read_to_string(dir.join("Edited.json")).unwrap(),
+            r#"{"name":"Edited","nozzle_temperature":["230"]}"#,
+            "the agent's JSON is not rewritten"
+        );
+        assert_eq!(
+            fs::read(dir.join("Untouched.info")).unwrap(),
+            untouched_info,
+            "an unchanged preset is not marked"
+        );
+        let created = read_profile_metadata(&dir.join("Created.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (created.setting_id.as_str(), created.sync_info.as_str()),
+            ("", "")
+        );
+        let ledger = load_ledger_at(&r._data.path().join("refinement_history.db"));
+        assert!(ledger.contains(&ledger_key(&dir.join("Created.json"))));
+        assert_eq!(ledger.len(), 1, "{ledger:?}");
+        let own = read_profile_metadata(&dir.join("Own.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (own.setting_id.as_str(), own.sync_info.as_str()),
+            ("PFUS00000000000003", ""),
+            "an .info the agent wrote itself is left alone"
+        );
     }
 }

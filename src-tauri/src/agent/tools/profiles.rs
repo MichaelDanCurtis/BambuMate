@@ -4,9 +4,11 @@ use serde_json::{json, Map, Value};
 
 use super::{arg_opt_str, arg_str, ToolOutput, ToolRegistry, ToolSpec};
 use crate::agent::types::UiCommand;
+use crate::history::ledger::note_new_preset_write;
 use crate::profile::inheritance::resolve_inheritance;
 use crate::profile::reader::read_profile;
-use crate::profile::writer::{backup_profile, restore_from_backup, write_profile_atomic};
+use crate::profile::sync::write_profile_edit;
+use crate::profile::writer::{backup_profile, restore_from_backup};
 use crate::profile::ProfileRegistry;
 
 pub fn specs() -> Vec<ToolSpec> {
@@ -210,14 +212,18 @@ async fn write(reg: &ToolRegistry, args: &Value) -> ToolOutput {
     for (k, v) in changes {
         raw.insert(k, v);
     }
-    if let Err(e) = write_profile_atomic(&profile, &path) {
-        return ToolOutput::error(format!("write failed: {e}"));
+    match write_profile_edit(&profile, &path) {
+        Ok(outcome) => note_new_preset_write(&outcome, &path),
+        Err(e) => return ToolOutput::error(format!("write failed: {e:#}")),
     }
     if let Err(reason) = crate::agent::validate::validate_profile_file(&path) {
         return match restore_from_backup(&backup, &path) {
-            Ok(()) => ToolOutput::error(format!(
-                "change rejected: {reason}; profile restored from backup"
-            )),
+            Ok(outcome) => {
+                note_new_preset_write(&outcome, &path);
+                ToolOutput::error(format!(
+                    "change rejected: {reason}; profile restored from backup"
+                ))
+            }
             Err(re) => ToolOutput::error(format!(
                 "change rejected: {reason}; restoring the backup ALSO failed: {re}"
             )),
@@ -290,7 +296,8 @@ async fn rollback(reg: &ToolRegistry, args: &Value) -> ToolOutput {
         return ToolOutput::error("declined: Bambu Studio is running");
     }
     match restore_from_backup(&backup, &path) {
-        Ok(()) => {
+        Ok(outcome) => {
+            note_new_preset_write(&outcome, &path);
             reg.host().emit_ui(UiCommand::Refresh {
                 what: "profiles".into(),
             });
@@ -570,7 +577,7 @@ mod tests {
         answer_next(&mut rx, &reg, "Yes").await;
         let out = await_timeout(t).await;
         assert!(!out.ok, "{}", out.summary());
-        // The backup is restored via `write_profile_atomic`, which re-serializes
+        // The backup is restored via `write_profile_edit`, which re-serializes
         // with 4-space indentation, so compare parsed values rather than bytes
         // (same pattern as `rollback_restores_latest_backup` below).
         let body = fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap();
@@ -677,5 +684,34 @@ mod tests {
             second_event.is_err(),
             "expected no second Ask event, got {second_event:?}"
         );
+    }
+
+    /// Agent writes are edits, so Bambu Studio must see `sync_info = update`
+    /// and push the change to the preset's cloud id.
+    #[tokio::test]
+    async fn write_marks_the_preset_for_upload() {
+        let h = host_with_profile();
+        fs::write(
+            h.user_dir.path().join("My PLA.info"),
+            "sync_info =\nuser_id = 1881310893\nsetting_id = PFUS0123456789abcd\nbase_id = GFSA04\nupdated_time = 1700000000\n",
+        )
+        .unwrap();
+        let (reg, mut rx) = registry_with(h.clone());
+        let reg = Arc::new(reg);
+        let r2 = reg.clone();
+        let t = tokio::spawn(async move {
+            r2.call(
+                "bm_write_profile",
+                json!({"path":"My PLA.json","changes":{"nozzle_temperature":["215"]}}),
+            )
+            .await
+        });
+        answer_next(&mut rx, &reg, "Yes").await;
+        let out = await_timeout(t).await;
+        assert!(out.ok, "{}", out.summary());
+
+        let info = fs::read_to_string(h.user_dir.path().join("My PLA.info")).unwrap();
+        assert!(info.contains("sync_info = update"), "{info}");
+        assert!(info.contains("setting_id = PFUS0123456789abcd"), "{info}");
     }
 }
