@@ -430,15 +430,19 @@ async fn on_request(rpc: &RpcConnection, shared: &Shared, id: Value, method: &st
             });
             let stopped = registry.cancel_watch();
             let out = registry.call(&tool, args).await;
-            // A call the user stopped has no turn left to report to.
-            if !stopped.is_fired() {
-                shared.emit(AgentEvent::ToolResult {
-                    session_id: sid,
-                    call_id,
-                    ok: out.ok,
-                    summary: out.summary(),
-                });
-            }
+            // A call the user stopped still resolves its activity row, but as
+            // "Stopped" rather than with whatever the cut-short call returned.
+            let (ok, summary) = if stopped.is_fired() {
+                (false, "Stopped".to_string())
+            } else {
+                (out.ok, out.summary())
+            };
+            shared.emit(AgentEvent::ToolResult {
+                session_id: sid,
+                call_id,
+                ok,
+                summary,
+            });
             let _ = rpc.respond(id, out.to_codex_response()).await;
         }
         "item/tool/requestUserInput" => {
@@ -1804,6 +1808,29 @@ mod tests {
                 "asked again after cancel: {e:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_tool_call_still_resolves_its_activity_row() {
+        let (p, mut srv) = fake_process();
+        let mut r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        srv.send(json!({"id": 7, "method":"item/tool/call","params":{"threadId":"th1","turnId":"tu","callId":"c9","tool":"bm_ask",
+            "arguments":{"header":"A","question":"Pending?","options":[]}}})).await;
+        next_matching(&mut r.rx, |e| matches!(e, AgentEvent::Ask { .. })).await;
+        r.backend.interrupt("s1").await.unwrap();
+        let result = next_matching(&mut r.rx, |e| matches!(e, AgentEvent::ToolResult { .. })).await;
+        assert_eq!(
+            result,
+            AgentEvent::ToolResult {
+                session_id: "s1".into(),
+                call_id: "c9".into(),
+                ok: false,
+                summary: "Stopped".into(),
+            }
+        );
+        let resp = srv.read().await;
+        assert_eq!(resp["id"], 7);
     }
 
     #[tokio::test]
