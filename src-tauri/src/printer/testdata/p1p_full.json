@@ -1,0 +1,40 @@
+{
+  "print": {
+    "command": "push_status",
+    "msg": 0,
+    "sequence_id": "2021",
+    "gcode_state": "IDLE",
+    "subtask_name": "",
+    "mc_percent": 0,
+    "mc_remaining_time": 0,
+    "layer_num": 0,
+    "total_layer_num": 0,
+    "bed_temper": 25.0,
+    "bed_target_temper": 0.0,
+    "nozzle_temper": 25.0,
+    "nozzle_target_temper": 0.0,
+    "nozzle_diameter": "0.4",
+    "nozzle_type": "stainless_steel",
+    "print_error": 0,
+    "hms": [],
+    "ams": {
+      "ams_exist_bits": "1",
+      "tray_now": "255",
+      "version": 4,
+      "ams": [
+        {
+          "id": "0",
+          "humidity": "4",
+          "temp": "22.7",
+          "tray": [
+            { "id": "0" },
+            { "id": "1", "tray_type": "PLA", "tray_sub_brands": "", "tray_info_idx": "GFA00", "tray_color": "000000FF", "nozzle_temp_min": "190", "nozzle_temp_max": "240", "remain": 0, "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000" },
+            { "id": "2", "tray_type": "PLA", "tray_sub_brands": "", "tray_info_idx": "GFA05", "tray_color": "DFE2E3FF", "nozzle_temp_min": "190", "nozzle_temp_max": "240", "remain": 0, "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000" },
+            { "id": "3", "tray_type": "PLA", "tray_sub_brands": "", "tray_info_idx": "GFL00", "tray_color": "F95959FF", "nozzle_temp_min": "190", "nozzle_temp_max": "240", "remain": 0, "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000" }
+          ]
+        }
+      ]
+    },
+    "vt_tray": { "id": "254", "tray_type": "ABS", "tray_sub_brands": "", "tray_info_idx": "GFB99", "tray_color": "000000FF", "nozzle_temp_min": "240", "nozzle_temp_max": "280", "remain": 0, "tag_uid": "0000000000000000", "tray_uuid": "00000000000000000000000000000000" }
+  }
+}

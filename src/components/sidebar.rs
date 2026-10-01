@@ -4,6 +4,7 @@ use leptos_router::hooks::use_location;
 use crate::app::{FeatureFlagsContext, UpdateContext};
 use crate::components::icons::{Icon, IconKind};
 use crate::components::stl_indicator::StlIndicator;
+use crate::printer::PrinterShared;
 
 pub struct NavItem {
     pub href: &'static str,
@@ -31,6 +32,11 @@ pub const NAV_ITEMS: &[NavItem] = &[
         href: "/profiles",
         label: "Profiles",
         icon: IconKind::Profiles,
+    },
+    NavItem {
+        href: "/printer",
+        label: "Printer",
+        icon: IconKind::Printer,
     },
     NavItem {
         href: "/batch",
@@ -72,6 +78,13 @@ pub fn is_active(path: &str, href: &str) -> bool {
 pub fn Sidebar() -> impl IntoView {
     let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
     let update_ctx = use_context::<UpdateContext>().expect("UpdateContext not provided");
+    let printer = use_context::<PrinterShared>().expect("PrinterShared not provided");
+    // No dot until a printer is set up.
+    let printer_dot = move || {
+        printer
+            .view
+            .with(|v| v.configured.then(|| v.connection.dot()))
+    };
     let pathname = use_location().pathname;
 
     let items = NAV_ITEMS
@@ -95,6 +108,12 @@ pub fn Sidebar() -> impl IntoView {
                         </Show>
                         <Show when=has_update>
                             <span class="nav-update-dot" aria-hidden="true" title="Update available"></span>
+                        </Show>
+                        <Show when=move || href == "/printer">
+                            {move || printer_dot().map(|state| view! {
+                                <span class="printer-dot" data-state=state role="img"
+                                    aria-label=format!("Printer: {state}") title="Printer connection"></span>
+                            })}
                         </Show>
                     </a>
                 </li>
@@ -130,6 +149,7 @@ mod tests {
                 "/filament",
                 "/analysis",
                 "/profiles",
+                "/printer",
                 "/batch",
                 "/compare",
                 "/settings",

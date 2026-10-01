@@ -4,6 +4,7 @@ pub mod app;
 #[cfg(test)]
 pub mod fake_host;
 pub mod interact;
+pub mod printer;
 pub mod profiles;
 
 use std::collections::{HashMap, HashSet};
@@ -86,6 +87,9 @@ pub trait ToolHost: Send + Sync {
     fn app_state(&self) -> AppState;
     fn emit_ui(&self, cmd: UiCommand);
     fn bambu_studio_running(&self) -> bool;
+    /// The live printer view. The printer tools strip its IP before
+    /// anything reaches the agent.
+    fn printer_view(&self) -> crate::printer::service::PrinterView;
     async fn search_filament(&self, name: &str) -> Result<Value, String>;
     async fn catalog_search(&self, query: &str, limit: usize) -> Result<Value, String>;
     /// Generates without writing; returns a summary that includes `staged_id`.
@@ -161,6 +165,7 @@ impl ToolRegistry {
         let mut all = interact::specs();
         all.extend(profiles::specs());
         all.extend(app::specs());
+        all.extend(printer::specs());
         all
     }
 
@@ -181,6 +186,9 @@ impl ToolRegistry {
             return out;
         }
         if let Some(out) = app::handle(self, name, &args).await {
+            return out;
+        }
+        if let Some(out) = printer::handle(self, name, &args).await {
             return out;
         }
         ToolOutput::error(format!("unknown tool '{name}'"))

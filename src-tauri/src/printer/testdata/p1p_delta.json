@@ -1,0 +1,11 @@
+{
+  "print": {
+    "command": "push_status",
+    "msg": 1,
+    "sequence_id": "2030",
+    "gcode_state": "RUNNING",
+    "mc_percent": 42,
+    "nozzle_temper": 219.5,
+    "nozzle_target_temper": 220.0
+  }
+}

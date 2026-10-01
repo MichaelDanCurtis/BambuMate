@@ -3,6 +3,7 @@ mod app;
 mod commands;
 mod components;
 mod pages;
+mod printer;
 mod theme;
 
 use app::App;

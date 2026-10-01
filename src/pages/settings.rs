@@ -4,6 +4,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::app::FeatureFlagsContext;
 use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
+use crate::components::printer_settings::PrinterSettings;
 use crate::theme::ThemeContext;
 
 /// Detect whether the app is running on macOS.
@@ -40,6 +41,7 @@ pub fn SettingsPage() -> impl IntoView {
     let (local_url_status, set_local_url_status) = signal::<Option<String>>(None);
     let (is_searching_path, set_is_searching_path) = signal(false);
     let (reset_confirm, set_reset_confirm) = signal(false);
+    let use_printer = use_context::<crate::printer::PrinterShared>();
     let (resetting, set_resetting) = signal(false);
     let (reset_status, set_reset_status) = signal::<Option<String>>(None);
     let (filament_ai_enabled, set_filament_ai_enabled) = signal(true);
@@ -708,6 +710,8 @@ pub fn SettingsPage() -> impl IntoView {
                 </div>
             </section>
 
+            <PrinterSettings />
+
             <section class="settings-section">
                 <h3>"Application"</h3>
                 <p class="section-description">"Configure application paths and preferences."</p>
@@ -801,7 +805,13 @@ pub fn SettingsPage() -> impl IntoView {
                                     set_resetting.set(true);
                                     set_reset_confirm.set(false);
                                     spawn_local(async move {
-                                        match commands::reset_to_clean_install().await {
+                                        let result = commands::reset_to_clean_install().await;
+                                        // The printer was removed too (or may
+                                        // have been, if the reset failed part way).
+                                        if let Some(printer) = use_printer {
+                                            printer.config_changed();
+                                        }
+                                        match result {
                                             Ok(()) => {
                                                 set_reset_status.set(Some("Reset complete. Reload the application to start fresh.".to_string()));
                                             }

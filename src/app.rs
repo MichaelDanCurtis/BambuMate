@@ -12,10 +12,12 @@ use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
 use crate::pages::home::HomePage;
 use crate::pages::print_analysis::PrintAnalysisPage;
+use crate::pages::printer::PrinterPage;
 use crate::pages::profile_diff::ProfileDiffPage;
 use crate::pages::profile_management::ProfileManagementPage;
 use crate::pages::settings::SettingsPage;
 use crate::pages::setup_wizard::SetupWizard;
+use crate::printer::{PrinterEvents, PrinterShared};
 use crate::theme::{apply_theme, normalize_theme, ThemeContext};
 
 /// Shared context for feature flags, reactive so UI updates on toggle.
@@ -40,6 +42,7 @@ pub fn App() -> impl IntoView {
     provide_context(UpdateContext { update_info });
     provide_context(AgentRefresh(RwSignal::new(0)));
     provide_context(AgentShared::default());
+    provide_context(PrinterShared::new());
 
     // Feature flags with both enabled by default
     let (flags, set_flags) = signal(FeatureFlags {
@@ -103,6 +106,7 @@ pub fn App() -> impl IntoView {
         <Router>
             // Mounted once, outside the Shows below: its listeners can't be removed.
             <AgentEvents />
+            <PrinterEvents />
 
             // Show wizard overlay if setup is not complete
             <Show when=move || setup_complete.get() == Some(false)>
@@ -124,6 +128,7 @@ pub fn App() -> impl IntoView {
                             <Route path=path!("/settings") view=SettingsPage />
                             <Route path=path!("/health") view=HealthPage />
                             <Route path=path!("/about") view=AboutPage />
+                            <Route path=path!("/printer") view=PrinterPage />
                         </Routes>
                     </main>
                     <AgentDrawer />

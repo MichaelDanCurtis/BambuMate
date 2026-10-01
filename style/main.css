@@ -273,13 +273,19 @@ body {
     height: 14px;
 }
 
-.nav-update-dot {
+/* The About update dot and the Printer connection dot (style/printer.css
+   sets its colour per state) share one spot on the icon's corner. */
+.nav-update-dot,
+.printer-dot {
     position: absolute;
     left: 38px;
     top: 12px;
     width: 6px;
     height: 6px;
     border-radius: var(--nd-radius-pill);
+}
+
+.nav-update-dot {
     background: var(--nd-signal);
 }
 
