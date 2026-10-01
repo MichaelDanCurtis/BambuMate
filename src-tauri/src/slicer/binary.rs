@@ -2,18 +2,23 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
+use tracing::debug;
 
-use super::{SlicerError, MIN_VERSION};
+use super::{SlicerError, MIN_VERSION, TESTED_VERSION};
+use crate::commands::launcher::{default_bs_path, search_bs_path};
 
-/// A Bambu Studio version, `02.08.02.61` → `[2, 8, 2, 61]`.
+/// How long `--help` may take before the probe gives up.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A Bambu Studio version, `02.08.02.61` -> `[2, 8, 2, 61]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BsVersion(pub [u32; 4]);
 
 impl BsVersion {
-    /// Parses `02.08.02.61` (and `2.8.2.61`).
+    /// Parses exactly four dot-separated numbers: `02.08.02.61` (and `2.8.2.61`).
     pub fn parse(s: &str) -> Option<Self> {
         let parts: Vec<u32> = s
             .trim()
@@ -22,6 +27,15 @@ impl BsVersion {
             .collect::<Option<_>>()?;
         let arr: [u32; 4] = parts.try_into().ok()?;
         Some(Self(arr))
+    }
+
+    /// Like [`parse`](Self::parse), but ignores whatever follows the version
+    /// (`02.08.02.61-beta` -> `02.08.02.61`). Still needs four components.
+    fn parse_prefix(s: &str) -> Option<Self> {
+        let end = s
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(s.len());
+        Self::parse(s[..end].trim_end_matches('.'))
     }
 }
 
@@ -64,17 +78,18 @@ impl SlicerStatus {
             version,
             supported: r.is_ok(),
             min_version: MIN_VERSION.to_string(),
-            tested_version: super::TESTED_VERSION.to_string(),
+            tested_version: TESTED_VERSION.to_string(),
             message: r.as_ref().err().map(|e| e.to_string()),
         }
     }
 }
 
-/// The version line `--help` prints: `BambuStudio-02.08.02.61:`.
+/// The version line `--help` prints: `BambuStudio-02.08.02.61:`. Anything
+/// after the four numbers (a `-beta` tag, the colon) is ignored.
 pub fn parse_help_version(output: &str) -> Option<BsVersion> {
     output.lines().find_map(|line| {
         let rest = line.trim().strip_prefix("BambuStudio-")?;
-        BsVersion::parse(rest.trim_end_matches(':'))
+        BsVersion::parse_prefix(rest)
     })
 }
 
@@ -111,10 +126,9 @@ pub fn exe_for_install(install: &Path) -> PathBuf {
 
 /// Uses the same detection as "Open in Bambu Studio" (default install
 /// locations, then Spotlight on macOS or the registry and PATH on Windows).
+/// Blocking: it can run `mdfind`, `reg query` or `where`.
 pub fn locate() -> Result<PathBuf, SlicerError> {
-    use crate::commands::launcher::{default_bs_path, search_bs_path};
     let install = default_bs_path()
-        .filter(|p| Path::new(p).exists())
         .or_else(search_bs_path)
         .ok_or(SlicerError::NotInstalled)?;
     let exe = exe_for_install(Path::new(&install));
@@ -125,11 +139,29 @@ pub fn locate() -> Result<PathBuf, SlicerError> {
     }
 }
 
+/// The bundle's `Info.plist` for an executable at `X.app/Contents/MacOS/<exe>`.
+#[cfg(target_os = "macos")]
+fn bundle_info_plist(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+    Some(macos_dir.parent()?.join("Info.plist"))
+}
+
 /// Reads the version: from the bundle's `Info.plist` on macOS when it is
 /// there, otherwise from `--help` (which prints it and exits at once).
+///
+/// A missing executable is [`SlicerError::NotInstalled`]; an executable that
+/// is there but won't tell us its version is [`SlicerError::BadOutput`].
 pub async fn probe(exe: &Path) -> Result<SlicerBinary, SlicerError> {
-    if let Some(contents) = exe.parent().and_then(Path::parent) {
-        if let Ok(plist) = std::fs::read_to_string(contents.join("Info.plist")) {
+    probe_with_timeout(exe, PROBE_TIMEOUT).await
+}
+
+async fn probe_with_timeout(exe: &Path, timeout: Duration) -> Result<SlicerBinary, SlicerError> {
+    #[cfg(target_os = "macos")]
+    if let Some(plist_path) = bundle_info_plist(exe) {
+        if let Ok(plist) = tokio::fs::read_to_string(&plist_path).await {
             if let Some(version) = parse_plist_version(&plist) {
                 return Ok(SlicerBinary {
                     exe: exe.to_path_buf(),
@@ -138,6 +170,18 @@ pub async fn probe(exe: &Path) -> Result<SlicerBinary, SlicerError> {
             }
         }
     }
+    let version = version_from_help(exe, timeout).await?;
+    Ok(SlicerBinary {
+        exe: exe.to_path_buf(),
+        version,
+    })
+}
+
+async fn version_from_help(exe: &Path, timeout: Duration) -> Result<BsVersion, SlicerError> {
+    let bad = |why: String| {
+        debug!("Bambu Studio version probe of {}: {why}", exe.display());
+        SlicerError::BadOutput
+    };
     let mut cmd = tokio::process::Command::new(exe);
     cmd.arg("--help")
         .stdin(Stdio::null())
@@ -146,24 +190,75 @@ pub async fn probe(exe: &Path) -> Result<SlicerBinary, SlicerError> {
         .kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
-    let out = tokio::time::timeout(Duration::from_secs(20), cmd.output())
-        .await
-        .map_err(|_| SlicerError::NotInstalled)?
-        .map_err(|_| SlicerError::NotInstalled)?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let version = parse_help_version(&text).ok_or(SlicerError::NotInstalled)?;
-    Ok(SlicerBinary {
-        exe: exe.to_path_buf(),
-        version,
-    })
+    let out = match tokio::time::timeout(timeout, cmd.output()).await {
+        Err(_) => return Err(bad(format!("--help didn't finish within {timeout:?}"))),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SlicerError::NotInstalled)
+        }
+        Ok(Err(e)) => return Err(bad(format!("couldn't run --help: {e}"))),
+        Ok(Ok(out)) => out,
+    };
+    if !out.status.success() {
+        return Err(bad(format!("--help exited with {}", out.status)));
+    }
+    // The version line has been seen on stdout; stderr is checked as well in
+    // case a build routes it there.
+    for stream in [&out.stdout, &out.stderr] {
+        let text =
+            std::str::from_utf8(stream).map_err(|e| bad(format!("non-UTF-8 output: {e}")))?;
+        if let Some(version) = parse_help_version(text) {
+            return Ok(version);
+        }
+    }
+    Err(bad("--help printed no version line".to_string()))
+}
+
+/// What a successful probe learned, valid while the executable is unchanged.
+struct Cached {
+    exe: PathBuf,
+    modified: Option<SystemTime>,
+    version: BsVersion,
+}
+
+static CACHE: tokio::sync::Mutex<Option<Cached>> = tokio::sync::Mutex::const_new(None);
+
+async fn modified_time(exe: &Path) -> Option<SystemTime> {
+    tokio::fs::metadata(exe).await.ok()?.modified().ok()
 }
 
 /// Locate, read the version, refuse unsupported versions.
+///
+/// The version is remembered for the life of the process and re-read only
+/// when the executable's path or modification time changes (an update, a
+/// reinstall). Use [`refresh`] to force a re-read.
 pub async fn detect() -> Result<SlicerBinary, SlicerError> {
-    let exe = locate()?;
-    let binary = probe(&exe).await?;
-    check_supported(binary.version)?;
-    Ok(binary)
+    let exe = tokio::task::spawn_blocking(locate).await.map_err(|e| {
+        debug!("Bambu Studio lookup task failed: {e}");
+        SlicerError::NotInstalled
+    })??;
+    let modified = modified_time(&exe).await;
+    let mut cache = CACHE.lock().await;
+    let version = match cache.as_ref() {
+        Some(c) if c.exe == exe && c.modified == modified && modified.is_some() => c.version,
+        _ => {
+            let binary = probe(&exe).await?;
+            *cache = Some(Cached {
+                exe: exe.clone(),
+                modified,
+                version: binary.version,
+            });
+            binary.version
+        }
+    };
+    drop(cache);
+    check_supported(version)?;
+    Ok(SlicerBinary { exe, version })
+}
+
+/// Forgets the remembered version and detects again.
+pub async fn refresh() -> Result<SlicerBinary, SlicerError> {
+    *CACHE.lock().await = None;
+    detect().await
 }
 
 #[cfg(test)]
@@ -177,6 +272,24 @@ mod tests {
     fn reads_the_version_from_help_output() {
         assert_eq!(parse_help_version(HELP), Some(BsVersion([2, 8, 2, 61])));
         assert_eq!(parse_help_version("Usage: something else"), None);
+    }
+
+    #[test]
+    fn a_suffix_after_the_fourth_component_is_ignored() {
+        assert_eq!(
+            parse_help_version("BambuStudio-02.08.02.61-beta:\n"),
+            Some(BsVersion([2, 8, 2, 61]))
+        );
+        assert_eq!(
+            parse_help_version("BambuStudio-02.08.02.61\n"),
+            Some(BsVersion([2, 8, 2, 61]))
+        );
+    }
+
+    #[test]
+    fn a_three_component_version_is_rejected() {
+        assert_eq!(parse_help_version("BambuStudio-02.08.02:\n"), None);
+        assert_eq!(parse_help_version("BambuStudio-02.08.02-beta:\n"), None);
     }
 
     #[test]
@@ -234,6 +347,11 @@ mod tests {
             min: MIN_VERSION.into(),
         }));
         assert!(old.installed && !old.supported);
+        assert_eq!(old.version.as_deref(), Some("02.07.00.00"));
+        assert_eq!(
+            old.message.as_deref(),
+            Some("Bambu Studio 02.07.00.00 is too old to slice from BambuMate; update to 02.08.00.00 or newer.")
+        );
         let none = SlicerStatus::from_detect(&Err(SlicerError::NotInstalled));
         assert!(!none.installed && !none.supported);
         assert_eq!(
@@ -243,13 +361,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_falls_back_to_help_when_there_is_no_plist() {
-        // A missing file is not an install.
+    async fn probing_a_missing_file_is_not_installed() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             probe(&dir.path().join("nope")).await,
             Err(SlicerError::NotInstalled)
         );
+    }
+
+    #[cfg(unix)]
+    mod help_fallback {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        const GENEROUS: Duration = Duration::from_secs(30);
+
+        /// An executable `#!/bin/sh` script that stands in for Bambu Studio.
+        fn fake_exe(dir: &Path, body: &str) -> PathBuf {
+            let path = dir.join("BambuStudio");
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+
+        #[tokio::test]
+        async fn reads_the_version_from_help_stdout() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = fake_exe(
+                dir.path(),
+                "echo 'BambuStudio-02.08.02.61:'; echo 'Usage: bambu-studio'",
+            );
+            let b = probe_with_timeout(&exe, GENEROUS).await.unwrap();
+            assert_eq!(b.version, BsVersion([2, 8, 2, 61]));
+            assert_eq!(b.exe, exe);
+        }
+
+        #[tokio::test]
+        async fn reads_the_version_from_help_stderr() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = fake_exe(dir.path(), "echo 'BambuStudio-02.09.00.10:' >&2");
+            let b = probe_with_timeout(&exe, GENEROUS).await.unwrap();
+            assert_eq!(b.version, BsVersion([2, 9, 0, 10]));
+        }
+
+        #[tokio::test]
+        async fn output_without_a_version_line_is_bad_output() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = fake_exe(dir.path(), "echo 'hello from some other program'");
+            assert_eq!(
+                probe_with_timeout(&exe, GENEROUS).await,
+                Err(SlicerError::BadOutput)
+            );
+        }
+
+        #[tokio::test]
+        async fn a_non_zero_exit_is_bad_output() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = fake_exe(dir.path(), "echo 'BambuStudio-02.08.02.61:'; exit 3");
+            assert_eq!(
+                probe_with_timeout(&exe, GENEROUS).await,
+                Err(SlicerError::BadOutput)
+            );
+        }
+
+        #[tokio::test]
+        async fn non_utf8_output_is_bad_output() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = fake_exe(dir.path(), "printf '\\377\\376\\n'");
+            assert_eq!(
+                probe_with_timeout(&exe, GENEROUS).await,
+                Err(SlicerError::BadOutput)
+            );
+        }
+
+        #[tokio::test]
+        async fn a_hung_help_is_bad_output_once_the_timeout_passes() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = fake_exe(dir.path(), "exec sleep 60");
+            let started = std::time::Instant::now();
+            assert_eq!(
+                probe_with_timeout(&exe, Duration::from_secs(1)).await,
+                Err(SlicerError::BadOutput)
+            );
+            assert!(started.elapsed() < Duration::from_secs(10));
+        }
+
+        /// On macOS the bundle's Info.plist wins over `--help`.
+        #[cfg(target_os = "macos")]
+        #[tokio::test]
+        async fn an_app_bundle_is_read_from_its_plist() {
+            let dir = tempfile::tempdir().unwrap();
+            let macos = dir.path().join("Fake.app/Contents/MacOS");
+            std::fs::create_dir_all(&macos).unwrap();
+            let exe = fake_exe(&macos, "echo 'BambuStudio-01.00.00.00:'");
+            std::fs::write(
+                macos.parent().unwrap().join("Info.plist"),
+                "<dict><key>CFBundleShortVersionString</key><string>02.08.02.61</string></dict>",
+            )
+            .unwrap();
+            let b = probe_with_timeout(&exe, GENEROUS).await.unwrap();
+            assert_eq!(b.version, BsVersion([2, 8, 2, 61]));
+        }
     }
 
     /// Runs only where Bambu Studio is installed (never on CI runners).
@@ -261,5 +473,8 @@ mod tests {
             .expect("Bambu Studio installed and supported");
         assert!(b.exe.is_file());
         assert!(b.version >= BsVersion::parse(MIN_VERSION).unwrap());
+        // A second call is served from the cache; refresh re-reads. All agree.
+        assert_eq!(detect().await.unwrap(), b);
+        assert_eq!(refresh().await.unwrap(), b);
     }
 }

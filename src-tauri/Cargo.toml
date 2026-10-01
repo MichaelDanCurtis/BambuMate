@@ -28,7 +28,7 @@ texting_robots = "0.2"
 rusqlite = { version = "0.38", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
-tokio = { version = "1", features = ["time", "process", "io-util", "sync", "macros", "rt-multi-thread", "net"] }
+tokio = { version = "1", features = ["time", "process", "io-util", "sync", "macros", "rt-multi-thread", "net", "fs"] }
 rand = "0.9"
 urlencoding = "2.1"
 regex = "1"
