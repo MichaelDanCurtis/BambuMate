@@ -244,4 +244,20 @@ mod tests {
             PathBuf::from("/Users/me/cube.stl")
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_rejects_a_fifo_without_opening_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.stl");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert_eq!(
+            validate_model_path(&fifo.to_string_lossy()).unwrap_err(),
+            SlicerError::InvalidModel(NOT_A_MODEL.into())
+        );
+    }
 }

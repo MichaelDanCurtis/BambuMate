@@ -18,11 +18,15 @@ use tracing::debug;
 use super::SlicerError;
 
 /// More entries than any real Bambu Studio output (a 3-plate project has ~45).
-pub const MAX_ENTRIES: usize = 4096;
+const MAX_ENTRIES: usize = 4096;
 const MAX_XML_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SETTINGS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PNG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PLATES: u32 = 256;
+/// Everything one parse may decompress, across all entries it reads.
+const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+/// Plate thumbnails one parse may extract.
+const MAX_THUMBNAILS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SliceResult {
@@ -101,20 +105,54 @@ pub struct SliceObject {
 /// The CLI's own `result.json`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct CliResult {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_i64")]
     pub return_code: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     pub error_string: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_plates")]
     pub sliced_plates: Vec<CliPlate>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct CliPlate {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub id: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     pub warning_message: String,
+}
+
+// `result.json` comes from another program: one field of the wrong type must
+// not cost us the rest of it, so each field falls back to its default.
+
+fn lenient_i64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let v = Value::deserialize(d)?;
+    Ok(match &v {
+        Value::Number(n) => n.as_i64().unwrap_or(0),
+        Value::String(s) => s.trim().parse().unwrap_or(0),
+        _ => 0,
+    })
+}
+
+fn lenient_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let n = lenient_i64(d)?;
+    Ok(u32::try_from(n).unwrap_or(0))
+}
+
+fn lenient_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::String(s) => s,
+        _ => String::new(),
+    })
+}
+
+fn lenient_plates<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<CliPlate>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect(),
+        _ => Vec::new(),
+    })
 }
 
 pub fn parse_cli_result(text: &str) -> Option<CliResult> {
@@ -171,39 +209,72 @@ pub fn parse_output(
     cli_result: Option<&str>,
     thumbnails_to: Option<&Path>,
 ) -> Result<SliceResult, SlicerError> {
-    parse_output_inner(gcode_3mf, cli_result, thumbnails_to).map_err(|e| {
-        debug!("could not read slicer output {}: {e}", gcode_3mf.display());
-        SlicerError::BadOutput
+    parse_output_inner(gcode_3mf, cli_result, thumbnails_to).map_err(|failure| {
+        let (detail, error) = match failure {
+            Failure::Bad(detail) => (detail, SlicerError::BadOutput),
+            Failure::Io(detail) => (detail.clone(), SlicerError::Io(detail)),
+        };
+        debug!(
+            "could not read slicer output {}: {detail}",
+            gcode_3mf.display()
+        );
+        error
     })
+}
+
+/// Why a parse failed: the file isn't what Bambu Studio writes, or BambuMate
+/// couldn't write somewhere it needed to.
+enum Failure {
+    Bad(String),
+    Io(String),
+}
+
+impl From<String> for Failure {
+    fn from(detail: String) -> Self {
+        Failure::Bad(detail)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(detail: &str) -> Self {
+        Failure::Bad(detail.to_string())
+    }
 }
 
 fn parse_output_inner(
     gcode_3mf: &Path,
     cli_result: Option<&str>,
     thumbnails_to: Option<&Path>,
-) -> Result<SliceResult, String> {
+) -> Result<SliceResult, Failure> {
     let file = std::fs::File::open(gcode_3mf).map_err(|e| format!("open: {e}"))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("zip: {e}"))?;
     if zip.len() > MAX_ENTRIES {
-        return Err(format!("{} entries (cap {MAX_ENTRIES})", zip.len()));
+        return Err(format!("{} entries (cap {MAX_ENTRIES})", zip.len()).into());
     }
     let mut thumbnails: Vec<(u32, String)> = Vec::new();
     for i in 0..zip.len() {
         let entry = zip.by_index(i).map_err(|e| format!("entry {i}: {e}"))?;
         if !is_safe_entry_name(entry.name()) || entry.enclosed_name().is_none() {
-            return Err(format!("unsafe entry name {:?}", entry.name()));
+            return Err(format!("unsafe entry name {:?}", entry.name()).into());
         }
         if let Some(n) = plate_png_index(entry.name()) {
             thumbnails.push((n, entry.name().to_string()));
         }
     }
 
-    let slice_info = read_text(&mut zip, "Metadata/slice_info.config", MAX_XML_BYTES)?
-        .ok_or("no Metadata/slice_info.config")?;
+    let mut budget = Budget::default();
+    let slice_info = read_text(
+        &mut zip,
+        "Metadata/slice_info.config",
+        MAX_XML_BYTES,
+        &mut budget,
+    )?
+    .ok_or("no Metadata/slice_info.config")?;
     let settings: Value = match read_text(
         &mut zip,
         "Metadata/project_settings.config",
         MAX_SETTINGS_BYTES,
+        &mut budget,
     )? {
         Some(text) => serde_json::from_str(&text).map_err(|e| format!("project_settings: {e}"))?,
         None => Value::Null,
@@ -212,6 +283,7 @@ fn parse_output_inner(
     if info.plates.is_empty() {
         return Err("slice_info has no plates".into());
     }
+    let mut extracted = 0;
 
     let filaments = filament_info(&settings);
     let cost_by_slot: HashMap<u32, f64> = filaments
@@ -226,17 +298,25 @@ fn parse_output_inner(
         for f in raw.filaments {
             let cost = cost_by_slot
                 .get(&f.slot)
-                .map(|per_kg| f.used_g * per_kg / 1000.0);
+                .map(|per_kg| f.used_g * per_kg / 1000.0)
+                .filter(|c| c.is_finite());
             uses.push(FilamentUse { cost, ..f });
         }
-        let cost = if uses.iter().any(|u| u.cost.is_some()) {
-            Some(uses.iter().filter_map(|u| u.cost).sum())
+        // A total over only some of the filaments would understate the cost,
+        // so any used slot without a price leaves the plate without one.
+        let cost = if !uses.is_empty() && uses.iter().all(|u| u.cost.is_some()) {
+            Some(uses.iter().filter_map(|u| u.cost).sum::<f64>()).filter(|c| c.is_finite())
         } else {
             None
         };
-        let weight_g = raw
-            .weight_g
-            .unwrap_or_else(|| uses.iter().map(|u| u.used_g).sum());
+        let weight_g = raw.weight_g.unwrap_or_else(|| {
+            let sum: f64 = uses.iter().map(|u| u.used_g).sum();
+            if sum.is_finite() {
+                sum
+            } else {
+                0.0
+            }
+        });
         let mut warnings = raw.warnings;
         if let Some(cli_plate) = cli
             .as_ref()
@@ -256,9 +336,14 @@ fn parse_output_inner(
             thumbnails_to,
             thumbnails.iter().find(|(n, _)| *n == raw.index),
         ) {
-            if let Some(bytes) = read_bytes(&mut zip, entry, MAX_PNG_BYTES)? {
+            if extracted >= MAX_THUMBNAILS {
+                return Err(format!("more than {MAX_THUMBNAILS} thumbnails").into());
+            }
+            if let Some(bytes) = read_bytes(&mut zip, entry, MAX_PNG_BYTES, &mut budget)? {
                 let name = format!("plate_{}.png", raw.index);
-                std::fs::write(dir.join(&name), bytes).map_err(|e| format!("thumbnail: {e}"))?;
+                std::fs::write(dir.join(&name), bytes)
+                    .map_err(|e| Failure::Io(format!("couldn't save {name}: {e}")))?;
+                extracted += 1;
                 thumbnail = Some(name);
             }
         }
@@ -309,31 +394,43 @@ fn plate_png_index(name: &str) -> Option<u32> {
     (1..=MAX_PLATES).contains(&n).then_some(n)
 }
 
+/// Bytes decompressed so far in one parse, shared by every entry it reads.
+#[derive(Default)]
+struct Budget {
+    used: u64,
+}
+
 fn read_bytes<R: Read + std::io::Seek>(
     zip: &mut zip::ZipArchive<R>,
     name: &str,
     cap: u64,
+    budget: &mut Budget,
 ) -> Result<Option<Vec<u8>>, String> {
     let entry = match zip.by_name(name) {
         Ok(e) => e,
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
         Err(e) => return Err(format!("{name}: {e}")),
     };
-    if entry.size() > cap {
+    // The entry may use what is left of the total, up to its own cap.
+    let limit = cap.min(MAX_TOTAL_BYTES.saturating_sub(budget.used));
+    if entry.size() > limit {
         return Err(format!(
-            "{name} declares {} bytes (cap {cap})",
+            "{name} declares {} bytes (limit {limit}: entry cap {cap}, total cap {MAX_TOTAL_BYTES})",
             entry.size()
         ));
     }
-    // Never trust the declared size: read at most cap + 1 bytes.
+    // Never trust the declared size: read at most limit + 1 bytes.
     let mut buf = Vec::new();
     entry
-        .take(cap + 1)
+        .take(limit + 1)
         .read_to_end(&mut buf)
         .map_err(|e| format!("{name}: {e}"))?;
-    if buf.len() as u64 > cap {
-        return Err(format!("{name} is larger than {cap} bytes"));
+    if buf.len() as u64 > limit {
+        return Err(format!(
+            "{name} is larger than {limit} bytes (entry cap {cap}, total cap {MAX_TOTAL_BYTES})"
+        ));
     }
+    budget.used += buf.len() as u64;
     Ok(Some(buf))
 }
 
@@ -341,17 +438,28 @@ fn read_text<R: Read + std::io::Seek>(
     zip: &mut zip::ZipArchive<R>,
     name: &str,
     cap: u64,
+    budget: &mut Budget,
 ) -> Result<Option<String>, String> {
-    read_bytes(zip, name, cap)?
+    read_bytes(zip, name, cap, budget)?
         .map(|b| String::from_utf8(b).map_err(|e| format!("{name}: {e}")))
         .transpose()
 }
 
+/// A setting value as text. Bambu Studio writes strings; accept JSON numbers
+/// too, since other tools that write these files may not quote them.
+fn value_text(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 fn setting_str(settings: &Value, key: &str) -> String {
     match settings.get(key) {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(a)) => a.first().and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        _ => String::new(),
+        Some(Value::Array(a)) => a.first().and_then(value_text).unwrap_or_default(),
+        Some(v) => value_text(v).unwrap_or_default(),
+        None => String::new(),
     }
 }
 
@@ -359,16 +467,26 @@ fn setting_list(settings: &Value, key: &str) -> Vec<String> {
     match settings.get(key) {
         Some(Value::Array(a)) => a
             .iter()
-            .map(|v| v.as_str().unwrap_or("").to_string())
+            .map(|v| value_text(v).unwrap_or_default())
             .collect(),
-        Some(Value::String(s)) => vec![s.clone()],
-        _ => Vec::new(),
+        Some(v) => value_text(v).into_iter().collect(),
+        None => Vec::new(),
     }
 }
 
+/// A finite number greater than zero; anything else (0, "inf", "NaN",
+/// negatives, text) means the setting is unset.
 fn positive(s: Option<&String>) -> Option<f64> {
     s.and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| *v > 0.0)
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
+/// A finite, non-negative number; anything else is treated as missing.
+fn finite_non_negative(s: &str) -> Option<f64> {
+    s.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
 }
 
 fn filament_info(settings: &Value) -> Vec<FilamentInfo> {
@@ -443,7 +561,7 @@ fn parse_slice_info(xml: &str) -> Result<SliceInfo, String> {
                         match a.get("key").map(String::as_str) {
                             Some("index") => p.index = value.parse().unwrap_or(0),
                             Some("prediction") => p.time_seconds = value.parse().unwrap_or(0),
-                            Some("weight") => p.weight_g = value.parse().ok(),
+                            Some("weight") => p.weight_g = finite_non_negative(value),
                             _ => {}
                         }
                     }
@@ -455,8 +573,14 @@ fn parse_slice_info(xml: &str) -> Result<SliceInfo, String> {
                         slot: a.get("id").and_then(|v| v.parse().ok()).unwrap_or(0),
                         filament_type: a.get("type").cloned().unwrap_or_default(),
                         color: a.get("color").cloned().unwrap_or_default(),
-                        used_g: a.get("used_g").and_then(|v| v.parse().ok()).unwrap_or(0.0),
-                        used_m: a.get("used_m").and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                        used_g: a
+                            .get("used_g")
+                            .and_then(|v| finite_non_negative(v))
+                            .unwrap_or(0.0),
+                        used_m: a
+                            .get("used_m")
+                            .and_then(|v| finite_non_negative(v))
+                            .unwrap_or(0.0),
                         cost: None,
                     }),
                     ("warning", Some(p)) => {
@@ -679,9 +803,12 @@ pub(crate) mod tests {
     }
 
     fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        write_zip_with(path, entries, zip::CompressionMethod::Stored);
+    }
+
+    fn write_zip_with(path: &Path, entries: &[(&str, &[u8])], method: zip::CompressionMethod) {
         let mut w = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
-        let opts = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(method);
         for (name, data) in entries {
             w.start_file(*name, opts).unwrap();
             w.write_all(data).unwrap();
@@ -776,5 +903,316 @@ pub(crate) mod tests {
     #[test]
     fn unknown_warning_keys_become_readable() {
         assert_eq!(warning_text("bed_temp_too_high"), "Bed temp too high");
+    }
+    /// A `slice_info.config` with one plate per `(index, filament xml)`.
+    fn slice_info(plates: &[(u32, &str)]) -> String {
+        let body: String = plates
+            .iter()
+            .map(|(i, filaments)| {
+                format!(
+                    r#"<plate><metadata key="index" value="{i}"/><metadata key="prediction" value="60"/>{filaments}</plate>"#
+                )
+            })
+            .collect();
+        format!(r#"<?xml version="1.0"?><config>{body}</config>"#)
+    }
+
+    fn write_with_settings(path: &Path, slice_info: &str, settings: &str) {
+        write_zip(
+            path,
+            &[
+                ("Metadata/slice_info.config", slice_info.as_bytes()),
+                ("Metadata/project_settings.config", settings.as_bytes()),
+            ],
+        );
+    }
+
+    #[test]
+    fn archives_over_the_total_cap_are_rejected_even_when_each_entry_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = vec![0u8; MAX_PNG_BYTES as usize];
+        let build = |plates: u32, name: &str| {
+            let info = slice_info(
+                &(1..=plates)
+                    .map(|i| (i, r#"<filament id="1" used_g="1" used_m="1"/>"#))
+                    .collect::<Vec<_>>(),
+            );
+            let names: Vec<String> = (1..=plates)
+                .map(|i| format!("Metadata/plate_{i}.png"))
+                .collect();
+            let mut entries: Vec<(&str, &[u8])> =
+                vec![("Metadata/slice_info.config", info.as_bytes())];
+            entries.extend(names.iter().map(|n| (n.as_str(), png.as_slice())));
+            let p = dir.path().join(name);
+            write_zip(&p, &entries);
+            p
+        };
+        let out = tempfile::tempdir().unwrap();
+        // 7 x 8 MiB stays under the 64 MiB total...
+        let fits = build(7, "seven.gcode.3mf");
+        assert_eq!(
+            parse_output(&fits, None, Some(out.path()))
+                .unwrap()
+                .plates
+                .len(),
+            7
+        );
+        // ...9 x 8 MiB does not, though no single entry is over its own cap.
+        let too_much = build(9, "nine.gcode.3mf");
+        assert_eq!(
+            parse_output(&too_much, None, Some(out.path())),
+            Err(SlicerError::BadOutput)
+        );
+    }
+
+    /// Sets the uncompressed size in every local and central header, so the
+    /// archive claims its entry is tiny while the data inflates to far more.
+    fn lie_about_size(bytes: &mut [u8], claimed: u32) {
+        for i in 0..bytes.len().saturating_sub(30) {
+            let offset = match &bytes[i..i + 4] {
+                b"PK\x03\x04" => 22,
+                b"PK\x01\x02" => 24,
+                _ => continue,
+            };
+            bytes[i + offset..i + offset + 4].copy_from_slice(&claimed.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn inflating_entry_that_lies_about_its_size_is_stopped_by_the_read_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lie.gcode.3mf");
+        let huge = vec![b' '; MAX_XML_BYTES as usize + 1024];
+        write_zip_with(
+            &p,
+            &[("Metadata/slice_info.config", &huge)],
+            zip::CompressionMethod::Deflated,
+        );
+        let mut bytes = std::fs::read(&p).unwrap();
+        lie_about_size(&mut bytes, 100);
+        std::fs::write(&p, &bytes).unwrap();
+
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            archive
+                .by_name("Metadata/slice_info.config")
+                .unwrap()
+                .size(),
+            100,
+            "the declared-size check must see the lie"
+        );
+        let err = read_bytes(
+            &mut archive,
+            "Metadata/slice_info.config",
+            MAX_XML_BYTES,
+            &mut Budget::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("is larger than"), "{err}");
+        assert_eq!(parse_output(&p, None, None), Err(SlicerError::BadOutput));
+    }
+
+    #[test]
+    fn thumbnail_extraction_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let build = |plates: u32| {
+            let info = slice_info(
+                &(1..=plates)
+                    .map(|i| (i, r#"<filament id="1" used_g="1" used_m="1"/>"#))
+                    .collect::<Vec<_>>(),
+            );
+            let names: Vec<String> = (1..=plates)
+                .map(|i| format!("Metadata/plate_{i}.png"))
+                .collect();
+            let mut entries: Vec<(&str, &[u8])> =
+                vec![("Metadata/slice_info.config", info.as_bytes())];
+            entries.extend(names.iter().map(|n| (n.as_str(), &b"\x89PNG"[..])));
+            let p = dir.path().join(format!("{plates}.gcode.3mf"));
+            write_zip(&p, &entries);
+            p
+        };
+        let ok = parse_output(&build(MAX_THUMBNAILS as u32), None, Some(out.path())).unwrap();
+        assert!(ok.plates.iter().all(|p| p.thumbnail.is_some()));
+        assert_eq!(
+            parse_output(&build(MAX_THUMBNAILS as u32 + 1), None, Some(out.path())),
+            Err(SlicerError::BadOutput)
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_that_cannot_be_saved_is_an_io_error_not_bad_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.gcode.3mf");
+        write_zip(
+            &p,
+            &[
+                ("Metadata/slice_info.config", MIN_SLICE_INFO),
+                ("Metadata/plate_1.png", b"\x89PNG"),
+            ],
+        );
+        let missing = dir.path().join("no-such-dir");
+        assert!(matches!(
+            parse_output(&p, None, Some(&missing)),
+            Err(SlicerError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn positive_requires_a_finite_number_above_zero() {
+        for bad in [
+            "inf", "-inf", "NaN", "nan", "-1", "0", "0.0", "abc", "", "1e999",
+        ] {
+            assert_eq!(positive(Some(&bad.to_string())), None, "{bad:?}");
+        }
+        assert_eq!(positive(None), None);
+        assert_eq!(positive(Some(&" 19.99 ".to_string())), Some(19.99));
+    }
+
+    #[test]
+    fn non_finite_and_negative_numbers_in_slice_info_are_treated_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("nan.gcode.3mf");
+        let info = r##"<config><plate><metadata key="index" value="1"/><metadata key="prediction" value="60"/><metadata key="weight" value="NaN"/><filament id="1" type="PLA" color="#FFFFFF" used_g="inf" used_m="-3"/><filament id="2" type="PLA" color="#000000" used_g="NaN" used_m="1e999"/></plate></config>"##;
+        write_with_settings(
+            &p,
+            info,
+            r#"{"filament_type":["PLA","PLA"],"filament_cost":["19.99","19.99"]}"#,
+        );
+        let r = parse_output(&p, None, None).unwrap();
+        let plate = &r.plates[0];
+        assert_eq!(plate.weight_g, 0.0);
+        for f in &plate.filaments {
+            assert_eq!((f.used_g, f.used_m), (0.0, 0.0), "{f:?}");
+            assert_eq!(f.cost, Some(0.0));
+        }
+        assert_eq!(plate.cost, Some(0.0));
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<SliceResult>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn a_cost_that_overflows_is_none_not_infinity() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.gcode.3mf");
+        let info = slice_info(&[(1, r#"<filament id="1" used_g="1e308" used_m="1"/>"#)]);
+        write_with_settings(
+            &p,
+            &info,
+            r#"{"filament_type":["PLA"],"filament_cost":["1e10"]}"#,
+        );
+        let r = parse_output(&p, None, None).unwrap();
+        assert_eq!(r.plates[0].filaments[0].cost, None);
+        assert_eq!(r.plates[0].cost, None);
+        assert!(r.plates[0].weight_g.is_finite());
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<SliceResult>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn slice_results_round_trip_through_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = parse_output(
+            &fixture("two_plates_h2c.gcode.3mf"),
+            Some(&result_json("two_plates_h2c.result.json")),
+            Some(dir.path()),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<SliceResult>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn settings_accept_json_numbers_and_treat_zero_or_malformed_costs_as_unset() {
+        let settings = serde_json::json!({
+            "filament_settings_id": ["A", "B", "C", "D"],
+            "filament_cost": ["0", "abc", 19.99, null],
+            "filament_density": [1.26, "1.24", 0, "x"],
+        });
+        let f = filament_info(&settings);
+        assert_eq!(
+            f.iter().map(|f| f.cost_per_kg).collect::<Vec<_>>(),
+            vec![None, None, Some(19.99), None]
+        );
+        assert_eq!(
+            f.iter().map(|f| f.density).collect::<Vec<_>>(),
+            vec![Some(1.26), Some(1.24), None, None]
+        );
+        let numeric = serde_json::json!({"printer_model": 5, "curr_bed_type": ["Cool Plate"]});
+        assert_eq!(setting_str(&numeric, "printer_model"), "5");
+        assert_eq!(setting_str(&numeric, "curr_bed_type"), "Cool Plate");
+    }
+
+    #[test]
+    fn filament_slot_maps_to_the_matching_filament_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("multi.gcode.3mf");
+        let info = slice_info(&[(
+            1,
+            r##"<filament id="2" type="PETG" color="#112233" used_g="10" used_m="3"/>"##,
+        )]);
+        write_with_settings(
+            &p,
+            &info,
+            r#"{"filament_settings_id":["PLA","PETG"],"filament_type":["PLA","PETG"],"filament_cost":["10.00","20.00"]}"#,
+        );
+        let r = parse_output(&p, None, None).unwrap();
+        let f = &r.plates[0].filaments[0];
+        assert_eq!(f.slot, 2);
+        assert!((f.cost.unwrap() - 10.0 * 20.0 / 1000.0).abs() < 1e-12);
+        assert_eq!(r.plates[0].cost, f.cost);
+        assert_eq!(r.filaments[1].preset, "PETG");
+    }
+
+    #[test]
+    fn plate_cost_is_none_when_any_used_filament_has_no_price() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("partial.gcode.3mf");
+        let info = slice_info(&[(
+            1,
+            r#"<filament id="1" used_g="10" used_m="3"/><filament id="2" used_g="10" used_m="3"/>"#,
+        )]);
+        write_with_settings(
+            &p,
+            &info,
+            r#"{"filament_type":["PLA","PLA"],"filament_cost":["0","20.00"]}"#,
+        );
+        let r = parse_output(&p, None, None).unwrap();
+        let plate = &r.plates[0];
+        assert_eq!(plate.filaments[0].cost, None);
+        assert!(plate.filaments[1].cost.is_some());
+        assert_eq!(plate.cost, None);
+    }
+
+    #[test]
+    fn one_badly_typed_cli_result_field_does_not_drop_the_rest() {
+        let r = parse_cli_result(
+            r#"{"return_code": -100, "error_string": null, "sliced_plates": [
+                {"id": "1", "warning_message": "w"}, {"id": 2, "warning_message": null},
+                "junk", {"id": 3, "warning_message": "ok"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.return_code, -100);
+        assert_eq!(r.error_string, "");
+        assert_eq!(
+            r.sliced_plates,
+            vec![
+                CliPlate {
+                    id: 1,
+                    warning_message: "w".into()
+                },
+                CliPlate {
+                    id: 2,
+                    warning_message: String::new()
+                },
+                CliPlate {
+                    id: 3,
+                    warning_message: "ok".into()
+                },
+            ]
+        );
+        let r = parse_cli_result(r#"{"return_code": "x", "sliced_plates": {}}"#).unwrap();
+        assert_eq!((r.return_code, r.sliced_plates.len()), (0, 0));
+        assert_eq!(parse_cli_result("not json"), None);
     }
 }

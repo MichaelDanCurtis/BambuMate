@@ -41,7 +41,7 @@ rmcp = { version = "3.4.1", default-features = false, features = ["server", "tra
 axum = "0.8"
 uuid = { version = "1", features = ["v4"] }
 # Slicing with Bambu Studio: read the output .gcode.3mf (a ZIP) and its XML metadata.
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 quick-xml = "0.42"
 
 [target.'cfg(windows)'.dependencies]
