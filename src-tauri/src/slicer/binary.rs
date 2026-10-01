@@ -12,6 +12,16 @@ use crate::commands::launcher::{default_bs_path, search_bs_path};
 
 /// How long `--help` may take before the probe gives up.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long one `reg query` may take (Windows version fallback).
+#[cfg(windows)]
+const REG_TIMEOUT: Duration = Duration::from_secs(10);
+/// The Uninstall keys searched for Bambu Studio's `DisplayVersion`.
+#[cfg(windows)]
+const UNINSTALL_KEYS: [&str; 3] = [
+    r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+    r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+    r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+];
 
 /// A Bambu Studio version, `02.08.02.61` -> `[2, 8, 2, 61]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -102,6 +112,101 @@ pub fn parse_plist_version(plist: &str) -> Option<BsVersion> {
     BsVersion::parse(value.split("</string>").next()?)
 }
 
+/// One value line of `reg query` output,
+/// `    DisplayVersion    REG_SZ    02.08.02.61`, as `(name, data)`.
+fn reg_value(line: &str) -> Option<(&str, &str)> {
+    let (name, rest) = line.trim().split_once("    REG_")?;
+    let data = rest.split_once("    ").map(|(_, d)| d).unwrap_or("");
+    Some((name.trim(), data.trim()))
+}
+
+/// Normalises a Windows path for a case-insensitive prefix check.
+fn windows_path_key(p: &str) -> String {
+    p.trim()
+        .trim_matches('"')
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+/// Bambu Studio's `DisplayVersion` from `reg query <Uninstall key> /s`
+/// output: the first entry whose `DisplayName` names Bambu Studio (or whose
+/// key is `…\BambuStudio`) and, when it records an `InstallLocation`, that
+/// contains `exe`. Accepts `2.8.2.61` and `02.08.02.61`. Pure, so it is
+/// tested on every OS; only Windows runs `reg`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn registry_version(output: &str, exe: &Path) -> Option<BsVersion> {
+    #[derive(Default)]
+    struct Entry<'a> {
+        key: &'a str,
+        name: Option<&'a str>,
+        version: Option<&'a str>,
+        location: Option<&'a str>,
+    }
+    let exe = windows_path_key(&exe.to_string_lossy());
+    let matches = |e: &Entry| -> Option<BsVersion> {
+        let named = e
+            .name
+            .is_some_and(|n| n.to_ascii_lowercase().contains("bambu studio"));
+        let keyed = e.key.to_ascii_lowercase().ends_with("\\bambustudio");
+        if !(named || keyed) {
+            return None;
+        }
+        if let Some(loc) = e.location.filter(|l| !l.is_empty()) {
+            if !exe.starts_with(&format!("{}\\", windows_path_key(loc))) {
+                return None;
+            }
+        }
+        BsVersion::parse_prefix(e.version?)
+    };
+    let mut entry = Entry::default();
+    for line in output.lines() {
+        if line.starts_with("HKEY_") {
+            if let Some(v) = matches(&entry) {
+                return Some(v);
+            }
+            entry = Entry {
+                key: line.trim(),
+                ..Entry::default()
+            };
+            continue;
+        }
+        match reg_value(line) {
+            Some(("DisplayName", d)) => entry.name = Some(d),
+            Some(("DisplayVersion", d)) => entry.version = Some(d),
+            Some(("InstallLocation", d)) => entry.location = Some(d),
+            _ => {}
+        }
+    }
+    matches(&entry)
+}
+
+/// The version from the registry's Uninstall entries, for when the
+/// GUI-subsystem `bambu-studio.exe` prints nothing to a piped stdout.
+#[cfg(windows)]
+async fn version_from_registry(exe: &Path) -> Option<BsVersion> {
+    for key in UNINSTALL_KEYS {
+        let mut cmd = tokio::process::Command::new("reg");
+        cmd.args(["query", key, "/s"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .creation_flags(0x0800_0000);
+        let Ok(Ok(out)) = tokio::time::timeout(REG_TIMEOUT, cmd.output()).await else {
+            debug!("reg query {key} failed or timed out");
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        if let Some(v) = registry_version(&String::from_utf8_lossy(&out.stdout), exe) {
+            return Some(v);
+        }
+    }
+    None
+}
+
 /// Refuses anything older than [`MIN_VERSION`].
 pub fn check_supported(v: BsVersion) -> Result<(), SlicerError> {
     let min = BsVersion::parse(MIN_VERSION).expect("MIN_VERSION parses");
@@ -170,7 +275,16 @@ async fn probe_with_timeout(exe: &Path, timeout: Duration) -> Result<SlicerBinar
             }
         }
     }
-    let version = version_from_help(exe, timeout).await?;
+    let version = match version_from_help(exe, timeout).await {
+        Ok(v) => v,
+        // `--help` gave no version (the GUI-subsystem exe may print nothing
+        // to a pipe): ask the registry instead.
+        #[cfg(windows)]
+        Err(SlicerError::BadOutput) => version_from_registry(exe)
+            .await
+            .ok_or(SlicerError::BadOutput)?,
+        Err(e) => return Err(e),
+    };
     Ok(SlicerBinary {
         exe: exe.to_path_buf(),
         version,
@@ -290,6 +404,50 @@ mod tests {
     fn a_three_component_version_is_rejected() {
         assert_eq!(parse_help_version("BambuStudio-02.08.02:\n"), None);
         assert_eq!(parse_help_version("BambuStudio-02.08.02-beta:\n"), None);
+    }
+
+    /// `reg query HKLM\…\Uninstall /s` output, trimmed to three entries.
+    const REG: &str = "\r
+HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\7-Zip\r
+    DisplayName    REG_SZ    7-Zip 23.01 (x64)\r
+    DisplayVersion    REG_SZ    23.01\r
+    InstallLocation    REG_SZ    C:\\Program Files\\7-Zip\\\r
+\r
+HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\BambuStudio\r
+    DisplayName    REG_SZ    Bambu Studio\r
+    DisplayVersion    REG_SZ    02.08.02.61\r
+    InstallLocation    REG_SZ    C:\\Program Files\\Bambu Studio\r
+    EstimatedSize    REG_DWORD    0x7d000\r
+\r
+HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Other\r
+    DisplayName    REG_SZ    Other\r
+";
+
+    #[test]
+    fn reads_the_version_from_the_registry() {
+        let exe = Path::new(r"C:\Program Files\Bambu Studio\bambu-studio.exe");
+        assert_eq!(registry_version(REG, exe), Some(BsVersion([2, 8, 2, 61])));
+        // Unpadded, under a key with another name and no install location.
+        let unpadded = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{GUID}\n    DisplayName    REG_SZ    Bambu Studio\n    DisplayVersion    REG_SZ    2.8.2.61\n";
+        assert_eq!(
+            registry_version(unpadded, exe),
+            Some(BsVersion([2, 8, 2, 61]))
+        );
+    }
+
+    #[test]
+    fn a_registry_entry_for_another_install_or_app_is_ignored() {
+        let elsewhere = Path::new(r"D:\Tools\BambuStudio\bambu-studio.exe");
+        assert_eq!(registry_version(REG, elsewhere), None);
+        let mixed_case = Path::new(r"c:/program files/BAMBU STUDIO/bambu-studio.exe");
+        assert_eq!(
+            registry_version(REG, mixed_case),
+            Some(BsVersion([2, 8, 2, 61]))
+        );
+        assert_eq!(registry_version("", elsewhere), None);
+        let no_version =
+            "HKEY_LOCAL_MACHINE\\X\\BambuStudio\n    DisplayName    REG_SZ    Bambu Studio\n";
+        assert_eq!(registry_version(no_version, elsewhere), None);
     }
 
     #[test]
