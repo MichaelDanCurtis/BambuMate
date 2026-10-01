@@ -3,6 +3,7 @@ mod app;
 mod commands;
 mod components;
 mod pages;
+mod slicer;
 mod theme;
 
 use app::App;

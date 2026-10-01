@@ -21,7 +21,15 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { extname, join, resolve } from "node:path";
-import { FIXTURES, GIF_1X1, makePng } from "./fixtures.mjs";
+import {
+  FIXTURES,
+  GIF_1X1,
+  makePng,
+  PETG,
+  SLICE_MODEL,
+  sliceJob,
+  sliceResult,
+} from "./fixtures.mjs";
 
 const repoRoot = resolve(process.argv[2] ?? "../..");
 const distDir = join(repoRoot, "dist");
@@ -74,13 +82,29 @@ function installTauriMock(fixtures) {
   const unknown = [];
   const handlers = {};
   window.__ipc = { calls, unknown };
+  // Steps may change answers mid-run through window.__fixtures. A fixture
+  // of the form { __sequence: [a, b, …] } answers a, then b, …; the last repeats.
+  const live = (window.__fixtures = structuredClone(fixtures));
   const invoke = async (cmd, args) => {
     calls.push({ cmd, args });
-    if (!(cmd in fixtures)) {
+    if (!(cmd in live)) {
       unknown.push(cmd);
       throw new Error(`no fixture for command '${cmd}'`);
     }
-    return structuredClone(fixtures[cmd]);
+    // `{ __delay: ms, answer }` answers late, like a slow backend;
+    // `{ __reject: "text" }` answers the way a Tauri command's Err(String) does.
+    let answer = live[cmd];
+    if (answer && Array.isArray(answer.__sequence)) {
+      const seq = answer.__sequence;
+      answer = seq.length > 1 ? seq.shift() : seq[0];
+    }
+    if (answer && typeof answer === "object" && "__delay" in answer) {
+      const { __delay, answer: late } = answer;
+      await new Promise((r) => setTimeout(r, __delay));
+      answer = late;
+    }
+    if (answer && typeof answer === "object" && "__reject" in answer) throw answer.__reject;
+    return structuredClone(answer);
   };
   const listen = async (name, cb) => {
     (handlers[name] ||= []).push(cb);
@@ -453,6 +477,282 @@ async function driveApp(browserType, engine, baseUrl) {
     if (!box) throw new Error("first diff row has no box");
     if (box.height < 8) throw new Error(`first diff row is only ${box.height}px tall`);
     return `row height ${Math.round(box.height)}px`;
+  });
+
+  // -- slice ---------------------------------------------------------------
+  const emitJob = (view) => page.evaluate((v) => window.__emit("slicer://job", v), view);
+  const callsOf = (cmd) => page.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c), cmd);
+  const running = (id, percent) =>
+    sliceJob(id, { state: "running", progress: { plate: 1, percent, stage: "Generating walls" } });
+  const done = (id, result, extra) => sliceJob(id, { state: "done", result, cached: false }, extra);
+
+  await step(run, page, "navigate to Slice", async () => {
+    await page.click('a[href="/slice"]');
+    await page.waitForSelector(".slice-page.nd", { timeout: 15000 });
+    await page.waitForFunction(() => document.querySelector(".sl-version")?.innerText.includes("02.08.02.61"), null, { timeout: 10000 });
+  });
+
+  await step(run, page, "preset pickers load for the default printer", async () => {
+    await page.waitForFunction(() => document.querySelectorAll("#sl-printer option").length === 2, null, { timeout: 10000 });
+    const printer = await page.locator("#sl-printer").inputValue();
+    const filament = await page.locator("#sl-filament").inputValue();
+    if (printer !== "Bambu Lab H2C 0.4 nozzle") throw new Error(`printer ${printer}`);
+    if (filament !== "Bambu PLA Basic @BBL H2C") throw new Error(`filament ${filament}`);
+    const asked = (await callsOf("slicer_presets")).map((c) => c.args.printer);
+    if (!asked.includes("Bambu Lab H2C 0.4 nozzle")) throw new Error(`presets asked for ${JSON.stringify(asked)}`);
+    return `${await page.locator("#sl-filament option").count()} filaments`;
+  });
+
+  await step(run, page, "choosing a file and pressing Slice queues a job", async () => {
+    await page.click(".sl-browse");
+    await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "cube.stl", null, { timeout: 5000 });
+    await page.click(".sl-slice");
+    await page.waitForSelector(".sl-job-status", { timeout: 5000 });
+    const [call] = await callsOf("slicer_slice");
+    const a = call.args;
+    if (a.modelPath !== SLICE_MODEL || a.filament !== "Bambu PLA Basic @BBL H2C" || a.bedType !== "Textured PEI Plate") {
+      throw new Error(JSON.stringify(a));
+    }
+    const status = await page.locator(".sl-job-status").innerText();
+    if (!status.startsWith("Queued")) throw new Error(`status ${status}`);
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_set_settings"), null, { timeout: 5000 });
+  });
+
+  await step(run, page, "progress shows and Cancel reaches the backend", async () => {
+    await emitJob(running(1, 50));
+    await page.waitForFunction(() => document.querySelector(".sl-job-status")?.innerText === "Plate 1 · Generating walls · 50%", null, { timeout: 5000 });
+    await page.click(".sl-cancel");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_cancel" && c.args.jobId === 1), null, { timeout: 5000 });
+  });
+
+  await step(run, page, "a finished job shows time, weight, cost, warnings and the plate", async () => {
+    await emitJob(done(1, sliceResult()));
+    await page.waitForSelector(".sl-hero", { timeout: 5000 });
+    const hero = await page.locator(".sl-hero").innerText();
+    const weight = await page.locator(".sl-weight").innerText();
+    const cost = await page.locator(".sl-cost").innerText();
+    if (hero !== "14m" || weight !== "3.69 g" || cost !== "0.07") throw new Error(`${hero} / ${weight} / ${cost}`);
+    if ((await page.locator(".sl-warning-warning").count()) !== 1) throw new Error("warning not shown");
+    await page.waitForSelector(".sl-thumb img", { timeout: 5000 });
+    const loaded = await page.locator(".sl-thumb img").evaluate((img) => img.complete && img.naturalWidth > 0);
+    if (!loaded) throw new Error("thumbnail did not decode");
+  });
+
+  await step(run, page, "Open in Bambu Studio hands over the sliced file", async () => {
+    await page.click(".sl-open");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_open_in_bambu_studio" && c.args.jobId === 1), null, { timeout: 5000 });
+  });
+
+  await page.screenshot({ path: `flow-${engine}-slice.png`, fullPage: false });
+
+  await step(run, page, "a failed job shows Bambu Studio's message", async () => {
+    const message = "Bambu Studio couldn't slice this model: No valid nozzle found. Please check nozzle count.";
+    await emitJob(sliceJob(1, { state: "failed", error: { kind: "slicer", message } }));
+    await page.waitForSelector(".sl-job-error", { timeout: 5000 });
+    const text = await page.locator(".sl-job-error").innerText();
+    if (text !== message) throw new Error(text);
+  });
+
+  await step(run, page, "compare queues one job per filament and marks the best", async () => {
+    await page.click(".sl-compare-toggle");
+    await page.selectOption(".sl-compare-filament", PETG);
+    await page.click(".sl-slice");
+    await page.waitForFunction(() => window.__ipc.calls.filter((c) => c.cmd === "slicer_slice").length === 3, null, { timeout: 5000 });
+    const filaments = (await callsOf("slicer_slice")).slice(1).map((c) => c.args.filament);
+    if (filaments[1] !== PETG) throw new Error(JSON.stringify(filaments));
+    await emitJob(done(2, sliceResult()));
+    await emitJob(done(3, sliceResult({ time: 990, weight: 4.1, cost: 0.09, warnings: 0 }), { filament: PETG }));
+    await page.waitForSelector(".sl-compare-table td.best", { timeout: 5000 });
+    const cols = await page.locator(".sl-compare-table thead th").count();
+    if (cols !== 3) throw new Error(`${cols} header cells`);
+    const deltas = await page.locator(".sl-compare-table .sl-delta").allInnerTexts();
+    if (!deltas.includes("+2m") || !deltas.includes("+0.41 g")) throw new Error(JSON.stringify(deltas));
+    return deltas.join(", ");
+  });
+
+  // Swaps some fixtures for the length of `fn`, then puts the old ones back.
+  const setFixture = (cmd, value) =>
+    page.evaluate(([c, v]) => {
+      window.__fixtures[c] = v;
+    }, [cmd, value]);
+  const withFixtures = async (changes, fn) => {
+    const saved = await page.evaluate((keys) => keys.map((k) => [k, window.__fixtures[k]]), Object.keys(changes));
+    for (const [cmd, value] of Object.entries(changes)) await setFixture(cmd, value);
+    try {
+      return await fn();
+    } finally {
+      for (const [cmd, value] of saved) await setFixture(cmd, value);
+    }
+  };
+  const openJob = async (id) => {
+    await page.click(`.sl-recent-row[data-job="${id}"]`);
+    await page.waitForSelector(`.sl-recent-row[data-job="${id}"].active`, { timeout: 5000 });
+  };
+  const textOf = (sel) => page.waitForSelector(sel, { timeout: 5000 }).then((el) => el.innerText());
+  const FILES_CLEARED = "That slice's files were cleared; slice it again.";
+  const queued = (id) => sliceJob(id, { state: "queued", position: 0 });
+
+  await step(run, page, "progress events update in place and keep focus", async () => {
+    // Compare shows jobs 2 and 3, with 2 open. Job 3 slices again while the
+    // filament picker has focus: only job 3's text may change.
+    const petg = (state) => sliceJob(3, state, { filament: PETG });
+    await page.waitForSelector(".sl-hero", { timeout: 5000 });
+    await page.evaluate(() => {
+      document.querySelector(".sl-hero").__mark = 1;
+      document.querySelector('.sl-recent-row[data-job="2"]').__mark = 1;
+      document.querySelector(".sl-compare-table thead th:nth-child(2)").__mark = 1;
+    });
+    await page.focus("#sl-filament");
+    const thumbs = (await callsOf("slicer_thumbnail")).length;
+    for (const percent of [20, 40, 60]) {
+      await emitJob(petg({ state: "running", progress: { plate: 1, percent, stage: "Generating walls" } }));
+    }
+    await page.waitForFunction(
+      () => document.querySelector(".sl-compare-table thead th:nth-child(3) .sl-col-state")?.innerText.endsWith("60%"),
+      null,
+      { timeout: 5000 },
+    );
+    const kept = await page.evaluate(() => ({
+      hero: document.querySelector(".sl-hero").__mark === 1,
+      row: document.querySelector('.sl-recent-row[data-job="2"]').__mark === 1,
+      column: document.querySelector(".sl-compare-table thead th:nth-child(2)").__mark === 1,
+      focus: document.activeElement?.id,
+    }));
+    if (!kept.hero || !kept.row || !kept.column || kept.focus !== "sl-filament") throw new Error(JSON.stringify(kept));
+    const refetched = (await callsOf("slicer_thumbnail")).length - thumbs;
+    if (refetched !== 0) throw new Error(`the open result fetched its thumbnail ${refetched} more times`);
+    await emitJob(petg({ state: "done", result: sliceResult({ time: 990, weight: 4.1, cost: 0.09, warnings: 0 }), cached: false }));
+    await page.waitForSelector(".sl-compare-table td.best", { timeout: 5000 });
+  });
+
+  await step(run, page, "plate tabs switch the plate, its numbers and thumbnail", async () => {
+    const two = sliceResult();
+    two.plates.push({ ...two.plates[0], index: 2, time_seconds: 8040, thumbnail: "plate_2.png", warnings: [] });
+    await emitJob(done(9, two));
+    await openJob(9);
+    await page.waitForSelector(".sl-plate-tab", { timeout: 5000 });
+    const tabs = await page.locator(".sl-plate-tab").allInnerTexts();
+    if (JSON.stringify(tabs) !== JSON.stringify(["Plate 1", "Plate 2"])) throw new Error(JSON.stringify(tabs));
+    await page.click(".sl-plate-tab:nth-child(2)");
+    await page.waitForFunction(() => document.querySelector(".sl-hero")?.innerText === "2h 14m", null, { timeout: 5000 });
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_thumbnail" && c.args.jobId === 9 && c.args.plate === 2), null, { timeout: 5000 });
+    if ((await page.locator(".sl-warning").count()) !== 0) throw new Error("plate 1's warning shown on plate 2");
+    if ((await page.locator(".sl-plate-tab.active").innerText()) !== "Plate 2") throw new Error("tab not marked");
+  });
+
+  await step(run, page, "leaving the page mid-job is safe and the job finishes", async () => {
+    await page.click(".sl-compare-toggle");
+    await page.click(".sl-slice");
+    await page.waitForFunction(() => window.__ipc.calls.filter((c) => c.cmd === "slicer_slice").length === 4, null, { timeout: 5000 });
+    await emitJob(running(4, 10));
+    await page.click('a[href="/about"]');
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    await emitJob(running(4, 80));
+    await emitJob(done(4, sliceResult()));
+    await page.click('a[href="/slice"]');
+    await page.waitForSelector(".slice-page", { timeout: 15000 });
+    const rows = await page.locator(".sl-recent-row").allInnerTexts();
+    if (!rows.some((r) => r.includes("Done"))) throw new Error(JSON.stringify(rows));
+  });
+
+  await step(run, page, "slicer errors show inline, as plain text", async () => {
+    await openJob(4);
+    // The page was left and opened again, so the model has to be chosen again.
+    await page.click(".sl-browse");
+    await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "cube.stl", null, { timeout: 5000 });
+    const failed = (kind, message) => emitJob(sliceJob(4, { state: "failed", error: { kind, message } }));
+    const shows = async (message) => {
+      await page.waitForFunction((m) => document.querySelector(".sl-job-error")?.innerText === m, message, { timeout: 5000 });
+    };
+    const incompatible = "Process '0.20mm Standard @BBL H2C' isn't made for printer 'Bambu Lab H2S 0.4 nozzle'.";
+    await failed("incompatible_process", incompatible);
+    await shows(incompatible);
+    const orphan = "Preset 'My PLA' is missing its parent 'Generic PLA @base'.";
+    await failed("missing_parent", orphan);
+    await shows(orphan);
+    const markup = "Bambu Studio couldn't slice this model: <img src=x onerror=\"window.__pwned=1\"><b>bold</b>";
+    await failed("slicer", markup);
+    await shows(markup);
+    if ((await page.locator(".sl-job-error img, .sl-job-error b").count()) !== 0) throw new Error("error text became markup");
+    await withFixtures({ slicer_slice: { __reject: "BambuMate is closing." } }, async () => {
+      await page.click(".sl-slice");
+      await page.waitForFunction(() => document.querySelector(".sl-input-error")?.innerText === "BambuMate is closing.", null, { timeout: 5000 });
+    });
+    if (await page.evaluate(() => window.__pwned)) throw new Error("error text ran a script");
+  });
+
+  await step(run, page, "a presets error shows inline and clears on the next load", async () => {
+    const message = "Bambu Studio isn't installed. Install it to slice in BambuMate.";
+    await withFixtures({ slicer_presets: { __reject: message } }, async () => {
+      await page.selectOption("#sl-printer", "Bambu Lab H2S 0.4 nozzle");
+      const text = await textOf(".sl-preset-error");
+      if (text !== message) throw new Error(text);
+    });
+    await page.selectOption("#sl-printer", "Bambu Lab H2C 0.4 nozzle");
+    await page.waitForSelector(".sl-preset-error", { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "cleared files show inline and Slice again queues the same job", async () => {
+    await withFixtures(
+      {
+        slicer_thumbnail: { __reject: FILES_CLEARED },
+        slicer_open_in_bambu_studio: { __reject: FILES_CLEARED },
+        slicer_slice: queued(6),
+      },
+      async () => {
+        await emitJob(done(5, sliceResult()));
+        await openJob(5);
+        if ((await textOf(".sl-action-error")) !== FILES_CLEARED) throw new Error("thumbnail error not shown");
+        await page.click(".sl-open");
+        await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_open_in_bambu_studio" && c.args.jobId === 5), null, { timeout: 5000 });
+        if ((await textOf(".sl-action-error")) !== FILES_CLEARED) throw new Error("open error not shown");
+        const before = (await callsOf("slicer_slice")).length;
+        await page.click(".sl-reslice");
+        await page.waitForSelector('.sl-recent-row[data-job="6"].active', { timeout: 5000 });
+        const calls = await callsOf("slicer_slice");
+        if (calls.length !== before + 1) throw new Error(`${calls.length - before} slice calls`);
+        const a = calls.at(-1).args;
+        const want = sliceJob(0, null);
+        const got = JSON.stringify([a.modelPath, a.printer, a.process, a.filament, a.bedType]);
+        const expected = JSON.stringify([SLICE_MODEL, want.printer, want.process, want.filament, want.bed_type]);
+        if (got !== expected) throw new Error(got);
+        if (!(await textOf(".sl-job-status")).startsWith("Queued")) throw new Error("re-slice not shown");
+      },
+    );
+  });
+
+  await step(run, page, "leaving the page while Slice is waiting on the backend is safe", async () => {
+    const errors = run.errors.length;
+    await withFixtures({ slicer_slice: { __delay: 600, answer: queued(8) } }, async () => {
+      await page.click(".sl-browse");
+      await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "cube.stl", null, { timeout: 5000 });
+      await page.click(".sl-slice");
+      await page.click('a[href="/about"]');
+      await page.waitForSelector(".about-page", { timeout: 15000 });
+      await page.waitForTimeout(1000);
+    });
+    if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
+    await page.click('a[href="/slice"]');
+    await page.waitForSelector('.sl-recent-row[data-job="8"]', { timeout: 5000 });
+  });
+
+  await step(run, page, "leaving the page while settings load is safe", async () => {
+    const errors = run.errors.length;
+    await page.click('a[href="/about"]');
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    const settings = await page.evaluate(() => window.__fixtures.slicer_get_settings);
+    const late = { __delay: 600, answer: { ...settings, effective: { ...settings.effective, printer: null } } };
+    await withFixtures({ slicer_get_settings: late }, async () => {
+      const presets = (await callsOf("slicer_presets")).length;
+      await page.click('a[href="/slice"]');
+      await page.waitForSelector(".slice-page", { timeout: 15000 });
+      await page.click('a[href="/about"]');
+      await page.waitForSelector(".about-page", { timeout: 15000 });
+      await page.waitForTimeout(1000);
+      const after = (await callsOf("slicer_presets")).length;
+      if (after !== presets) throw new Error(`${after - presets} presets loads for a closed page`);
+    });
+    if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
   });
 
   // -- settings --------------------------------------------------------------

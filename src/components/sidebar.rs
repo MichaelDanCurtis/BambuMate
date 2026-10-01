@@ -52,6 +52,9 @@ pub fn Sidebar() -> impl IntoView {
                     <a href="/compare" class="nav-link">"Compare Profiles"</a>
                 </li>
                 <li class="nav-item">
+                    <a href="/slice" class="nav-link">"Slice"</a>
+                </li>
+                <li class="nav-item">
                     <a href="/settings" class="nav-link">"Settings"</a>
                 </li>
                 <li class="nav-item">

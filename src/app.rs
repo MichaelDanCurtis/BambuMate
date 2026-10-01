@@ -16,6 +16,8 @@ use crate::pages::profile_diff::ProfileDiffPage;
 use crate::pages::profile_management::ProfileManagementPage;
 use crate::pages::settings::SettingsPage;
 use crate::pages::setup_wizard::SetupWizard;
+use crate::pages::slice::SlicePage;
+use crate::slicer::{SlicerEvents, SlicerShared};
 use crate::theme::{apply_theme, normalize_theme, ThemeContext};
 
 /// Shared context for feature flags, reactive so UI updates on toggle.
@@ -40,6 +42,7 @@ pub fn App() -> impl IntoView {
     provide_context(UpdateContext { update_info });
     provide_context(AgentRefresh(RwSignal::new(0)));
     provide_context(AgentShared::default());
+    provide_context(SlicerShared::default());
 
     // Feature flags with both enabled by default
     let (flags, set_flags) = signal(FeatureFlags {
@@ -103,6 +106,7 @@ pub fn App() -> impl IntoView {
         <Router>
             // Mounted once, outside the Shows below: its listeners can't be removed.
             <AgentEvents />
+            <SlicerEvents />
 
             // Show wizard overlay if setup is not complete
             <Show when=move || setup_complete.get() == Some(false)>
@@ -121,6 +125,7 @@ pub fn App() -> impl IntoView {
                             <Route path=path!("/profiles") view=ProfileManagementPage />
                             <Route path=path!("/batch") view=BatchGeneratePage />
                             <Route path=path!("/compare") view=ProfileDiffPage />
+                            <Route path=path!("/slice") view=SlicePage />
                             <Route path=path!("/settings") view=SettingsPage />
                             <Route path=path!("/health") view=HealthPage />
                             <Route path=path!("/about") view=AboutPage />

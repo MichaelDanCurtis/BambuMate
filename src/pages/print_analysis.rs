@@ -602,7 +602,7 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// Simple base64 encoder (avoiding extra dependencies in WASM).
-fn base64_encode(bytes: &[u8]) -> String {
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut result = String::with_capacity((bytes.len() + 2) / 3 * 4);
