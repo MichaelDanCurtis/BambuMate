@@ -216,6 +216,94 @@ impl ToolHost for TauriToolHost {
                 .await,
         )
     }
+
+    async fn slice(
+        &self,
+        req: super::tools::slicer::SliceToolRequest,
+    ) -> Result<Vec<crate::slicer::jobs::JobView>, String> {
+        use tauri::Manager;
+        let svc = self
+            .app
+            .try_state::<crate::slicer::jobs::SlicerService>()
+            .ok_or("Slicing isn't available.")?
+            .inner()
+            .clone();
+        let defaults = crate::commands::slicer::effective_settings(&self.app);
+        let filaments = std::iter::once(req.filament.clone())
+            .chain(req.compare_filaments.iter().cloned().map(Some));
+        // Cancels this call's unfinished jobs if it ends early: a refused
+        // enqueue part-way through, or the agent turn being stopped (which
+        // drops this future).
+        let cancel_svc = svc.clone();
+        let mut guard = PendingJobs::new(move |id| {
+            cancel_svc.cancel(id);
+        });
+        for filament in filaments {
+            let choice = defaults.choice(req.printer.clone(), req.process.clone(), filament)?;
+            let view = svc
+                .enqueue(crate::slicer::jobs::JobRequest {
+                    source_path: req.model_path.clone(),
+                    choice,
+                    origin: crate::slicer::jobs::JobOrigin::Agent,
+                })
+                .map_err(|e| e.to_string())?;
+            guard.ids.push(view.id);
+        }
+        self.emit_ui(UiCommand::Navigate {
+            route: "/slice".into(),
+            profile_path: None,
+        });
+        // Each job has its own 5-minute timeout; this bounds the wait for
+        // jobs queued behind others. bm_slice_result picks up the rest.
+        let deadline = tokio::time::Instant::now() + SLICE_WAIT;
+        let mut views = Vec::new();
+        for id in guard.ids.clone() {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if let Some(v) = svc.wait(id, left).await {
+                views.push(v);
+            }
+        }
+        // The caller has its answer: jobs still waiting past the bound keep
+        // going, so bm_slice_result can pick them up.
+        guard.ids.clear();
+        Ok(views)
+    }
+
+    fn slice_job(&self, job_id: u64) -> Option<crate::slicer::jobs::JobView> {
+        use tauri::Manager;
+        self.app
+            .try_state::<crate::slicer::jobs::SlicerService>()
+            .and_then(|s| s.job(job_id))
+    }
+}
+
+/// How long `bm_slice` waits for its jobs before handing back whatever state
+/// they are in.
+const SLICE_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Jobs `bm_slice` queued and hasn't answered for yet. Dropping it cancels
+/// them, so a refused enqueue part-way through, or a stopped agent turn
+/// (which drops the waiting future), doesn't leave work nobody asked to keep.
+struct PendingJobs<F: Fn(u64)> {
+    cancel: F,
+    ids: Vec<u64>,
+}
+
+impl<F: Fn(u64)> PendingJobs<F> {
+    fn new(cancel: F) -> Self {
+        Self {
+            cancel,
+            ids: Vec::new(),
+        }
+    }
+}
+
+impl<F: Fn(u64)> Drop for PendingJobs<F> {
+    fn drop(&mut self) {
+        for id in &self.ids {
+            (self.cancel)(*id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -302,5 +390,22 @@ mod tests {
         let r: Result<(), String> =
             take_staged_on_success(&map, "nope", |_| async { Ok(()) }).await;
         assert!(r.unwrap_err().contains("no staged profile 'nope'"));
+    }
+
+    #[test]
+    fn pending_jobs_are_cancelled_when_dropped_but_not_once_answered() {
+        let cancelled = std::cell::RefCell::new(Vec::new());
+        {
+            let mut g = PendingJobs::new(|id| cancelled.borrow_mut().push(id));
+            g.ids.extend([1, 2]);
+        }
+        assert_eq!(*cancelled.borrow(), vec![1, 2]);
+        cancelled.borrow_mut().clear();
+        {
+            let mut g = PendingJobs::new(|id| cancelled.borrow_mut().push(id));
+            g.ids.extend([3]);
+            g.ids.clear();
+        }
+        assert!(cancelled.borrow().is_empty());
     }
 }

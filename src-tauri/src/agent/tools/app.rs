@@ -14,6 +14,7 @@ pub const ROUTES: &[&str] = &[
     "/profiles",
     "/batch",
     "/compare",
+    "/slice",
     "/settings",
     "/health",
     "/about",
@@ -30,7 +31,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bm_navigate",
-            description: "Move the BambuMate UI to a page so the user can follow along. Routes: /, /filament, /analysis, /profiles, /batch, /compare, /settings, /health, /about.",
+            description: "Move the BambuMate UI to a page so the user can follow along. Routes: /, /filament, /analysis, /profiles, /batch, /compare, /slice, /settings, /health, /about.",
             input_schema: json!({"type":"object","properties":{"route":{"type":"string"},"profile_path":{"type":"string"}},"required":["route"]}),
         },
         ToolSpec {
@@ -336,6 +337,6 @@ mod tests {
 
     #[test]
     fn total_tool_count_stays_small() {
-        assert_eq!(crate::agent::tools::ToolRegistry::specs().len(), 18);
+        assert_eq!(crate::agent::tools::ToolRegistry::specs().len(), 20);
     }
 }

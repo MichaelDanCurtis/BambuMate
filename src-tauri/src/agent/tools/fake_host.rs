@@ -9,6 +9,29 @@ use tokio::sync::broadcast;
 use super::{ToolHost, ToolRegistry};
 use crate::agent::asks::AskBroker;
 use crate::agent::types::{AgentEvent, AppState, UiCommand};
+use crate::slicer::jobs::{JobOrigin, JobState, JobView};
+
+/// A finished job built from the real cube fixture.
+pub fn done_job(id: u64) -> JobView {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/slicer/cube_h2c.gcode.3mf");
+    let mut result = crate::slicer::result::parse_output(&fixture, None, None).unwrap();
+    result.output_path = "/cache/output.gcode.3mf".into();
+    JobView {
+        id,
+        origin: JobOrigin::Agent,
+        source_path: "/models/cube.stl".into(),
+        model_name: "cube.stl".into(),
+        printer: "Bambu Lab H2C 0.4 nozzle".into(),
+        process: "0.20mm Standard @BBL H2C".into(),
+        filament: "Bambu PLA Basic @BBL H2C".into(),
+        bed_type: "Textured PEI Plate".into(),
+        state: JobState::Done {
+            result,
+            cached: false,
+        },
+    }
+}
 
 pub struct FakeHost {
     pub user_dir: tempfile::TempDir,
@@ -104,5 +127,25 @@ impl ToolHost for FakeHost {
     async fn launch_bambu_studio(&self, profile_path: Option<String>) -> Result<Value, String> {
         self.log(format!("launch:{}", profile_path.unwrap_or_default()));
         Ok(json!({"launched":true}))
+    }
+    async fn slice(&self, req: super::slicer::SliceToolRequest) -> Result<Vec<JobView>, String> {
+        self.log(format!(
+            "slice:{}:{}:{}",
+            req.model_path,
+            req.filament.clone().unwrap_or_default(),
+            req.compare_filaments.join(",")
+        ));
+        Ok(vec![done_job(1)])
+    }
+    fn slice_job(&self, job_id: u64) -> Option<JobView> {
+        (job_id == 7).then(|| JobView {
+            state: JobState::Failed {
+                error: crate::slicer::SlicerError::Slicer {
+                    message: "No valid nozzle found. Please check nozzle count.".into(),
+                }
+                .view(),
+            },
+            ..done_job(7)
+        })
     }
 }

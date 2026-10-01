@@ -5,6 +5,7 @@ pub mod app;
 pub mod fake_host;
 pub mod interact;
 pub mod profiles;
+pub mod slicer;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -104,6 +105,14 @@ pub trait ToolHost: Send + Sync {
     ) -> Result<Value, String>;
     async fn history(&self, profile_path: &str) -> Result<Value, String>;
     async fn launch_bambu_studio(&self, profile_path: Option<String>) -> Result<Value, String>;
+    /// Queues the slicing jobs `bm_slice` asked for (one, plus one per
+    /// comparison filament) and waits for them; returns their latest views.
+    async fn slice(
+        &self,
+        req: slicer::SliceToolRequest,
+    ) -> Result<Vec<crate::slicer::jobs::JobView>, String>;
+    /// One slicing job, if the queue still knows it.
+    fn slice_job(&self, job_id: u64) -> Option<crate::slicer::jobs::JobView>;
 }
 
 pub fn arg_str(args: &Value, key: &str) -> Result<String, ToolOutput> {
@@ -161,6 +170,7 @@ impl ToolRegistry {
         let mut all = interact::specs();
         all.extend(profiles::specs());
         all.extend(app::specs());
+        all.extend(slicer::specs());
         all
     }
 
@@ -181,6 +191,9 @@ impl ToolRegistry {
             return out;
         }
         if let Some(out) = app::handle(self, name, &args).await {
+            return out;
+        }
+        if let Some(out) = slicer::handle(self, name, &args).await {
             return out;
         }
         ToolOutput::error(format!("unknown tool '{name}'"))
