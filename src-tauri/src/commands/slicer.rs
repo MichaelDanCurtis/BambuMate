@@ -10,13 +10,14 @@ use base64::Engine;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
+use tokio::sync::Semaphore;
 
 use crate::slicer::auto::{auto_request, wait_until_stable, STABLE_INTERVAL, STABLE_MAX};
 use crate::slicer::binary::{self, SlicerStatus};
 use crate::slicer::cache::{SliceCache, DEFAULT_CAP_BYTES};
 use crate::slicer::jobs::{
     BambuStudioEnv, JobEvents, JobOrigin, JobRequest, JobState, JobView, SlicerEnv, SlicerService,
-    CLOSING, WORK_DIR_NAME,
+    WORK_DIR_NAME,
 };
 use crate::slicer::settings::{
     bambu_studio_selection, normalize_bed_type, BambuStudioSelection, PresetChoice, PresetLists,
@@ -547,28 +548,51 @@ pub fn stop(app: &AppHandle) {
     }
 }
 
+/// How many new STLs are waited on (and queued) at once. Others wait for a
+/// turn, so a bulk copy into the watch folder can't pile up polling tasks.
+const AUTO_SLICE_CONCURRENCY: usize = 4;
+
 /// Queues one new STL from the watch folder, when "Slice new STLs
 /// automatically" is on. Every way out is quiet: nothing here retries, and
 /// the wait for the file to settle is bounded by [`STABLE_MAX`].
-async fn auto_slice(app: AppHandle, file: StlFile) {
+async fn auto_slice(app: AppHandle, file: StlFile, turns: Arc<Semaphore>) {
     let name = file.filename.as_str();
+    let full = |app: &AppHandle| {
+        app.try_state::<SlicerService>()
+            .is_none_or(|svc| svc.queue_is_full(JobOrigin::Auto))
+    };
+    // Skip at once when the watch folder's queue is full anyway.
+    if full(&app) {
+        tracing::debug!("auto-slice skipped {name}: the watch-folder queue is full");
+        return;
+    }
+    let Ok(_turn) = turns.acquire().await else {
+        return;
+    };
+    // Cheap first: the saved flag. `BambuStudio.conf` is read only when on.
     let settings = {
         let app = app.clone();
-        match blocking(move || effective_settings(&app)).await {
-            Ok(s) => s,
-            Err(e) => {
+        blocking(move || {
+            read_settings(&app)
+                .auto_slice
+                .then(|| effective_settings(&app))
+        })
+        .await
+    };
+    let request = match settings {
+        Ok(Some(settings)) => match auto_request(&settings, &file.path) {
+            Some(Ok(r)) => r,
+            Some(Err(e)) => {
                 tracing::warn!("auto-slice skipped {name}: {e}");
                 return;
             }
-        }
-    };
-    let request = match auto_request(&settings, &file.path) {
-        None => return,
-        Some(Err(e)) => {
+            None => return,
+        },
+        Ok(None) => return,
+        Err(e) => {
             tracing::warn!("auto-slice skipped {name}: {e}");
             return;
         }
-        Some(Ok(r)) => r,
     };
     if !wait_until_stable(Path::new(&file.path), STABLE_INTERVAL, STABLE_MAX).await {
         if Path::new(&file.path).exists() {
@@ -578,13 +602,21 @@ async fn auto_slice(app: AppHandle, file: StlFile) {
         }
         return;
     }
+    // The wait can take a minute: honour a switch turned off meanwhile.
+    let still_on = {
+        let app = app.clone();
+        blocking(move || read_settings(&app).auto_slice).await
+    };
+    if !still_on.unwrap_or(false) {
+        return;
+    }
     // Absent only while the app is starting or has already torn down.
     let Some(svc) = app.try_state::<SlicerService>() else {
         return;
     };
     match svc.enqueue(request) {
         Ok(_) => {}
-        Err(SlicerError::Io(m)) if m == CLOSING => {
+        Err(SlicerError::Closing) => {
             tracing::debug!("auto-slice of {name} not queued: BambuMate is closing");
         }
         // Includes the cap on waiting automatic jobs: the file is left alone.
@@ -596,8 +628,9 @@ async fn auto_slice(app: AppHandle, file: StlFile) {
 /// automatically" is on. Called once from `setup`, after [`start`].
 pub fn install_auto_slice(app: &AppHandle) {
     let handle = app.clone();
+    let turns = Arc::new(Semaphore::new(AUTO_SLICE_CONCURRENCY));
     let hook: crate::stl_watcher::NewStlHook = Arc::new(move |file| {
-        tauri::async_runtime::spawn(auto_slice(handle.clone(), file));
+        tauri::async_runtime::spawn(auto_slice(handle.clone(), file, turns.clone()));
     });
     app.state::<crate::stl_watcher::StlWatcherState>()
         .set_on_new(hook);

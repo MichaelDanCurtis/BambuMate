@@ -92,8 +92,9 @@ mod tests {
             })
         };
         assert!(wait_until_stable(&p, Duration::from_millis(200), Duration::from_secs(30)).await);
-        writer.await.unwrap();
+        // Checked before the writer is awaited: returning early fails this.
         assert_eq!(std::fs::metadata(&p).unwrap().len(), 13);
+        writer.await.unwrap();
     }
 
     #[tokio::test]

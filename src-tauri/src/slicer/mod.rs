@@ -45,6 +45,9 @@ pub enum SlicerError {
     Timeout,
     #[error("Bambu Studio's output couldn't be read.")]
     BadOutput,
+    /// Refused because the app is quitting (see `SlicerService::shutdown`).
+    #[error("BambuMate is closing.")]
+    Closing,
     #[error("{0}")]
     InvalidModel(String),
     /// The full user-facing message. Build the usual "couldn't prepare"
@@ -73,6 +76,7 @@ impl SlicerError {
             SlicerError::Slicer { .. } => "slicer",
             SlicerError::Timeout => "timeout",
             SlicerError::BadOutput => "bad_output",
+            SlicerError::Closing => "closing",
             SlicerError::InvalidModel(_) => "invalid_model",
             SlicerError::Io(_) => "io",
         }

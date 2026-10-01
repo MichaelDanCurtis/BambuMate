@@ -28,9 +28,6 @@ const KEEP_FINISHED: usize = 100;
 pub const MAX_QUEUED_PER_ORIGIN: usize = 10;
 /// Why the cache can't be cleared right now.
 const BUSY_CLEARING: &str = "Finish or cancel the current slice first.";
-/// Why nothing more is queued once the app is quitting.
-/// The refusal `enqueue` gives once [`SlicerService::shutdown`] has run.
-pub(crate) const CLOSING: &str = "BambuMate is closing.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -372,7 +369,7 @@ impl SlicerService {
         let view = {
             let mut s = self.lock();
             if s.closed {
-                return Err(SlicerError::Io(CLOSING.into()));
+                return Err(SlicerError::Closing);
             }
             if let Some(full) = queue_full_message(&s, req.origin) {
                 return Err(SlicerError::Io(full));
@@ -417,6 +414,13 @@ impl SlicerService {
         };
         self.inner.wake.notify_one();
         Ok(view)
+    }
+
+    /// Whether `origin` already has [`MAX_QUEUED_PER_ORIGIN`] jobs waiting,
+    /// so `enqueue` would refuse one more. A cheap pre-check; `enqueue`
+    /// stays the authority.
+    pub fn queue_is_full(&self, origin: JobOrigin) -> bool {
+        queue_full_message(&self.lock(), origin).is_some()
     }
 
     /// Asks a queued or running job to stop. `true` means the request was
@@ -1469,8 +1473,10 @@ mod tests {
                 ..h.request(&m, PLA)
             };
             for _ in 0..MAX_QUEUED_PER_ORIGIN {
+                assert!(!h.svc.queue_is_full(origin));
                 h.svc.enqueue(req.clone()).unwrap();
             }
+            assert!(h.svc.queue_is_full(origin));
             let err = h.svc.enqueue(req.clone()).unwrap_err();
             assert_eq!(err.kind(), "io");
             assert!(err.to_string().contains("already waiting"), "{err}");
@@ -1587,6 +1593,8 @@ mod tests {
             .svc
             .enqueue(h.request(&h.model("c.stl", b"c"), PLA))
             .unwrap_err();
+        assert_eq!(err, SlicerError::Closing);
+        assert_eq!(err.kind(), "closing");
         assert_eq!(err.to_string(), "BambuMate is closing.");
         assert_eq!(h.svc.shutdown(), None, "nothing left to stop");
     }
