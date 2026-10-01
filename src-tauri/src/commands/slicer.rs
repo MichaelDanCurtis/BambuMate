@@ -186,6 +186,19 @@ pub async fn slicer_slice(
     .await?
 }
 
+/// Whether `path` is still a model Bambu Studio can slice (the checks of
+/// [`crate::slicer::validate_model_path`]). The Slice page asks before it
+/// offers "Slice again" for a job whose files were cleared: a dropped model
+/// is cleared with the cache.
+#[tauri::command]
+pub async fn slicer_model_exists(path: String) -> bool {
+    blocking(move || model_exists(&path)).await.unwrap_or(false)
+}
+
+fn model_exists(path: &str) -> bool {
+    crate::slicer::validate_model_path(path).is_ok()
+}
+
 /// `true` when the cancel was taken (see [`SlicerService::cancel`]); the
 /// job's final state arrives as a `slicer://job` event.
 #[tauri::command]
@@ -1037,6 +1050,23 @@ mod tests {
         prune_opened(&opened, &copy, 0);
         assert!(copy.is_file());
         assert!(!opened.join("12-old.gcode.3mf").exists());
+    }
+
+    #[test]
+    fn a_staged_model_removed_by_clear_no_longer_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let inputs = root.path().join(INPUTS_DIR);
+        let staged = stage_bytes(&inputs, "cube.stl", b"solid cube").unwrap();
+        let staged = staged.to_string_lossy().into_owned();
+        assert!(model_exists(&staged));
+        assert!(remove_inputs(&inputs) > 0);
+        assert!(!model_exists(&staged));
+        // Same rules as slicing: no sliced files, no folders, no other types.
+        let sliced = root.path().join("cube.gcode.3mf");
+        std::fs::write(&sliced, b"x").unwrap();
+        assert!(!model_exists(&sliced.to_string_lossy()));
+        assert!(!model_exists(&root.path().to_string_lossy()));
+        assert!(!model_exists(""));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Pure helpers for slicing state and its display. Host-testable.
 
-use super::types::{JobState, JobView, SliceResult, WarningLevel};
+use super::types::{JobState, JobView, SliceResult, SlicerSettings, WarningLevel};
 
 /// Jobs kept in the frontend's list.
 pub const MAX_JOBS: usize = 200;
@@ -225,6 +225,25 @@ pub fn compare_rows(columns: &[Option<Totals>]) -> Vec<CompareRow> {
             format!("{}", v as i64)
         }),
     ]
+}
+
+/// What the Slice page saves after a slice: the presets it sliced with, on
+/// top of the settings as they are saved now. Everything else (auto-slice)
+/// keeps its saved value, so a slice never turns it off.
+pub fn remember_choices(
+    saved: SlicerSettings,
+    printer: String,
+    process: String,
+    filament: String,
+    bed_type: String,
+) -> SlicerSettings {
+    SlicerSettings {
+        printer: Some(printer),
+        process: Some(process),
+        filament: Some(filament),
+        bed_type: Some(bed_type),
+        ..saved
+    }
 }
 
 #[cfg(test)]
@@ -482,5 +501,35 @@ mod tests {
         let rows = compare_rows(&[Some(totals(&result(60, 1.0, None, 0))), None]);
         assert!(rows.iter().all(|r| r.best.is_none()));
         assert_eq!(rows[2].cells, vec![None, None], "no cost set");
+    }
+
+    #[test]
+    fn remembering_choices_keeps_auto_slice_as_saved() {
+        let saved = SlicerSettings {
+            printer: Some("Old printer".into()),
+            process: None,
+            filament: Some("Old filament".into()),
+            bed_type: None,
+            auto_slice: true,
+        };
+        let next = remember_choices(saved, "P".into(), "Q".into(), "F".into(), "B".into());
+        assert_eq!(
+            next,
+            SlicerSettings {
+                printer: Some("P".into()),
+                process: Some("Q".into()),
+                filament: Some("F".into()),
+                bed_type: Some("B".into()),
+                auto_slice: true,
+            }
+        );
+        let off = remember_choices(
+            SlicerSettings::default(),
+            "P".into(),
+            "Q".into(),
+            "F".into(),
+            "B".into(),
+        );
+        assert!(!off.auto_slice);
     }
 }

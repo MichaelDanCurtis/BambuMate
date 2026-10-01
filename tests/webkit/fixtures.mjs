@@ -625,6 +625,7 @@ export const FIXTURES = {
   slicer_clear_cache: 12582912,
   slicer_pick_model: SLICE_MODEL,
   slicer_stage_model: SLICE_MODEL,
+  slicer_model_exists: true,
 };
 
 // -- test images ------------------------------------------------------------

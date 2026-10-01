@@ -94,6 +94,7 @@ pub fn run() {
             commands::slicer::slicer_clear_cache,
             commands::slicer::slicer_pick_model,
             commands::slicer::slicer_stage_model,
+            commands::slicer::slicer_model_exists,
             commands::stl_bridge::set_stl_watch_dir,
             commands::stl_bridge::get_stl_watch_dir,
             commands::stl_bridge::list_received_stls,

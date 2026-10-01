@@ -784,6 +784,10 @@ async function driveApp(browserType, engine, baseUrl) {
         await page.click(".sl-open");
         await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_open_in_bambu_studio" && c.args.jobId === 5), null, { timeout: 5000 });
         if ((await textOf(".sl-action-error")) !== FILES_CLEARED.message) throw new Error("open error not shown");
+        // "Slice again" is offered once the model turned out to be still there.
+        await page.waitForSelector(".sl-reslice", { timeout: 5000 });
+        const checked = (await callsOf("slicer_model_exists")).map((c) => c.args.path);
+        if (!checked.includes(SLICE_MODEL)) throw new Error(`checked ${JSON.stringify(checked)}`);
         const before = (await callsOf("slicer_slice")).length;
         await page.click(".sl-reslice");
         await page.waitForSelector('.sl-recent-row[data-job="6"].active', { timeout: 5000 });
@@ -797,6 +801,58 @@ async function driveApp(browserType, engine, baseUrl) {
         if (!(await textOf(".sl-job-status")).startsWith("Queued")) throw new Error("re-slice not shown");
       },
     );
+  });
+
+  await step(run, page, "a dropped model cleared with the cache is not offered for slicing again", async () => {
+    // Clear slice cache empties the staged inputs too, so the job's model is gone.
+    const staged = "/Users/runner/Library/Application Support/com.bambumate.app/slice-inputs/6f1c2a7e-0d3b-4c5e-9a8f-1b2c3d4e5f60/bracket.stl";
+    const job = (state) => sliceJob(12, state, { source_path: staged, model_name: "bracket.stl" });
+    await withFixtures({ slicer_stage_model: staged, slicer_slice: job({ state: "queued", position: 0 }) }, async () => {
+      const dropped = await page.evaluateHandle(() => {
+        const dt = new DataTransfer();
+        dt.items.add(new File(["solid bracket"], "bracket.stl", { type: "model/stl" }));
+        return dt;
+      });
+      await page.dispatchEvent(".sl-drop", "drop", { dataTransfer: dropped });
+      await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "bracket.stl", null, { timeout: 5000 });
+      const [stage] = (await callsOf("slicer_stage_model")).slice(-1);
+      if (stage.args.fileName !== "bracket.stl" || !stage.args.dataBase64) throw new Error(JSON.stringify(stage.args));
+      const saves = await settledCount("slicer_set_settings");
+      await page.click(".sl-slice");
+      await settledPast("slicer_set_settings", saves);
+      if ((await callsOf("slicer_slice")).at(-1).args.modelPath !== staged) throw new Error("did not slice the staged model");
+    });
+    await withFixtures(
+      {
+        slicer_thumbnail: { __reject: FILES_CLEARED },
+        slicer_open_in_bambu_studio: { __reject: FILES_CLEARED },
+        slicer_model_exists: false,
+      },
+      async () => {
+        await emitJob(job({ state: "done", result: sliceResult(), cached: false }));
+        await page.waitForSelector('.sl-recent-row[data-job="12"].active', { timeout: 5000 });
+        const gone = await textOf(".sl-reslice-gone");
+        if (gone !== "The model was cleared too; drop it again.") throw new Error(gone);
+        const checked = (await callsOf("slicer_model_exists")).map((c) => c.args.path);
+        if (!checked.includes(staged)) throw new Error(`checked ${JSON.stringify(checked)}`);
+        if ((await page.locator(".sl-reslice").count()) !== 0) throw new Error("offered Slice again for a cleared model");
+      },
+    );
+  });
+
+  await step(run, page, "a slice keeps auto-slice as it is saved now", async () => {
+    // Settings turned auto-slice on after this page loaded its settings.
+    const settings = await page.evaluate(() => window.__fixtures.slicer_get_settings);
+    const on = { ...settings, saved: { ...settings.saved, auto_slice: true } };
+    await withFixtures({ slicer_get_settings: on, slicer_slice: queued(13) }, async () => {
+      await page.click(".sl-browse");
+      await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "cube.stl", null, { timeout: 5000 });
+      const saves = await settledCount("slicer_set_settings");
+      await page.click(".sl-slice");
+      await settledPast("slicer_set_settings", saves);
+      const { settings: saved } = (await callsOf("slicer_set_settings")).at(-1).args;
+      if (saved.auto_slice !== true || saved.filament !== sliceJob(0, null).filament) throw new Error(JSON.stringify(saved));
+    });
   });
 
   await step(run, page, "a cached result that arrives before Slice answers stays Done", async () => {
@@ -862,6 +918,43 @@ async function driveApp(browserType, engine, baseUrl) {
       if (after !== presets) throw new Error(`${after - presets} presets loads for a closed page`);
     });
     if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
+  });
+
+  await step(run, page, "a page whose settings failed to load saves none after a slice", async () => {
+    // Starts on About (the previous step left the page).
+    await withFixtures({ slicer_get_settings: { __reject: "The settings couldn't be read." }, slicer_slice: queued(14) }, async () => {
+      const loads = await settledCount("slicer_get_settings");
+      await page.click('a[href="/slice"]');
+      await settledPast("slicer_get_settings", loads);
+      await page.waitForFunction(() => document.querySelector("#sl-printer")?.value === "Bambu Lab H2C 0.4 nozzle", null, { timeout: 10000 });
+      await page.click(".sl-browse");
+      await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "cube.stl", null, { timeout: 5000 });
+      await page.waitForSelector(".sl-slice:not([disabled])", { timeout: 5000 });
+      const saves = await callCount("slicer_set_settings");
+      const gets = await callCount("slicer_get_settings");
+      const slices = await settledCount("slicer_slice");
+      await page.click(".sl-slice");
+      await settledPast("slicer_slice", slices);
+      await page.waitForSelector('.sl-recent-row[data-job="14"].active', { timeout: 5000 });
+      await page.waitForSelector(".sl-slice:not([disabled])", { timeout: 5000 });
+      if ((await callCount("slicer_set_settings")) !== saves) throw new Error("saved settings it never read");
+      if ((await callCount("slicer_get_settings")) !== gets) throw new Error("read settings again after a failed load");
+    });
+  });
+
+  await step(run, page, "the watch-folder list refreshes while the page is open", async () => {
+    const file = (name) => ({ path: `/Users/runner/stl-inbox/${name}`, filename: name, received_at: "2026-10-01T12:00:00Z" });
+    await withFixtures({ list_received_stls: [file("bracket.stl")] }, async () => {
+      await page.waitForFunction(() => document.querySelectorAll(".sl-watch option").length === 2, null, { timeout: 15000 });
+      await page.evaluate(() => (document.querySelectorAll(".sl-watch option")[1].__mark = 1));
+      await setFixture("list_received_stls", [file("bracket.stl"), file("hinge.stl")]);
+      await page.waitForFunction(() => document.querySelectorAll(".sl-watch option").length === 3, null, { timeout: 15000 });
+      const kept = await page.evaluate(() => document.querySelectorAll(".sl-watch option")[1].__mark === 1);
+      if (!kept) throw new Error("the list was rebuilt instead of keyed");
+      await page.selectOption(".sl-watch", "/Users/runner/stl-inbox/hinge.stl");
+      await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "hinge.stl", null, { timeout: 5000 });
+    });
+    await page.waitForSelector(".sl-watch", { state: "detached", timeout: 15000 });
   });
 
   // -- settings --------------------------------------------------------------

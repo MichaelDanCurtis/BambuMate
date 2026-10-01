@@ -15,11 +15,11 @@ use wasm_bindgen_futures::spawn_local;
 use crate::commands::{self, StlFile};
 use crate::slicer::state::{
     compare_rows, format_cost, format_duration, format_grams, insert_if_absent, keyed_rows,
-    status_line, swatch_color, totals, Totals,
+    remember_choices, status_line, swatch_color, totals, Totals,
 };
 use crate::slicer::types::{
-    ErrorView, JobState, PresetLists, PresetOption, PresetSource, SlicerSettings, SlicerStatus,
-    WarningLevel, FILES_CLEARED_KIND,
+    ErrorView, JobState, PresetLists, PresetOption, PresetSource, SlicerStatus, WarningLevel,
+    FILES_CLEARED_KIND,
 };
 use crate::slicer::{bridge, SlicerShared};
 
@@ -31,6 +31,9 @@ const RECENT: usize = 10;
 /// before they are read into memory and sent over IPC.
 const MAX_DROP_BYTES: f64 = 512.0 * 1024.0 * 1024.0;
 const TOO_LARGE: &str = "That file is too large to slice from BambuMate.";
+/// How often the "From watch folder" list is refreshed, like the STL
+/// indicator's.
+const WATCH_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Reads a dropped file and stages it in the backend, which needs a path.
 async fn stage_dropped(file: web_sys::File) -> Result<String, String> {
@@ -96,7 +99,9 @@ pub fn SlicePage() -> impl IntoView {
     let status = RwSignal::new(None::<SlicerStatus>);
     let lists = RwSignal::new(PresetLists::default());
     let bed_types = RwSignal::new(Vec::<String>::new());
-    let saved = RwSignal::new(SlicerSettings::default());
+    // Whether the saved settings could be read. Until they are, a slice
+    // saves nothing, so it can't overwrite them (auto-slice) with defaults.
+    let settings_loaded = RwSignal::new(false);
     let printer = RwSignal::new(String::new());
     let process = RwSignal::new(String::new());
     let filament = RwSignal::new(String::new());
@@ -185,7 +190,7 @@ pub fn SlicePage() -> impl IntoView {
         match bridge::get_settings().await {
             Ok(view) => {
                 let eff = view.effective;
-                saved.try_set(view.saved);
+                settings_loaded.try_set(true);
                 bed_types.try_set(view.bed_types);
                 process.try_set(eff.process.unwrap_or_default());
                 filament.try_set(eff.filament.unwrap_or_default());
@@ -204,6 +209,20 @@ pub fn SlicePage() -> impl IntoView {
             watched.try_set(files);
         }
     });
+
+    // New STLs arrive while the page is open; only a changed list is set.
+    let refresh_watched = move || {
+        spawn_local(async move {
+            if let Ok(files) = commands::list_received_stls().await {
+                if watched.try_with_untracked(|w| *w != files) == Some(true) {
+                    watched.try_set(files);
+                }
+            }
+        });
+    };
+    if let Ok(handle) = set_interval_with_handle(refresh_watched, WATCH_POLL) {
+        on_cleanup(move || handle.clear());
+    }
 
     // Processes and filaments follow the printer.
     Effect::new(move |_| {
@@ -281,13 +300,7 @@ pub fn SlicePage() -> impl IntoView {
         if comparing.get_untracked() {
             all.extend(extra.get_untracked().into_iter().filter(|e| !e.is_empty()));
         }
-        let remember = SlicerSettings {
-            printer: Some(p.clone()),
-            process: Some(q.clone()),
-            filament: Some(f),
-            bed_type: Some(b.clone()),
-            auto_slice: saved.get_untracked().auto_slice,
-        };
+        let remember = settings_loaded.get_untracked();
         busy.set(true);
         error.set(None);
         spawn_local(async move {
@@ -313,11 +326,17 @@ pub fn SlicePage() -> impl IntoView {
             };
             selected.try_set(Some(first));
             compare_ids.try_set(if ids.len() > 1 { ids } else { Vec::new() });
-            match bridge::set_settings(remember).await {
-                Ok(view) => {
-                    saved.try_set(view.saved);
-                }
-                Err(e) => {
+            // The presets just used become the defaults, saved on top of the
+            // settings as they are now (Settings may have changed auto-slice
+            // since the page loaded). Nothing is saved when they can't be read.
+            if remember {
+                let saved = match bridge::get_settings().await {
+                    Ok(view) => bridge::set_settings(remember_choices(view.saved, p, q, f, b))
+                        .await
+                        .map(|_| ()),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = saved {
                     error.try_set(Some(e));
                 }
             }
@@ -393,9 +412,9 @@ pub fn SlicePage() -> impl IntoView {
                                 }
                             >
                                 <option value="">"From watch folder"</option>
-                                {move || watched.get().into_iter().map(|f| view! {
+                                <For each=move || watched.get() key=|f| f.path.clone() let:f>
                                     <option value=f.path.clone()>{f.filename.clone()}</option>
-                                }).collect::<Vec<_>>()}
+                                </For>
                             </select>
                         </Show>
                     </div>
@@ -573,6 +592,21 @@ fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
         });
     };
     let cleared = move || notice.with(|n| n.as_ref().is_some_and(|n| n.kind == FILES_CLEARED_KIND));
+    // Whether a cleared job's model is still there to slice again: a dropped
+    // model is cleared along with the cache. `None` until checked.
+    let source_ok = RwSignal::new(None::<bool>);
+    Effect::new(move |_| {
+        if !cleared() || source_ok.get_untracked().is_some() {
+            return;
+        }
+        let Some(path) = job.with_untracked(|j| j.as_ref().map(|j| j.source_path.clone())) else {
+            return;
+        };
+        spawn_local(async move {
+            let ok = bridge::model_exists(path).await;
+            source_ok.try_set(Some(ok));
+        });
+    });
     view! {
         <section class="sl-job">
             <header class="sl-job-head">
@@ -599,7 +633,15 @@ fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
                 <div class="sl-notice">
                     <p class="sl-error sl-action-error">{n.message}</p>
                     <Show when=cleared>
-                        <button class="sl-btn sl-reslice" disabled=move || reslicing.get() on:click=reslice>"Slice again"</button>
+                        {move || match source_ok.get() {
+                            Some(true) => view! {
+                                <button class="sl-btn sl-reslice" disabled=move || reslicing.get() on:click=reslice>"Slice again"</button>
+                            }.into_any(),
+                            Some(false) => view! {
+                                <p class="sl-reslice-gone">"The model was cleared too; drop it again."</p>
+                            }.into_any(),
+                            None => ().into_any(),
+                        }}
                     </Show>
                 </div>
             })}

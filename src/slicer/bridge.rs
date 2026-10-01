@@ -137,6 +137,18 @@ pub async fn clear_cache() -> Result<u64, String> {
     call("slicer_clear_cache", &NoArgs {}).await
 }
 
+#[derive(Serialize)]
+struct PathArgs {
+    path: String,
+}
+
+/// Whether a job's model can still be sliced; `false` when the check fails.
+pub async fn model_exists(path: String) -> bool {
+    call("slicer_model_exists", &PathArgs { path })
+        .await
+        .unwrap_or(false)
+}
+
 pub async fn pick_model() -> Result<Option<String>, String> {
     call("slicer_pick_model", &NoArgs {}).await
 }
