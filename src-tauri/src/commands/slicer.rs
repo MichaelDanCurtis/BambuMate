@@ -32,6 +32,11 @@ pub const JOB_EVENT: &str = "slicer://job";
 /// launch and by "Clear slice cache"; staging a new model removes the older
 /// folders no waiting or running job uses.
 pub const INPUTS_DIR: &str = "slice-inputs";
+/// "Open in Bambu Studio" opens a copy kept here, outside the cache, so
+/// eviction or "Clear slice cache" can't remove a file Bambu Studio has open.
+pub const OPENED_DIR: &str = "opened";
+/// Copies kept in [`OPENED_DIR`]; older ones are removed first.
+const KEEP_OPENED: usize = 10;
 /// Largest model the Slice page accepts by drag and drop.
 const MAX_STAGED_BYTES: usize = 512 * 1024 * 1024;
 const MAX_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
@@ -282,13 +287,103 @@ pub async fn slicer_open_in_bambu_studio(
 ) -> Result<crate::commands::launcher::LaunchResult, ErrorView> {
     let view = svc.job(job_id).ok_or_else(|| job_file_error(JOB_GONE))?;
     let output = finished_output(&view).map_err(job_file_error)?;
+    let opened = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| job_file_error(&e.to_string()))?
+        .join(OPENED_DIR);
+    let copy = blocking(move || copy_for_opening(&opened, job_id, &output, KEEP_OPENED))
+        .await
+        .and_then(|r| r)
+        .map_err(|e| job_file_error(&e))?;
     crate::commands::launcher::launch_bambu_studio(
         app,
-        Some(output.to_string_lossy().into_owned()),
+        Some(copy.to_string_lossy().into_owned()),
         None,
     )
     .await
     .map_err(|e| job_file_error(&e))
+}
+
+/// Copies a job's sliced file into `opened` as
+/// `<job-id>-<cache key>.gcode.3mf` and returns the copy, then keeps only the
+/// `keep` most recently opened copies. Job ids start again with each launch,
+/// so the name also carries the cache entry's key (the output's folder
+/// name): the same name always means the same content, and an existing copy
+/// (which Bambu Studio may still have open) is reused, never overwritten.
+fn copy_for_opening(
+    opened: &Path,
+    job_id: u64,
+    output: &Path,
+    keep: usize,
+) -> Result<PathBuf, String> {
+    let fail = |e: std::io::Error| format!("BambuMate couldn't copy the sliced file: {e}");
+    let key: String = output
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| {
+            n.to_string_lossy()
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .take(16)
+                .collect()
+        })
+        .unwrap_or_default();
+    let name = if key.is_empty() {
+        format!("{job_id}.gcode.3mf")
+    } else {
+        format!("{job_id}-{key}.gcode.3mf")
+    };
+    std::fs::create_dir_all(opened).map_err(fail)?;
+    let dest = opened.join(&name);
+    let same = |a: &Path, b: &Path| match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.is_file() && a.len() == b.len(),
+        _ => false,
+    };
+    if same(&dest, output) {
+        // Newest again for pruning; a copy Bambu Studio holds may refuse.
+        let _ = std::fs::File::options()
+            .write(true)
+            .open(&dest)
+            .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    } else {
+        let part = opened.join(format!(".{name}.{}.part", uuid::Uuid::new_v4()));
+        let copied = std::fs::copy(output, &part).and_then(|_| std::fs::rename(&part, &dest));
+        if let Err(e) = copied {
+            let _ = std::fs::remove_file(&part);
+            return Err(fail(e));
+        }
+    }
+    prune_opened(opened, &dest, keep);
+    Ok(dest)
+}
+
+/// Removes all but the `keep` newest `.gcode.3mf` copies in `opened`, never
+/// `current`. A copy Bambu Studio still holds open may refuse to go; it is
+/// tried again next time.
+fn prune_opened(opened: &Path, current: &Path, keep: usize) {
+    let Ok(read) = std::fs::read_dir(opened) else {
+        return;
+    };
+    let mut copies: Vec<(std::time::SystemTime, PathBuf)> = read
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            !name.starts_with('.') && name.ends_with(".gcode.3mf")
+        })
+        .filter_map(|e| {
+            let meta = std::fs::symlink_metadata(e.path()).ok()?;
+            meta.is_file()
+                .then(|| (meta.modified().unwrap_or(std::time::UNIX_EPOCH), e.path()))
+        })
+        .collect();
+    // Newest first.
+    copies.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in copies.into_iter().skip(keep) {
+        if path != current {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn inputs_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -866,6 +961,82 @@ mod tests {
         let mut queued = job.clone();
         queued.state = JobState::Queued { position: 0 };
         assert_eq!(finished_output(&queued).unwrap_err(), NOT_FINISHED);
+    }
+
+    /// A sliced file in a cache-entry-like folder named `key`.
+    fn cached_output(root: &Path, key: &str, body: &[u8]) -> PathBuf {
+        let dir = root.join("slices").join(key);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join(OUTPUT_FILE);
+        std::fs::write(&out, body).unwrap();
+        out
+    }
+
+    #[test]
+    fn opening_copies_the_sliced_file_out_of_the_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let opened = root.path().join(OPENED_DIR);
+        let out = cached_output(root.path(), "ab12cd", b"sliced");
+        let copy = copy_for_opening(&opened, 3, &out, KEEP_OPENED).unwrap();
+        assert_eq!(copy, opened.join("3-ab12cd.gcode.3mf"));
+        assert_eq!(std::fs::read(&copy).unwrap(), b"sliced");
+        // Clearing the cache leaves the opened copy alone.
+        std::fs::remove_dir_all(root.path().join("slices")).unwrap();
+        assert_eq!(std::fs::read(&copy).unwrap(), b"sliced");
+        // Opening again reuses it; nothing half-written is left behind.
+        let out = cached_output(root.path(), "ab12cd", b"sliced");
+        assert_eq!(
+            copy_for_opening(&opened, 3, &out, KEEP_OPENED).unwrap(),
+            copy
+        );
+        let names: Vec<_> = std::fs::read_dir(&opened)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("3-ab12cd.gcode.3mf")]);
+        // Job 3 of a later launch, with other content, gets its own copy.
+        let other = cached_output(root.path(), "ef34", b"other slice");
+        let later = copy_for_opening(&opened, 3, &other, KEEP_OPENED).unwrap();
+        assert_ne!(later, copy);
+        assert_eq!(std::fs::read(&later).unwrap(), b"other slice");
+        assert_eq!(std::fs::read(&copy).unwrap(), b"sliced");
+    }
+
+    #[test]
+    fn only_the_newest_opened_copies_are_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let opened = root.path().join(OPENED_DIR);
+        std::fs::create_dir_all(&opened).unwrap();
+        // Twelve older copies, job 1 the oldest.
+        let base = std::time::SystemTime::now() - Duration::from_secs(3600);
+        for id in 1..=12u64 {
+            let p = opened.join(format!("{id}-old.gcode.3mf"));
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(base + Duration::from_secs(id))
+                .unwrap();
+        }
+        // Not copies: left alone.
+        std::fs::write(opened.join("notes.txt"), b"keep").unwrap();
+        std::fs::write(opened.join(".x.gcode.3mf.part"), b"keep").unwrap();
+        let out = cached_output(root.path(), "new", b"new");
+        let copy = copy_for_opening(&opened, 13, &out, 10).unwrap();
+        assert!(copy.is_file());
+        for id in 1..=3u64 {
+            assert!(!opened.join(format!("{id}-old.gcode.3mf")).exists(), "{id}");
+        }
+        for id in 4..=12u64 {
+            assert!(opened.join(format!("{id}-old.gcode.3mf")).is_file(), "{id}");
+        }
+        assert!(opened.join("notes.txt").is_file());
+        assert!(opened.join(".x.gcode.3mf.part").is_file());
+        // The copy just made survives even a keep of zero.
+        prune_opened(&opened, &copy, 0);
+        assert!(copy.is_file());
+        assert!(!opened.join("12-old.gcode.3mf").exists());
     }
 
     #[test]
