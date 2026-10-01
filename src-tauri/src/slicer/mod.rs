@@ -6,7 +6,9 @@
 //! handed back to the user, who prints through Bambu's own path.
 
 pub mod binary;
+pub mod cache;
 pub mod command;
+pub mod jobs;
 pub mod result;
 pub mod run;
 pub mod settings;

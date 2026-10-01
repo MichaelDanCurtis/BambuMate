@@ -43,6 +43,8 @@ uuid = { version = "1", features = ["v4"] }
 # Slicing with Bambu Studio: read the output .gcode.3mf (a ZIP) and its XML metadata.
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 quick-xml = "0.42"
+# Slice cache keys (0.10 is already in Cargo.lock).
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 # killpg: stop the slicer's whole process group on cancel or timeout.
