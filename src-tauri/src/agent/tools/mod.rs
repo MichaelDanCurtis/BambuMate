@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{watch, Mutex as AsyncMutex};
 
 use super::asks::AskBroker;
 use super::types::{AppState, UiCommand};
@@ -145,6 +145,28 @@ pub struct ToolRegistry {
     host: Arc<dyn ToolHost>,
     asks: Arc<AskBroker>,
     scope: Mutex<WriteScope>,
+    /// Counts the times the user stopped this session's agent. A tool call
+    /// watches for a change after it starts; see [`CancelWatch`].
+    stops: watch::Sender<u64>,
+}
+
+/// Fires when the session's agent is stopped (interrupt or end) after the
+/// watch was taken. A call that starts later is not affected, so there is
+/// nothing to reset when a new turn begins.
+pub struct CancelWatch(watch::Receiver<u64>);
+
+impl CancelWatch {
+    pub fn is_fired(&self) -> bool {
+        self.0.has_changed().unwrap_or(false)
+    }
+
+    /// Completes once the agent is stopped.
+    pub async fn fired(&mut self) {
+        if self.0.changed().await.is_err() {
+            // The registry is gone, so nothing can stop the call any more.
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 impl ToolRegistry {
@@ -154,7 +176,19 @@ impl ToolRegistry {
             host,
             asks,
             scope: Mutex::new(WriteScope::default()),
+            stops: watch::channel(0).0,
         }
+    }
+
+    /// Takes a watch for a call that is about to start.
+    pub fn cancel_watch(&self) -> CancelWatch {
+        CancelWatch(self.stops.subscribe())
+    }
+
+    /// Tells every call in flight that the agent was stopped. Called from the
+    /// backends' interrupt and end-session paths.
+    pub fn cancel_calls(&self) {
+        self.stops.send_modify(|n| *n += 1);
     }
     pub fn session_id(&self) -> &str {
         &self.session_id

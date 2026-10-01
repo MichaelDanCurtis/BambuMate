@@ -332,7 +332,7 @@ async fn dispatch(
             *l = None;
         }
     }
-    let active: Vec<(String, u32)> = {
+    let active: Vec<(String, u32, Arc<ToolRegistry>)> = {
         let mut sessions = shared.sessions.lock().unwrap();
         sessions
             .iter_mut()
@@ -340,13 +340,15 @@ async fn dispatch(
             .map(|(sid, s)| {
                 s.in_flight = false;
                 s.turn_id = None;
-                (sid.clone(), s.seq)
+                (sid.clone(), s.seq, s.opts.registry.clone())
             })
             .collect()
     };
-    for (sid, seq) in active {
-        // Questions from the dead process can never be answered back to it.
+    for (sid, seq, registry) in active {
+        // Questions and tool calls for the dead process can never be
+        // answered back to it.
         shared.asks.cancel_session(&sid);
+        registry.cancel_calls();
         shared.emit(AgentEvent::Error {
             session_id: Some(sid.clone()),
             message: "Codex stopped unexpectedly. Send another message to restart it.".into(),
@@ -426,13 +428,17 @@ async fn on_request(rpc: &RpcConnection, shared: &Shared, id: Value, method: &st
                 name: tool.clone(),
                 args: args.clone(),
             });
+            let stopped = registry.cancel_watch();
             let out = registry.call(&tool, args).await;
-            shared.emit(AgentEvent::ToolResult {
-                session_id: sid,
-                call_id,
-                ok: out.ok,
-                summary: out.summary(),
-            });
+            // A call the user stopped has no turn left to report to.
+            if !stopped.is_fired() {
+                shared.emit(AgentEvent::ToolResult {
+                    session_id: sid,
+                    call_id,
+                    ok: out.ok,
+                    summary: out.summary(),
+                });
+            }
             let _ = rpc.respond(id, out.to_codex_response()).await;
         }
         "item/tool/requestUserInput" => {
@@ -805,6 +811,16 @@ impl AgentBackend for CodexBackend {
 
     async fn interrupt(&self, session_id: &str) -> Result<(), String> {
         self.shared.asks.cancel_session(session_id);
+        let registry = self
+            .shared
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .map(|s| s.opts.registry.clone());
+        if let Some(registry) = registry {
+            registry.cancel_calls();
+        }
         let (thread_id, turn_id, ended_seq) = {
             let mut sessions = self.shared.sessions.lock().unwrap();
             let s = sessions.get_mut(session_id).ok_or("unknown session")?;
@@ -844,7 +860,10 @@ impl AgentBackend for CodexBackend {
 
     async fn end_session(&self, session_id: &str) {
         self.shared.asks.cancel_session(session_id);
-        self.shared.sessions.lock().unwrap().remove(session_id);
+        let removed = self.shared.sessions.lock().unwrap().remove(session_id);
+        if let Some(s) = removed {
+            s.opts.registry.cancel_calls();
+        }
     }
 }
 
@@ -1441,6 +1460,20 @@ mod tests {
         })
         .await;
         assert!(models.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupt_stops_tool_calls_in_flight_but_not_later_ones() {
+        let (p, mut srv) = fake_process();
+        let r = rig(vec![p]);
+        started(&r, &mut srv).await;
+        let in_flight = r.opts.registry.cancel_watch();
+        r.backend.interrupt("s1").await.unwrap();
+        assert!(in_flight.is_fired());
+        assert!(!r.opts.registry.cancel_watch().is_fired());
+        let after_end = r.opts.registry.cancel_watch();
+        r.backend.end_session("s1").await;
+        assert!(after_end.is_fired(), "ending the session stops calls too");
     }
 
     #[tokio::test]

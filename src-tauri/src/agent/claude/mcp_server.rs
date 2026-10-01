@@ -125,7 +125,7 @@ impl ServerHandler for BmServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let name = request.name.to_string();
         let args = Value::Object(request.arguments.clone().unwrap_or_default());
@@ -141,7 +141,11 @@ impl ServerHandler for BmServer {
             name: name.clone(),
             args: args.clone(),
         });
-        let out = self.registry.call(&name, args).await;
+        // A `notifications/cancelled` for this request drops the call.
+        let out = tokio::select! {
+            out = self.registry.call(&name, args) => out,
+            _ = context.ct.cancelled() => ToolOutput::error("cancelled"),
+        };
         asks.emit(AgentEvent::ToolResult {
             session_id: sid,
             call_id,

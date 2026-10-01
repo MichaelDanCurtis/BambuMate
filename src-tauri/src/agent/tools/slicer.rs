@@ -4,6 +4,7 @@
 use serde_json::{json, Value};
 
 use super::{arg_opt_str, ToolOutput, ToolRegistry, ToolSpec};
+use crate::commands::slicer::finished_output;
 use crate::slicer::jobs::{JobState, JobView};
 use crate::slicer::result::WarningLevel;
 
@@ -29,11 +30,11 @@ pub fn specs() -> Vec<ToolSpec> {
             name: "bm_slice",
             description: "Slice an .stl or .3mf with the user's Bambu Studio and return per-plate print time, weight, cost, filament use and slicer warnings, plus the sliced file's path. Missing presets use the user's slicing defaults. compare_filaments slices the same model once per extra filament (max 3). Never prints or uploads anything.",
             input_schema: json!({"type":"object","properties":{
-                "model_path":{"type":"string"},
+                "model_path":{"type":"string","description":"Absolute path of an existing .stl or .3mf model"},
                 "printer":{"type":"string","description":"Bambu Studio printer preset name"},
                 "process":{"type":"string","description":"Bambu Studio process preset name"},
                 "filament":{"type":"string","description":"Bambu Studio filament preset name"},
-                "compare_filaments":{"type":"array","items":{"type":"string"}}
+                "compare_filaments":{"type":"array","items":{"type":"string"},"description":"Up to 3 extra filament presets, sliced with the same printer and process"}
             },"required":["model_path"]}),
         },
         ToolSpec {
@@ -63,7 +64,7 @@ fn round2(v: f64) -> f64 {
 /// What the agent sees of a job. The output path is included; the user's
 /// presets folder and Bambu Studio's paths are not.
 pub fn job_summary(view: &JobView) -> Value {
-    let mut out = json!({
+    let out = json!({
         "job_id": view.id,
         "model": view.model_name,
         "printer": view.printer,
@@ -76,6 +77,11 @@ pub fn job_summary(view: &JobView) -> Value {
         JobState::Cancelled => json!({"status":"cancelled"}),
         JobState::Failed { error } => json!({"status":"failed","error":error.message}),
         JobState::Done { result, cached } => {
+            // The sliced file is gone (the cache was cleared): don't hand
+            // out its dead path or stale numbers.
+            if let Err(cleared) = finished_output(view) {
+                return merge(out, json!({"status":"cleared","error":cleared}));
+            }
             let plates: Vec<Value> = result
                 .plates
                 .iter()
@@ -110,10 +116,21 @@ pub fn job_summary(view: &JobView) -> Value {
             })
         }
     };
+    merge(out, extra)
+}
+
+fn merge(mut out: Value, extra: Value) -> Value {
     if let (Value::Object(o), Value::Object(e)) = (&mut out, extra) {
         o.extend(e);
     }
     out
+}
+
+/// A preset argument, trimmed; blank means "use the default".
+fn arg_preset(args: &Value, key: &str) -> Option<String> {
+    arg_opt_str(args, key)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 pub async fn handle(reg: &ToolRegistry, name: &str, args: &Value) -> Option<ToolOutput> {
@@ -127,20 +144,27 @@ pub async fn handle(reg: &ToolRegistry, name: &str, args: &Value) -> Option<Tool
                 Ok((p, _)) => p.to_string_lossy().into_owned(),
                 Err(e) => return Some(ToolOutput::error(e.to_string())),
             };
-            let compare: Vec<String> = match args.get("compare_filaments") {
-                None | Some(Value::Null) => Vec::new(),
-                Some(Value::Array(items)) => items
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .map(str::to_string)
-                    .filter(|s| !s.trim().is_empty())
-                    .collect(),
-                Some(_) => {
-                    return Some(ToolOutput::error(
-                        "'compare_filaments' must be an array of preset names",
-                    ))
-                }
-            };
+            let compare: Vec<String> =
+                match args.get("compare_filaments") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(items)) => {
+                        let mut names = Vec::new();
+                        for item in items {
+                            match item.as_str().map(str::trim) {
+                                Some(s) if !s.is_empty() => names.push(s.to_string()),
+                                _ => return Some(ToolOutput::error(
+                                    "'compare_filaments' entries must be non-blank preset names",
+                                )),
+                            }
+                        }
+                        names
+                    }
+                    Some(_) => {
+                        return Some(ToolOutput::error(
+                            "'compare_filaments' must be an array of preset names",
+                        ))
+                    }
+                };
             if compare.len() > MAX_COMPARE {
                 return Some(ToolOutput::error(format!(
                     "compare at most {MAX_COMPARE} extra filaments"
@@ -148,16 +172,22 @@ pub async fn handle(reg: &ToolRegistry, name: &str, args: &Value) -> Option<Tool
             }
             let req = SliceToolRequest {
                 model_path,
-                printer: arg_opt_str(args, "printer"),
-                process: arg_opt_str(args, "process"),
-                filament: arg_opt_str(args, "filament"),
+                printer: arg_preset(args, "printer"),
+                process: arg_preset(args, "process"),
+                filament: arg_preset(args, "filament"),
                 compare_filaments: compare,
             };
-            match host.slice(req).await {
-                Ok(views) => ToolOutput::json(&json!({
-                    "jobs": views.iter().map(job_summary).collect::<Vec<_>>()
-                })),
-                Err(e) => ToolOutput::error(e),
+            // Stopping the agent drops the wait, which cancels the jobs it
+            // queued (see `TauriToolHost::slice`).
+            let mut stopped = reg.cancel_watch();
+            tokio::select! {
+                res = host.slice(req) => match res {
+                    Ok(views) => ToolOutput::json(&json!({
+                        "jobs": views.iter().map(job_summary).collect::<Vec<_>>()
+                    })),
+                    Err(e) => ToolOutput::error(e),
+                },
+                _ = stopped.fired() => ToolOutput::error("stopped; the queued slicing jobs were cancelled"),
             }
         }
         "bm_slice_result" => {
@@ -236,6 +266,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopping_the_agent_ends_the_wait_and_drops_the_queued_jobs() {
+        let h = Arc::new(FakeHost::new());
+        h.slice_hangs
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (reg, _rx) = registry_with(h.clone());
+        let reg = Arc::new(reg);
+        let stl = h.user_dir.path().join("cube.stl");
+        std::fs::write(&stl, b"solid").unwrap();
+        let call = {
+            let reg = reg.clone();
+            let args = json!({"model_path": stl.to_string_lossy()});
+            tokio::spawn(async move { reg.call("bm_slice", args).await })
+        };
+        while !h.slice_waiting.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        assert!(!h.slice_dropped.load(std::sync::atomic::Ordering::SeqCst));
+        reg.cancel_calls();
+        let out = tokio::time::timeout(std::time::Duration::from_secs(30), call)
+            .await
+            .expect("the wait ended")
+            .unwrap();
+        assert!(!out.ok);
+        assert!(out.summary().contains("cancelled"));
+        assert!(
+            h.slice_dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the host's wait was dropped, which cancels its jobs"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_before_a_call_does_not_cancel_it() {
+        let h = Arc::new(FakeHost::new());
+        let (reg, _rx) = registry_with(h.clone());
+        reg.cancel_calls();
+        let stl = h.user_dir.path().join("cube.stl");
+        std::fs::write(&stl, b"solid").unwrap();
+        let out = reg
+            .call("bm_slice", json!({"model_path": stl.to_string_lossy()}))
+            .await;
+        assert!(out.ok, "{}", out.summary());
+    }
+
+    #[test]
+    fn a_cleared_output_reports_the_clear_copy_and_no_path() {
+        let mut job = crate::agent::tools::fake_host::done_job(3);
+        if let JobState::Done { result, .. } = &mut job.state {
+            result.output_path = "/nope/output.gcode.3mf".into();
+        }
+        let v = job_summary(&job);
+        assert_eq!(v["status"], "cleared");
+        assert_eq!(
+            v["error"],
+            "That slice's files were cleared; slice it again."
+        );
+        assert!(v.get("output_path").is_none());
+        assert!(v.get("plates").is_none());
+        // A job whose file is still there keeps its path.
+        let ok = job_summary(&crate::agent::tools::fake_host::done_job(3));
+        assert_eq!(ok["status"], "done");
+        assert!(std::path::Path::new(ok["output_path"].as_str().unwrap()).is_file());
+    }
+
+    #[tokio::test]
+    async fn bad_compare_entries_are_refused_and_preset_args_are_trimmed() {
+        let h = Arc::new(FakeHost::new());
+        let (reg, _rx) = registry_with(h.clone());
+        let stl = h.user_dir.path().join("cube.stl");
+        std::fs::write(&stl, b"solid").unwrap();
+        for bad in [json!([1]), json!(["a", "  "]), json!([null]), json!("a")] {
+            let out = reg
+                .call(
+                    "bm_slice",
+                    json!({"model_path": stl.to_string_lossy(), "compare_filaments": bad}),
+                )
+                .await;
+            assert!(!out.ok, "{bad}");
+        }
+        assert!(h.calls.lock().unwrap().is_empty());
+        let out = reg
+            .call(
+                "bm_slice",
+                json!({"model_path": stl.to_string_lossy(), "filament": "  PLA  ", "compare_filaments": [" PETG "]}),
+            )
+            .await;
+        assert!(out.ok);
+        assert!(h.calls.lock().unwrap()[0].ends_with(":PLA:PETG"));
+        // Blank presets mean "use the default".
+        let out = reg
+            .call(
+                "bm_slice",
+                json!({"model_path": stl.to_string_lossy(), "filament": "   "}),
+            )
+            .await;
+        assert!(out.ok);
+        assert!(h.calls.lock().unwrap()[1].ends_with("::"));
+    }
+
+    #[tokio::test]
     async fn too_many_comparisons_are_refused() {
         let h = Arc::new(FakeHost::new());
         let (reg, _rx) = registry_with(h.clone());
@@ -264,6 +393,16 @@ mod tests {
             v["error"],
             "Bambu Studio couldn't slice this model: No valid nozzle found. Please check nozzle count."
         );
+        let cleared = reg.call("bm_slice_result", json!({"job_id": 8})).await;
+        let crate::agent::tools::ToolContent::Text(text) = &cleared.content[0] else {
+            panic!()
+        };
+        let v: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            v["error"],
+            "That slice's files were cleared; slice it again."
+        );
+        assert!(!text.contains("/nope"));
         assert!(!reg.call("bm_slice_result", json!({"job_id": 99})).await.ok);
         assert!(!reg.call("bm_slice_result", json!({})).await.ok);
     }

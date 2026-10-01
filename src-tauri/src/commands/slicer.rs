@@ -191,7 +191,7 @@ pub fn slicer_jobs(svc: State<'_, SlicerService>) -> Vec<JobView> {
 }
 
 /// The finished job's sliced file, which must still be on disk.
-fn finished_output(view: &JobView) -> Result<PathBuf, &'static str> {
+pub(crate) fn finished_output(view: &JobView) -> Result<PathBuf, &'static str> {
     let JobState::Done { result, .. } = &view.state else {
         return Err(NOT_FINISHED);
     };

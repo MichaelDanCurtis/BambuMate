@@ -228,7 +228,13 @@ impl ToolHost for TauriToolHost {
             .ok_or("Slicing isn't available.")?
             .inner()
             .clone();
-        let defaults = crate::commands::slicer::effective_settings(&self.app);
+        // Reads BambuStudio.conf, so not on the async runtime.
+        let app = self.app.clone();
+        let defaults = tauri::async_runtime::spawn_blocking(move || {
+            crate::commands::slicer::effective_settings(&app)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
         let filaments = std::iter::once(req.filament.clone())
             .chain(req.compare_filaments.iter().cloned().map(Some));
         // Cancels this call's unfinished jobs if it ends early: a refused
@@ -259,14 +265,12 @@ impl ToolHost for TauriToolHost {
         let mut views = Vec::new();
         for id in guard.ids.clone() {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if let Some(v) = svc.wait(id, left).await {
-                views.push(v);
-            }
+            views.push(svc.wait(id, left).await);
         }
+        let ids = std::mem::take(&mut guard.ids);
         // The caller has its answer: jobs still waiting past the bound keep
         // going, so bm_slice_result can pick them up.
-        guard.ids.clear();
-        Ok(views)
+        all_known(&ids, views)
     }
 
     fn slice_job(&self, job_id: u64) -> Option<crate::slicer::jobs::JobView> {
@@ -275,6 +279,21 @@ impl ToolHost for TauriToolHost {
             .try_state::<crate::slicer::jobs::SlicerService>()
             .and_then(|s| s.job(job_id))
     }
+}
+
+/// The waited-for jobs, or an explicit error when the queue no longer knows
+/// one of them (it keeps only the latest finished jobs), never a short list.
+fn all_known(
+    ids: &[u64],
+    views: Vec<Option<crate::slicer::jobs::JobView>>,
+) -> Result<Vec<crate::slicer::jobs::JobView>, String> {
+    let known: Vec<_> = views.into_iter().flatten().collect();
+    if known.len() == ids.len() {
+        return Ok(known);
+    }
+    Err(format!(
+        "That slice is no longer available. The jobs queued were {ids:?}; bm_slice_result reads any that are still known."
+    ))
 }
 
 /// How long `bm_slice` waits for its jobs before handing back whatever state
@@ -407,5 +426,17 @@ mod tests {
             g.ids.clear();
         }
         assert!(cancelled.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_job_the_queue_forgot_is_an_error_not_a_short_list() {
+        let job = crate::agent::tools::fake_host::done_job(1);
+        assert_eq!(
+            all_known(&[1], vec![Some(job.clone())]).unwrap(),
+            vec![job.clone()]
+        );
+        let err = all_known(&[1, 2], vec![Some(job), None]).unwrap_err();
+        assert!(err.starts_with("That slice is no longer available."));
+        assert!(all_known(&[5], vec![None]).is_err());
     }
 }
