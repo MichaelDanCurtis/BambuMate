@@ -160,7 +160,6 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                 when=move || ff_ctx.flags.get().analysis_enabled
                 fallback=move || view! {
                     <div class="ai-required-notice">
-                        <div class="ai-required-lock">"🔒"</div>
                         <h3>"AI Required"</h3>
                         <p>
                             "Print Analysis uses AI vision models to detect defects in your prints "

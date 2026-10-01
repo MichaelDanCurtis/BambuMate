@@ -74,8 +74,20 @@ function installTauriMock(fixtures) {
   const unknown = [];
   const handlers = {};
   window.__ipc = { calls, unknown };
+  // The real backend recomputes get_feature_flags from stored preferences, so
+  // flipping the Settings page's AI toggle off should be reflected the next
+  // time the frontend re-fetches flags. The fixture itself is static, so this
+  // is the cheapest way to get a real AI-off state without a second fixture
+  // set: track the one preference write that matters and answer accordingly.
+  let analysisEnabled = fixtures.get_feature_flags?.analysis_enabled ?? true;
   const invoke = async (cmd, args) => {
     calls.push({ cmd, args });
+    if (cmd === "set_preference" && args?.key === "filament_search_use_ai" && args?.value === "false") {
+      analysisEnabled = false;
+    }
+    if (cmd === "get_feature_flags") {
+      return { ...fixtures.get_feature_flags, analysis_enabled: analysisEnabled };
+    }
     if (!(cmd in fixtures)) {
       unknown.push(cmd);
       throw new Error(`no fixture for command '${cmd}'`);
@@ -157,6 +169,92 @@ async function driveApp(browserType, engine, baseUrl) {
       ...new Set(window.__ipc.calls.map((c) => c.cmd)),
     ]);
     return cmds.join(", ");
+  });
+
+  // -- rail sidebar ----------------------------------------------------------
+  await step(run, page, "rail is collapsed to 64px with icons only", async () => {
+    const w = await page.locator("nav.sidebar").evaluate((el) => el.getBoundingClientRect().width);
+    if (Math.round(w) !== 64) throw new Error(`rail width ${w}`);
+    const labelOpacity = await page.locator(".nav-label").first().evaluate((el) => getComputedStyle(el).opacity);
+    if (labelOpacity !== "0") throw new Error(`label opacity ${labelOpacity}`);
+  });
+
+  await step(run, page, "hovering expands the rail over the content", async () => {
+    const before = await page.locator(".content").evaluate((el) => el.getBoundingClientRect().left);
+    await page.hover("nav.sidebar");
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219, null, { timeout: 3000 });
+    const after = await page.locator(".content").evaluate((el) => el.getBoundingClientRect().left);
+    if (before !== after) throw new Error(`content moved from ${before} to ${after}`);
+    // "220px with labels visible" -- opacity is a transition, so poll for it
+    // rather than reading it once.
+    await page.waitForFunction(
+      () => getComputedStyle(document.querySelector(".nav-label")).opacity === "1",
+      null,
+      { timeout: 3000 }
+    );
+    if (await page.locator(".sidebar-wordmark").count()) {
+      await page.waitForFunction(
+        () => getComputedStyle(document.querySelector(".sidebar-wordmark")).opacity === "1",
+        null,
+        { timeout: 3000 }
+      );
+    }
+    await page.mouse.move(900, 400);
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65, null, { timeout: 3000 });
+  });
+
+  // Real Tab presses were tried first (the concern being that programmatic
+  // focus() doesn't reliably set :focus-visible), but WebKit's headless
+  // engine -- like real Safari's default "Text boxes and lists only" keyboard
+  // setting -- never gives an <a> Tab focus at all here, in either direction,
+  // so a key-driven approach can't reach this link in that engine. Verified
+  // directly: after the preceding hover step, page.locator(...).focus() does
+  // set :focus-visible (and expands the rail) in both engines, so it is used
+  // here instead. See Task 6 report for the measurements.
+  //
+  // What this step proves: once a link is focus-visible, the rail's CSS
+  // reacts correctly (expands, labels become visible). What it does NOT
+  // prove: that the link is reachable by an actual Tab key press -- WebKit's
+  // headless engine can't exercise that here (see above), so the tabIndex
+  // check below is the closest available guard against a link silently
+  // dropping out of the tab order (tabindex="-1"), which programmatic
+  // .focus() would not otherwise reveal.
+  await step(run, page, "keyboard focus expands the rail", async () => {
+    await page.locator('nav.sidebar a[href="/profiles"]').focus();
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219, null, { timeout: 3000 });
+    await page.waitForFunction(
+      () => getComputedStyle(document.querySelector(".nav-label")).opacity === "1",
+      null,
+      { timeout: 3000 }
+    );
+    if (await page.locator(".sidebar-wordmark").count()) {
+      await page.waitForFunction(
+        () => getComputedStyle(document.querySelector(".sidebar-wordmark")).opacity === "1",
+        null,
+        { timeout: 3000 }
+      );
+    }
+    const outOfOrder = await page
+      .locator("nav.sidebar a")
+      .evaluateAll((els) => els.filter((el) => el.tabIndex < 0).map((el) => el.getAttribute("href")));
+    if (outOfOrder.length) throw new Error(`removed from tab order: ${outOfOrder.join(", ")}`);
+    await page.evaluate(() => document.activeElement.blur());
+  });
+
+  await step(run, page, "active route shows the signal tick", async () => {
+    const current = await page.locator('nav.sidebar a[aria-current="page"]').getAttribute("href");
+    if (current !== "/") throw new Error(`aria-current on ${current}`);
+    const tick = await page.locator('nav.sidebar a[aria-current="page"]').evaluate((el) => getComputedStyle(el, "::before").backgroundColor);
+    if (!tick || tick === "rgba(0, 0, 0, 0)") throw new Error(`no tick colour (${tick})`);
+  });
+
+  // Regression for the exact bug the Task 5 fix round addressed: Chromium
+  // focuses a link on mousedown, and with :focus-within that kept the rail
+  // stuck open after an ordinary click. :has(:focus-visible) should not.
+  await step(run, page, "clicking a nav link does not leave the rail open", async () => {
+    await page.click('nav.sidebar a[href="/analysis"]');
+    await page.mouse.move(900, 400);
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65, null, { timeout: 3000 });
   });
 
   // -- filament search and selection ---------------------------------------
@@ -490,6 +588,33 @@ async function driveApp(browserType, engine, baseUrl) {
     return `${rows} providers`;
   });
 
+  // Regression for the Task 5 fix that made .nav-lock absolutely positioned
+  // over the icon's corner instead of flowing after the (opacity:0, but still
+  // full-width) label -- otherwise it would sit past the edge of the 64px
+  // collapsed rail. Turning AI off here, after the two prior steps that need
+  // it on, keeps this order-independent of the rest of the flow: nothing
+  // after this point revisits Print Analysis or the AI-gated Settings UI.
+  await step(run, page, "AI-off lock is visible on the collapsed rail", async () => {
+    await page.locator(".settings-page .wizard-mode-card", { hasText: "Manufacturer Specs Only" }).click();
+    await page.waitForFunction(
+      () => window.__ipc.calls.some(
+        (c) => c.cmd === "set_preference" && c.args?.key === "filament_search_use_ai" && c.args?.value === "false"
+      ),
+      null,
+      { timeout: 5000 }
+    );
+    const lock = page.locator('nav.sidebar a[href="/analysis"] .nav-lock');
+    await lock.waitFor({ state: "visible", timeout: 5000 });
+    const rail = await page.locator("nav.sidebar").boundingBox();
+    const box = await lock.boundingBox();
+    if (!box || !rail) throw new Error("lock or rail has no box");
+    if (rail.width > 65) throw new Error(`rail not collapsed: ${rail.width}px`);
+    if (box.x + box.width > rail.x + rail.width + 1) {
+      throw new Error(`lock (x=${box.x}, w=${box.width}) extends past the ${Math.round(rail.width)}px rail`);
+    }
+    return `lock at x=${Math.round(box.x)} within ${Math.round(rail.width)}px rail`;
+  });
+
   await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });
 
   // -- health check ----------------------------------------------------------
@@ -621,8 +746,15 @@ async function driveApp(browserType, engine, baseUrl) {
 
   await step(run, page, "invalid-profile warning is shown in accent", async () => {
     await emit({ kind: "invalid_profiles", session_id: "sess-1", seq: 1, paths: ["/p/Broken.json"] });
-    const color = await page.locator(".ag-notice.ag-error").last().evaluate((el) => getComputedStyle(el).color);
-    if (!/215,\s*25,\s*33/.test(color)) throw new Error(`notice color ${color}`);
+    const { color, accent } = await page.locator(".ag-notice.ag-error").last().evaluate((el) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--nd-accent)";
+      el.parentElement.appendChild(probe);
+      const accent = getComputedStyle(probe).color;
+      probe.remove();
+      return { color: getComputedStyle(el).color, accent };
+    });
+    if (color !== accent) throw new Error(`notice color ${color}, accent ${accent}`);
   });
 
   await page.screenshot({ path: `flow-${engine}-agent.png`, fullPage: false });

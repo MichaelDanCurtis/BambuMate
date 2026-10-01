@@ -550,7 +550,6 @@ pub fn SetupWizard(
                                     class={move || if use_ai_mode.get() == Some(true) { "wizard-mode-card selected" } else { "wizard-mode-card" }}
                                     on:click=move |_| use_ai_mode.set(Some(true))
                                 >
-                                    <div class="wizard-mode-icon">"🤖"</div>
                                     <h4>"Use AI (Recommended)"</h4>
                                     <p>
                                         "Use an AI model with your API key to intelligently extract filament "
@@ -569,7 +568,6 @@ pub fn SetupWizard(
                                     class={move || if use_ai_mode.get() == Some(false) { "wizard-mode-card selected" } else { "wizard-mode-card" }}
                                     on:click=move |_| use_ai_mode.set(Some(false))
                                 >
-                                    <div class="wizard-mode-icon">"🌐"</div>
                                     <h4>"Use Manufacturer Specs"</h4>
                                     <p>
                                         "Pull specs directly from manufacturer websites and SpoolScout. "
@@ -751,7 +749,7 @@ pub fn SetupWizard(
                             <Show when=move || !is_loading_models.get() && model_error.get().is_empty()>
                                 <Show when=move || !vision_available.get()>
                                     <div class="wizard-status wizard-status-warning">
-                                        <strong>"⚠ No vision-capable model on this account."</strong>
+                                        <strong>"No vision-capable model on this account."</strong>
                                         <p>
                                             "BambuMate's print analysis and defect detection features need image input. "
                                             "You can still use this provider for text-only features (filament search, profile generation), "
@@ -790,7 +788,7 @@ pub fn SetupWizard(
                                         {move || available_models.get().iter().filter(|m| show_all_models.get() || m.vision).map(|m| {
                                             let id = m.id.clone();
                                             let mut label = if m.recommended {
-                                                format!("⭐ Recommended — {}", m.name)
+                                                format!("Recommended — {}", m.name)
                                             } else {
                                                 m.name.clone()
                                             };

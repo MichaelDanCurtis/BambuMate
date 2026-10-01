@@ -5,7 +5,10 @@
     position: fixed;
     top: 12px;
     right: 16px;
-    z-index: 40;
+    /* Raised together with .agent-drawer, above the rail (style/main.css
+       .sidebar, z-index 600), so the drawer's own toggle stays above the
+       rail rather than the rail covering it. */
+    z-index: 650;
     padding: 6px 12px;
     border: 1px solid var(--nd-border-visible);
     border-radius: 999px;
@@ -24,7 +27,10 @@
     position: fixed;
     top: 0;
     right: 0;
-    z-index: 50;
+    /* Must stay above the rail (style/main.css .sidebar, z-index 600) so the
+       drawer keeps covering it when open, but below full-screen overlays
+       (1000, e.g. the modal/change-preview/wizard overlays). */
+    z-index: 700;
     width: min(440px, 100vw);
     height: 100vh;
     display: flex;

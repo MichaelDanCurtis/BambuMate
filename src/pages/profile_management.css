@@ -74,7 +74,7 @@
 }
 
 .profile-list-item.selected {
-    background: rgba(233, 69, 96, 0.1);
+    background: var(--nd-surface-raised);
     border-left: 3px solid var(--accent);
 }
 
@@ -169,11 +169,11 @@
 }
 
 .btn-icon.btn-danger {
-    color: #e74c3c;
+    color: var(--nd-accent);
 }
 
 .btn-icon.btn-danger:hover {
-    background: rgba(231, 76, 60, 0.1);
+    background: var(--nd-accent-subtle);
 }
 
 /* Profile fields table */
@@ -209,7 +209,10 @@
 }
 
 .field-value:hover {
-    color: var(--accent);
+    /* --accent (--nd-text-display) is nearly identical to --text-primary
+       (--nd-text-primary), so this hover was invisible. --nd-interactive
+       gives a real colour change to signal the field is editable. */
+    color: var(--nd-interactive);
 }
 
 /* Inline edit input */
@@ -235,7 +238,7 @@
     right: 0;
     bottom: 0;
     left: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background-color: rgba(0, 0, 0, 0.6);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -243,9 +246,9 @@
 }
 
 .modal-content {
-    background: var(--bg-card);
-    border: 1px solid var(--border-primary);
-    border-radius: 12px;
+    border: 1px solid var(--nd-border);
+    border-radius: var(--nd-radius-card);
+    background: var(--nd-surface);
     padding: 1.5rem;
     max-width: 400px;
     width: 90%;
@@ -269,18 +272,18 @@
 
 /* Error/success states */
 .profile-error {
-    background: rgba(231, 76, 60, 0.1);
-    border: 1px solid rgba(231, 76, 60, 0.3);
-    color: #e74c3c;
+    background: var(--nd-surface-raised);
+    border: 1px solid var(--nd-accent);
+    color: var(--nd-accent);
     padding: 0.75rem 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
 }
 
 .profile-success {
-    background: rgba(46, 204, 113, 0.1);
-    border: 1px solid rgba(46, 204, 113, 0.3);
-    color: #2ecc71;
+    background: var(--nd-surface-raised);
+    border: 1px solid var(--nd-signal);
+    color: var(--nd-signal);
     padding: 0.75rem 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
@@ -320,14 +323,17 @@
 
 /* Edit Specs button */
 .btn-edit-specs {
-    background: rgba(233, 69, 96, 0.1);
+    background: var(--nd-surface-raised);
     border-color: var(--accent);
     color: var(--accent);
     font-weight: 500;
 }
 
 .btn-edit-specs:hover {
-    background: rgba(233, 69, 96, 0.2);
+    /* The base background was the same --nd-surface-raised, so this hover
+       was invisible. --nd-border is one tier darker/lighter, flat and
+       colour-only. */
+    background: var(--nd-border);
 }
 
 /* Specs Editor embedded styles (shared with filament_search) */
@@ -366,13 +372,16 @@
 
 .spec-fields-grid {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    /* minmax(0, …): a bare 1fr track can't shrink below its content, which
+       pushed the right column past the Profiles detail panel at 900px. */
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.5rem;
 }
 
 .spec-field {
     display: flex;
     flex-direction: column;
+    min-width: 0;
     gap: 0.125rem;
 }
 
@@ -381,8 +390,12 @@
 }
 
 .spec-field-label {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-text-secondary);
 }
 
 .spec-field-label-row {
@@ -402,7 +415,7 @@
     padding: 0.375rem 0.5rem;
     font-size: 0.85rem;
     border: 1px solid var(--border-primary);
-    border-radius: 4px;
+    border-radius: var(--nd-radius-input);
     background: var(--bg-primary);
     color: var(--text-primary);
     outline: none;
@@ -427,14 +440,21 @@
 
 .spec-field-select {
     width: 100%;
-    padding: 0.5rem;
+    padding: 0.5rem 36px 0.5rem 0.5rem;
     font-size: 0.9rem;
     border: 1px solid var(--border-primary);
-    border-radius: 6px;
-    background: var(--bg-primary);
+    border-radius: var(--nd-radius-input);
+    background-color: var(--bg-primary);
     color: var(--text-primary);
     outline: none;
     cursor: pointer;
+    /* Without this WebKit draws its native Aqua bezel, a gradient pill. Same
+       chevron as select.input in style/main.css. */
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23999999' d='M1.41 0L6 4.58 10.59 0 12 1.41l-6 6-6-6z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
 }
 
 .spec-field-select:focus {
@@ -498,7 +518,6 @@
     white-space: normal;
     width: 240px;
     max-width: 90vw;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     z-index: 500;
     pointer-events: none;
 }
