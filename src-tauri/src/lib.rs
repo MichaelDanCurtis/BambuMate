@@ -10,6 +10,7 @@ pub mod model_catalog;
 mod process_command;
 pub mod profile;
 pub mod scraper;
+pub mod slicer;
 pub mod stl_watcher;
 pub mod str_utils;
 
