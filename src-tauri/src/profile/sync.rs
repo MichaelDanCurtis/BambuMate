@@ -950,7 +950,9 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            let body = std::fs::read_to_string(path).unwrap();
+            // Windows checkouts may have CRLF line endings; the test-module
+            // and pattern matching below assume LF.
+            let body = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
             if body.contains(invented_id) {
                 offenders.push(format!("{rel}: {invented_id}"));
             }
