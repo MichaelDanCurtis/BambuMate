@@ -9,14 +9,13 @@ use tauri::{AppHandle, State};
 
 use crate::history::SlotAssignment;
 use crate::printer::client::{self, ConnectionState, TestOutcome, Timing};
-use crate::printer::discovery::{self, DiscoveredPrinter};
+use crate::printer::discovery::{self, DiscoveryReport};
 use crate::printer::service::{self, PrinterService, PrinterView};
 use crate::printer::settings::{self, PrinterConfig, PrinterConfigView};
 use crate::printer::slots;
 use crate::printer::tls::normalize_fingerprint;
 use crate::profile::{reader, BambuPaths, ProfileRegistry};
 
-const DISCOVERY_WINDOW: Duration = Duration::from_secs(5);
 const TEST_WAIT: Duration = Duration::from_secs(15);
 const NEED_CODE: &str = "Enter the access code shown on the printer screen.";
 const OTHER_TARGET: &str =
@@ -98,8 +97,8 @@ pub async fn printer_get_config(app: AppHandle) -> Result<Option<PrinterConfigVi
 
 /// Listens for printer announcements for five seconds. Sends nothing.
 #[tauri::command]
-pub async fn printer_discover() -> Result<Vec<DiscoveredPrinter>, String> {
-    Ok(discovery::discover(discovery::DISCOVERY_PORTS, DISCOVERY_WINDOW).await)
+pub async fn printer_discover() -> Result<DiscoveryReport, String> {
+    discovery::discover(discovery::DISCOVERY_PORTS, discovery::DISCOVERY_WINDOW).await
 }
 
 #[tauri::command]

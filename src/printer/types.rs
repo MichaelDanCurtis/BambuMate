@@ -257,6 +257,14 @@ pub struct PrinterConfigView {
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
+pub struct DiscoveryReport {
+    pub printers: Vec<DiscoveredPrinter>,
+    pub warnings: Vec<String>,
+    pub listen_seconds: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct DiscoveredPrinter {
     pub ip: String,
     pub serial: String,

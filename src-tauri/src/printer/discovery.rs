@@ -23,6 +23,8 @@ use tokio::task::JoinSet;
 use super::settings::valid_serial;
 
 pub const DISCOVERY_PORTS: &[u16] = &[2021, 1990, 1900];
+/// A single bounded scan. Five seconds often missed the next announcement.
+pub const DISCOVERY_WINDOW: Duration = Duration::from_secs(15);
 const SSDP_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
 const BAMBU_URN: &str = "urn:bambulab-com:device:3dprinter";
 /// Most printers one discovery run reports. A flood of forged announcements
@@ -44,6 +46,19 @@ pub struct DiscoveredPrinter {
     /// more than one device.
     #[serde(default)]
     pub conflict: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryReport {
+    pub printers: Vec<DiscoveredPrinter>,
+    /// Partial listener failures remain visible even when another port works.
+    pub warnings: Vec<String>,
+    pub listen_seconds: u64,
+}
+
+enum DiscoveryEvent {
+    Printer(DiscoveredPrinter),
+    Failed(String),
 }
 
 /// A readable model name for a `DevModel.bambu.com` code. Codes are the
@@ -167,7 +182,7 @@ fn merge(found: &mut HashMap<String, DiscoveredPrinter>, p: DiscoveredPrinter) {
     }
 }
 
-fn bind_listener(port: u16) -> std::io::Result<UdpSocket> {
+fn bind_listener(port: u16, allow_loopback: bool) -> std::io::Result<UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     // Bambu Studio may already be listening on 2021.
@@ -175,14 +190,25 @@ fn bind_listener(port: u16) -> std::io::Result<UdpSocket> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     socket.set_reuse_port(true)?;
     socket.set_nonblocking(true)?;
-    socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
-    if let Err(e) = socket.join_multicast_v4(&SSDP_GROUP, &Ipv4Addr::UNSPECIFIED) {
-        tracing::debug!("SSDP multicast join on {port} failed: {e}");
+    // Loopback tests neither bind a LAN listener nor join a multicast group.
+    let address = if allow_loopback {
+        Ipv4Addr::LOCALHOST
+    } else {
+        Ipv4Addr::UNSPECIFIED
+    };
+    socket.bind(&SocketAddrV4::new(address, port).into())?;
+    if !allow_loopback {
+        socket.join_multicast_v4(&SSDP_GROUP, &Ipv4Addr::UNSPECIFIED)?;
     }
     UdpSocket::from_std(socket.into())
 }
 
-async fn listen_on(socket: UdpSocket, tx: mpsc::Sender<DiscoveredPrinter>, allow_loopback: bool) {
+async fn listen_on(
+    socket: UdpSocket,
+    port: u16,
+    tx: mpsc::Sender<DiscoveryEvent>,
+    allow_loopback: bool,
+) {
     let mut buf = vec![0u8; 2048];
     let mut errors = 0;
     loop {
@@ -190,7 +216,7 @@ async fn listen_on(socket: UdpSocket, tx: mpsc::Sender<DiscoveredPrinter>, allow
             Ok((n, from)) => {
                 errors = 0;
                 if let Some(p) = parse_announcement(&buf[..n], from.ip(), allow_loopback) {
-                    if tx.send(p).await.is_err() {
+                    if tx.send(DiscoveryEvent::Printer(p)).await.is_err() {
                         return;
                     }
                 }
@@ -198,7 +224,11 @@ async fn listen_on(socket: UdpSocket, tx: mpsc::Sender<DiscoveredPrinter>, allow
             Err(e) => {
                 errors += 1;
                 if errors > MAX_RECV_ERRORS {
-                    tracing::debug!("giving up listening for printers: {e}");
+                    let _ = tx
+                        .send(DiscoveryEvent::Failed(format!(
+                            "UDP {port} stopped receiving: {e}"
+                        )))
+                        .await;
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -209,45 +239,89 @@ async fn listen_on(socket: UdpSocket, tx: mpsc::Sender<DiscoveredPrinter>, allow
 
 /// Sockets bound and listening. Dropping this stops the listeners.
 struct Listening {
-    rx: mpsc::Receiver<DiscoveredPrinter>,
+    rx: mpsc::Receiver<DiscoveryEvent>,
+    warnings: Vec<String>,
+    active: usize,
     _tasks: JoinSet<()>,
 }
 
 impl Listening {
     /// Binds every port in `ports` that can be bound, before returning, so
     /// anything sent afterwards is buffered by the socket.
-    fn start(ports: &[u16], allow_loopback: bool) -> Self {
-        let (tx, rx) = mpsc::channel::<DiscoveredPrinter>(64);
+    fn start(ports: &[u16], allow_loopback: bool) -> Result<Self, String> {
+        Self::start_with(ports, allow_loopback, bind_listener)
+    }
+
+    fn start_with(
+        ports: &[u16],
+        allow_loopback: bool,
+        mut bind: impl FnMut(u16, bool) -> std::io::Result<UdpSocket>,
+    ) -> Result<Self, String> {
+        let (tx, rx) = mpsc::channel(64);
         let mut tasks = JoinSet::new();
+        let mut warnings = Vec::new();
         for &port in ports {
-            match bind_listener(port) {
+            match bind(port, allow_loopback) {
                 Ok(socket) => {
-                    tasks.spawn(listen_on(socket, tx.clone(), allow_loopback));
+                    tasks.spawn(listen_on(socket, port, tx.clone(), allow_loopback));
                 }
-                Err(e) => tracing::debug!("cannot listen for printers on UDP {port}: {e}"),
+                Err(e) => warnings.push(format!("Cannot listen on UDP {port}: {e}")),
             }
         }
-        Self { rx, _tasks: tasks }
+        let active = tasks.len();
+        if active == 0 {
+            return Err(discovery_error(&warnings));
+        }
+        Ok(Self {
+            rx,
+            warnings,
+            active,
+            _tasks: tasks,
+        })
     }
 
     /// Collects announcements for `window`, sorted by name.
-    async fn collect(mut self, window: Duration) -> Vec<DiscoveredPrinter> {
+    async fn collect(mut self, window: Duration) -> Result<DiscoveryReport, String> {
         let mut found: HashMap<String, DiscoveredPrinter> = HashMap::new();
         let deadline = tokio::time::Instant::now() + window;
-        while let Ok(Some(p)) = tokio::time::timeout_at(deadline, self.rx.recv()).await {
-            merge(&mut found, p);
+        while tokio::time::Instant::now() < deadline {
+            let Ok(Some(event)) = tokio::time::timeout_at(deadline, self.rx.recv()).await else {
+                break;
+            };
+            match event {
+                DiscoveryEvent::Printer(p) => merge(&mut found, p),
+                DiscoveryEvent::Failed(error) => {
+                    self.warnings.push(error);
+                    self.active = self.active.saturating_sub(1);
+                    if self.active == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        if self.active == 0 && found.is_empty() {
+            return Err(discovery_error(&self.warnings));
         }
         let mut out: Vec<DiscoveredPrinter> = found.into_values().collect();
         out.sort_by(|a, b| a.name.cmp(&b.name).then(a.serial.cmp(&b.serial)));
-        out
+        Ok(DiscoveryReport {
+            printers: out,
+            warnings: self.warnings,
+            listen_seconds: window.as_secs(),
+        })
     }
+}
+
+fn discovery_error(warnings: &[String]) -> String {
+    format!("Couldn't listen for printer announcements. Check local-network access and whether another app is using the discovery ports, or enter the printer's IP and serial manually. {}", warnings.join("; "))
 }
 
 /// Listens on `ports` for `window` and returns each printer heard, once,
 /// sorted by name, at most [`MAX_DISCOVERED`] of them. Ports that can't be
-/// bound are skipped.
-pub async fn discover(ports: &[u16], window: Duration) -> Vec<DiscoveredPrinter> {
-    Listening::start(ports, false).collect(window).await
+/// bound are reported, and total listener failure is an error. The deadline
+/// never resets on traffic, so a flood cannot extend a scan indefinitely.
+pub async fn discover(ports: &[u16], window: Duration) -> Result<DiscoveryReport, String> {
+    Listening::start(ports, false)?.collect(window).await
 }
 
 #[cfg(test)]
@@ -411,7 +485,7 @@ mod tests {
             .port();
         // The sockets are bound before `start` returns, so datagrams sent
         // next are buffered and no sleep is needed.
-        let listening = Listening::start(&[port], true);
+        let listening = Listening::start(&[port], true).unwrap();
         let from_loopback = NOTIFY.replace("192.168.1.20", "127.0.0.1");
         let forged = NOTIFY.replace("0948AB000000001", "FORGED0000000001");
         let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -424,10 +498,108 @@ mod tests {
         sender
             .send_to(forged.as_bytes(), ("127.0.0.1", port))
             .unwrap();
-        let found = listening.collect(Duration::from_millis(400)).await;
+        let found = listening
+            .collect(Duration::from_millis(400))
+            .await
+            .unwrap()
+            .printers;
         assert_eq!(found.len(), 1, "the same printer twice is listed once");
         assert_eq!(found[0].serial, "0948AB000000001");
         assert_eq!(found[0].ip, "127.0.0.1");
         assert!(!found[0].conflict);
+    }
+
+    #[tokio::test]
+    async fn total_listener_failure_is_an_error_not_an_empty_scan() {
+        let result = Listening::start_with(&[2021, 1990, 1900], true, |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ))
+        });
+        let error = match result {
+            Err(e) => e,
+            Ok(_) => panic!("scan unexpectedly started"),
+        };
+        assert!(error.contains("Couldn't listen"));
+        assert!(error.contains("local-network access"));
+        for port in DISCOVERY_PORTS {
+            assert!(error.contains(&format!("UDP {port}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_listener_failure_is_returned_without_blocking_a_healthy_scan() {
+        let listening = Listening::start_with(&[2021, 1990], true, |port, _| {
+            if port == 2021 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "address in use",
+                ))
+            } else {
+                // Ephemeral loopback socket; never joins a LAN multicast group.
+                UdpSocket::from_std({
+                    let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+                    socket.set_nonblocking(true)?;
+                    socket
+                })
+            }
+        })
+        .unwrap();
+        let report = listening.collect(Duration::ZERO).await.unwrap();
+        assert!(report.printers.is_empty());
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("UDP 2021"));
+    }
+
+    // A controlled event channel exercises timing without receiving from a
+    // real network or waiting 15 wall-clock seconds.
+    fn controlled() -> (Listening, mpsc::Sender<DiscoveryEvent>) {
+        let (tx, rx) = mpsc::channel(64);
+        (
+            Listening {
+                rx,
+                warnings: vec![],
+                active: 1,
+                _tasks: JoinSet::new(),
+            },
+            tx,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_announcement_after_five_seconds_is_kept_and_traffic_cannot_extend_the_deadline() {
+        let (listening, tx) = controlled();
+        let started = tokio::time::Instant::now();
+        let scan = tokio::spawn(listening.collect(DISCOVERY_WINDOW));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(!scan.is_finished());
+        tx.send(DiscoveryEvent::Printer(printer("192.168.1.20", "LATE")))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(8)).await;
+        tx.send(DiscoveryEvent::Printer(printer("192.168.1.21", "LATER")))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let report = scan.await.unwrap().unwrap();
+        assert_eq!(started.elapsed(), DISCOVERY_WINDOW);
+        assert_eq!(report.printers.len(), 2);
+        assert_eq!(report.listen_seconds, 15);
+    }
+
+    #[tokio::test]
+    async fn listeners_that_stop_receiving_produce_an_error() {
+        let (listening, tx) = controlled();
+        tx.send(DiscoveryEvent::Failed(
+            "UDP 2021 stopped receiving: permission denied".into(),
+        ))
+        .await
+        .unwrap();
+        let error = listening.collect(DISCOVERY_WINDOW).await.unwrap_err();
+        assert!(error.contains("stopped receiving"));
     }
 }

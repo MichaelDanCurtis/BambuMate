@@ -79,6 +79,20 @@ pub fn SetupWizard(
     let clean_install = RwSignal::new(false);
     let clean_install_status = RwSignal::new(String::new());
 
+    let defer_analysis = move |_| {
+        saving.set(true);
+        error_msg.set(String::new());
+        spawn_local(async move {
+            match commands::set_preference("setup_complete", "true").await {
+                Ok(()) => on_cancel.run(()),
+                Err(e) => {
+                    error_msg.try_set(format!("Couldn't save setup choice: {e}"));
+                    saving.try_set(false);
+                }
+            }
+        });
+    };
+
     // Step 0: Auto-detect Bambu Studio config path on mount
     Effect::new(move || {
         spawn_local(async move {
@@ -550,7 +564,7 @@ pub fn SetupWizard(
                                     class={move || if use_ai_mode.get() == Some(true) { "wizard-mode-card selected" } else { "wizard-mode-card" }}
                                     on:click=move |_| use_ai_mode.set(Some(true))
                                 >
-                                    <h4>"Use AI (Recommended)"</h4>
+                                    <h4>"Use Analysis AI"</h4>
                                     <p>
                                         "Use an AI model with your API key to intelligently extract filament "
                                         "specs and detect print defects. Best accuracy, especially for "
@@ -561,7 +575,7 @@ pub fn SetupWizard(
                                         <li>"✓ Web scraping with AI extraction"</li>
                                         <li>"✓ Print Analysis (defect detection)"</li>
                                     </ul>
-                                    <p class="wizard-mode-note">"Requires a paid API key (Claude, OpenAI, etc.)"</p>
+                                    <p class="wizard-mode-note">"Requires an API key or a local model server"</p>
                                 </div>
 
                                 <div
@@ -583,7 +597,7 @@ pub fn SetupWizard(
                             </div>
 
                             <p class="wizard-description wizard-mode-footer">
-                                "You can change this at any time in Settings."
+                                "You can change this at any time in Settings. Agent chat is configured separately in the Agent panel."
                             </p>
                         </div>
                     </Show>
@@ -591,10 +605,15 @@ pub fn SetupWizard(
                     // Step 2: AI Provider selection (was step 1)
                     <Show when=move || step.get() == 2>
                         <div class="wizard-step">
-                            <h3>"AI Provider"</h3>
+                            <h3>"Analysis Provider"</h3>
                             <p class="wizard-description">
-                                "BambuMate uses AI to analyze filament specifications and detect print defects. "
-                                "Choose a provider below."
+                                "Choose an API provider or local model server for automatic filament-spec extraction and Print Analysis. "
+                                "Print Analysis also requires a vision-capable model."
+                            </p>
+                            <p class="wizard-description wizard-agent-note">
+                                "For agent chat, open the Agent panel after setup and choose Codex or Claude. "
+                                "Codex uses your local CLI sign-in. Claude uses an API key, or CLI sign-in when offered in the panel. "
+                                "Agent sign-in does not configure automatic extraction or Print Analysis. You can configure analysis later."
                             </p>
 
                             <div class="wizard-providers">
@@ -829,9 +848,9 @@ pub fn SetupWizard(
                     </Show>
                     <button
                         class="btn btn-ghost wizard-skip-btn"
-                        on:click=move |_| on_cancel.run(())
+                        on:click=defer_analysis
                         disabled=move || saving.get()
-                    >"Skip Setup"</button>
+                    >"Configure analysis later"</button>
                     <div class="wizard-footer-spacer"></div>
                     <Show when=move || step.get() < 4>
                         <button

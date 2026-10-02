@@ -789,9 +789,9 @@ export const FIXTURES = {
   // Not set up in Settings yet, so the discovery flow has an empty form.
   printer_get_config: null,
   printer_view: PRINTER_VIEW,
-  printer_discover: [
+  printer_discover: { printers: [
     { ip: "192.168.1.20", serial: PRINTER_SERIAL, name: "Workshop H2D", model: "H2D", conflict: false },
-  ],
+  ], warnings: [], listen_seconds: 15 },
   printer_test_connection: {
     connection: { state: "cert_untrusted", fingerprint: PRINTER_FINGERPRINT },
     got_report: false,

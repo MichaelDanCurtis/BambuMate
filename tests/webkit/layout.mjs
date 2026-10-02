@@ -212,6 +212,9 @@ async function checkRailOverlap(browserType, name, baseUrl) {
       await reveal(page);
       await page.waitForSelector(overlapSelector, { timeout: 5000 });
       // The bug only shows once the rail is at its full 220px.
+      // Navigation now dismisses hover until the pointer leaves the rail.
+      // Start a fresh hover to test its expanded stacking, not the dismissed state.
+      await page.mouse.move(850, 750);
       await page.hover("nav.sidebar");
       await page.waitForFunction(
         () => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219,

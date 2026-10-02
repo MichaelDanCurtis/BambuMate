@@ -98,7 +98,7 @@ body {
     transition: width 200ms var(--nd-ease) 0ms;
 }
 
-.sidebar:hover {
+.sidebar:hover:not(.hover-dismissed) {
     width: 220px;
     transition-delay: 150ms;
 }
@@ -171,8 +171,8 @@ body {
    cannot parse `:has()` discards the whole selector list, which would take
    the working `:hover` rule down with it and leave an empty 220px panel on
    hover. See the equivalent width rules above and src/components/change_preview.css. */
-.sidebar:hover .sidebar-wordmark,
-.sidebar:hover .nav-label {
+.sidebar:hover:not(.hover-dismissed) .sidebar-wordmark,
+.sidebar:hover:not(.hover-dismissed) .nav-label {
     opacity: 1;
     transition-delay: 150ms;
 }

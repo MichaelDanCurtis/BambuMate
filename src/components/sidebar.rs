@@ -91,6 +91,10 @@ pub fn Sidebar() -> impl IntoView {
             .with(|v| v.configured.then(|| v.connection.dot()))
     };
     let pathname = use_location().pathname;
+    // A navigation click completes the hover interaction. Collapse even if
+    // the pointer stays on the rail, so it cannot cover the new page's controls.
+    // Leaving the rail arms hover again; keyboard focus still expands it.
+    let hover_dismissed = RwSignal::new(false);
 
     let items = NAV_ITEMS
         .iter()
@@ -103,6 +107,7 @@ pub fn Sidebar() -> impl IntoView {
             view! {
                 <li class="nav-item" class:nav-item-locked=locked>
                     <a href=href class="nav-link" class:active=active class:nav-link-locked=locked
+                        on:click=move |_| hover_dismissed.set(true)
                         aria-current=move || if active() { Some("page") } else { None }
                         aria-label=move || has_update().then(|| format!("{label}, update available"))
                         title=move || locked().then(|| "Requires AI — enable in Settings".to_string())>
@@ -127,7 +132,8 @@ pub fn Sidebar() -> impl IntoView {
         .collect_view();
 
     view! {
-        <nav class="sidebar" aria-label="Main">
+        <nav class="sidebar" class:hover-dismissed=move || hover_dismissed.get()
+            on:mouseleave=move |_| hover_dismissed.set(false) aria-label="Main">
             <div class="sidebar-header">
                 <span class="rail-mark" aria-hidden="true"></span>
                 <span class="sidebar-wordmark">"BAMBUMATE"</span>
