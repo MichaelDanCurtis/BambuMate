@@ -17,12 +17,56 @@ use crate::agent::types::{AgentModel, AppState, Provider, Readiness};
 
 pub const PREF_FULL_ACCESS: &str = "agent_full_access";
 pub const PREF_CLAUDE_AUTH: &str = "agent_claude_auth_mode";
+pub const PREF_CODEX_MODEL: &str = "agent_codex_model";
+pub const PREF_CODEX_EFFORT: &str = "agent_codex_effort";
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-6.1-sol";
+pub const DEFAULT_CODEX_EFFORT: &str = "medium";
+
+fn codex_choices(
+    model: Option<String>,
+    effort: Option<String>,
+    stored_model: Option<String>,
+    stored_effort: Option<String>,
+) -> (String, String) {
+    let choose = |explicit: Option<String>, saved: Option<String>, default: &str| {
+        explicit
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| saved.filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| default.to_string())
+    };
+    (
+        choose(model, stored_model, DEFAULT_CODEX_MODEL),
+        choose(effort, stored_effort, DEFAULT_CODEX_EFFORT),
+    )
+}
+
+fn stored_codex_choices(
+    app: &AppHandle,
+    model: Option<String>,
+    effort: Option<String>,
+) -> (String, String) {
+    let store = app.store("preferences.json").ok();
+    let saved = |key| {
+        store
+            .as_ref()
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_str().map(str::to_string))
+    };
+    codex_choices(
+        model,
+        effort,
+        saved(PREF_CODEX_MODEL),
+        saved(PREF_CODEX_EFFORT),
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSettings {
     pub full_access: bool,
     pub claude_auth_mode: AuthMode,
     pub claude_auth_modes: Vec<AuthMode>,
+    pub codex_model: String,
+    pub codex_effort: String,
 }
 
 /// The agent service, or why it could not start. Managed either way so a
@@ -64,11 +108,18 @@ pub async fn agent_login(svc: Svc<'_>, provider: Provider) -> Result<Option<Stri
 
 #[tauri::command]
 pub async fn agent_start(
+    app: AppHandle,
     svc: Svc<'_>,
     provider: Provider,
     model: Option<String>,
     effort: Option<String>,
 ) -> Result<String, String> {
+    let (model, effort) = if provider == Provider::Codex {
+        let (model, effort) = stored_codex_choices(&app, model, effort);
+        (Some(model), Some(effort))
+    } else {
+        (model, effort)
+    };
     svc.get()?.start(provider, model, effort).await
 }
 
@@ -164,7 +215,10 @@ fn read_settings(app: &AppHandle, claude: &ClaudeBackend) -> AgentSettings {
         .and_then(|s| s.get(PREF_FULL_ACCESS))
         .and_then(|v| v.as_str().map(|s| s == "true").or_else(|| v.as_bool()))
         .unwrap_or(false);
+    let (codex_model, codex_effort) = stored_codex_choices(app, None, None);
     AgentSettings {
+        codex_model,
+        codex_effort,
         full_access,
         claude_auth_mode: claude.auth_mode(),
         claude_auth_modes: available_modes(),
@@ -220,6 +274,31 @@ pub fn apply_stored_settings(app: &AppHandle, svc: &AgentService, claude: &Claud
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_defaults_are_local_and_saved_or_explicit_choices_win() {
+        assert_eq!(
+            codex_choices(None, None, None, None),
+            ("gpt-6.1-sol".into(), "medium".into())
+        );
+        assert_eq!(
+            codex_choices(None, None, Some("saved-model".into()), Some("high".into())),
+            ("saved-model".into(), "high".into())
+        );
+        assert_eq!(
+            codex_choices(
+                Some("chosen-model".into()),
+                Some("low".into()),
+                Some("saved-model".into()),
+                Some("high".into())
+            ),
+            ("chosen-model".into(), "low".into())
+        );
+        assert_eq!(
+            codex_choices(Some("".into()), None, Some("".into()), Some("".into())),
+            ("gpt-6.1-sol".into(), "medium".into())
+        );
+    }
 
     #[test]
     fn a_failed_agent_service_reports_unavailable_instead_of_panicking() {

@@ -135,16 +135,26 @@ function installTauriMock(fixtures) {
     if (cmd === "set_preference" && args?.key === "filament_search_use_ai" && args?.value === "false") {
       analysisEnabled = false;
     }
+    if (cmd === "set_preference" && args?.key === "agent_codex_model") live.agent_get_settings.codex_model = args.value;
+    if (cmd === "set_preference" && args?.key === "agent_codex_effort") live.agent_get_settings.codex_effort = args.value;
     if (cmd === "get_feature_flags") {
       settled.push(cmd);
       return { ...live.get_feature_flags, analysis_enabled: analysisEnabled };
+    }
+    if (cmd === "check_setup_complete" && sessionStorage.getItem("mock-setup-complete") === "true") {
+      settled.push(cmd);
+      return { ...live.check_setup_complete, setup_complete: true };
     }
     if (!(cmd in live)) {
       unknown.push(cmd);
       throw new Error(`no fixture for command '${cmd}'`);
     }
     try {
-      return await answerFor(cmd);
+      const answer = await answerFor(cmd);
+      if (cmd === "set_preference" && args?.key === "setup_complete") {
+        sessionStorage.setItem("mock-setup-complete", args.value);
+      }
+      return answer;
     } finally {
       settled.push(cmd);
     }
@@ -323,9 +333,27 @@ async function driveApp(browserType, engine, baseUrl) {
   // focuses a link on mousedown, and with :focus-within that kept the rail
   // stuck open after an ordinary click. :has(:focus-visible) should not.
   await step(run, page, "clicking a nav link does not leave the rail open", async () => {
+    await page.hover('nav.sidebar a[href="/analysis"]');
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219);
     await page.click('nav.sidebar a[href="/analysis"]');
-    await page.mouse.move(900, 400);
+    // Deliberately leave the pointer where the user clicked. The UI itself
+    // must finish this hover interaction; moving it away masks the regression.
     await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65, null, { timeout: 3000 });
+  });
+
+  await step(run, page, "navigation leaves the new page's left controls clickable", async () => {
+    await page.click('nav.sidebar a[href="/settings"]');
+    await page.waitForSelector("#slice-auto");
+    await page.locator("#slice-auto").click({ trial: true });
+    await page.click('nav.sidebar a[href="/health"]');
+    await page.waitForSelector(".diagnostics-controls button.btn-primary");
+    await page.locator(".diagnostics-controls button.btn-primary").click({ trial: true });
+    // A fresh hover remains available after leaving the rail.
+    await page.mouse.move(900, 400);
+    await page.hover("nav.sidebar");
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width >= 219);
+    await page.mouse.move(900, 400);
+    await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65);
   });
 
   // -- filament search and selection ---------------------------------------
@@ -808,6 +836,34 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await page.locator(".sl-plate-tab.active").innerText()) !== "Plate 2") throw new Error("tab not marked");
   });
 
+  await step(run, page, "agent context follows model, presets, job and selected plate", async () => {
+    await page.waitForFunction(() => {
+      const state = window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state;
+      return state?.slice?.selected_job_id === 9 && state.slice.selected_plate === 2;
+    }, null, { timeout: 5000 });
+    const state = (await callsOf("agent_set_app_state")).at(-1).args.state;
+    if (state.route !== "/slice" || state.slice.model_path !== SLICE_MODEL) throw new Error(JSON.stringify(state));
+    for (const [key, id] of [["printer","sl-printer"], ["process","sl-process"], ["filament","sl-filament"], ["bed_type","sl-bed"]]) {
+      const picker = page.locator(`#${id}`);
+      if (await picker.count() && state.slice[key] !== await picker.inputValue()) throw new Error(`context differs from ${id}`);
+    }
+    if (!state.slice.compare_filaments.includes(PETG)) throw new Error("comparison context missing");
+    await page.click(".agent-toggle");
+    await page.waitForSelector(".agent-drawer.open", { timeout: 5000 });
+    await page.waitForFunction(() => document.querySelector(".ag-context")?.textContent.includes("Plate 2"));
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".agent-drawer")).opacity) === 1);
+    await page.screenshot({ path: `flow-${engine}-slice-agent.png`, fullPage: false });
+    await page.click(".ag-close");
+    await openJob(2);
+    await page.waitForFunction(() => {
+      const s = window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state.slice;
+      return s?.selected_job_id === 2 && s.selected_plate === 1;
+    }, null, { timeout: 5000 });
+    await emitJob(sliceJob(2, { state:"failed", error:{ kind:"slicer", message:"Fixture failure" } }));
+    await page.waitForFunction(() => window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state.slice?.selected_plate == null, null, { timeout:5000 });
+    await emitJob(done(2, sliceResult()));
+  });
+
   await step(run, page, "leaving the page mid-job is safe and the job finishes", async () => {
     await page.click(".sl-compare-toggle");
     await page.click(".sl-slice");
@@ -815,6 +871,10 @@ async function driveApp(browserType, engine, baseUrl) {
     await emitJob(running(4, 10));
     await page.click('a[href="/about"]');
     await page.waitForSelector(".about-page", { timeout: 15000 });
+    await page.waitForFunction(() => {
+      const s = window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state;
+      return s?.route === "/about" && s.slice == null;
+    }, null, { timeout: 5000 });
     await emitJob(running(4, 80));
     await emitJob(done(4, sliceResult()));
     await page.click('a[href="/slice"]');
@@ -1209,6 +1269,45 @@ async function driveApp(browserType, engine, baseUrl) {
   const CONNECTING_VIEW = { ...PRINTER_VIEW, connection: { state: "connecting" } };
   const TRUSTED_CONNECTING = "Trusted — connecting…";
   const CONNECTED_H2D = "Connected to H2D. Live status is on the Printer page.";
+  const discoveryText = (sel, text) => page.waitForFunction(
+    ([s, t]) => document.querySelector(s)?.textContent.includes(t), [sel, text], { timeout: 5000 }
+  );
+
+  await step(run, page, "discovery shows progress, prevents duplicate scans and accepts a late result", async () => {
+    await withFixtures({ printer_discover: { __hold: "discovery", answer: FIXTURES.printer_discover } }, async () => {
+      const before = (await callsOf("printer_discover")).length;
+      await page.click(".printer-scan");
+      await page.waitForSelector(".printer-scan[disabled]");
+      await discoveryText(".printer-scan-progress", "seconds remaining");
+      await page.waitForFunction(() => document.querySelector(".printer-scan-progress")?.textContent.includes("14 seconds remaining"));
+      if (await page.locator(".printer-none, .printer-found-item").count()) throw new Error("premature discovery result");
+      if ((await callsOf("printer_discover")).length !== before + 1) throw new Error("duplicate scan");
+      await release("discovery");
+      await page.waitForSelector(".printer-found-item");
+      await page.waitForSelector(".printer-scan:not([disabled])");
+      if (await page.locator(".printer-scan-progress").count()) throw new Error("progress did not stop");
+    });
+  });
+
+  await step(run, page, "discovery errors stay distinct from a healthy empty scan and retry recovers", async () => {
+    const error = "Couldn't listen for printer announcements. UDP 2021: permission denied";
+    await withFixtures({ printer_discover: { __reject: error } }, async () => {
+      await page.click(".printer-scan");
+      await waitText(".printer-discovery-error", error);
+      if (await page.locator(".printer-none").count()) throw new Error("failure reported as no printers");
+    });
+    await withFixtures({ printer_discover: { printers: [], warnings: [], listen_seconds: 15 } }, async () => {
+      await page.click(".printer-scan");
+      await discoveryText(".printer-none", "No printer announcements received in 15 seconds");
+      if (await page.locator(".printer-discovery-error").count()) throw new Error("old error remained");
+    });
+    await withFixtures({ printer_discover: { ...FIXTURES.printer_discover, warnings: ["Cannot listen on UDP 1900: address in use"] } }, async () => {
+      await page.click(".printer-scan");
+      await page.waitForSelector(".printer-found-item");
+      await discoveryText(".printer-discovery-warning", "UDP 1900");
+      if (await page.locator(".printer-none, .printer-discovery-error").count()) throw new Error("partial success discarded");
+    });
+  });
 
   await step(run, page, "printer settings find a printer on the network", async () => {
     await page.click(".printer-scan");
@@ -1352,10 +1451,10 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   await step(run, page, "a serial claimed by two devices is flagged", async () => {
-    await setFixture("printer_discover", [
+    await setFixture("printer_discover", { printers: [
       { ip: "192.168.1.20", serial: PRINTER_SERIAL, name: "Workshop H2D", model: "H2D", conflict: true },
       { ip: "192.168.1.31", serial: "01P00A000000002", name: "", model: "P1S", conflict: false },
-    ]);
+    ], warnings: [], listen_seconds: 15 });
     await page.click(".printer-scan");
     await page.waitForFunction(() => document.querySelectorAll(".printer-found-item").length === 2, null, {
       timeout: 10000,
@@ -2045,7 +2144,8 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "drawer shows readiness and the default model", async () => {
     await page.waitForFunction(() => document.querySelector(".ag-status")?.innerText.startsWith("READY"), null, { timeout: 5000 });
     const model = await page.locator(".ag-model").inputValue();
-    if (model !== "gpt-test") throw new Error(`default model is "${model}", expected "gpt-test"`);
+    if (model !== "gpt-6.1-sol") throw new Error(`default model is "${model}", expected "gpt-6.1-sol"`);
+    if (await page.locator(".ag-effort").inputValue() !== "medium") throw new Error("reasoning default is not medium");
     return model;
   });
 
@@ -2054,7 +2154,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.press(".ag-input", "Enter");
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "agent_send"), null, { timeout: 5000 });
     const start = await called("agent_start");
-    if (start[0].args.provider !== "codex" || start[0].args.model !== "gpt-test") {
+    if (start[0].args.provider !== "codex" || start[0].args.model !== "gpt-6.1-sol" || start[0].args.effort !== "medium") {
       throw new Error(`started ${JSON.stringify(start[0].args)}`);
     }
     await page.waitForSelector(".ag-user", { timeout: 2000 });
@@ -2139,7 +2239,60 @@ async function driveApp(browserType, engine, baseUrl) {
     if (await page.locator(".ag-stream > *").count() !== 0) throw new Error("chat not cleared");
   });
 
+  await step(run, page, "explicit Codex model and reasoning choices survive reopening and start the next chat", async () => {
+    await page.selectOption(".ag-model", "gpt-test");
+    await page.selectOption(".ag-effort", "high");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "set_preference" && c.args.key === "agent_codex_effort" && c.args.value === "high"));
+    await page.click(".ag-close");
+    await page.click(".agent-toggle");
+    await page.waitForFunction(() => document.querySelector(".ag-model")?.value === "gpt-test" && document.querySelector(".ag-effort")?.value === "high", null, { timeout:5000 });
+    const base = (await called("agent_start")).length;
+    await page.fill(".ag-input", "Explain this slice.");
+    await page.press(".ag-input", "Enter");
+    await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "agent_start").length > n, base);
+    const start = (await called("agent_start")).at(-1).args;
+    if (start.model !== "gpt-test" || start.effort !== "high") throw new Error(JSON.stringify(start));
+  });
+
   run.unknown = await page.evaluate(() => [...new Set(window.__ipc.unknown)]).catch(() => []);
+
+  const wizard = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  wizard.on("pageerror", (e) => run.errors.push(`pageerror: ${e.message}`));
+  wizard.on("console", (m) => { if (m.type() === "error") run.errors.push(`console.error: ${m.text()}`); });
+  await wizard.addInitScript(installTauriMock, {
+    ...FIXTURES,
+    check_setup_complete: { bambu_studio_path: null, ai_provider: null, has_api_key: false, setup_complete: false },
+  });
+  await step(run, wizard, "setup distinguishes analysis providers from agent chat without requesting agent auth", async () => {
+    await wizard.goto(baseUrl);
+    await wizard.waitForSelector(".wizard-overlay");
+    await wizard.click(".wizard-footer .btn-primary");
+    await wizard.locator(".wizard-mode-card", { hasText: "Use Analysis AI" }).click();
+    await wizard.click(".wizard-footer .btn-primary");
+    await wizard.getByRole("heading", { name: "Analysis Provider", exact: true }).waitFor();
+    const note = await wizard.locator(".wizard-agent-note").innerText();
+    for (const text of ["Agent panel", "Codex", "Claude", "does not configure automatic extraction or Print Analysis"]) {
+      if (!note.includes(text)) throw new Error(`missing explanation: ${text}`);
+    }
+    if (await wizard.locator(".wizard-provider-card", { hasText: "Codex" }).count()) throw new Error("CLI chat advertised as analysis provider");
+    await wizard.screenshot({ path: `flow-${engine}-setup-analysis.png` });
+  });
+  await step(run, wizard, "deferring analysis reports save errors, persists and leaves agent chat available", async () => {
+    await wizard.evaluate(() => { window.__fixtures.set_preference = { __sequence: [{ __reject: "disk full" }, null] }; });
+    await wizard.getByRole("button", { name: "Configure analysis later" }).click();
+    await wizard.waitForFunction(() => document.querySelector(".wizard-error")?.textContent.includes("disk full"));
+    if (!(await wizard.locator(".wizard-overlay").count())) throw new Error("setup closed before choice was saved");
+    await wizard.getByRole("button", { name: "Configure analysis later" }).click();
+    await wizard.waitForSelector(".wizard-overlay", { state: "detached" });
+    await wizard.reload();
+    await wizard.waitForSelector("nav.sidebar");
+    if (await wizard.locator(".wizard-overlay").count()) throw new Error("setup reopened without an analysis key");
+    await wizard.click(".agent-toggle");
+    await wizard.waitForSelector(".agent-drawer.open");
+    const starts = await wizard.evaluate(() => window.__ipc.calls.filter((c) => c.cmd === "agent_start" || c.cmd === "store_api_key"));
+    if (starts.length) throw new Error("deferring analysis started inference or stored a key");
+  });
+  run.unknown.push(...await wizard.evaluate(() => [...new Set(window.__ipc.unknown)]).catch(() => []));
   await browser.close();
   return run;
 }

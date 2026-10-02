@@ -12,6 +12,8 @@ use leptos_router::hooks::use_query_map;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::agent::drawer::AgentShared;
+use crate::agent::types::SliceContext;
 use crate::commands::{self, StlFile};
 use crate::slicer::state::{
     compare_rows, format_cost, format_duration, format_grams, insert_if_absent, keyed_rows,
@@ -112,6 +114,33 @@ pub fn SlicePage() -> impl IntoView {
     let extra = RwSignal::new(Vec::<String>::new());
     let compare_ids = RwSignal::new(Vec::<u64>::new());
     let selected = RwSignal::new(None::<u64>);
+    // A plate belongs to its job: never carry it into the next selected job.
+    let plate_selection = RwSignal::new(None::<(u64, u32)>);
+    let agent_slice = expect_context::<AgentShared>().slice;
+    Effect::new(move |_| {
+        let job_id = selected.get();
+        let selected_plate = plate_selection
+            .get()
+            .filter(|(id, _)| Some(*id) == job_id)
+            .map(|(_, plate)| plate);
+        agent_slice.set(Some(SliceContext {
+            model_path: model.get(),
+            printer: printer.get(),
+            process: process.get(),
+            filament: filament.get(),
+            bed_type: bed_type.get(),
+            compare_filaments: if comparing.get() {
+                extra.get()
+            } else {
+                Vec::new()
+            },
+            selected_job_id: job_id,
+            selected_plate,
+        }));
+    });
+    on_cleanup(move || {
+        agent_slice.set(None);
+    });
     let error = RwSignal::new(None::<String>);
     let preset_error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
@@ -486,7 +515,7 @@ pub fn SlicePage() -> impl IntoView {
                 <CompareTable ids=compare_ids.into() />
             </Show>
 
-            {move || selected.get().map(|id| view! { <JobCard id=id selected=selected /> })}
+            {move || selected.get().map(|id| view! { <JobCard id=id selected=selected plate_selection=plate_selection /> })}
 
             <section class="sl-recent">
                 <h3 class="nd-label">"Recent"</h3>
@@ -527,7 +556,11 @@ enum Phase {
 }
 
 #[component]
-fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
+fn JobCard(
+    id: u64,
+    selected: RwSignal<Option<u64>>,
+    plate_selection: RwSignal<Option<(u64, u32)>>,
+) -> impl IntoView {
     let shared = expect_context::<SlicerShared>();
     let job = shared.job(id);
     // An inline message from Cancel, the thumbnail, Open or Slice again.
@@ -626,7 +659,7 @@ fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
             </Show>
             {move || match phase.get() {
                 Phase::Failed(message) => view! { <p class="sl-error sl-job-error">{message}</p> }.into_any(),
-                Phase::Done => view! { <ResultView id=id notice=notice /> }.into_any(),
+                Phase::Done => view! { <ResultView id=id notice=notice plate_selection=plate_selection /> }.into_any(),
                 Phase::Pending => ().into_any(),
             }}
             {move || notice.get().map(|n| view! {
@@ -650,7 +683,11 @@ fn JobCard(id: u64, selected: RwSignal<Option<u64>>) -> impl IntoView {
 }
 
 #[component]
-fn ResultView(id: u64, notice: RwSignal<Option<ErrorView>>) -> impl IntoView {
+fn ResultView(
+    id: u64,
+    notice: RwSignal<Option<ErrorView>>,
+    plate_selection: RwSignal<Option<(u64, u32)>>,
+) -> impl IntoView {
     let job = expect_context::<SlicerShared>().job(id);
     let result = Memo::new(move |_| {
         job.with(|j| match j.as_ref().map(|j| &j.state) {
@@ -672,6 +709,17 @@ fn ResultView(id: u64, notice: RwSignal<Option<ErrorView>>) -> impl IntoView {
             r.as_ref()
                 .and_then(|r| r.plates.iter().find(|x| x.index == p).cloned())
         })
+    });
+    Effect::new(move |_| {
+        let selected = current.with(|p| p.as_ref().map(|p| (id, p.index)));
+        plate_selection.set(selected);
+    });
+    on_cleanup(move || {
+        plate_selection.try_update(|selection| {
+            if selection.is_some_and(|(job_id, _)| job_id == id) {
+                *selection = None;
+            }
+        });
     });
     let thumb = RwSignal::new(None::<String>);
     Effect::new(move |_| {

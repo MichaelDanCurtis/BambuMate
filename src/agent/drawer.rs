@@ -9,7 +9,8 @@ use super::bridge;
 use super::cards::EntryView;
 use super::state::{ChatState, Entry};
 use super::types::{
-    AgentEvent, AgentModel, AgentSettings, AppState, AuthMode, Provider, Readiness, UiCommand,
+    AgentEvent, AgentModel, AgentSettings, AppState, AuthMode, Provider, Readiness, SliceContext,
+    UiCommand,
 };
 
 /// Bumped when the agent changes profiles, so open pages can reload.
@@ -25,6 +26,7 @@ pub struct AgentShared {
     pub chat: RwSignal<ChatState>,
     pub open: RwSignal<bool>,
     pub provider: RwSignal<Provider>,
+    pub slice: RwSignal<Option<SliceContext>>,
 }
 
 impl Default for AgentShared {
@@ -33,6 +35,7 @@ impl Default for AgentShared {
             chat: RwSignal::new(ChatState::default()),
             open: RwSignal::new(false),
             provider: RwSignal::new(Provider::Codex),
+            slice: RwSignal::new(None),
         }
     }
 }
@@ -77,11 +80,13 @@ pub fn AgentDrawer() -> impl IntoView {
         chat,
         open,
         provider,
+        slice,
     } = expect_context::<AgentShared>();
     let show_settings = RwSignal::new(false);
     let readiness = RwSignal::new(None::<Readiness>);
     let models = RwSignal::new(Vec::<AgentModel>::new());
     let model = RwSignal::new(None::<String>);
+    let effort = RwSignal::new("medium".to_string());
     let settings = RwSignal::new(None::<AgentSettings>);
     let draft = RwSignal::new(String::new());
     let attachments = RwSignal::new(Vec::<(String, String)>::new()); // (display name, staged path)
@@ -107,9 +112,11 @@ pub fn AgentDrawer() -> impl IntoView {
     let location = use_location();
     Effect::new(move |_| {
         let route = location.pathname.get();
+        let slice = if route == "/slice" { slice.get() } else { None };
         spawn_local(async move {
             bridge::set_app_state(&AppState {
                 route,
+                slice,
                 ..Default::default()
             })
             .await;
@@ -120,21 +127,43 @@ pub fn AgentDrawer() -> impl IntoView {
         readiness.set(None);
         spawn_local(async move {
             let r = bridge::readiness(p).await.ok();
+            let saved = bridge::get_settings().await.ok();
+            if provider.get_untracked() != p {
+                return;
+            }
+            if let Some(s) = &saved {
+                settings.set(Some(s.clone()));
+            }
             if matches!(r, Some(Readiness::Ready { .. })) {
                 if let Ok(list) = bridge::models(p).await {
-                    model.set(
-                        list.iter()
-                            .find(|m| m.is_default)
-                            .or(list.first())
-                            .map(|m| m.id.clone()),
-                    );
+                    if provider.get_untracked() != p {
+                        return;
+                    }
+                    if p == Provider::Codex {
+                        model.set(Some(
+                            saved
+                                .as_ref()
+                                .map(|s| s.codex_model.clone())
+                                .unwrap_or_else(|| "gpt-6.1-sol".into()),
+                        ));
+                        effort.set(
+                            saved
+                                .as_ref()
+                                .map(|s| s.codex_effort.clone())
+                                .unwrap_or_else(|| "medium".into()),
+                        );
+                    } else {
+                        model.set(
+                            list.iter()
+                                .find(|m| m.is_default)
+                                .or(list.first())
+                                .map(|m| m.id.clone()),
+                        );
+                    }
                     models.set(list);
                 }
             }
             readiness.set(r);
-            if let Ok(s) = bridge::get_settings().await {
-                settings.set(Some(s));
-            }
         });
     };
 
@@ -196,8 +225,12 @@ pub fn AgentDrawer() -> impl IntoView {
         spawn_local(async move {
             let sid = match chat.with_untracked(|c| c.session_id.clone()) {
                 Some(s) => s,
-                None => match bridge::start(provider.get_untracked(), model.get_untracked(), None)
-                    .await
+                None => match bridge::start(
+                    provider.get_untracked(),
+                    model.get_untracked(),
+                    (provider.get_untracked() == Provider::Codex).then(|| effort.get_untracked()),
+                )
+                .await
                 {
                     Ok(s) => {
                         chat.update(|c| c.session_id = Some(s.clone()));
@@ -343,14 +376,53 @@ pub fn AgentDrawer() -> impl IntoView {
                 <Show when=move || matches!(readiness.get(), Some(Readiness::NeedsApiKey))>
                     <a class="ag-login" href="/settings">"Add an Anthropic API key in Settings"</a>
                 </Show>
+                {move || (location.pathname.get() == "/slice").then(|| slice.get()).flatten().map(|s| {
+                    let model = s.model_path.as_deref().map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p)).unwrap_or("Slice");
+                    let mut label = model.to_string();
+                    if let Some(id) = s.selected_job_id { label.push_str(&format!(" · Job {id}")); }
+                    if let Some(plate) = s.selected_plate { label.push_str(&format!(" · Plate {plate}")); }
+                    view! { <p class="ag-context nd-mono">{label}</p> }
+                })}
                 <Show when=ready>
                     <div class="ag-model-row">
-                        <select class="ag-model nd-mono" on:change=move |e| model.set(Some(event_target_value(&e)))>
+                        <select class="ag-model nd-mono" aria-label="Agent model" disabled=busy title="Model for new chats" on:change=move |e| {
+                            let choice = event_target_value(&e);
+                            model.set(Some(choice.clone()));
+                            if provider.get_untracked() == Provider::Codex {
+                                spawn_local(async move {
+                                    if let Err(e) = crate::commands::set_preference("agent_codex_model", &choice).await { notice(e, true); }
+                                });
+                            }
+                        }>
+                            {move || model.get().filter(|id| !models.with(|ms| ms.iter().any(|m| &m.id == id)))
+                                .map(|id| view! { <option value=id.clone() selected=true>{id.clone()}</option> })}
                             {move || models.get().into_iter().map(|m| {
                                 let selected = model.get().as_deref() == Some(m.id.as_str());
                                 view! { <option value=m.id.clone() selected=selected>{m.display_name.clone()}</option> }
                             }).collect_view()}
                         </select>
+                        <Show when=move || provider.get() == Provider::Codex>
+                            <select class="ag-effort nd-mono" aria-label="Reasoning effort" disabled=busy title="Reasoning for new chats"
+                                prop:value=move || effort.get()
+                                on:change=move |e| {
+                                    let choice = event_target_value(&e);
+                                    effort.set(choice.clone());
+                                    spawn_local(async move {
+                                        if let Err(e) = crate::commands::set_preference("agent_codex_effort", &choice).await { notice(e, true); }
+                                    });
+                                }>
+                                {move || {
+                                    let selected_model = model.get();
+                                    let mut choices = models.with(|ms| ms.iter().find(|m| Some(&m.id) == selected_model.as_ref()).map(|m| m.efforts.clone()).unwrap_or_default());
+                                    let current = effort.get();
+                                    if !choices.contains(&current) { choices.push(current.clone()); }
+                                    choices.into_iter().map(|e| {
+                                        let selected = e == current;
+                                        view! { <option value=e.clone() selected=selected>{e.clone()}</option> }
+                                    }).collect_view()
+                                }}
+                            </select>
+                        </Show>
                         <div class="ag-usage" title="Plan usage">{usage_segments}</div>
                     </div>
                 </Show>

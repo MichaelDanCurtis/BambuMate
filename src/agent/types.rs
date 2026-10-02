@@ -158,6 +158,22 @@ pub struct AppState {
     pub selected_filament: Option<String>,
     pub photo_path: Option<String>,
     pub last_analysis_session: Option<i64>,
+    #[serde(default)]
+    pub slice: Option<SliceContext>,
+}
+
+/// Choices and selection on BambuMate's Slice page (not Studio's live GUI).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SliceContext {
+    pub model_path: Option<String>,
+    pub printer: String,
+    pub process: String,
+    pub filament: String,
+    pub bed_type: String,
+    pub compare_filaments: Vec<String>,
+    pub selected_job_id: Option<u64>,
+    pub selected_plate: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -192,6 +208,8 @@ pub struct AgentSettings {
     pub full_access: bool,
     pub claude_auth_mode: AuthMode,
     pub claude_auth_modes: Vec<AuthMode>,
+    pub codex_model: String,
+    pub codex_effort: String,
 }
 
 /// What a rewind would change in the profile folder (full paths).

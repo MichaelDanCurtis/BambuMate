@@ -203,6 +203,21 @@ pub fn PrinterSettings() -> impl IntoView {
     let saved = RwSignal::new(Option::<PrinterConfigView>::None);
     let found = RwSignal::new(Option::<Vec<DiscoveredPrinter>>::None);
     let scanning = RwSignal::new(false);
+    let scan_elapsed = RwSignal::new(0u64);
+    let discovery_error = RwSignal::new(Option::<String>::None);
+    let discovery_warnings = RwSignal::new(Vec::<String>::new());
+    // Keep progress alive only while this section exists. After 15 seconds
+    // say we're finishing, rather than claiming to listen indefinitely.
+    if let Ok(handle) = set_interval_with_handle(
+        move || {
+            if scanning.try_get_untracked() == Some(true) {
+                scan_elapsed.try_update(|n| *n = (*n + 1).min(15));
+            }
+        },
+        std::time::Duration::from_secs(1),
+    ) {
+        on_cleanup(move || handle.clear());
+    }
     let busy = RwSignal::new(false);
     let message = RwSignal::new(Option::<(String, bool)>::None);
     // From Test connection; the live connection's offer is derived below.
@@ -348,11 +363,24 @@ pub fn PrinterSettings() -> impl IntoView {
     };
 
     let scan = move |_| {
+        if scanning.get_untracked() {
+            return;
+        }
         scanning.set(true);
+        scan_elapsed.set(0);
         found.set(None);
+        discovery_error.set(None);
+        discovery_warnings.set(Vec::new());
         spawn_local(async move {
-            let list = bridge::discover().await.unwrap_or_default();
-            found.try_set(Some(list));
+            match bridge::discover().await {
+                Ok(report) => {
+                    found.try_set(Some(report.printers));
+                    discovery_warnings.try_set(report.warnings);
+                }
+                Err(e) => {
+                    discovery_error.try_set(Some(e));
+                }
+            }
             scanning.try_set(false);
         });
     };
@@ -515,11 +543,31 @@ pub fn PrinterSettings() -> impl IntoView {
                 <button class="btn btn-secondary btn-sm printer-scan" on:click=scan disabled=move || scanning.get()>
                     {move || if scanning.get() { "Searching…" } else { "Find printers" }}
                 </button>
+                <Show when=move || scanning.get()>
+                    <p class="section-description printer-scan-progress" role="status">
+                        {move || {
+                            let elapsed = scan_elapsed.get();
+                            if elapsed < 15 {
+                                format!("Listening for printer announcements… {} seconds remaining. Keep the printer awake and on the same local network.", 15 - elapsed)
+                            } else {
+                                "Finishing the discovery scan…".to_string()
+                            }
+                        }}
+                    </p>
+                </Show>
+                {move || discovery_error.get().map(|e| view! {
+                    <p class="status-text status-warning printer-discovery-error" role="alert">{e}</p>
+                })}
+                {move || (!discovery_warnings.get().is_empty()).then(|| view! {
+                    <p class="status-text status-warning printer-discovery-warning" role="status">
+                        "Some discovery listeners were unavailable: " {move || discovery_warnings.get().join("; ")}
+                    </p>
+                })}
                 {move || found.get().map(|list| {
                     if list.is_empty() {
                         view! {
                             <p class="section-description printer-none">
-                                "No printers found. Enter the IP address and serial number below."
+                                "No printer announcements received in 15 seconds. Keep the printer awake and on the same local network, then retry, or enter its IP address and serial number below."
                             </p>
                         }
                         .into_any()

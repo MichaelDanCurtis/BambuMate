@@ -94,9 +94,9 @@ pub async fn get_feature_flags(app: AppHandle) -> Result<FeatureFlags, String> {
 
 /// Check whether the initial setup wizard has been completed.
 ///
-/// Setup is considered complete when:
-/// 1. An AI provider is selected
-/// 2. Either an API key for that provider is saved, or the provider is "local"
+/// Completing or explicitly deferring setup dismisses the wizard. Analysis
+/// readiness is reported separately and gated by `get_feature_flags`; a
+/// missing analysis key must not keep reopening setup for agent-chat users.
 #[tauri::command]
 pub fn check_setup_complete(app: AppHandle) -> Result<SetupStatus, String> {
     info!("Checking setup status");
@@ -146,23 +146,11 @@ pub fn check_setup_complete(app: AppHandle) -> Result<SetupStatus, String> {
         .and_then(|v| v.as_str().map(|s| s == "true"))
         .unwrap_or(false);
 
-    // When the user opted out of AI, no API key is needed — just the setup flag.
-    let use_ai = store
-        .get("filament_search_use_ai")
-        .and_then(|v| v.as_str().map(|s| s != "false"))
-        .unwrap_or(true);
-
-    let setup_complete = if use_ai {
-        setup_flag && ai_provider.is_some() && has_api_key
-    } else {
-        setup_flag
-    };
-
     Ok(SetupStatus {
         bambu_studio_path,
         ai_provider,
         has_api_key,
-        setup_complete,
+        setup_complete: setup_flag,
     })
 }
 

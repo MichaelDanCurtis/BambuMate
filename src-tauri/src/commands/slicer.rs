@@ -39,7 +39,7 @@ pub const OPENED_DIR: &str = "opened";
 const KEEP_OPENED: usize = 10;
 /// Largest model the Slice page accepts by drag and drop.
 const MAX_STAGED_BYTES: usize = 512 * 1024 * 1024;
-const MAX_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
 /// How long quitting waits for a cancelled job to stop. Its process group
 /// is killed at once; this only covers reaping it.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
@@ -243,7 +243,11 @@ fn job_file_error(message: &str) -> ErrorView {
 /// Plate `plate`'s thumbnail as a `data:` URL. Only `plate_<plate>.png` next
 /// to the job's own output is read, and only up to `max` bytes; `None`
 /// when the plate has no thumbnail (or it is too large).
-fn plate_thumbnail(view: &JobView, plate: u32, max: u64) -> Result<Option<String>, &'static str> {
+pub(crate) fn plate_thumbnail(
+    view: &JobView,
+    plate: u32,
+    max: u64,
+) -> Result<Option<String>, &'static str> {
     let output = finished_output(view)?;
     let JobState::Done { result, .. } = &view.state else {
         return Err(NOT_FINISHED);
@@ -257,9 +261,37 @@ fn plate_thumbnail(view: &JobView, plate: u32, max: u64) -> Result<Option<String
     if listed != Some(expected.as_str()) {
         return Ok(None);
     }
-    let Ok(file) = std::fs::File::open(output.with_file_name(&expected)) else {
+    let thumbnail = output.with_file_name(&expected);
+    // Cached filenames are fixed, and a symlink must not escape the job folder.
+    if std::fs::symlink_metadata(&thumbnail).map_or(true, |m| !m.is_file()) {
+        return Ok(None);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Open a reparse point itself rather than following its target.
+        options.custom_flags(0x00200000);
+    }
+    let Ok(file) = options.open(&thumbnail) else {
         return Ok(None);
     };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if file
+            .metadata()
+            .map_or(true, |m| m.file_attributes() & 0x400 != 0)
+        {
+            return Ok(None);
+        }
+    }
     match file.metadata() {
         Ok(meta) if meta.is_file() && meta.len() <= max => {}
         _ => return Ok(None),
@@ -267,6 +299,9 @@ fn plate_thumbnail(view: &JobView, plate: u32, max: u64) -> Result<Option<String
     // The size is checked again while reading, in case the file grew.
     let mut bytes = Vec::new();
     if file.take(max + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > max {
+        return Ok(None);
+    }
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Ok(None);
     }
     Ok(Some(format!(
@@ -958,6 +993,28 @@ mod tests {
             result.plates[0].thumbnail = Some("../secret.png".into());
         }
         assert_eq!(plate_thumbnail(&odd, 1, MAX_THUMBNAIL_BYTES).unwrap(), None);
+    }
+
+    #[test]
+    fn thumbnails_refuse_non_png_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = done_job(dir.path());
+        std::fs::write(dir.path().join("plate_1.png"), b"not a PNG").unwrap();
+        assert_eq!(plate_thumbnail(&job, 1, MAX_THUMBNAIL_BYTES).unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumbnails_never_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let job = done_job(dir.path());
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.png");
+        std::fs::copy(dir.path().join("plate_1.png"), &target).unwrap();
+        std::fs::remove_file(dir.path().join("plate_1.png")).unwrap();
+        symlink(&target, dir.path().join("plate_1.png")).unwrap();
+        assert_eq!(plate_thumbnail(&job, 1, MAX_THUMBNAIL_BYTES).unwrap(), None);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use super::types::{DiscoveredPrinter, PrinterConfigView, PrinterView, TestOutcome};
+use super::types::{DiscoveryReport, PrinterConfigView, PrinterView, TestOutcome};
 
 #[wasm_bindgen]
 extern "C" {
@@ -68,7 +68,7 @@ pub async fn get_config() -> Result<Option<PrinterConfigView>, String> {
     call("printer_get_config", &Empty {}).await
 }
 
-pub async fn discover() -> Result<Vec<DiscoveredPrinter>, String> {
+pub async fn discover() -> Result<DiscoveryReport, String> {
     call("printer_discover", &Empty {}).await
 }
 

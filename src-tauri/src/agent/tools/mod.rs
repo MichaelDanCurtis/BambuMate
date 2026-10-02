@@ -117,6 +117,7 @@ pub trait ToolHost: Send + Sync {
     ) -> Result<Vec<crate::slicer::jobs::JobView>, String>;
     /// One slicing job, if the queue still knows it.
     fn slice_job(&self, job_id: u64) -> Option<crate::slicer::jobs::JobView>;
+    async fn slice_thumbnail(&self, job_id: u64, plate: u32) -> Result<Option<String>, String>;
 }
 
 pub fn arg_str(args: &Value, key: &str) -> Result<String, ToolOutput> {

@@ -99,6 +99,12 @@ BambuMate automatically detects your Bambu Studio installation and profile direc
 
 ### Agent Panel
 
+Setup's **Analysis Provider** configures automatic filament-spec extraction and Print Analysis through an API or local model server. Agent chat is configured separately in the Agent panel; a Codex CLI sign-in does not configure those analysis features. **Configure analysis later** saves that choice, keeps chat available, and does not reopen setup on every launch.
+
+The Codex panel defaults to **GPT-6.1 Sol** with **medium** reasoning for new chats. Model and reasoning choices you save in the panel take priority; these settings belong to BambuMate.
+
+On the **Slice** page, the agent can read your selected model and presets, the selected job’s current results, and the selected plate. It can view the plate preview through `bm_slice_thumbnail`. This context comes from BambuMate’s Slice page; live Bambu Studio object selection and viewport access are not included.
+
 Install at least one agent CLI:
 
 ```bash
@@ -107,6 +113,10 @@ npm install -g @anthropic-ai/claude-code             # Claude Agent (needs an An
 ```
 
 **Settings → Health Check** reports whether each CLI is installed. By default the agent can write only to the Bambu Studio profile folder and its own workspace folder; turn on **Full access** in the panel's settings to lift that. Every agent turn snapshots your profiles first, so **Rewind** on any message restores them.
+
+### Printer discovery
+
+**Settings → Printer → Find printers** passively listens for announcements for 15 seconds. Progress and listener failures are shown separately from a healthy scan with no announcements; a partial listener failure can still return printers. Keep the printer awake on the same local network. If multicast announcements are unavailable, enter the IP and serial manually. Discovery sends no printer commands and does not connect to a discovered printer automatically.
 
 ## Tech Stack
 

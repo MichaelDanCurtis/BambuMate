@@ -34,11 +34,16 @@ pub(crate) fn merge_specs(partial: Value) -> Result<FilamentSpecs, String> {
     serde_json::from_value(base).map_err(|e| format!("invalid specs: {e}"))
 }
 
-/// The frontend pushes `route` on every change but leaves fields it does not
-/// own (e.g. `photo_path`, set by `agent_stage_image`) as `None`. A `None`
-/// therefore means "unchanged", not "cleared".
+/// The frontend replaces its route and Slice snapshot on every change. It
+/// leaves host-owned fields (e.g. `photo_path`, set by `agent_stage_image`) as
+/// `None`, which means "unchanged" for those fields.
 pub(crate) fn merge_app_state(current: &AppState, incoming: AppState) -> AppState {
     AppState {
+        slice: if incoming.route == "/slice" {
+            incoming.slice
+        } else {
+            None
+        },
         route: incoming.route,
         selected_profile: incoming
             .selected_profile
@@ -281,6 +286,22 @@ impl ToolHost for TauriToolHost {
         all_known(&ids, views)
     }
 
+    async fn slice_thumbnail(&self, job_id: u64, plate: u32) -> Result<Option<String>, String> {
+        let view = self
+            .slice_job(job_id)
+            .ok_or("That slicing job is no longer available.")?;
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::commands::slicer::plate_thumbnail(
+                &view,
+                plate,
+                crate::commands::slicer::MAX_THUMBNAIL_BYTES,
+            )
+            .map_err(str::to_string)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     fn slice_job(&self, job_id: u64) -> Option<crate::slicer::jobs::JobView> {
         use tauri::Manager;
         self.app
@@ -351,6 +372,35 @@ mod tests {
     #[test]
     fn merge_specs_rejects_non_objects() {
         assert!(merge_specs(json!("PLA")).is_err());
+    }
+
+    #[test]
+    fn slice_state_replaces_and_clears_instead_of_leaking_old_selection() {
+        use crate::agent::types::SliceContext;
+        let old = AppState {
+            route: "/slice".into(),
+            slice: Some(SliceContext {
+                selected_job_id: Some(5),
+                selected_plate: Some(2),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let clear = AppState {
+            route: "/slice".into(),
+            slice: Some(SliceContext::default()),
+            ..Default::default()
+        };
+        let next = merge_app_state(&old, clear);
+        assert_eq!(next.slice.unwrap().selected_job_id, None);
+        let away = merge_app_state(
+            &old,
+            AppState {
+                route: "/profiles".into(),
+                ..Default::default()
+            },
+        );
+        assert!(away.slice.is_none());
     }
 
     fn with_photo(p: &str) -> AppState {

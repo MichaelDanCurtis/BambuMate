@@ -29,6 +29,10 @@ state stored there, and a wrong value can duplicate or lose the user's cloud pre
 - To look at a print photo, call bm_get_photo. Use bm_run_analysis for BambuMate's \
 defect detection and rule-based recommendations, then explain and apply changes with \
 bm_write_profile.
+- On the Slice page, bm_app_state includes the current choices, selected job/results and plate. \
+Use bm_slice_thumbnail to see that job's plate preview. This describes BambuMate's Slice page, \
+not Bambu Studio's live viewport or object selection.
+\
 - To check a model before printing, call bm_slice (print time, weight, cost, \
 warnings; compare_filaments for a side-by-side). It only slices: BambuMate never \
 prints or uploads, so tell the user to print from Bambu Studio.
