@@ -43,6 +43,7 @@ pub struct FakeHost {
     pub calls: Mutex<Vec<String>>,
     pub bs_running: AtomicBool,
     pub printer: Mutex<PrinterView>,
+    pub slice_jobs: Mutex<std::collections::HashMap<u64, JobView>>,
     /// Makes `slice` wait forever, like a long queue.
     pub slice_hangs: AtomicBool,
     /// Set once a hanging `slice` is waiting.
@@ -69,6 +70,7 @@ impl FakeHost {
             calls: Mutex::new(Vec::new()),
             bs_running: AtomicBool::new(false),
             printer: Mutex::new(PrinterView::unconfigured()),
+            slice_jobs: Mutex::new(std::collections::HashMap::new()),
             slice_hangs: AtomicBool::new(false),
             slice_waiting: AtomicBool::new(false),
             slice_dropped: Arc::new(AtomicBool::new(false)),
@@ -166,8 +168,21 @@ impl ToolHost for FakeHost {
         }
         Ok(vec![done_job(1)])
     }
+    async fn slice_thumbnail(&self, job_id: u64, plate: u32) -> Result<Option<String>, String> {
+        let view = self.slice_job(job_id).ok_or("no such job")?;
+        crate::commands::slicer::plate_thumbnail(
+            &view,
+            plate,
+            crate::commands::slicer::MAX_THUMBNAIL_BYTES,
+        )
+        .map_err(str::to_string)
+    }
     fn slice_job(&self, job_id: u64) -> Option<JobView> {
+        if let Some(job) = self.slice_jobs.lock().unwrap().get(&job_id).cloned() {
+            return Some(job);
+        }
         match job_id {
+            1 => Some(done_job(1)),
             7 => Some(JobView {
                 state: JobState::Failed {
                     error: crate::slicer::SlicerError::Slicer {

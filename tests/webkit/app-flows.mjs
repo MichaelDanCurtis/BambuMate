@@ -135,6 +135,8 @@ function installTauriMock(fixtures) {
     if (cmd === "set_preference" && args?.key === "filament_search_use_ai" && args?.value === "false") {
       analysisEnabled = false;
     }
+    if (cmd === "set_preference" && args?.key === "agent_codex_model") live.agent_get_settings.codex_model = args.value;
+    if (cmd === "set_preference" && args?.key === "agent_codex_effort") live.agent_get_settings.codex_effort = args.value;
     if (cmd === "get_feature_flags") {
       settled.push(cmd);
       return { ...live.get_feature_flags, analysis_enabled: analysisEnabled };
@@ -808,6 +810,34 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await page.locator(".sl-plate-tab.active").innerText()) !== "Plate 2") throw new Error("tab not marked");
   });
 
+  await step(run, page, "agent context follows model, presets, job and selected plate", async () => {
+    await page.waitForFunction(() => {
+      const state = window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state;
+      return state?.slice?.selected_job_id === 9 && state.slice.selected_plate === 2;
+    }, null, { timeout: 5000 });
+    const state = (await callsOf("agent_set_app_state")).at(-1).args.state;
+    if (state.route !== "/slice" || state.slice.model_path !== SLICE_MODEL) throw new Error(JSON.stringify(state));
+    for (const [key, id] of [["printer","sl-printer"], ["process","sl-process"], ["filament","sl-filament"], ["bed_type","sl-bed"]]) {
+      const picker = page.locator(`#${id}`);
+      if (await picker.count() && state.slice[key] !== await picker.inputValue()) throw new Error(`context differs from ${id}`);
+    }
+    if (!state.slice.compare_filaments.includes(PETG)) throw new Error("comparison context missing");
+    await page.click(".agent-toggle");
+    await page.waitForSelector(".agent-drawer.open", { timeout: 5000 });
+    await page.waitForFunction(() => document.querySelector(".ag-context")?.textContent.includes("Plate 2"));
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".agent-drawer")).opacity) === 1);
+    await page.screenshot({ path: `flow-${engine}-slice-agent.png`, fullPage: false });
+    await page.click(".ag-close");
+    await openJob(2);
+    await page.waitForFunction(() => {
+      const s = window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state.slice;
+      return s?.selected_job_id === 2 && s.selected_plate === 1;
+    }, null, { timeout: 5000 });
+    await emitJob(sliceJob(2, { state:"failed", error:{ kind:"slicer", message:"Fixture failure" } }));
+    await page.waitForFunction(() => window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state.slice?.selected_plate == null, null, { timeout:5000 });
+    await emitJob(done(2, sliceResult()));
+  });
+
   await step(run, page, "leaving the page mid-job is safe and the job finishes", async () => {
     await page.click(".sl-compare-toggle");
     await page.click(".sl-slice");
@@ -815,6 +845,10 @@ async function driveApp(browserType, engine, baseUrl) {
     await emitJob(running(4, 10));
     await page.click('a[href="/about"]');
     await page.waitForSelector(".about-page", { timeout: 15000 });
+    await page.waitForFunction(() => {
+      const s = window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state;
+      return s?.route === "/about" && s.slice == null;
+    }, null, { timeout: 5000 });
     await emitJob(running(4, 80));
     await emitJob(done(4, sliceResult()));
     await page.click('a[href="/slice"]');
@@ -2045,7 +2079,8 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "drawer shows readiness and the default model", async () => {
     await page.waitForFunction(() => document.querySelector(".ag-status")?.innerText.startsWith("READY"), null, { timeout: 5000 });
     const model = await page.locator(".ag-model").inputValue();
-    if (model !== "gpt-test") throw new Error(`default model is "${model}", expected "gpt-test"`);
+    if (model !== "gpt-6.1-sol") throw new Error(`default model is "${model}", expected "gpt-6.1-sol"`);
+    if (await page.locator(".ag-effort").inputValue() !== "medium") throw new Error("reasoning default is not medium");
     return model;
   });
 
@@ -2054,7 +2089,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.press(".ag-input", "Enter");
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "agent_send"), null, { timeout: 5000 });
     const start = await called("agent_start");
-    if (start[0].args.provider !== "codex" || start[0].args.model !== "gpt-test") {
+    if (start[0].args.provider !== "codex" || start[0].args.model !== "gpt-6.1-sol" || start[0].args.effort !== "medium") {
       throw new Error(`started ${JSON.stringify(start[0].args)}`);
     }
     await page.waitForSelector(".ag-user", { timeout: 2000 });
@@ -2137,6 +2172,21 @@ async function driveApp(browserType, engine, baseUrl) {
     const [del] = await called("agent_delete_session");
     if (del.args.sessionId !== "sess-1") throw new Error(JSON.stringify(del.args));
     if (await page.locator(".ag-stream > *").count() !== 0) throw new Error("chat not cleared");
+  });
+
+  await step(run, page, "explicit Codex model and reasoning choices survive reopening and start the next chat", async () => {
+    await page.selectOption(".ag-model", "gpt-test");
+    await page.selectOption(".ag-effort", "high");
+    await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "set_preference" && c.args.key === "agent_codex_effort" && c.args.value === "high"));
+    await page.click(".ag-close");
+    await page.click(".agent-toggle");
+    await page.waitForFunction(() => document.querySelector(".ag-model")?.value === "gpt-test" && document.querySelector(".ag-effort")?.value === "high", null, { timeout:5000 });
+    const base = (await called("agent_start")).length;
+    await page.fill(".ag-input", "Explain this slice.");
+    await page.press(".ag-input", "Enter");
+    await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "agent_start").length > n, base);
+    const start = (await called("agent_start")).at(-1).args;
+    if (start.model !== "gpt-test" || start.effort !== "high") throw new Error(JSON.stringify(start));
   });
 
   run.unknown = await page.evaluate(() => [...new Set(window.__ipc.unknown)]).catch(() => []);

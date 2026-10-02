@@ -99,6 +99,10 @@ BambuMate automatically detects your Bambu Studio installation and profile direc
 
 ### Agent Panel
 
+The Codex panel defaults to **GPT-6.1 Sol** with **medium** reasoning for new chats. Model and reasoning choices you save in the panel take priority; these settings belong to BambuMate.
+
+On the **Slice** page, the agent can read your selected model and presets, the selected job’s current results, and the selected plate. It can view the plate preview through `bm_slice_thumbnail`. This context comes from BambuMate’s Slice page; live Bambu Studio object selection and viewport access are not included.
+
 Install at least one agent CLI:
 
 ```bash

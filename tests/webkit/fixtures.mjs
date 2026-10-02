@@ -730,10 +730,11 @@ export const FIXTURES = {
   // -- agent panel --
   agent_readiness: { state: "ready", detail: "test@example.com · plus" },
   agent_models: [
-    { id: "gpt-test", display_name: "GPT Test", efforts: ["low", "medium"], is_default: true },
+    { id: "gpt-test", display_name: "GPT Test", efforts: ["low", "medium", "high"], is_default: true },
+    { id: "gpt-6.1-sol", display_name: "GPT-6.1 Sol", efforts: ["low", "medium", "high"], is_default: false },
   ],
-  agent_get_settings: { full_access: false, claude_auth_mode: "api_key", claude_auth_modes: ["api_key"] },
-  agent_set_settings: { full_access: false, claude_auth_mode: "api_key", claude_auth_modes: ["api_key"] },
+  agent_get_settings: { full_access: false, claude_auth_mode: "api_key", claude_auth_modes: ["api_key"], codex_model: "gpt-6.1-sol", codex_effort: "medium" },
+  agent_set_settings: { full_access: false, claude_auth_mode: "api_key", claude_auth_modes: ["api_key"], codex_model: "gpt-6.1-sol", codex_effort: "medium" },
   agent_set_app_state: null,
   agent_start: "sess-1",
   agent_send: 1,

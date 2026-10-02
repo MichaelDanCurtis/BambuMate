@@ -27,7 +27,7 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "bm_app_state",
-            description: "What the user is looking at in BambuMate: route, selected profile/filament, current photo path, last analysis session. Call this first.",
+            description: "What the user is looking at in BambuMate: route, profile/filament, photo, and Slice page model, draft presets, selected job/results and plate. This is BambuMate context, not Bambu Studio live GUI state. Call this first.",
             input_schema: json!({"type":"object","properties":{}}),
         },
         ToolSpec {
@@ -102,7 +102,16 @@ pub async fn handle(reg: &ToolRegistry, name: &str, args: &Value) -> Option<Tool
     let host = reg.host();
     Some(match name {
         "bm_app_state" => {
-            ToolOutput::json(&serde_json::to_value(host.app_state()).unwrap_or(Value::Null))
+            let state = host.app_state();
+            let mut out = serde_json::to_value(&state).unwrap_or(Value::Null);
+            if state.route == "/slice" {
+                if let Some(context) = state.slice.as_ref() {
+                    out["slice"] = super::slicer::context_summary(host.as_ref(), context);
+                }
+            } else {
+                out["slice"] = Value::Null;
+            }
+            ToolOutput::json(&out)
         }
         "bm_navigate" => {
             let route = match arg_str(args, "route") {
@@ -338,6 +347,6 @@ mod tests {
 
     #[test]
     fn total_tool_count_stays_small() {
-        assert_eq!(crate::agent::tools::ToolRegistry::specs().len(), 22);
+        assert_eq!(crate::agent::tools::ToolRegistry::specs().len(), 23);
     }
 }
