@@ -25,7 +25,11 @@ Rebuild every page in the Nothing design language as a cockpit. Each page leads 
 ## Constraints
 
 - **Read-only printer.** Nothing in this piece sends a command to the printer. "Open printer" navigates; "resume on the printer" is advice text.
-- **Mostly frontend.** The only backend change is the agent's `bm_navigate` route list. "Last print" is recorded in the frontend.
+- **Mostly frontend.** There are two backend changes, both small:
+  - the agent's `bm_navigate` route list;
+  - one read-only command, `latest_generated_preset`, which returns the newest row of the `generated_presets` ledger for Home's "Recent" line. The frontend has no other way to know which preset BambuMate made last: `list_profiles` carries no dates.
+
+  "Last print" is recorded in the frontend.
 - **Both themes are first-class.** Every new text/background pair passes `contrast.mjs` in dark and light: 4.5:1 for text, 3:1 for disabled text.
 - **Tokens only.** New CSS uses the `--nd-*` tokens from `style/tokens.css`. No new colours are introduced.
 - **Font budget per screen.** At most two families (Space Grotesk and Space Mono), plus Doto for the single hero. At most three sizes and two weights.
@@ -50,7 +54,7 @@ The rail (`src/components/sidebar.rs`, `NAV_ITEMS`):
 - Settings is pinned to the bottom of the rail, below a divider. This is new; today the rail is one flat list.
 - The Printer connection dot and the STL indicator stay where they are.
 - **Redirects.** `/batch` goes to `/filament/batch`, `/compare` to `/profiles/compare`, `/health` to `/settings/health`, and `/about` to `/settings/about`. Each uses `leptos_router`'s `Redirect` with `replace: true`, so the old route never stays in history. Deep links and the agent's old routes keep working.
-- **Feature flags.** The Analyze hub stays hidden when `analysis_enabled` is off, as it is today.
+- **Feature flags.** When `analysis_enabled` is off, the Analyze hub shows locked with "Requires AI", as Print Analysis does today.
 - **Agent.** `bm_navigate` in `src-tauri/src/agent/tools/app.rs` adds the new tab routes to its allowlist and keeps the old ones, so saved prompts don't break. Its description lists the new routes. Tool counts stay at 22 agent, 22 Codex and 23 MCP.
 
 ### 2. Shared patterns
@@ -80,8 +84,8 @@ Home (`src/pages/home.rs`) is rebuilt around a pure `HomeState` derived from con
 
 1. **Attention.** The printer is connected and either paused or has an active HMS error.
    - Hero: the state word (e.g. `PAUSED`) in accent, with the HMS code in the label and the cached HMS text as the detail line.
-   - The affected AMS slot is outlined in accent.
-   - Actions: "Open printer" and "What does this mean?". The second opens the agent drawer with the HMS code and text as the prompt.
+   - The slot in use (the printer's `tray_now`) is outlined in accent. An HMS code does not name a slot, so the slot feeding the print stands in for the affected one; in a runout pause they are the same slot.
+   - Actions: "Open printer" and "What does this mean?". The second opens the agent drawer with a question about the HMS code and text already typed in the composer. The user still presses send.
 2. **Printing.**
    - Hero: the percentage in Doto.
    - Detail: time left, layer x/y, and nozzle and bed temperatures.
@@ -100,7 +104,8 @@ Home (`src/pages/home.rs`) is rebuilt around a pure `HomeState` derived from con
 - A footer strip: the most recent generated profile and how long ago it was made, on the left; on the right, "All presets synced" or "N presets unsynced", the latter linking to Settings → Health.
 
 **Data rules:**
-- `list_unsynced_presets` runs when Home mounts and again after a repair event. It never runs on a timer.
+- `list_profiles`, `list_unsynced_presets` and `latest_generated_preset` run when Home mounts and again when the agent changes profiles (`AgentRefresh`). Repair happens on Settings → Health, so returning to Home re-reads. None of them runs on a timer.
+- While printing, the slot in use is outlined in signal.
 - "Last print" is recorded in `PrinterShared` when the printer's job state changes from running to finished. It holds the job name, finish time and duration, and lives for the session only.
 - A failed `list_profiles` or `list_unsynced_presets` call shows `StateText::Error` in its own strip. The hero and the rest of the page still render.
 
@@ -172,13 +177,11 @@ Each wave is its own PR off `main`, merged before the next one starts. Every wav
 **Backend** (`cargo test --manifest-path src-tauri/Cargo.toml`): `bm_navigate` accepts every new route and every old route, and rejects an unknown one.
 
 **WebKit and Chromium** (`tests/webkit/`):
-- `screens.mjs`:
-  - `ROUTES` lists the hub and tab routes.
-  - Each old route lands on its tab.
-  - Every route is captured in both themes.
+- `screens.mjs` (run by hand, not in CI): `ROUTES` lists the hub and tab routes, and every route is captured in both themes.
 - `layout.mjs`: the rail has 7 items, and the rail-overlap check runs on every hub tab.
 - `app-flows.mjs`:
   - Home with printer fixtures for all four states shows the right hero.
+  - Each old route lands on its tab, and Back skips the old route.
   - Switching tabs updates the URL, and Back returns to the previous tab.
   - A failing data call renders `[ERROR: …]` while the rest of the page renders.
   - The STL indicator opens and closes from the keyboard.
