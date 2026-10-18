@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use tracing::info;
 
-use super::types::{AppliedChange, SessionDetail, SessionSummary, SlotAssignment};
+use super::types::{AppliedChange, GeneratedPreset, SessionDetail, SessionSummary, SlotAssignment};
 
 /// SQLite store for refinement history.
 /// All operations are synchronous (rusqlite is blocking).
@@ -325,6 +325,25 @@ impl RefinementHistory {
         rows.collect::<Result<HashSet<_>, _>>()
             .map_err(|e| format!("Failed to collect ledger: {}", e))
     }
+
+    /// The newest ledger row, if any. Ties on `created_at` go to the row
+    /// written last.
+    pub fn latest_generated_preset(&self) -> Result<Option<GeneratedPreset>, String> {
+        self.conn
+            .query_row(
+                "SELECT profile_name, created_at FROM generated_presets
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok(GeneratedPreset {
+                        profile_name: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        created_at: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| format!("Failed to read the newest generated preset: {}", e))
+    }
 }
 
 #[cfg(test)]
@@ -556,5 +575,21 @@ mod tests {
         let paths = store.generated_preset_paths().unwrap();
         assert_eq!(paths.len(), 1);
         assert!(paths.contains("/u/B.json"));
+    }
+
+    #[test]
+    fn latest_generated_preset_is_the_newest_row() {
+        let (store, _dir) = create_test_store();
+        assert_eq!(store.latest_generated_preset().unwrap(), None);
+        store
+            .record_generated_preset("/a.json", "P1", "Acme PLA")
+            .unwrap();
+        store
+            .record_generated_preset("/b.json", "P2", "Acme PETG")
+            .unwrap();
+        // Same second: the row written last wins.
+        let latest = store.latest_generated_preset().unwrap().unwrap();
+        assert_eq!(latest.profile_name, "Acme PETG");
+        assert!(latest.created_at > 0);
     }
 }

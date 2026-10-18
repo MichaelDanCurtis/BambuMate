@@ -328,6 +328,24 @@ pub async fn repair_preset_sync(paths: Vec<String>) -> Result<RepairResult, Stri
     serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
 }
 
+/// The preset BambuMate most recently wrote as new (Home's "Recent" line).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GeneratedPreset {
+    pub profile_name: String,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
+pub async fn latest_generated_preset() -> Result<Option<GeneratedPreset>, String> {
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;
+
+    let result = invoke("latest_generated_preset", args)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| "Unknown error".to_string()))?;
+
+    serde_wasm_bindgen::from_value(result).map_err(|e| e.to_string())
+}
+
 /// Open a native folder picker and return the selected path, or None if cancelled.
 pub async fn pick_config_folder() -> Result<Option<String>, String> {
     let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|e| e.to_string())?;

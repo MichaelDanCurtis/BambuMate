@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tracing::{info, warn};
 
+use crate::history::GeneratedPreset;
 use crate::profile::paths::BambuPaths;
 use crate::profile::sync::{self, RepairResult, UnsyncedPreset, BS_RUNNING_ERROR};
 
@@ -76,4 +77,13 @@ pub async fn repair_preset_sync(paths: Vec<String>) -> Result<RepairResult, Stri
     })
     .await
     .map_err(|e| format!("preset repair failed: {}", e))?
+}
+
+/// The preset BambuMate most recently wrote as new (Home's "Recent" line).
+/// Read-only.
+#[tauri::command]
+pub async fn latest_generated_preset() -> Result<Option<GeneratedPreset>, String> {
+    tauri::async_runtime::spawn_blocking(crate::history::ledger::latest_generated_preset)
+        .await
+        .map_err(|e| format!("ledger read failed: {}", e))?
 }

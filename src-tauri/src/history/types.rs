@@ -42,3 +42,12 @@ pub struct SlotAssignment {
     pub preset_path: Option<String>,
     pub assigned_at: String,
 }
+
+/// The preset BambuMate most recently wrote as new: the newest row of the
+/// `generated_presets` ledger. Shown on Home's "Recent" line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeneratedPreset {
+    pub profile_name: String,
+    /// Unix seconds.
+    pub created_at: i64,
+}
