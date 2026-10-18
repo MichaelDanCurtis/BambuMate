@@ -1833,6 +1833,29 @@ async function driveApp(browserType, engine, baseUrl) {
     if (h1 !== "Settings") throw new Error(`h1 reads "${h1}"`);
   });
 
+  await step(run, page, "activating a tab from the keyboard keeps focus on that tab", async () => {
+    // The header must stay mounted across a tab switch, or focus falls to <body>.
+    for (const [hub, page_, tab, selector] of [
+      ["/settings", ".settings-page", "/settings/about", ".about-page"],
+      ["/filament", ".filament-search-page", "/filament/batch", ".batch-generate-page"],
+      ["/profiles", ".profile-management-page", "/profiles/compare", ".profile-diff-page"],
+    ]) {
+      await page.click(`nav.sidebar a[href="${hub}"]`);
+      await page.waitForSelector(page_, { timeout: 15000 });
+      await page.evaluate(() => { window.__header = document.querySelector(".nd-page-header"); });
+      await page.focus(`.nd-tabs a[href="${tab}"]`);
+      await page.keyboard.press("Enter");
+      await page.waitForFunction((t) => location.pathname === t, tab, { timeout: 5000 });
+      await page.waitForSelector(selector, { timeout: 15000 });
+      const focused = await page.evaluate(() => document.activeElement?.getAttribute("href") ?? document.activeElement?.tagName);
+      if (focused !== tab) throw new Error(`${hub}: focus is on ${focused} after opening ${tab}`);
+      const kept = await page.evaluate(() => window.__header === document.querySelector(".nd-page-header"));
+      if (!kept) throw new Error(`${hub}: the header was remounted`);
+      const current = await page.locator('.nd-tabs a[aria-current="page"]').getAttribute("href");
+      if (current !== tab) throw new Error(`${hub}: the current tab is ${current}`);
+    }
+  });
+
   await step(run, page, "an unknown route says so", async () => {
     await goTo("/nope");
     await page.waitForFunction(

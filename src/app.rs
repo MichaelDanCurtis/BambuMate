@@ -167,29 +167,21 @@ pub fn App() -> impl IntoView {
                         <Routes fallback=|| view! { <NoRoute /> }>
                             <Route path=path!("/") view=HomePage />
                             <Route path=path!("/printer") view=PrinterPage />
-                            <Route path=path!("/filament") view=|| view! {
-                                <HubPage title="Filament" tabs=FILAMENT_TABS><FilamentSearchPage /></HubPage>
-                            } />
-                            <Route path=path!("/filament/batch") view=|| view! {
-                                <HubPage title="Filament" tabs=FILAMENT_TABS><BatchGeneratePage /></HubPage>
-                            } />
-                            <Route path=path!("/profiles") view=|| view! {
-                                <HubPage title="Profiles" tabs=PROFILES_TABS><ProfileManagementPage /></HubPage>
-                            } />
-                            <Route path=path!("/profiles/compare") view=|| view! {
-                                <HubPage title="Profiles" tabs=PROFILES_TABS><ProfileDiffPage /></HubPage>
-                            } />
+                            <ParentRoute path=path!("/filament") view=|| view! { <HubPage title="Filament" tabs=FILAMENT_TABS /> }>
+                                <Route path=path!("") view=FilamentSearchPage />
+                                <Route path=path!("batch") view=BatchGeneratePage />
+                            </ParentRoute>
+                            <ParentRoute path=path!("/profiles") view=|| view! { <HubPage title="Profiles" tabs=PROFILES_TABS /> }>
+                                <Route path=path!("") view=ProfileManagementPage />
+                                <Route path=path!("compare") view=ProfileDiffPage />
+                            </ParentRoute>
                             <Route path=path!("/slice") view=SlicePage />
                             <Route path=path!("/analysis") view=PrintAnalysisPage />
-                            <Route path=path!("/settings") view=|| view! {
-                                <HubPage title="Settings" tabs=SETTINGS_TABS><SettingsPage /></HubPage>
-                            } />
-                            <Route path=path!("/settings/health") view=|| view! {
-                                <HubPage title="Settings" tabs=SETTINGS_TABS><HealthPage /></HubPage>
-                            } />
-                            <Route path=path!("/settings/about") view=|| view! {
-                                <HubPage title="Settings" tabs=SETTINGS_TABS><AboutPage /></HubPage>
-                            } />
+                            <ParentRoute path=path!("/settings") view=|| view! { <HubPage title="Settings" tabs=SETTINGS_TABS /> }>
+                                <Route path=path!("") view=SettingsPage />
+                                <Route path=path!("health") view=HealthPage />
+                                <Route path=path!("about") view=AboutPage />
+                            </ParentRoute>
                         </Routes>
                     </main>
                     <AgentDrawer />
