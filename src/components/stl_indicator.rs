@@ -84,7 +84,7 @@ pub fn StlIndicator() -> impl IntoView {
                     type="button"
                     class="stl-badge"
                     node_ref=badge
-                    aria-haspopup="true"
+                    aria-controls="stl-dropdown"
                     aria-expanded=move || expanded.get().to_string()
                     aria-label=move || stl_files.with(|f| stl_label(f.len()))
                     title="STL files received"
@@ -95,7 +95,7 @@ pub fn StlIndicator() -> impl IntoView {
                 </button>
 
                 <Show when=move || expanded.get()>
-                    <div class="stl-dropdown">
+                    <div class="stl-dropdown" id="stl-dropdown">
                         <For
                             each=move || stl_files.get()
                             key=|f| f.path.clone()
