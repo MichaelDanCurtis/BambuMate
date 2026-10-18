@@ -1817,6 +1817,13 @@ async function driveApp(browserType, engine, baseUrl) {
       null,
       { timeout: 5000 }
     );
+    // The not-found view is already on screen when an old route is followed:
+    // it must still redirect, and Back must not land on the old route.
+    await goTo("/batch");
+    await page.waitForFunction(() => location.pathname === "/filament/batch", null, { timeout: 5000 });
+    await page.waitForSelector(".batch-generate-page", { timeout: 15000 });
+    await page.goBack();
+    await page.waitForFunction(() => location.pathname === "/nope", null, { timeout: 5000 });
     await page.click('nav.sidebar a[href="/"]');
   });
 
