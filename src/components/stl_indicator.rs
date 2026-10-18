@@ -1,17 +1,39 @@
+use leptos::html;
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, StlFile};
+use crate::components::icons::{Icon, IconKind};
 use crate::slicer::state::{badge_text, latest_for_source};
 use crate::slicer::SlicerShared;
+
+/// The button's accessible name.
+fn stl_label(count: usize) -> String {
+    match count {
+        1 => "1 STL file waiting".into(),
+        n => format!("{n} STL files waiting"),
+    }
+}
 
 #[component]
 pub fn StlIndicator() -> impl IntoView {
     let (stl_files, set_stl_files) = signal::<Vec<StlFile>>(vec![]);
     let (expanded, set_expanded) = signal(false);
     let slicer = expect_context::<SlicerShared>();
+    let badge = NodeRef::<html::Button>::new();
+    // Escape from anywhere in the list closes it and returns focus to the
+    // button that opened it.
+    let on_keydown = move |e: web_sys::KeyboardEvent| {
+        if e.key() == "Escape" && expanded.get_untracked() {
+            e.prevent_default();
+            set_expanded.set(false);
+            if let Some(b) = badge.get() {
+                let _ = b.focus();
+            }
+        }
+    };
 
     // Poll for STL files every 5 seconds
     Effect::new(move |_| {
@@ -57,18 +79,23 @@ pub fn StlIndicator() -> impl IntoView {
 
     view! {
         <Show when=move || !stl_files.get().is_empty()>
-            <div class="stl-indicator">
-                <div
+            <div class="stl-indicator" on:keydown=on_keydown>
+                <button
+                    type="button"
                     class="stl-badge"
-                    on:click=move |_| set_expanded.update(|e| *e = !*e)
+                    node_ref=badge
+                    aria-controls="stl-dropdown"
+                    aria-expanded=move || expanded.get().to_string()
+                    aria-label=move || stl_files.with(|f| stl_label(f.len()))
                     title="STL files received"
+                    on:click=move |_| set_expanded.update(|e| *e = !*e)
                 >
-                    <span class="stl-badge-icon">"STL"</span>
-                    <span class="stl-badge-count">{move || stl_files.get().len()}</span>
-                </div>
+                    <span class="stl-badge-icon" aria-hidden="true"><Icon kind=IconKind::Stl /></span>
+                    <span class="stl-badge-count" aria-hidden="true">{move || stl_files.get().len()}</span>
+                </button>
 
                 <Show when=move || expanded.get()>
-                    <div class="stl-dropdown">
+                    <div class="stl-dropdown" id="stl-dropdown">
                         <For
                             each=move || stl_files.get()
                             key=|f| f.path.clone()
@@ -121,5 +148,16 @@ pub fn StlIndicator() -> impl IntoView {
                 </Show>
             </div>
         </Show>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_label_counts_the_waiting_files() {
+        assert_eq!(stl_label(1), "1 STL file waiting");
+        assert_eq!(stl_label(3), "3 STL files waiting");
     }
 }

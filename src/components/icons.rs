@@ -9,12 +9,9 @@ pub enum IconKind {
     Analyze,
     Profiles,
     Printer,
-    Batch,
-    Compare,
     Slice,
+    Stl,
     Settings,
-    Health,
-    About,
     Lock,
 }
 
@@ -26,13 +23,10 @@ pub fn Icon(kind: IconKind) -> impl IntoView {
         IconKind::Analyze => view! { <rect x="3.5" y="6" width="17" height="13" rx="2"/><circle cx="12" cy="12.5" r="3.5"/><path d="M8 6l1.5-2h5L16 6"/> }.into_any(),
         IconKind::Profiles => view! { <path d="M5 6h14M5 12h14M5 18h9"/> }.into_any(),
         IconKind::Printer => view! { <rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M4 8h16M10.5 8v3h3V8M12 11v1.5M7.5 16.5h9"/> }.into_any(),
-        IconKind::Batch => view! { <rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/> }.into_any(),
-        IconKind::Compare => view! { <path d="M8 4v16M16 4v16M4 8h4M16 16h4"/> }.into_any(),
         // Stacked layers: a model cut into slices.
         IconKind::Slice => view! { <path d="M4 7.5l8-3.5 8 3.5-8 3.5z"/><path d="M4 12l8 3.5 8-3.5M4 16.5l8 3.5 8-3.5"/> }.into_any(),
+        IconKind::Stl => view! { <path d="M12 3.5l7.5 4.25v8.5L12 20.5l-7.5-4.25v-8.5z"/><path d="M4.5 7.75L12 12l7.5-4.25M12 12v8.5"/> }.into_any(),
         IconKind::Settings => view! { <circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/> }.into_any(),
-        IconKind::Health => view! { <path d="M3 12h4l2-5 4 10 2-5h6"/> }.into_any(),
-        IconKind::About => view! { <circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8v.01"/> }.into_any(),
         IconKind::Lock => view! { <rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/> }.into_any(),
     };
     view! {

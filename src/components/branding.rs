@@ -15,35 +15,3 @@ pub fn BrandMark() -> impl IntoView {
         </div>
     }
 }
-
-#[component]
-pub fn HeroArtwork() -> impl IntoView {
-    view! {
-        <div class="hero-artwork" aria-hidden="true">
-            <svg viewBox="0 0 520 320" class="hero-artwork-svg">
-                <defs>
-                    <linearGradient id="heroShell" x1="68" y1="30" x2="422" y2="274" gradientUnits="userSpaceOnUse">
-                        <stop offset="0" stop-color="#34c400" />
-                        <stop offset="1" stop-color="#00ae42" />
-                    </linearGradient>
-                    <linearGradient id="heroPanel" x1="148" y1="86" x2="364" y2="250" gradientUnits="userSpaceOnUse">
-                        <stop offset="0" stop-color="#fdfffb" />
-                        <stop offset="1" stop-color="#eef8ea" />
-                    </linearGradient>
-                </defs>
-                <rect x="64" y="26" width="364" height="236" rx="34" fill="url(#heroShell)" />
-                <rect x="94" y="56" width="304" height="176" rx="26" fill="#102417" fill-opacity="0.24" />
-                <rect x="146" y="84" width="220" height="140" rx="22" fill="url(#heroPanel)" />
-                <circle cx="194" cy="124" r="24" fill="#00ae42" />
-                <path d="M176 123h36M194 105v36" stroke="#12351f" stroke-width="7" stroke-linecap="round" />
-                <rect x="232" y="108" width="98" height="14" rx="7" fill="#87c774" />
-                <rect x="232" y="134" width="72" height="14" rx="7" fill="#c7e0b8" />
-                <rect x="232" y="160" width="112" height="14" rx="7" fill="#9fd38e" />
-                <path d="M111 284c33-26 76-39 129-39 44 0 87 10 130 29" fill="none" stroke="#6ad35b" stroke-opacity="0.34" stroke-width="22" stroke-linecap="round" />
-                <path d="M346 246c34-30 51-67 51-110" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="12" stroke-linecap="round" />
-                <circle cx="400" cy="90" r="23" fill="#ffffff" fill-opacity="0.2" />
-                <circle cx="433" cy="124" r="11" fill="#ffffff" fill-opacity="0.34" />
-            </svg>
-        </div>
-    }
-}

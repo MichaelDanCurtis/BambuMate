@@ -7,18 +7,24 @@ use serde_json::{json, Value};
 use super::{arg_opt_str, arg_str, ToolContent, ToolOutput, ToolRegistry, ToolSpec};
 use crate::agent::types::UiCommand;
 
+/// Pages the agent may show. The hub tabs come first; the routes from
+/// before the hubs still work, because the app redirects them to their tab.
 pub const ROUTES: &[&str] = &[
     "/",
+    "/printer",
     "/filament",
-    "/analysis",
+    "/filament/batch",
     "/profiles",
+    "/profiles/compare",
+    "/slice",
+    "/analysis",
+    "/settings",
+    "/settings/health",
+    "/settings/about",
     "/batch",
     "/compare",
-    "/slice",
-    "/settings",
     "/health",
     "/about",
-    "/printer",
 ];
 
 const MAX_EDGE: u32 = 1568;
@@ -32,7 +38,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bm_navigate",
-            description: "Move the BambuMate UI to a page so the user can follow along. Routes: /, /filament, /analysis, /profiles, /batch, /compare, /slice, /settings, /health, /about, /printer.",
+            description: "Move the BambuMate UI to a page so the user can follow along. Routes: /, /printer, /filament, /filament/batch, /profiles, /profiles/compare, /slice, /analysis, /settings, /settings/health, /settings/about. The older /batch, /compare, /health and /about still work.",
             input_schema: json!({"type":"object","properties":{"route":{"type":"string"},"profile_path":{"type":"string"}},"required":["route"]}),
         },
         ToolSpec {
@@ -252,6 +258,32 @@ mod tests {
         );
         assert!(
             matches!(&h.ui.lock().unwrap()[0], UiCommand::Navigate { route, .. } if route == "/compare")
+        );
+    }
+
+    #[tokio::test]
+    async fn navigate_accepts_hub_tabs_and_the_old_routes() {
+        let h = Arc::new(FakeHost::new());
+        let (reg, _rx) = registry_with(h.clone());
+        for route in [
+            "/filament/batch",
+            "/profiles/compare",
+            "/settings/health",
+            "/settings/about",
+            "/batch",
+            "/compare",
+            "/health",
+            "/about",
+        ] {
+            assert!(
+                reg.call("bm_navigate", json!({ "route": route })).await.ok,
+                "{route} was refused"
+            );
+        }
+        assert!(
+            !reg.call("bm_navigate", json!({"route":"/settings/nope"}))
+                .await
+                .ok
         );
     }
 

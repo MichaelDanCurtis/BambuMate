@@ -30,6 +30,7 @@ import {
   PETG,
   PRINTER_FINGERPRINT,
   PRINTER_SERIAL,
+  PRINTER_SLOTS,
   PRINTER_UNCONFIGURED,
   PRINTER_VIEW,
   SLICE_MODEL,
@@ -229,6 +230,30 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   await page.addInitScript(installTauriMock, FIXTURES);
+  // Follows an in-app link without the rail: the router handles any
+  // same-origin <a> click, which is what a link elsewhere in the app does.
+  // Waits for the route to land (`expect` is where it ends up, for an old
+  // route that redirects), then fails if the browser did a full page load
+  // instead: a load would have dropped the marker set before the click.
+  const goTo = async (route, expect = route) => {
+    await page.evaluate((r) => {
+      window.__sameDocument = true;
+      const a = document.createElement("a");
+      a.href = r;
+      document.body.append(a);
+      a.click();
+      a.remove();
+    }, route);
+    await page.waitForFunction((p) => location.pathname === p, expect, { timeout: 5000 });
+    if (!(await page.evaluate(() => window.__sameDocument === true))) {
+      throw new Error(`following ${route} reloaded the page`);
+    }
+  };
+  // Opens a hub from the rail, then one of its tabs.
+  const openTab = async (hub, tab) => {
+    await page.click(`nav.sidebar a[href="${hub}"]`);
+    await page.click(`.nd-tabs a[href="${tab}"]`);
+  };
 
   console.log(`\n== ${engine} ==`);
 
@@ -237,7 +262,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await page.waitForSelector(".sidebar", { timeout: 45000 });
     const links = await page.locator(".nav-link").count();
-    if (links < 8) throw new Error(`only ${links} nav links rendered`);
+    if (links !== 7) throw new Error(`${links} nav links rendered, expected the 7 hubs`);
     return `${links} nav links`;
   });
 
@@ -345,7 +370,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click('nav.sidebar a[href="/settings"]');
     await page.waitForSelector("#slice-auto");
     await page.locator("#slice-auto").click({ trial: true });
-    await page.click('nav.sidebar a[href="/health"]');
+    await openTab("/settings", "/settings/health");
     await page.waitForSelector(".diagnostics-controls button.btn-primary");
     await page.locator(".diagnostics-controls button.btn-primary").click({ trial: true });
     // A fresh hover remains available after leaving the rail.
@@ -588,7 +613,7 @@ async function driveApp(browserType, engine, baseUrl) {
 
   // -- batch generate --------------------------------------------------------
   await step(run, page, "navigate to Batch Generate", async () => {
-    await page.click('a[href="/batch"]');
+    await openTab("/filament", "/filament/batch");
     await page.waitForSelector(".batch-generate-page", { timeout: 15000 });
     // The real select replaces a disabled "Loading brands..." placeholder only
     // once list_catalog_brands resolves.
@@ -612,7 +637,7 @@ async function driveApp(browserType, engine, baseUrl) {
 
   // -- compare profiles ------------------------------------------------------
   await step(run, page, "navigate to Compare Profiles", async () => {
-    await page.click('a[href="/compare"]');
+    await openTab("/profiles", "/profiles/compare");
     await page.waitForSelector(".profile-diff-page", { timeout: 15000 });
   });
 
@@ -869,11 +894,11 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click(".sl-slice");
     await page.waitForFunction(() => window.__ipc.calls.filter((c) => c.cmd === "slicer_slice").length === 4, null, { timeout: 5000 });
     await emitJob(running(4, 10));
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     await page.waitForFunction(() => {
       const s = window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state;
-      return s?.route === "/about" && s.slice == null;
+      return s?.route === "/settings/about" && s.slice == null;
     }, null, { timeout: 5000 });
     await emitJob(running(4, 80));
     await emitJob(done(4, sliceResult()));
@@ -1068,7 +1093,7 @@ async function driveApp(browserType, engine, baseUrl) {
       const saves = await settledCount("slicer_set_settings");
       await page.click(".sl-slice");
       await calledPast("slicer_slice", slices);
-      await page.click('a[href="/about"]');
+      await goTo("/settings/about");
       await page.waitForSelector(".about-page", { timeout: 15000 });
       await release("away-slice");
       // The task's last call: it ran to the end on a closed page.
@@ -1081,7 +1106,7 @@ async function driveApp(browserType, engine, baseUrl) {
 
   await step(run, page, "leaving the page while settings load is safe", async () => {
     const errors = run.errors.length;
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     const settings = await page.evaluate(() => window.__fixtures.slicer_get_settings);
     const late = { __hold: "away-settings", answer: { ...settings, effective: { ...settings.effective, printer: null } } };
@@ -1091,7 +1116,7 @@ async function driveApp(browserType, engine, baseUrl) {
       const stls = await settledCount("list_received_stls");
       await page.click('a[href="/slice"]');
       await calledPast("slicer_get_settings", loads);
-      await page.click('a[href="/about"]');
+      await goTo("/settings/about");
       await page.waitForSelector(".about-page", { timeout: 15000 });
       await release("away-settings");
       // The task's last call: it ran to the end on a closed page.
@@ -1193,7 +1218,7 @@ async function driveApp(browserType, engine, baseUrl) {
     };
     await withFixtures({ slicer_get_settings: withChoices, slicer_set_settings: on }, async () => {
       // Reopen Settings so it loads the saved choices.
-      await page.click('a[href="/about"]');
+      await goTo("/settings/about");
       await page.waitForSelector(".about-page", { timeout: 15000 });
       await page.click('a[href="/settings"]');
       await page.waitForSelector("#slice-auto:not([disabled])", { timeout: 10000 });
@@ -1575,7 +1600,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await setFixture("printer_save", { __delay: 400, answer: FIXTURES.printer_save });
     const errors = run.errors.length;
     await page.click(".printer-trust-btn");
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     await page.waitForTimeout(800);
     if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
@@ -1586,7 +1611,7 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "Reset for clean install empties Settings → Printer", async () => {
     // A saved printer, shown when the section mounts.
     await setFixture("printer_get_config", FIXTURES.printer_save);
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     await page.click('a[href="/settings"]');
     await page.waitForFunction(() => document.querySelector("#printer-ip")?.value === "192.168.1.20", null, {
@@ -1673,12 +1698,29 @@ async function driveApp(browserType, engine, baseUrl) {
         await page.waitForFunction(() => location.pathname === "/slice" && location.search === "?job=9", null, { timeout: 5000 });
         await waitText(".sl-job-model", "bracket.stl");
       });
+
+      await step(run, page, "the STL indicator opens and closes from the keyboard", async () => {
+        const badge = page.locator(".stl-badge");
+        // Start closed: the steps above leave the list open.
+        if ((await badge.getAttribute("aria-expanded")) === "true") await badge.click();
+        await page.waitForSelector(".stl-dropdown", { state: "detached", timeout: 5000 });
+        const label = await badge.getAttribute("aria-label");
+        if (label !== "1 STL file waiting") throw new Error(`aria-label "${label}"`);
+        await badge.focus();
+        await page.keyboard.press("Enter");
+        await page.waitForSelector(".stl-dropdown", { timeout: 5000 });
+        if ((await badge.getAttribute("aria-expanded")) !== "true") throw new Error("aria-expanded is not true");
+        await page.keyboard.press("Escape");
+        await page.waitForSelector(".stl-dropdown", { state: "detached", timeout: 5000 });
+        const focused = await page.evaluate(() => document.activeElement?.classList.contains("stl-badge"));
+        if (!focused) throw new Error("focus did not return to the STL button");
+      });
     });
   }
 
   // -- health check ----------------------------------------------------------
   await step(run, page, "navigate to Health Check", async () => {
-    await page.click('a[href="/health"]');
+    await openTab("/settings", "/settings/health");
     await page.waitForSelector(".health-page", { timeout: 15000 });
     await page.waitForSelector(".health-results", { timeout: 20000 });
     const items = await page.locator(".health-results .health-item").count();
@@ -1744,7 +1786,7 @@ async function driveApp(browserType, engine, baseUrl) {
 
   // -- about -----------------------------------------------------------------
   await step(run, page, "navigate to About", async () => {
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     const version = (await page.locator(".about-version-value").first().innerText()).trim();
     if (!version.includes("1.3.0")) throw new Error(`version reads "${version}"`);
@@ -1756,6 +1798,79 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "update state reports up to date", async () => {
     await page.waitForSelector(".about-up-to-date", { timeout: 20000 });
     return (await page.locator(".about-up-to-date").first().innerText()).replace(/\s+/g, " ").trim();
+  });
+
+  // -- hubs ------------------------------------------------------------------
+  await step(run, page, "old routes land on their hub tab and Back skips them", async () => {
+    for (const [old, tab, selector] of [
+      ["/batch", "/filament/batch", ".batch-generate-page"],
+      ["/compare", "/profiles/compare", ".profile-diff-page"],
+      ["/health", "/settings/health", ".health-page"],
+      ["/about", "/settings/about", ".about-page"],
+    ]) {
+      await page.click('nav.sidebar a[href="/slice"]');
+      await page.waitForSelector(".slice-page", { timeout: 15000 });
+      await goTo(old, tab);
+      await page.waitForFunction((t) => location.pathname === t, tab, { timeout: 5000 });
+      await page.waitForSelector(selector, { timeout: 15000 });
+      const current = await page.locator('.nd-tabs a[aria-current="page"]').getAttribute("href");
+      if (current !== tab) throw new Error(`${old}: the current tab is ${current}`);
+      await page.goBack();
+      await page.waitForFunction(() => location.pathname === "/slice", null, { timeout: 5000 });
+    }
+  });
+
+  await step(run, page, "switching tabs updates the URL and Back returns to the previous tab", async () => {
+    await page.click('nav.sidebar a[href="/settings"]');
+    await page.waitForSelector(".settings-page", { timeout: 15000 });
+    await page.click('.nd-tabs a[href="/settings/about"]');
+    await page.waitForFunction(() => location.pathname === "/settings/about", null, { timeout: 5000 });
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    await page.goBack();
+    await page.waitForFunction(() => location.pathname === "/settings", null, { timeout: 5000 });
+    await page.waitForSelector(".settings-page", { timeout: 15000 });
+    const h1 = (await page.locator("h1.nd-page-title").textContent()).trim();
+    if (h1 !== "Settings") throw new Error(`h1 reads "${h1}"`);
+  });
+
+  await step(run, page, "activating a tab from the keyboard keeps focus on that tab", async () => {
+    // The header must stay mounted across a tab switch, or focus falls to <body>.
+    for (const [hub, page_, tab, selector] of [
+      ["/settings", ".settings-page", "/settings/about", ".about-page"],
+      ["/filament", ".filament-search-page", "/filament/batch", ".batch-generate-page"],
+      ["/profiles", ".profile-management-page", "/profiles/compare", ".profile-diff-page"],
+    ]) {
+      await page.click(`nav.sidebar a[href="${hub}"]`);
+      await page.waitForSelector(page_, { timeout: 15000 });
+      await page.evaluate(() => { window.__header = document.querySelector(".nd-page-header"); });
+      await page.focus(`.nd-tabs a[href="${tab}"]`);
+      await page.keyboard.press("Enter");
+      await page.waitForFunction((t) => location.pathname === t, tab, { timeout: 5000 });
+      await page.waitForSelector(selector, { timeout: 15000 });
+      const focused = await page.evaluate(() => document.activeElement?.getAttribute("href") ?? document.activeElement?.tagName);
+      if (focused !== tab) throw new Error(`${hub}: focus is on ${focused} after opening ${tab}`);
+      const kept = await page.evaluate(() => window.__header === document.querySelector(".nd-page-header"));
+      if (!kept) throw new Error(`${hub}: the header was remounted`);
+      const current = await page.locator('.nd-tabs a[aria-current="page"]').getAttribute("href");
+      if (current !== tab) throw new Error(`${hub}: the current tab is ${current}`);
+    }
+  });
+
+  await step(run, page, "an unknown route says so", async () => {
+    await goTo("/nope");
+    await page.waitForFunction(
+      () => document.querySelector(".nd-state")?.textContent === "[EMPTY: Page not found]",
+      null,
+      { timeout: 5000 }
+    );
+    // The not-found view is already on screen when an old route is followed:
+    // it must still redirect, and Back must not land on the old route.
+    await goTo("/batch", "/filament/batch");
+    await page.waitForFunction(() => location.pathname === "/filament/batch", null, { timeout: 5000 });
+    await page.waitForSelector(".batch-generate-page", { timeout: 15000 });
+    await page.goBack();
+    await page.waitForFunction(() => location.pathname === "/nope", null, { timeout: 5000 });
+    await page.click('nav.sidebar a[href="/"]');
   });
 
   // -- printer page -------------------------------------------------------------
@@ -2116,12 +2231,172 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".pr-picker .pr-picker-item", { timeout: 10000 });
     const errors = run.errors.length;
     await page.locator(".pr-picker-item").first().click();
-    // The picker's backdrop covers the rail, so navigate the way the agent would.
-    await page.locator('a[href="/about"]').dispatchEvent("click");
+    // The picker's backdrop covers the rail, so follow a link the way one elsewhere in the app would.
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     await page.waitForTimeout(800);
     if ((await callsOf("printer_assign_slot")).length !== before + 1) throw new Error("assign was not sent");
     if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
+  });
+
+  // -- home cockpit -----------------------------------------------------------
+  // textContent, not innerText: the hero label and the footer are uppercased by CSS.
+  const homeMode = (mode) => page.waitForSelector(`.home-page[data-mode="${mode}"]`, { timeout: 5000 });
+  const homeText = (sel) => page.locator(sel).first().evaluate((el) => el.textContent.replace(/\s+/g, " ").trim());
+  const RUNNING_CLEAN = { ...PRINTER_VIEW, errors: [] };
+  const FINISHED = { ...RUNNING_CLEAN, state: { ...PRINTER_VIEW.state, gcode_state: "FINISH", mc_percent: 100 } };
+
+  await step(run, page, "home leads with a printer error", async () => {
+    await setFixture("printer_view", PRINTER_VIEW);
+    await page.click('nav.sidebar a[href="/"]');
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await homeMode("attention");
+    const hero = await homeText(".home-page .nd-hero");
+    for (const want of ["ERROR", "Needs attention · 0300_400C", "Look up 0300_400C on the Bambu wiki."]) {
+      if (!hero.includes(want)) throw new Error(`hero lacks "${want}": ${hero}`);
+    }
+  });
+
+  await step(run, page, "What does this mean? puts the error in the agent composer", async () => {
+    const starts = (await callsOf("agent_start")).length + (await callsOf("agent_send")).length;
+    await page.click(".hm-ask");
+    await page.waitForSelector(".agent-drawer.open", { timeout: 5000 });
+    await page.waitForFunction(
+      () => document.querySelector(".ag-input")?.value.includes("0300_400C"),
+      null,
+      { timeout: 5000 }
+    );
+    // Nothing is sent until the user presses send.
+    if ((await callsOf("agent_start")).length + (await callsOf("agent_send")).length !== starts) {
+      throw new Error("the question was sent without the user");
+    }
+    await page.fill(".ag-input", "");
+    // The open drawer covers the toggle, so close it with its own button.
+    await page.click(".ag-close");
+    await page.waitForSelector(".agent-drawer.open", { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "home shows the print in progress", async () => {
+    await emitEvent("printer://state", RUNNING_CLEAN);
+    await homeMode("printing");
+    const number = await homeText(".home-page .nd-hero-number");
+    if (number !== "6") throw new Error(`hero number "${number}"`);
+    const hero = await homeText(".home-page .nd-hero");
+    if (!hero.includes("9 h 09 m left · Layer 1 / 200 · Nozzle 245 °C · Bed 70 °C")) throw new Error(hero);
+    const on = await page.locator(".home-page .nd-seg-on").count();
+    if (on !== 1) throw new Error(`${on} segments filled for 6%`);
+  });
+
+  await step(run, page, "an HMS code during a print keeps the print and names the code", async () => {
+    // BambuMate can't tell an informational HMS code from a fatal one.
+    await emitEvent("printer://state", { ...PRINTER_VIEW, errors: [PRINTER_VIEW.errors[0]] });
+    await homeMode("printing");
+    const label = await homeText(".home-page .nd-hero-label");
+    if (!label.includes("HMS 0300_0100_0001_0007")) throw new Error(`label reads "${label}"`);
+    const number = await homeText(".home-page .nd-hero-number");
+    if (number !== "6") throw new Error(`hero number "${number}"`);
+    if ((await page.locator(".home-page .nd-segbar").count()) !== 1) throw new Error("progress bar hidden");
+    const name = await page.locator(".home-page .nd-segbar").getAttribute("aria-label");
+    if (name !== "Print progress") throw new Error(`progress bar is named "${name}"`);
+    // An HMS code with nothing printing needs attention.
+    await emitEvent("printer://state", { ...PRINTER_VIEW, state: { ...PRINTER_VIEW.state, gcode_state: "IDLE" }, errors: [PRINTER_VIEW.errors[0]] });
+    await homeMode("attention");
+    await emitEvent("printer://state", RUNNING_CLEAN);
+    await homeMode("printing");
+  });
+
+  await step(run, page, "home marks the slot in use with text, not only a colour", async () => {
+    await emitEvent("printer://state", { ...RUNNING_CLEAN, state: { ...RUNNING_CLEAN.state, tray_now: 2 } });
+    await homeMode("printing");
+    const slot = page.locator('.hm-slot[data-slot-label="A3"][data-in-use="signal"]');
+    await slot.waitFor({ timeout: 5000 });
+    const marker = (await slot.locator(".hm-in-use").textContent()).trim();
+    if (marker !== "In use") throw new Error(`marker reads "${marker}"`);
+    if ((await page.locator(".hm-in-use").count()) !== 1) throw new Error("more than one slot marked in use");
+    await emitEvent("printer://state", RUNNING_CLEAN);
+    await page.waitForFunction(() => document.querySelector(".hm-in-use") === null, null, { timeout: 5000 });
+  });
+
+  await step(run, page, "home AMS slots open the preset picker", async () => {
+    const slots = await page.locator(".hm-slot").count();
+    if (slots !== PRINTER_SLOTS.length) throw new Error(`${slots} slots, expected ${PRINTER_SLOTS.length}`);
+    await page.click('.hm-slot[data-slot-label="A3"] .hm-slot-main');
+    await page.waitForSelector(".pr-picker", { timeout: 5000 });
+    await page.click(".pr-picker-cancel");
+    await page.waitForSelector(".pr-picker", { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "home is ready after a print finishes", async () => {
+    await emitEvent("printer://state", FINISHED);
+    await homeMode("idle");
+    const number = await homeText(".home-page .nd-hero-number");
+    if (number !== "READY") throw new Error(`hero number "${number}"`);
+    const hero = await homeText(".home-page .nd-hero");
+    if (!hero.includes("Last print finished just now · T-pose - slim H2D dual AMS riser")) throw new Error(hero);
+  });
+
+  await step(run, page, "home never shows a stale percentage after a disconnect", async () => {
+    await emitEvent("printer://state", RUNNING_CLEAN);
+    await homeMode("printing");
+    await emitEvent("printer://connection", { state: "unreachable" });
+    await homeMode("no-printer");
+    const hero = await homeText(".home-page .nd-hero");
+    if (!hero.includes("[DISCONNECTED]")) throw new Error(hero);
+    const number = await homeText(".home-page .nd-hero-number");
+    if (number !== String(FIXTURES.list_profiles.length)) throw new Error(`hero number "${number}"`);
+    if ((await page.locator(".hm-ams").count()) !== 0) throw new Error("AMS shown while disconnected");
+    await emitEvent("printer://connection", { state: "connected" });
+    await homeMode("printing");
+  });
+
+  await step(run, page, "home footer shows recent work and sync status", async () => {
+    // Earlier steps (Health repair) may have changed these answers; start from the defaults
+    // and remount Home so it reads them.
+    await setFixture("list_unsynced_presets", FIXTURES.list_unsynced_presets);
+    await setFixture("latest_generated_preset", FIXTURES.latest_generated_preset);
+    await page.click('nav.sidebar a[href="/printer"]');
+    await page.click('nav.sidebar a[href="/"]');
+    await page.waitForSelector(".hm-recent span", { timeout: 5000 });
+    await page.waitForSelector(".hm-sync a.hm-sync-warn", { timeout: 5000 });
+    const recent = await homeText(".hm-recent");
+    if (!recent.startsWith("Recent · Polymaker PETG Red · ")) throw new Error(`recent reads "${recent}"`);
+    const sync = page.locator(".hm-sync a.hm-sync-warn");
+    const text = (await sync.textContent()).trim();
+    if (text !== "2 presets not syncing") throw new Error(`sync reads "${text}"`);
+    if ((await sync.getAttribute("href")) !== "/settings/health") throw new Error("sync link goes elsewhere");
+  });
+
+  await step(run, page, "a failed scan shows inline and the rest of Home renders", async () => {
+    await withFixtures({ list_unsynced_presets: { __reject: "scan failed" } }, async () => {
+      await page.click('nav.sidebar a[href="/printer"]');
+      await page.click('nav.sidebar a[href="/"]');
+      await page.waitForFunction(
+        () => document.querySelector(".hm-sync .nd-state")?.textContent === "[ERROR: scan failed]",
+        null,
+        { timeout: 5000 }
+      );
+      if ((await page.locator(".home-page .nd-hero").count()) !== 1) throw new Error("hero missing");
+    });
+  });
+
+  await step(run, page, "home with no printer leads with profiles and offers to connect", async () => {
+    // The previous step left Home showing a failed scan; remount it to re-read.
+    await page.click('nav.sidebar a[href="/printer"]');
+    await page.click('nav.sidebar a[href="/"]');
+    await emitEvent("printer://state", PRINTER_UNCONFIGURED);
+    await homeMode("no-printer");
+    const label = await homeText(".home-page .nd-hero-label");
+    if (label !== "BambuMate") throw new Error(`label reads "${label}"`);
+    // The count is user presets and the detail claims only what the scan saw.
+    await page.waitForFunction(
+      () => /\d+\s*presets/.test(document.querySelector(".home-page .nd-hero")?.textContent ?? "")
+        && /not syncing|No sync problems found/.test(document.querySelector(".home-page .nd-hero")?.textContent ?? ""),
+      null,
+      { timeout: 5000 }
+    );
+    if ((await page.locator(".hm-connect").getAttribute("href")) !== "/settings#printer") throw new Error("connect link");
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await homeMode("attention");
   });
 
   // Put the canned answers back so later steps start from the defaults.

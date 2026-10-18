@@ -4,6 +4,7 @@ mod commands;
 mod components;
 mod pages;
 mod printer;
+mod routes;
 mod slicer;
 mod theme;
 

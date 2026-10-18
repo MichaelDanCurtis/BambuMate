@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
-use super::RefinementHistory;
+use super::{GeneratedPreset, RefinementHistory};
 use crate::profile::sync::NewPresetWrite;
 
 /// The history database, resolved without an `AppHandle` so plain commands
@@ -79,6 +79,24 @@ pub fn record_new_preset(json_path: &Path) {
             "Ledger: no app data directory; not recording {:?}",
             json_path
         ),
+    }
+}
+
+/// The preset BambuMate most recently wrote as new, from the database at
+/// `db_path`. `None` when there is no database yet; it is not created.
+pub fn latest_generated_preset_at(db_path: &Path) -> Result<Option<GeneratedPreset>, String> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    RefinementHistory::new(db_path)?.latest_generated_preset()
+}
+
+/// The preset BambuMate most recently wrote as new, for Home's "Recent"
+/// line. `None` with no app data directory.
+pub fn latest_generated_preset() -> Result<Option<GeneratedPreset>, String> {
+    match history_db_path() {
+        Some(db) => latest_generated_preset_at(&db),
+        None => Ok(None),
     }
 }
 
@@ -265,5 +283,22 @@ mod tests {
         let ledger = try_load_ledger_at(&db).unwrap();
 
         assert!(ledger.contains(&ledger_key(&json)));
+    }
+
+    #[test]
+    fn latest_generated_preset_without_a_database_is_none_and_creates_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("missing.db");
+        assert_eq!(latest_generated_preset_at(&db).unwrap(), None);
+        assert!(!db.exists());
+    }
+
+    #[test]
+    fn latest_generated_preset_reads_the_ledger() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("history.db");
+        record_new_preset_at(&db, &preset(tmp.path()));
+        let latest = latest_generated_preset_at(&db).unwrap().unwrap();
+        assert_eq!(latest.profile_name, "Acme PLA");
     }
 }

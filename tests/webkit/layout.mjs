@@ -182,33 +182,54 @@ function installTauriMock(fixtures) {
 
 const RAIL_WIDTH_VIEWPORT = { width: 900, height: 800 };
 
-// Each case: a route, how to surface a page-level z-indexed element near the
-// rail (some need a click to open), and that element's selector.
+// Each case: the links that open a page (the rail link, then any tab), how
+// to surface a page-level z-indexed element near the rail (some need a click
+// to open), and that element's selector.
+const TAB_ROUTES = [
+  ["/filament", "/filament"],
+  ["/filament", "/filament/batch"],
+  ["/profiles", "/profiles"],
+  ["/profiles", "/profiles/compare"],
+  ["/settings", "/settings"],
+  ["/settings", "/settings/health"],
+  ["/settings", "/settings/about"],
+];
 const RAIL_OVERLAP_CASES = [
   {
     route: "/filament",
+    path: ["/filament"],
     reveal: async () => {},
     overlapSelector: ".search-container",
   },
   {
-    route: "/compare",
+    route: "/profiles/compare",
+    path: ["/profiles", "/profiles/compare"],
     reveal: async (page) => {
       await page.locator(".ss-display").first().click();
     },
     overlapSelector: ".ss-dropdown",
   },
+  // The tab row sits right against the rail on every tabbed hub.
+  ...TAB_ROUTES.map(([hub, tab]) => ({
+    route: tab,
+    path: hub === tab ? [hub] : [hub, tab],
+    reveal: async () => {},
+    overlapSelector: ".nd-tabs",
+  })),
 ];
 
 async function checkRailOverlap(browserType, name, baseUrl) {
   const failures = [];
   const browser = await browserType.launch();
-  for (const { route, reveal, overlapSelector } of RAIL_OVERLAP_CASES) {
+  for (const { route, path, reveal, overlapSelector } of RAIL_OVERLAP_CASES) {
     const page = await browser.newPage({ viewport: RAIL_WIDTH_VIEWPORT });
     await page.addInitScript(installTauriMock, FIXTURES);
     try {
       await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
       await page.waitForSelector(".sidebar", { timeout: 45000 });
-      await page.click(`a[href="${route}"]`);
+      const [hub, ...tabs] = path;
+      await page.click(`nav.sidebar a[href="${hub}"]`);
+      for (const tab of tabs) await page.click(`.nd-tabs a[href="${tab}"]`);
       await reveal(page);
       await page.waitForSelector(overlapSelector, { timeout: 5000 });
       // The bug only shows once the rail is at its full 220px.

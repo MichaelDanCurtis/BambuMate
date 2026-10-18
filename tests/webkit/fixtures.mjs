@@ -667,6 +667,7 @@ export const FIXTURES = {
     bambu_studio_running: false,
   },
   repair_preset_sync: { repaired: [UNSYNCED_CONFIRMED_PATH], skipped: [] },
+  latest_generated_preset: { profile_name: "Polymaker PETG Red", created_at: 1791158400 },
 
   // -- settings (/settings) --
   // Option<String>: null is "no key stored", which is a real state and keeps
