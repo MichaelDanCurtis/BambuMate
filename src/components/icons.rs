@@ -10,6 +10,7 @@ pub enum IconKind {
     Profiles,
     Printer,
     Slice,
+    Stl,
     Settings,
     Lock,
 }
@@ -24,6 +25,7 @@ pub fn Icon(kind: IconKind) -> impl IntoView {
         IconKind::Printer => view! { <rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M4 8h16M10.5 8v3h3V8M12 11v1.5M7.5 16.5h9"/> }.into_any(),
         // Stacked layers: a model cut into slices.
         IconKind::Slice => view! { <path d="M4 7.5l8-3.5 8 3.5-8 3.5z"/><path d="M4 12l8 3.5 8-3.5M4 16.5l8 3.5 8-3.5"/> }.into_any(),
+        IconKind::Stl => view! { <path d="M12 3.5l7.5 4.25v8.5L12 20.5l-7.5-4.25v-8.5z"/><path d="M4.5 7.75L12 12l7.5-4.25M12 12v8.5"/> }.into_any(),
         IconKind::Settings => view! { <circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/> }.into_any(),
         IconKind::Lock => view! { <rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/> }.into_any(),
     };

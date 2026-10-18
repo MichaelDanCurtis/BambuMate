@@ -1692,6 +1692,23 @@ async function driveApp(browserType, engine, baseUrl) {
         await page.waitForFunction(() => location.pathname === "/slice" && location.search === "?job=9", null, { timeout: 5000 });
         await waitText(".sl-job-model", "bracket.stl");
       });
+
+      await step(run, page, "the STL indicator opens and closes from the keyboard", async () => {
+        const badge = page.locator(".stl-badge");
+        // Start closed: the steps above leave the list open.
+        if ((await badge.getAttribute("aria-expanded")) === "true") await badge.click();
+        await page.waitForSelector(".stl-dropdown", { state: "detached", timeout: 5000 });
+        const label = await badge.getAttribute("aria-label");
+        if (label !== "1 STL file waiting") throw new Error(`aria-label "${label}"`);
+        await badge.focus();
+        await page.keyboard.press("Enter");
+        await page.waitForSelector(".stl-dropdown", { timeout: 5000 });
+        if ((await badge.getAttribute("aria-expanded")) !== "true") throw new Error("aria-expanded is not true");
+        await page.keyboard.press("Escape");
+        await page.waitForSelector(".stl-dropdown", { state: "detached", timeout: 5000 });
+        const focused = await page.evaluate(() => document.activeElement?.classList.contains("stl-badge"));
+        if (!focused) throw new Error("focus did not return to the STL button");
+      });
     });
   }
 

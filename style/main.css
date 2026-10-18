@@ -980,6 +980,8 @@ select.input option {
     border: 1px solid var(--nd-border-visible);
     border-radius: var(--nd-radius-pill);
     cursor: pointer;
+    background: transparent;
+    padding: 0;
     font-family: var(--nd-font-mono);
     font-size: 10px;
     font-weight: 600;
@@ -994,7 +996,18 @@ select.input option {
 }
 
 .stl-badge-icon {
+    display: flex;
     color: inherit;
+}
+
+.stl-badge-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.stl-badge:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
 }
 
 .stl-badge-count {
