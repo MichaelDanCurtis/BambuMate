@@ -2252,7 +2252,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await emitEvent("printer://state", PRINTER_VIEW);
     await homeMode("attention");
     const hero = await homeText(".home-page .nd-hero");
-    for (const want of ["ERROR", "Needs attention · 0300_0100_0001_0007", "The heatbed temperature is abnormal"]) {
+    for (const want of ["ERROR", "Needs attention · 0300_400C", "Look up 0300_400C on the Bambu wiki."]) {
       if (!hero.includes(want)) throw new Error(`hero lacks "${want}": ${hero}`);
     }
   });
@@ -2262,7 +2262,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click(".hm-ask");
     await page.waitForSelector(".agent-drawer.open", { timeout: 5000 });
     await page.waitForFunction(
-      () => document.querySelector(".ag-input")?.value.includes("0300_0100_0001_0007"),
+      () => document.querySelector(".ag-input")?.value.includes("0300_400C"),
       null,
       { timeout: 5000 }
     );

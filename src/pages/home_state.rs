@@ -128,8 +128,20 @@ pub fn idle_label(v: &PrinterView) -> String {
     join(&[printer_name(v), "Idle".into()])
 }
 
+/// The error Home names in Attention: a print error if there is one (it is
+/// what puts Home into Attention mid-print, and the backend lists it after
+/// the HMS codes), else the first HMS code.
+fn attention_error(v: &PrinterView) -> Option<&ErrorView> {
+    v.errors
+        .iter()
+        .find(|e| e.kind == "print_error")
+        .or_else(|| v.errors.first())
+}
+
 pub fn attention_label(v: &PrinterView) -> String {
-    let code = v.errors.first().map(|e| e.code.clone()).unwrap_or_default();
+    let code = attention_error(v)
+        .map(|e| e.code.clone())
+        .unwrap_or_default();
     join(&[printer_name(v), "Needs attention".into(), code])
 }
 
@@ -157,7 +169,7 @@ fn is_failed(v: &PrinterView) -> bool {
 }
 
 pub fn attention_detail(v: &PrinterView) -> String {
-    match v.errors.first() {
+    match attention_error(v) {
         Some(ErrorView { text: Some(t), .. }) => t.clone(),
         Some(e) => format!("Look up {} on the Bambu wiki.", e.code),
         None if is_failed(v) => "The print failed. Check the printer.".into(),
@@ -275,7 +287,7 @@ pub fn sync_line(not_syncing: usize) -> String {
 
 /// The question "What does this mean?" puts in the agent's composer.
 pub fn ask_about(v: &PrinterView) -> String {
-    match v.errors.first() {
+    match attention_error(v) {
         Some(ErrorView {
             code,
             text: Some(t),
@@ -369,6 +381,31 @@ mod tests {
                 disconnected: false
             }
         );
+    }
+
+    #[test]
+    fn attention_names_the_print_error_that_caused_it() {
+        // The backend lists HMS entries first and the print error last; the
+        // print error is what put Home into Attention mid-print.
+        let mut v = connected("RUNNING");
+        v.errors
+            .push(error("0300_0100", Some("AMS humidity is high.")));
+        v.errors.push(ErrorView {
+            text: Some("The nozzle is clogged.".into()),
+            ..print_error("0500_4001")
+        });
+        assert_eq!(
+            attention_label(&v),
+            "Workshop H2D · Needs attention · 0500_4001"
+        );
+        assert_eq!(attention_detail(&v), "The nozzle is clogged.");
+        assert!(ask_about(&v).contains("0500_4001"));
+        // With only HMS codes (not printing), the first one is shown.
+        let mut idle = connected("IDLE");
+        idle.errors
+            .push(error("0300_0100", Some("AMS humidity is high.")));
+        idle.errors.push(error("0700_2000", None));
+        assert_eq!(attention_detail(&idle), "AMS humidity is high.");
     }
 
     #[test]

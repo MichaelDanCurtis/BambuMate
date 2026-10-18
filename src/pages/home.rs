@@ -3,6 +3,8 @@
 //! it come the AMS slots and a footer with recent work and sync status.
 //! Read-only: nothing here sends a command to the printer.
 
+use std::time::Duration;
+
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -18,6 +20,9 @@ use crate::pages::home_state::{
 use crate::pages::printer::SlotPicker;
 use crate::printer::types::{swatch_color, untrusted_text, ConnectionState, SlotView};
 use crate::printer::PrinterShared;
+
+/// How often the relative times ("3h ago") are brought up to date.
+const CLOCK_TICK: Duration = Duration::from_secs(30);
 
 /// Most characters shown of a filament type the printer reports.
 const MATERIAL_MAX: usize = 16;
@@ -42,6 +47,17 @@ pub fn HomePage() -> impl IntoView {
     });
     let in_use = Memo::new(move |_| view.with(active_slot));
     let picking = RwSignal::new(Option::<SlotView>::None);
+    // "3h ago" is worked out against this clock, so the relative times keep
+    // up while Home stays open.
+    let now = RwSignal::new(js_sys::Date::now());
+    if let Ok(clock) = set_interval_with_handle(
+        move || {
+            now.try_set(js_sys::Date::now());
+        },
+        CLOCK_TICK,
+    ) {
+        on_cleanup(move || clock.clear());
+    }
 
     // `None` until each call answers. They run on mount and again when the
     // agent changes profiles; never on a timer.
@@ -112,7 +128,7 @@ pub fn HomePage() -> impl IntoView {
                 label=Signal::derive(move || view.with(idle_label))
                 value=Signal::derive(move || view.with(|v| idle_word(v).to_string()))
                 detail=Signal::derive(move || {
-                    last_print.with(|p| last_print_detail(p.as_ref(), js_sys::Date::now()))
+                    last_print.with(|p| last_print_detail(p.as_ref(), now.get()))
                 })
             />
             <div class="hm-actions">
@@ -188,7 +204,7 @@ pub fn HomePage() -> impl IntoView {
             <footer class="hm-foot">
                 <div class="hm-recent">
                     {move || match recent.get() {
-                        Some(Ok(Some(p))) => recent_line(&p, js_sys::Date::now())
+                        Some(Ok(Some(p))) => recent_line(&p, now.get())
                             .map(|line| view! { <span>{line}</span> }.into_any()),
                         Some(Err(e)) => Some(view! { <StateText kind=StateKind::Error message=e /> }.into_any()),
                         _ => None,
