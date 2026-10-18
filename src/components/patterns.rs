@@ -121,14 +121,19 @@ pub fn Hero(
 }
 
 /// Discrete progress: `total` segments, filled per [`segments_filled`].
+/// `label` names the bar for assistive tech.
 #[component]
-pub fn SegmentedBar(#[prop(into)] percent: Signal<u32>, total: u32) -> impl IntoView {
+pub fn SegmentedBar(
+    label: &'static str,
+    #[prop(into)] percent: Signal<u32>,
+    total: u32,
+) -> impl IntoView {
     let filled = move || segments_filled(percent.get(), total);
     let segments = (0..total)
         .map(|i| view! { <span class="nd-seg" class:nd-seg-on=move || i < filled()></span> })
         .collect_view();
     view! {
-        <div class="nd-segbar" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+        <div class="nd-segbar" role="progressbar" aria-label=label aria-valuemin="0" aria-valuemax="100"
             aria-valuenow=move || percent.get().min(100).to_string()>
             {segments}
         </div>

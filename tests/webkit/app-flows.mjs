@@ -232,8 +232,10 @@ async function driveApp(browserType, engine, baseUrl) {
   await page.addInitScript(installTauriMock, FIXTURES);
   // Follows an in-app link without the rail: the router handles any
   // same-origin <a> click, which is what a link elsewhere in the app does.
-  // Fails if the browser did a full page load instead.
-  const goTo = async (route) => {
+  // Waits for the route to land (`expect` is where it ends up, for an old
+  // route that redirects), then fails if the browser did a full page load
+  // instead: a load would have dropped the marker set before the click.
+  const goTo = async (route, expect = route) => {
     await page.evaluate((r) => {
       window.__sameDocument = true;
       const a = document.createElement("a");
@@ -242,7 +244,10 @@ async function driveApp(browserType, engine, baseUrl) {
       a.click();
       a.remove();
     }, route);
-    await page.waitForFunction(() => window.__sameDocument === true, null, { timeout: 2000 });
+    await page.waitForFunction((p) => location.pathname === p, expect, { timeout: 5000 });
+    if (!(await page.evaluate(() => window.__sameDocument === true))) {
+      throw new Error(`following ${route} reloaded the page`);
+    }
   };
   // Opens a hub from the rail, then one of its tabs.
   const openTab = async (hub, tab) => {
@@ -1805,7 +1810,7 @@ async function driveApp(browserType, engine, baseUrl) {
     ]) {
       await page.click('nav.sidebar a[href="/slice"]');
       await page.waitForSelector(".slice-page", { timeout: 15000 });
-      await goTo(old);
+      await goTo(old, tab);
       await page.waitForFunction((t) => location.pathname === t, tab, { timeout: 5000 });
       await page.waitForSelector(selector, { timeout: 15000 });
       const current = await page.locator('.nd-tabs a[aria-current="page"]').getAttribute("href");
@@ -1837,7 +1842,7 @@ async function driveApp(browserType, engine, baseUrl) {
     );
     // The not-found view is already on screen when an old route is followed:
     // it must still redirect, and Back must not land on the old route.
-    await goTo("/batch");
+    await goTo("/batch", "/filament/batch");
     await page.waitForFunction(() => location.pathname === "/filament/batch", null, { timeout: 5000 });
     await page.waitForSelector(".batch-generate-page", { timeout: 15000 });
     await page.goBack();
@@ -2259,6 +2264,36 @@ async function driveApp(browserType, engine, baseUrl) {
     if (on !== 1) throw new Error(`${on} segments filled for 6%`);
   });
 
+  await step(run, page, "an HMS code during a print keeps the print and names the code", async () => {
+    // BambuMate can't tell an informational HMS code from a fatal one.
+    await emitEvent("printer://state", { ...PRINTER_VIEW, errors: [PRINTER_VIEW.errors[0]] });
+    await homeMode("printing");
+    const label = await homeText(".home-page .nd-hero-label");
+    if (!label.includes("HMS 0300_0100_0001_0007")) throw new Error(`label reads "${label}"`);
+    const number = await homeText(".home-page .nd-hero-number");
+    if (number !== "6") throw new Error(`hero number "${number}"`);
+    if ((await page.locator(".home-page .nd-segbar").count()) !== 1) throw new Error("progress bar hidden");
+    const name = await page.locator(".home-page .nd-segbar").getAttribute("aria-label");
+    if (name !== "Print progress") throw new Error(`progress bar is named "${name}"`);
+    // An HMS code with nothing printing needs attention.
+    await emitEvent("printer://state", { ...PRINTER_VIEW, state: { ...PRINTER_VIEW.state, gcode_state: "IDLE" }, errors: [PRINTER_VIEW.errors[0]] });
+    await homeMode("attention");
+    await emitEvent("printer://state", RUNNING_CLEAN);
+    await homeMode("printing");
+  });
+
+  await step(run, page, "home marks the slot in use with text, not only a colour", async () => {
+    await emitEvent("printer://state", { ...RUNNING_CLEAN, state: { ...RUNNING_CLEAN.state, tray_now: 2 } });
+    await homeMode("printing");
+    const slot = page.locator('.hm-slot[data-slot-label="A3"][data-in-use="signal"]');
+    await slot.waitFor({ timeout: 5000 });
+    const marker = (await slot.locator(".hm-in-use").textContent()).trim();
+    if (marker !== "In use") throw new Error(`marker reads "${marker}"`);
+    if ((await page.locator(".hm-in-use").count()) !== 1) throw new Error("more than one slot marked in use");
+    await emitEvent("printer://state", RUNNING_CLEAN);
+    await page.waitForFunction(() => document.querySelector(".hm-in-use") === null, null, { timeout: 5000 });
+  });
+
   await step(run, page, "home AMS slots open the preset picker", async () => {
     const slots = await page.locator(".hm-slot").count();
     if (slots !== PRINTER_SLOTS.length) throw new Error(`${slots} slots, expected ${PRINTER_SLOTS.length}`);
@@ -2304,7 +2339,7 @@ async function driveApp(browserType, engine, baseUrl) {
     if (!recent.startsWith("Recent · Polymaker PETG Red · ")) throw new Error(`recent reads "${recent}"`);
     const sync = page.locator(".hm-sync a.hm-sync-warn");
     const text = (await sync.textContent()).trim();
-    if (text !== "2 presets unsynced") throw new Error(`sync reads "${text}"`);
+    if (text !== "2 presets not syncing") throw new Error(`sync reads "${text}"`);
     if ((await sync.getAttribute("href")) !== "/settings/health") throw new Error("sync link goes elsewhere");
   });
 
@@ -2322,10 +2357,20 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   await step(run, page, "home with no printer leads with profiles and offers to connect", async () => {
+    // The previous step left Home showing a failed scan; remount it to re-read.
+    await page.click('nav.sidebar a[href="/printer"]');
+    await page.click('nav.sidebar a[href="/"]');
     await emitEvent("printer://state", PRINTER_UNCONFIGURED);
     await homeMode("no-printer");
     const label = await homeText(".home-page .nd-hero-label");
     if (label !== "BambuMate") throw new Error(`label reads "${label}"`);
+    // The count is user presets and the detail claims only what the scan saw.
+    await page.waitForFunction(
+      () => /\d+\s*presets/.test(document.querySelector(".home-page .nd-hero")?.textContent ?? "")
+        && /not syncing|No sync problems found/.test(document.querySelector(".home-page .nd-hero")?.textContent ?? ""),
+      null,
+      { timeout: 5000 }
+    );
     if ((await page.locator(".hm-connect").getAttribute("href")) !== "/settings#printer") throw new Error("connect link");
     await emitEvent("printer://state", PRINTER_VIEW);
     await homeMode("attention");

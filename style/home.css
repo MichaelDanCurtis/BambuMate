@@ -75,6 +75,20 @@
     border-color: var(--nd-accent);
 }
 
+/* Not colour alone: the slot in use also says so. */
+.hm-in-use {
+    grid-column: 1 / -1;
+    font-size: 11px;
+}
+
+.hm-slot[data-in-use="signal"] .hm-in-use {
+    color: var(--nd-signal);
+}
+
+.hm-slot[data-in-use="accent"] .hm-in-use {
+    color: var(--nd-accent);
+}
+
 .hm-swatch {
     grid-row: span 2;
     width: 12px;

@@ -13,8 +13,7 @@ use crate::components::patterns::{Hero, SegmentedBar, StateKind, StateText, Tone
 use crate::pages::home_state::{
     active_slot, ask_about, attention_detail, attention_label, attention_word, home_mode,
     idle_label, idle_word, last_print_detail, mode_key, no_printer_label, percent_text,
-    printing_detail, printing_label, profiles_detail, recent_line, sync_line, HomeMode,
-    HOME_SEGMENTS,
+    printing_detail, printing_label, recent_line, sync_line, HomeMode, HOME_SEGMENTS,
 };
 use crate::pages::printer::SlotPicker;
 use crate::printer::types::{swatch_color, untrusted_text, ConnectionState, SlotView};
@@ -97,6 +96,7 @@ pub fn HomePage() -> impl IntoView {
                 detail=Signal::derive(move || view.with(printing_detail))
             />
             <SegmentedBar
+                label="Print progress"
                 percent=Signal::derive(move || {
                     view.with(|v| v.state.as_ref().and_then(|s| s.mc_percent).unwrap_or(0))
                 })
@@ -132,9 +132,9 @@ pub fn HomePage() -> impl IntoView {
                     Some(Err(_)) => "—".to_string(),
                     None => "…".to_string(),
                 })
-                unit=" profiles"
-                detail=Signal::derive(move || match (profiles.get(), unsynced.get()) {
-                    (Some(Ok(total)), Some(Ok(u))) => profiles_detail(total, u),
+                unit=" presets"
+                detail=Signal::derive(move || match unsynced.get() {
+                    Some(Ok(n)) => sync_line(n),
                     _ => String::new(),
                 })
             />
@@ -188,9 +188,8 @@ pub fn HomePage() -> impl IntoView {
             <footer class="hm-foot">
                 <div class="hm-recent">
                     {move || match recent.get() {
-                        Some(Ok(Some(p))) => Some(view! {
-                            <span>{recent_line(&p, js_sys::Date::now())}</span>
-                        }.into_any()),
+                        Some(Ok(Some(p))) => recent_line(&p, js_sys::Date::now())
+                            .map(|line| view! { <span>{line}</span> }.into_any()),
                         Some(Err(e)) => Some(view! { <StateText kind=StateKind::Error message=e /> }.into_any()),
                         _ => None,
                     }}
@@ -245,6 +244,9 @@ fn HomeSlot(
                     })}
                 </span>
                 <span class="hm-slot-status">{move || item.with(|s| s.status.badge())}</span>
+                <Show when=move || outline().is_some()>
+                    <span class="hm-in-use nd-label">"In use"</span>
+                </Show>
             </button>
         </div>
     }

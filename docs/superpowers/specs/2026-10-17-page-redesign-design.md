@@ -82,7 +82,7 @@ Home (`src/pages/home.rs`) is rebuilt around a pure `HomeState` derived from con
 
 **States, in order of precedence:**
 
-1. **Attention.** The printer is connected and either paused or has an active HMS error.
+1. **Attention.** The printer is connected and paused or failed, reports a print error, or reports an HMS code while not printing. An HMS code during a print doesn't hide the print: the Printing hero stays and its label names the code. BambuMate can't tell an HMS code's severity.
    - Hero: the state word (e.g. `PAUSED`) in accent, with the HMS code in the label and the cached HMS text as the detail line.
    - The slot in use (the printer's `tray_now`) is outlined in accent. An HMS code does not name a slot, so the slot feeding the print stands in for the affected one; in a runout pause they are the same slot.
    - Actions: "Open printer" and "What does this mean?". The second opens the agent drawer with a question about the HMS code and text already typed in the composer. The user still presses send.
@@ -95,13 +95,13 @@ Home (`src/pages/home.rs`) is rebuilt around a pure `HomeState` derived from con
    - Detail: the last print's name, how long ago it finished and its duration, shown only when known.
    - Actions: "Slice a model", "New filament profile" and "Analyze last print". The last one appears only when analysis is enabled.
 4. **No printer.** No printer is configured, or the configured printer is disconnected.
-   - Hero: the count of BambuMate profiles, with the detail "N synced to your Bambu account".
+   - Hero: the count of user filament presets, with the detail "N presets not syncing" or "No sync problems found".
    - Actions: "New filament profile" and "Slice a model", plus a small "Connect →" link to Settings → Printer.
    - When a printer is configured but disconnected, the label reads `[DISCONNECTED]`. A stale percentage is never shown.
 
 **Below the hero:**
 - The AMS slot row. It appears whenever a printer is connected and reuses the printer page's slot data and its "Assign" affordance.
-- A footer strip: the most recent generated profile and how long ago it was made, on the left; on the right, "All presets synced" or "N presets unsynced", the latter linking to Settings → Health.
+- A footer strip: the most recent generated profile and how long ago it was made, on the left; on the right, "No sync problems found" or "N presets not syncing", the latter linking to Settings → Health. BambuMate can only see presets stuck out of sync, not confirm that the others reached the cloud.
 
 **Data rules:**
 - `list_profiles`, `list_unsynced_presets` and `latest_generated_preset` run when Home mounts and again when the agent changes profiles (`AgentRefresh`). Repair happens on Settings → Health, so returning to Home re-reads. None of them runs on a timer.

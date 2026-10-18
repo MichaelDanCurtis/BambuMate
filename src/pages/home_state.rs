@@ -13,6 +13,12 @@ pub const HOME_SEGMENTS: u32 = 12;
 /// Most characters shown of a printer name the printer reports.
 const NAME_MAX: usize = 64;
 
+/// Most characters shown of a preset name.
+const PRESET_MAX: usize = 64;
+
+/// Most characters shown of an error code the printer reports.
+const CODE_MAX: usize = 32;
+
 /// Most characters shown of a file name the printer reports.
 const FILE_MAX: usize = 120;
 
@@ -21,7 +27,7 @@ const PRINTING: &[&str] = &["PREPARE", "SLICING", "RUNNING"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeMode {
-    /// Paused, or the printer reports an error.
+    /// Paused or failed, a print error, or an HMS code while not printing.
     Attention,
     Printing,
     Idle,
@@ -33,6 +39,11 @@ pub enum HomeMode {
 
 /// Which hero Home leads with. Precedence: attention, printing, idle, no
 /// printer. A printer that isn't connected never shows its last state.
+///
+/// An HMS code alone doesn't pull Home away from a print: the backend can't
+/// tell an informational code (AMS humidity) from a fatal one, so during a
+/// print it only shows in the label (see `printing_label`). A print error
+/// always needs attention, and so does any code when nothing is printing.
 pub fn home_mode(v: &PrinterView) -> HomeMode {
     if !v.configured {
         return HomeMode::NoPrinter {
@@ -43,10 +54,15 @@ pub fn home_mode(v: &PrinterView) -> HomeMode {
         return HomeMode::NoPrinter { disconnected: true };
     }
     let gcode = v.state.as_ref().and_then(|s| s.gcode_state.as_deref());
-    if gcode == Some("PAUSE") || !v.errors.is_empty() {
+    let printing = gcode.is_some_and(|g| PRINTING.contains(&g));
+    let print_error = v.errors.iter().any(|e| e.kind == "print_error");
+    if matches!(gcode, Some("PAUSE" | "FAILED"))
+        || print_error
+        || (!v.errors.is_empty() && !printing)
+    {
         return HomeMode::Attention;
     }
-    if gcode.is_some_and(|g| PRINTING.contains(&g)) {
+    if printing {
         return HomeMode::Printing;
     }
     HomeMode::Idle
@@ -97,8 +113,15 @@ fn join(parts: &[String]) -> String {
         .join(" · ")
 }
 
+/// `Workshop H2D · Printing · Benchy`, plus `· HMS <code>` when the printer
+/// reports a code during the print.
 pub fn printing_label(v: &PrinterView) -> String {
-    join(&[printer_name(v), "Printing".into(), file_name(v)])
+    let hms = v
+        .errors
+        .first()
+        .map(|e| format!("HMS {}", untrusted_text(&e.code, CODE_MAX)))
+        .unwrap_or_default();
+    join(&[printer_name(v), "Printing".into(), file_name(v), hms])
 }
 
 pub fn idle_label(v: &PrinterView) -> String {
@@ -123,15 +146,21 @@ pub fn no_printer_label(v: &PrinterView) -> String {
 
 pub fn attention_word(v: &PrinterView) -> &'static str {
     match v.state.as_ref().and_then(|s| s.gcode_state.as_deref()) {
+        Some("FAILED") => "FAILED",
         Some("PAUSE") => "PAUSED",
         _ => "ERROR",
     }
+}
+
+fn is_failed(v: &PrinterView) -> bool {
+    v.state.as_ref().and_then(|s| s.gcode_state.as_deref()) == Some("FAILED")
 }
 
 pub fn attention_detail(v: &PrinterView) -> String {
     match v.errors.first() {
         Some(ErrorView { text: Some(t), .. }) => t.clone(),
         Some(e) => format!("Look up {} on the Bambu wiki.", e.code),
+        None if is_failed(v) => "The print failed. Check the printer.".into(),
         None => "Paused. Check the printer, then resume the print there.".into(),
     }
 }
@@ -221,28 +250,27 @@ pub fn last_print_detail(p: Option<&LastPrint>, now_ms: f64) -> String {
     ])
 }
 
-/// `Recent · Polymaker PETG Red · 2d ago`.
-pub fn recent_line(p: &GeneratedPreset, now_ms: f64) -> String {
-    format!(
-        "Recent · {} · {}",
-        p.profile_name,
-        format_ago(now_ms, p.created_at as f64 * 1000.0)
-    )
-}
-
-pub fn sync_line(unsynced: usize) -> String {
-    match unsynced {
-        0 => "All presets synced".into(),
-        1 => "1 preset unsynced".into(),
-        n => format!("{n} presets unsynced"),
+/// `Recent · Polymaker PETG Red · 2d ago`; `None` without a name or a date,
+/// which would read as `Recent ·  · 104d ago`.
+pub fn recent_line(p: &GeneratedPreset, now_ms: f64) -> Option<String> {
+    let name = untrusted_text(p.profile_name.trim(), PRESET_MAX);
+    if name.is_empty() || p.created_at <= 0 {
+        return None;
     }
+    Some(format!(
+        "Recent · {name} · {}",
+        format_ago(now_ms, p.created_at as f64 * 1000.0)
+    ))
 }
 
-pub fn profiles_detail(total: usize, unsynced: usize) -> String {
-    format!(
-        "{} synced to your Bambu account",
-        total.saturating_sub(unsynced)
-    )
+/// What BambuMate can say about sync. It sees only presets stuck out of
+/// sync, so it can't confirm that every other preset reached the cloud.
+pub fn sync_line(not_syncing: usize) -> String {
+    match not_syncing {
+        0 => "No sync problems found".into(),
+        1 => "1 preset not syncing".into(),
+        n => format!("{n} presets not syncing"),
+    }
 }
 
 /// The question "What does this mean?" puts in the agent's composer.
@@ -259,6 +287,10 @@ pub fn ask_about(v: &PrinterView) -> String {
             "My printer shows error {}. What does it mean, and how do I fix it?",
             e.code
         ),
+        None if is_failed(v) => {
+            "My printer reports that a print failed. What usually causes that, and what should I check?"
+                .into()
+        }
         None => {
             "My printer paused mid-print. What usually causes that, and what should I check?".into()
         }
@@ -308,13 +340,21 @@ mod tests {
         }
     }
 
+    fn print_error(code: &str) -> ErrorView {
+        ErrorView {
+            kind: "print_error".into(),
+            ..error(code, None)
+        }
+    }
+
     #[test]
     fn attention_beats_printing_beats_idle_beats_no_printer() {
         let mut v = connected("RUNNING");
         assert_eq!(home_mode(&v), HomeMode::Printing);
-        v.errors.push(error("0300_0100", None));
+        v.errors.push(print_error("0500_4001"));
         assert_eq!(home_mode(&v), HomeMode::Attention);
         assert_eq!(home_mode(&connected("PAUSE")), HomeMode::Attention);
+        assert_eq!(home_mode(&connected("FAILED")), HomeMode::Attention);
         assert_eq!(home_mode(&connected("PREPARE")), HomeMode::Printing);
         assert_eq!(home_mode(&connected("IDLE")), HomeMode::Idle);
         assert_eq!(home_mode(&connected("FINISH")), HomeMode::Idle);
@@ -329,6 +369,38 @@ mod tests {
                 disconnected: false
             }
         );
+    }
+
+    #[test]
+    fn an_hms_code_alone_does_not_hide_a_print() {
+        // BambuMate can't tell an HMS code's severity, so one during a print
+        // (AMS humidity, say) must not replace the progress with an error.
+        let mut printing = connected("RUNNING");
+        printing.errors.push(error("0300_0100", None));
+        assert_eq!(home_mode(&printing), HomeMode::Printing);
+        assert_eq!(
+            printing_label(&printing),
+            "Workshop H2D · Printing · Benchy · HMS 0300_0100"
+        );
+        // A print error during a print still needs attention.
+        let mut both = connected("RUNNING");
+        both.errors.push(error("0300_0100", None));
+        both.errors.push(print_error("0500_4001"));
+        assert_eq!(home_mode(&both), HomeMode::Attention);
+        // Not printing, any code is attention.
+        let mut idle = connected("IDLE");
+        idle.errors.push(error("0300_0100", None));
+        assert_eq!(home_mode(&idle), HomeMode::Attention);
+        let mut finished = connected("FINISH");
+        finished.errors.push(error("0300_0100", None));
+        assert_eq!(home_mode(&finished), HomeMode::Attention);
+        // A printer that reports no state yet counts as not printing.
+        let mut waiting = PrinterView {
+            state: None,
+            ..connected("IDLE")
+        };
+        waiting.errors.push(error("0300_0100", None));
+        assert_eq!(home_mode(&waiting), HomeMode::Attention);
     }
 
     #[test]
@@ -403,6 +475,15 @@ mod tests {
         );
         let paused = connected("PAUSE");
         assert_eq!(attention_word(&paused), "PAUSED");
+        let failed = connected("FAILED");
+        assert_eq!(attention_word(&failed), "FAILED");
+        assert_eq!(
+            attention_detail(&failed),
+            "The print failed. Check the printer."
+        );
+        let mut idle_err = connected("IDLE");
+        idle_err.errors.push(error("0300_0100", None));
+        assert_eq!(attention_word(&idle_err), "ERROR");
         assert_eq!(
             attention_detail(&paused),
             "Paused. Check the printer, then resume the print there."
@@ -464,21 +545,46 @@ mod tests {
         assert_eq!(last_print_detail(None, now), "");
     }
 
+    fn preset(name: &str, created_at: i64) -> GeneratedPreset {
+        GeneratedPreset {
+            profile_name: name.into(),
+            created_at,
+        }
+    }
+
     #[test]
-    fn footer_and_profile_lines() {
-        let p = GeneratedPreset {
-            profile_name: "Polymaker PETG Red".into(),
-            created_at: 1_000_000,
-        };
+    fn recent_line_text() {
+        let now = (1_000_000.0 + 2.0 * 86_400.0) * 1000.0;
         assert_eq!(
-            recent_line(&p, (1_000_000.0 + 2.0 * 86_400.0) * 1000.0),
-            "Recent · Polymaker PETG Red · 2d ago"
+            recent_line(&preset("Polymaker PETG Red", 1_000_000), now).as_deref(),
+            Some("Recent · Polymaker PETG Red · 2d ago")
         );
-        assert_eq!(sync_line(0), "All presets synced");
-        assert_eq!(sync_line(1), "1 preset unsynced");
-        assert_eq!(sync_line(3), "3 presets unsynced");
-        assert_eq!(profiles_detail(12, 3), "9 synced to your Bambu account");
-        assert_eq!(profiles_detail(2, 5), "0 synced to your Bambu account");
+    }
+
+    #[test]
+    fn recent_line_is_skipped_without_a_name_or_a_date() {
+        let now = 10_000_000_000.0;
+        assert_eq!(recent_line(&preset("", 1_000_000), now), None);
+        assert_eq!(recent_line(&preset("   ", 1_000_000), now), None);
+        assert_eq!(recent_line(&preset("PETG", 0), now), None);
+        assert_eq!(recent_line(&preset("PETG", -5), now), None);
+    }
+
+    #[test]
+    fn recent_line_cleans_the_profile_name() {
+        let now = (1_000_000.0 + 60.0) * 1000.0;
+        let long = "x".repeat(200);
+        let line = recent_line(&preset(&format!("A\u{202e}B\n{long}"), 1_000_000), now).unwrap();
+        assert!(!line.contains('\u{202e}'));
+        assert!(!line.contains('\n'));
+        assert!(line.chars().count() < 100, "{line}");
+    }
+
+    #[test]
+    fn sync_line_only_claims_what_the_data_shows() {
+        assert_eq!(sync_line(0), "No sync problems found");
+        assert_eq!(sync_line(1), "1 preset not syncing");
+        assert_eq!(sync_line(3), "3 presets not syncing");
     }
 
     #[test]
