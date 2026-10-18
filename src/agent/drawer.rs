@@ -27,6 +27,10 @@ pub struct AgentShared {
     pub open: RwSignal<bool>,
     pub provider: RwSignal<Provider>,
     pub slice: RwSignal<Option<SliceContext>>,
+    /// A question another page wants in the composer (Home's "What does
+    /// this mean?"). The drawer moves it into the draft and clears it; the
+    /// user still presses send.
+    pub prefill: RwSignal<Option<String>>,
 }
 
 impl Default for AgentShared {
@@ -36,6 +40,7 @@ impl Default for AgentShared {
             open: RwSignal::new(false),
             provider: RwSignal::new(Provider::Codex),
             slice: RwSignal::new(None),
+            prefill: RwSignal::new(None),
         }
     }
 }
@@ -81,6 +86,7 @@ pub fn AgentDrawer() -> impl IntoView {
         open,
         provider,
         slice,
+        prefill,
     } = expect_context::<AgentShared>();
     let show_settings = RwSignal::new(false);
     let readiness = RwSignal::new(None::<Readiness>);
@@ -89,6 +95,12 @@ pub fn AgentDrawer() -> impl IntoView {
     let effort = RwSignal::new("medium".to_string());
     let settings = RwSignal::new(None::<AgentSettings>);
     let draft = RwSignal::new(String::new());
+    Effect::new(move |_| {
+        if let Some(text) = prefill.get() {
+            draft.set(text);
+            prefill.set(None);
+        }
+    });
     let attachments = RwSignal::new(Vec::<(String, String)>::new()); // (display name, staged path)
     let running = Signal::derive(move || chat.with(|c| c.running));
     // Set from the moment SEND is pressed until the turn is announced (or

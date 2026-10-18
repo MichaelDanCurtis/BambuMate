@@ -406,7 +406,8 @@ fn SlotCard(item: Memo<SlotView>, picking: RwSignal<Option<SlotView>>) -> impl I
     };
     view! {
         <div class="pr-slot" data-status=move || item.with(|s| s.status.key())
-            data-label=move || item.with(|s| s.label.clone())>
+            data-label=move || item.with(|s| s.label.clone())
+            data-slot-label=move || item.with(|s| s.label.clone())>
             <button class="pr-slot-main" on:click=move |_| { picking.set(Some(item.get_untracked())); }
                 title="Choose the preset loaded here">
                 {body}
@@ -490,15 +491,16 @@ fn more_than_shown(list: &[ProfileInfo], query: &str) -> bool {
         .is_some()
 }
 
-/// Puts focus back on a slot card's button once the picker has gone, if that
-/// card is still on the page.
+/// Puts focus back on the slot a picker was opened from, on whichever page
+/// it was opened (Printer or Home): the first button inside the element
+/// whose `data-slot-label` matches.
 fn refocus_card(label: String) {
     set_timeout(
         move || {
             let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
                 return;
             };
-            let Ok(cards) = doc.query_selector_all(".pr-slot") else {
+            let Ok(cards) = doc.query_selector_all("[data-slot-label]") else {
                 return;
             };
             for i in 0..cards.length() {
@@ -508,9 +510,9 @@ fn refocus_card(label: String) {
                 else {
                     continue;
                 };
-                if card.get_attribute("data-label").as_deref() == Some(label.as_str()) {
+                if card.get_attribute("data-slot-label").as_deref() == Some(label.as_str()) {
                     if let Some(button) = card
-                        .query_selector(".pr-slot-main")
+                        .query_selector("button")
                         .ok()
                         .flatten()
                         .and_then(|b| b.dyn_into::<web_sys::HtmlElement>().ok())
@@ -526,7 +528,7 @@ fn refocus_card(label: String) {
 }
 
 #[component]
-fn SlotPicker(item: SlotView, picking: RwSignal<Option<SlotView>>) -> impl IntoView {
+pub(crate) fn SlotPicker(item: SlotView, picking: RwSignal<Option<SlotView>>) -> impl IntoView {
     let slot = item;
     let shared = expect_context::<PrinterShared>();
     let user = RwSignal::new(Vec::<ProfileInfo>::new());

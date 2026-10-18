@@ -1,83 +1,251 @@
+//! Home: a cockpit that leads with whatever matters now (spec 2026-10-17
+//! §3). The printer decides the hero (see `home_state::home_mode`); below
+//! it come the AMS slots and a footer with recent work and sync status.
+//! Read-only: nothing here sends a command to the printer.
+
 use leptos::prelude::*;
+use wasm_bindgen_futures::spawn_local;
 
+use crate::agent::drawer::{AgentRefresh, AgentShared};
 use crate::app::FeatureFlagsContext;
-use crate::components::branding::HeroArtwork;
+use crate::commands::{self, GeneratedPreset};
+use crate::components::patterns::{Hero, SegmentedBar, StateKind, StateText, Tone};
+use crate::pages::home_state::{
+    active_slot, ask_about, attention_detail, attention_label, attention_word, home_mode,
+    idle_label, idle_word, last_print_detail, mode_key, no_printer_label, percent_text,
+    printing_detail, printing_label, profiles_detail, recent_line, sync_line, HomeMode,
+    HOME_SEGMENTS,
+};
+use crate::pages::printer::SlotPicker;
+use crate::printer::types::{swatch_color, untrusted_text, ConnectionState, SlotView};
+use crate::printer::PrinterShared;
 
-const HERO_EYEBROW: &str = "Bambu Studio workflow";
-const HERO_DESCRIPTION: &str =
-    "Generate cleaner profiles, compare tuned presets, and refine prints with a calmer Bambu-inspired workspace.";
+/// Most characters shown of a filament type the printer reports.
+const MATERIAL_MAX: usize = 16;
 
 #[component]
 pub fn HomePage() -> impl IntoView {
-    let ff_ctx = use_context::<FeatureFlagsContext>().expect("FeatureFlagsContext not provided");
+    let printer = expect_context::<PrinterShared>();
+    let view = printer.view;
+    let last_print = printer.last_print;
+    let flags = expect_context::<FeatureFlagsContext>().flags;
+    let agent = expect_context::<AgentShared>();
+    let refresh = expect_context::<AgentRefresh>().0;
+    // Picks up anything missed while away.
+    printer.refresh();
+
+    let mode = Memo::new(move |_| view.with(home_mode));
+    let connected = Memo::new(move |_| {
+        view.with(|v| v.configured && v.connection == ConnectionState::Connected)
+    });
+    let slot_labels = Memo::new(move |_| {
+        view.with(|v| v.slots.iter().map(|s| s.label.clone()).collect::<Vec<_>>())
+    });
+    let in_use = Memo::new(move |_| view.with(active_slot));
+    let picking = RwSignal::new(Option::<SlotView>::None);
+
+    // `None` until each call answers. They run on mount and again when the
+    // agent changes profiles; never on a timer.
+    let profiles = RwSignal::new(None::<Result<usize, String>>);
+    let unsynced = RwSignal::new(None::<Result<usize, String>>);
+    let recent = RwSignal::new(None::<Result<Option<GeneratedPreset>, String>>);
+    Effect::new(move |_| {
+        refresh.track();
+        // Home can go away while these are in flight, so each write is a
+        // try_set, which does nothing once the signal is disposed.
+        spawn_local(async move {
+            profiles.try_set(Some(commands::list_profiles().await.map(|l| l.len())));
+        });
+        spawn_local(async move {
+            unsynced.try_set(Some(
+                commands::list_unsynced_presets()
+                    .await
+                    .map(|l| l.presets.len()),
+            ));
+        });
+        spawn_local(async move {
+            recent.try_set(Some(commands::latest_generated_preset().await));
+        });
+    });
+
+    let ask = move |_| {
+        agent.prefill.set(Some(view.with_untracked(ask_about)));
+        agent.open.set(true);
+    };
+
+    let hero = move || match mode.get() {
+        HomeMode::Attention => view! {
+            <Hero
+                label=Signal::derive(move || view.with(attention_label))
+                value=Signal::derive(move || view.with(|v| attention_word(v).to_string()))
+                detail=Signal::derive(move || view.with(attention_detail))
+                tone=Tone::Accent
+            />
+            <div class="hm-actions">
+                <a href="/printer" class="btn btn-primary">"Open printer"</a>
+                <button type="button" class="btn btn-secondary hm-ask" on:click=ask>
+                    "What does this mean?"
+                </button>
+            </div>
+        }
+        .into_any(),
+        HomeMode::Printing => view! {
+            <Hero
+                label=Signal::derive(move || view.with(printing_label))
+                value=Signal::derive(move || view.with(percent_text))
+                unit="%"
+                detail=Signal::derive(move || view.with(printing_detail))
+            />
+            <SegmentedBar
+                percent=Signal::derive(move || {
+                    view.with(|v| v.state.as_ref().and_then(|s| s.mc_percent).unwrap_or(0))
+                })
+                total=HOME_SEGMENTS
+            />
+            <div class="hm-actions">
+                <a href="/printer" class="btn btn-secondary">"Printer →"</a>
+            </div>
+        }
+        .into_any(),
+        HomeMode::Idle => view! {
+            <Hero
+                label=Signal::derive(move || view.with(idle_label))
+                value=Signal::derive(move || view.with(|v| idle_word(v).to_string()))
+                detail=Signal::derive(move || {
+                    last_print.with(|p| last_print_detail(p.as_ref(), js_sys::Date::now()))
+                })
+            />
+            <div class="hm-actions">
+                <a href="/slice" class="btn btn-primary">"Slice a model"</a>
+                <a href="/filament" class="btn btn-secondary">"New filament profile"</a>
+                <Show when=move || flags.get().analysis_enabled>
+                    <a href="/analysis" class="btn btn-secondary">"Analyze last print"</a>
+                </Show>
+            </div>
+        }
+        .into_any(),
+        HomeMode::NoPrinter { disconnected } => view! {
+            <Hero
+                label=Signal::derive(move || view.with(no_printer_label))
+                value=Signal::derive(move || match profiles.get() {
+                    Some(Ok(n)) => n.to_string(),
+                    Some(Err(_)) => "—".to_string(),
+                    None => "…".to_string(),
+                })
+                unit=" profiles"
+                detail=Signal::derive(move || match (profiles.get(), unsynced.get()) {
+                    (Some(Ok(total)), Some(Ok(u))) => profiles_detail(total, u),
+                    _ => String::new(),
+                })
+            />
+            {move || match profiles.get() {
+                Some(Err(e)) => Some(view! { <StateText kind=StateKind::Error message=e /> }),
+                _ => None,
+            }}
+            <div class="hm-actions">
+                <a href="/filament" class="btn btn-primary">"New filament profile"</a>
+                <a href="/slice" class="btn btn-secondary">"Slice a model"</a>
+            </div>
+            <p class="hm-connect-line">
+                {if disconnected {
+                    "The printer is offline. "
+                } else {
+                    "Connect your printer to see live status and the AMS here. "
+                }}
+                <a href="/settings#printer" class="hm-connect">
+                    {if disconnected { "Check Settings → Printer →" } else { "Connect →" }}
+                </a>
+            </p>
+        }
+        .into_any(),
+    };
 
     view! {
-        <div class="page home-page">
-            <section class="hero-panel">
-                <div class="hero-copy">
-                    <span class="hero-eyebrow">{HERO_EYEBROW}</span>
-                    <h2>"Welcome to BambuMate"</h2>
-                    <p class="page-description hero-description">
-                        {HERO_DESCRIPTION}
-                    </p>
-                    <div class="hero-actions">
-                        <a href="/filament" class="btn btn-primary">"Create a Profile"</a>
-                        <Show when=move || ff_ctx.flags.get().analysis_enabled>
-                            <a href="/analysis" class="btn btn-secondary">"Analyze a Print"</a>
-                        </Show>
-                    </div>
-                </div>
-                <HeroArtwork />
-            </section>
+        <div class="page home-page" data-mode=move || mode_key(mode.get())>
+            <h1 class="nd-visually-hidden">"Home"</h1>
+            <section class="hm-hero">{hero}</section>
 
-            <div class="card-grid">
-                <div class="card">
-                    <h3>"Search Filament"</h3>
-                    <p>"Find filament specs and generate optimized profiles"</p>
-                    <a href="/filament" class="btn btn-primary">"Search Now"</a>
-                </div>
-                <Show when=move || ff_ctx.flags.get().analysis_enabled>
-                    <div class="card">
-                        <h3>"Analyze Print"</h3>
-                        <p>"Upload a photo for AI defect analysis and recommendations"</p>
-                        <a href="/analysis" class="btn btn-primary">"Analyze Now"</a>
+            <Show when=move || connected.get() && slot_labels.with(|l| !l.is_empty())>
+                <section class="hm-ams" aria-label="AMS">
+                    <p class="nd-label">"AMS"</p>
+                    <div class="hm-slots">
+                        <For
+                            each=move || slot_labels.get()
+                            key=|label| label.clone()
+                            children=move |label| {
+                                let item = Memo::new(move |_| {
+                                    view.with(|v| {
+                                        v.slots.iter().find(|s| s.label == label).cloned().unwrap_or_default()
+                                    })
+                                });
+                                view! { <HomeSlot item=item in_use=in_use mode=mode picking=picking /> }
+                            }
+                        />
                     </div>
-                </Show>
-                <div class="card">
-                    <h3>"View Profiles"</h3>
-                    <p>"Browse and manage your generated filament profiles"</p>
-                    <a href="/profiles" class="btn btn-primary">"Browse Profiles"</a>
-                </div>
-            </div>
+                </section>
+            </Show>
 
-            <div class="how-it-works">
-                <h3>"How It Works"</h3>
-                <div class="steps">
-                    <div class="step">
-                        <span class="step-number">"1"</span>
-                        <div class="step-content">
-                            <strong>"Search"</strong>
-                            <p>"Find your filament from our catalog or let AI look it up"</p>
-                        </div>
-                    </div>
-                    <div class="step">
-                        <span class="step-number">"2"</span>
-                        <div class="step-content">
-                            <strong>"Generate"</strong>
-                            <p>"We create an optimized Bambu Studio profile from the specs"</p>
-                        </div>
-                    </div>
-                    <Show when=move || ff_ctx.flags.get().analysis_enabled>
-                        <div class="step">
-                            <span class="step-number">"3"</span>
-                            <div class="step-content">
-                                <strong>"Refine"</strong>
-                                <p>"Print a test, photograph it, and get AI-powered tuning suggestions"</p>
-                            </div>
-                        </div>
-                    </Show>
+            <footer class="hm-foot">
+                <div class="hm-recent">
+                    {move || match recent.get() {
+                        Some(Ok(Some(p))) => Some(view! {
+                            <span>{recent_line(&p, js_sys::Date::now())}</span>
+                        }.into_any()),
+                        Some(Err(e)) => Some(view! { <StateText kind=StateKind::Error message=e /> }.into_any()),
+                        _ => None,
+                    }}
                 </div>
-            </div>
+                <div class="hm-sync">
+                    {move || match unsynced.get() {
+                        Some(Ok(0)) => view! { <span class="hm-sync-ok">{sync_line(0)}</span> }.into_any(),
+                        Some(Ok(n)) => view! {
+                            <a href="/settings/health" class="hm-sync-warn">{sync_line(n)}</a>
+                        }.into_any(),
+                        Some(Err(e)) => view! { <StateText kind=StateKind::Error message=e /> }.into_any(),
+                        None => view! { <StateText kind=StateKind::Loading /> }.into_any(),
+                    }}
+                </div>
+            </footer>
+
+            {move || picking.get().map(|slot| view! { <SlotPicker item=slot picking=picking /> })}
+        </div>
+    }
+}
+
+/// One AMS slot. Clicking it opens the same preset picker as the Printer
+/// page. The slot feeding the print is outlined: signal while printing,
+/// accent when the printer needs attention.
+#[component]
+fn HomeSlot(
+    item: Memo<SlotView>,
+    in_use: Memo<Option<(u32, u32)>>,
+    mode: Memo<HomeMode>,
+    picking: RwSignal<Option<SlotView>>,
+) -> impl IntoView {
+    let outline = move || {
+        let here = item.with(|s| Some((s.ams_id, s.tray_id))) == in_use.get();
+        match (here, mode.get()) {
+            (true, HomeMode::Printing) => Some("signal"),
+            (true, HomeMode::Attention) => Some("accent"),
+            _ => None,
+        }
+    };
+    view! {
+        <div class="hm-slot"
+            data-slot-label=move || item.with(|s| s.label.clone())
+            data-status=move || item.with(|s| s.status.key())
+            data-in-use=outline>
+            <button type="button" class="hm-slot-main" title="Choose the preset loaded here"
+                on:click=move |_| picking.set(Some(item.get_untracked()))>
+                <span class="hm-swatch" style:background=move || item.with(|s| swatch_color(&s.tray.tray_color))></span>
+                <span class="hm-slot-label nd-mono">{move || item.with(|s| s.label.clone())}</span>
+                <span class="hm-material">
+                    {move || item.with(|s| {
+                        if s.tray.empty { "—".to_string() } else { untrusted_text(&s.tray.tray_type, MATERIAL_MAX) }
+                    })}
+                </span>
+                <span class="hm-slot-status">{move || item.with(|s| s.status.badge())}</span>
+            </button>
         </div>
     }
 }

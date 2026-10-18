@@ -30,6 +30,7 @@ import {
   PETG,
   PRINTER_FINGERPRINT,
   PRINTER_SERIAL,
+  PRINTER_SLOTS,
   PRINTER_UNCONFIGURED,
   PRINTER_VIEW,
   SLICE_MODEL,
@@ -2208,6 +2209,126 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForTimeout(800);
     if ((await callsOf("printer_assign_slot")).length !== before + 1) throw new Error("assign was not sent");
     if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
+  });
+
+  // -- home cockpit -----------------------------------------------------------
+  // textContent, not innerText: the hero label and the footer are uppercased by CSS.
+  const homeMode = (mode) => page.waitForSelector(`.home-page[data-mode="${mode}"]`, { timeout: 5000 });
+  const homeText = (sel) => page.locator(sel).first().evaluate((el) => el.textContent.replace(/\s+/g, " ").trim());
+  const RUNNING_CLEAN = { ...PRINTER_VIEW, errors: [] };
+  const FINISHED = { ...RUNNING_CLEAN, state: { ...PRINTER_VIEW.state, gcode_state: "FINISH", mc_percent: 100 } };
+
+  await step(run, page, "home leads with a printer error", async () => {
+    await setFixture("printer_view", PRINTER_VIEW);
+    await page.click('nav.sidebar a[href="/"]');
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await homeMode("attention");
+    const hero = await homeText(".home-page .nd-hero");
+    for (const want of ["ERROR", "Needs attention · 0300_0100_0001_0007", "The heatbed temperature is abnormal"]) {
+      if (!hero.includes(want)) throw new Error(`hero lacks "${want}": ${hero}`);
+    }
+  });
+
+  await step(run, page, "What does this mean? puts the error in the agent composer", async () => {
+    const starts = (await callsOf("agent_start")).length + (await callsOf("agent_send")).length;
+    await page.click(".hm-ask");
+    await page.waitForSelector(".agent-drawer.open", { timeout: 5000 });
+    await page.waitForFunction(
+      () => document.querySelector(".ag-input")?.value.includes("0300_0100_0001_0007"),
+      null,
+      { timeout: 5000 }
+    );
+    // Nothing is sent until the user presses send.
+    if ((await callsOf("agent_start")).length + (await callsOf("agent_send")).length !== starts) {
+      throw new Error("the question was sent without the user");
+    }
+    await page.fill(".ag-input", "");
+    // The open drawer covers the toggle, so close it with its own button.
+    await page.click(".ag-close");
+    await page.waitForSelector(".agent-drawer.open", { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "home shows the print in progress", async () => {
+    await emitEvent("printer://state", RUNNING_CLEAN);
+    await homeMode("printing");
+    const number = await homeText(".home-page .nd-hero-number");
+    if (number !== "6") throw new Error(`hero number "${number}"`);
+    const hero = await homeText(".home-page .nd-hero");
+    if (!hero.includes("9 h 09 m left · Layer 1 / 200 · Nozzle 245 °C · Bed 70 °C")) throw new Error(hero);
+    const on = await page.locator(".home-page .nd-seg-on").count();
+    if (on !== 1) throw new Error(`${on} segments filled for 6%`);
+  });
+
+  await step(run, page, "home AMS slots open the preset picker", async () => {
+    const slots = await page.locator(".hm-slot").count();
+    if (slots !== PRINTER_SLOTS.length) throw new Error(`${slots} slots, expected ${PRINTER_SLOTS.length}`);
+    await page.click('.hm-slot[data-slot-label="A3"] .hm-slot-main');
+    await page.waitForSelector(".pr-picker", { timeout: 5000 });
+    await page.click(".pr-picker-cancel");
+    await page.waitForSelector(".pr-picker", { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "home is ready after a print finishes", async () => {
+    await emitEvent("printer://state", FINISHED);
+    await homeMode("idle");
+    const number = await homeText(".home-page .nd-hero-number");
+    if (number !== "READY") throw new Error(`hero number "${number}"`);
+    const hero = await homeText(".home-page .nd-hero");
+    if (!hero.includes("Last print finished just now · T-pose - slim H2D dual AMS riser")) throw new Error(hero);
+  });
+
+  await step(run, page, "home never shows a stale percentage after a disconnect", async () => {
+    await emitEvent("printer://state", RUNNING_CLEAN);
+    await homeMode("printing");
+    await emitEvent("printer://connection", { state: "unreachable" });
+    await homeMode("no-printer");
+    const hero = await homeText(".home-page .nd-hero");
+    if (!hero.includes("[DISCONNECTED]")) throw new Error(hero);
+    const number = await homeText(".home-page .nd-hero-number");
+    if (number !== String(FIXTURES.list_profiles.length)) throw new Error(`hero number "${number}"`);
+    if ((await page.locator(".hm-ams").count()) !== 0) throw new Error("AMS shown while disconnected");
+    await emitEvent("printer://connection", { state: "connected" });
+    await homeMode("printing");
+  });
+
+  await step(run, page, "home footer shows recent work and sync status", async () => {
+    // Earlier steps (Health repair) may have changed these answers; start from the defaults
+    // and remount Home so it reads them.
+    await setFixture("list_unsynced_presets", FIXTURES.list_unsynced_presets);
+    await setFixture("latest_generated_preset", FIXTURES.latest_generated_preset);
+    await page.click('nav.sidebar a[href="/printer"]');
+    await page.click('nav.sidebar a[href="/"]');
+    await page.waitForSelector(".hm-recent span", { timeout: 5000 });
+    await page.waitForSelector(".hm-sync a.hm-sync-warn", { timeout: 5000 });
+    const recent = await homeText(".hm-recent");
+    if (!recent.startsWith("Recent · Polymaker PETG Red · ")) throw new Error(`recent reads "${recent}"`);
+    const sync = page.locator(".hm-sync a.hm-sync-warn");
+    const text = (await sync.textContent()).trim();
+    if (text !== "2 presets unsynced") throw new Error(`sync reads "${text}"`);
+    if ((await sync.getAttribute("href")) !== "/settings/health") throw new Error("sync link goes elsewhere");
+  });
+
+  await step(run, page, "a failed scan shows inline and the rest of Home renders", async () => {
+    await withFixtures({ list_unsynced_presets: { __reject: "scan failed" } }, async () => {
+      await page.click('nav.sidebar a[href="/printer"]');
+      await page.click('nav.sidebar a[href="/"]');
+      await page.waitForFunction(
+        () => document.querySelector(".hm-sync .nd-state")?.textContent === "[ERROR: scan failed]",
+        null,
+        { timeout: 5000 }
+      );
+      if ((await page.locator(".home-page .nd-hero").count()) !== 1) throw new Error("hero missing");
+    });
+  });
+
+  await step(run, page, "home with no printer leads with profiles and offers to connect", async () => {
+    await emitEvent("printer://state", PRINTER_UNCONFIGURED);
+    await homeMode("no-printer");
+    const label = await homeText(".home-page .nd-hero-label");
+    if (label !== "BambuMate") throw new Error(`label reads "${label}"`);
+    if ((await page.locator(".hm-connect").getAttribute("href")) !== "/settings#printer") throw new Error("connect link");
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await homeMode("attention");
   });
 
   // Put the canned answers back so later steps start from the defaults.
