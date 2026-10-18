@@ -200,6 +200,12 @@ body {
     flex: 1;
 }
 
+/* Settings, pinned to the bottom of the rail below a divider. */
+.nav-list-end {
+    flex: none;
+    border-top: 1px solid var(--nd-border);
+}
+
 .nav-item {
     position: relative;
 }

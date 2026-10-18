@@ -27,7 +27,26 @@ if (!existsSync(join(distDir, "index.html"))) {
 const THEMES = ["dark", "bambu"];
 const WIDTHS = [1280, 900];
 const HEIGHT = 860; // the minimum; taller pages grow the viewport, see below
-const ROUTES = ["/", "/filament", "/analysis", "/profiles", "/printer", "/batch", "/compare", "/slice", "/settings", "/health", "/about"];
+const ROUTES = [
+  "/",
+  "/printer",
+  "/filament",
+  "/filament/batch",
+  "/profiles",
+  "/profiles/compare",
+  "/slice",
+  "/analysis",
+  "/settings",
+  "/settings/health",
+  "/settings/about",
+];
+// A tab route is reached through its hub: the hub's rail link, then the tab.
+const HUB_OF = {
+  "/filament/batch": "/filament",
+  "/profiles/compare": "/profiles",
+  "/settings/health": "/settings",
+  "/settings/about": "/settings",
+};
 
 // Copied from serve() in app-flows.mjs, which runs its flows at import time
 // and so cannot export it. Keep the two in step.
@@ -78,7 +97,7 @@ function installTauriMock({ fixtures, theme }) {
 }
 
 function fileName(theme, width, route) {
-  const name = route === "/" ? "home" : route.slice(1);
+  const name = route === "/" ? "home" : route.slice(1).replaceAll("/", "-");
   return `${theme}-${width}-${name}.png`;
 }
 
@@ -97,7 +116,9 @@ try {
         await page.addInitScript(installTauriMock, { fixtures: FIXTURES, theme });
         await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
         await page.waitForSelector(".sidebar", { timeout: 45000 });
-        await page.click(`a.nav-link[href="${route}"]`);
+        const hub = HUB_OF[route];
+        await page.click(`a.nav-link[href="${hub ?? route}"]`);
+        if (hub) await page.click(`.nd-tabs a[href="${route}"]`);
         // Leave the rail at rest: move the pointer off it and drop focus, so the
         // screenshot shows the collapsed 64px rail and not its hover state.
         await page.mouse.move(width - 20, HEIGHT - 20);

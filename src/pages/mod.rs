@@ -3,6 +3,7 @@ pub mod batch_generate;
 pub mod filament_search;
 pub mod health;
 pub mod home;
+pub mod hub;
 pub mod print_analysis;
 pub mod printer;
 pub mod profile_diff;

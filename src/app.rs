@@ -1,16 +1,20 @@
 use leptos::prelude::*;
 use leptos_router::components::*;
+use leptos_router::hooks::{use_location, use_navigate};
 use leptos_router::path;
+use leptos_router::NavigateOptions;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::agent::drawer::{AgentDrawer, AgentEvents, AgentRefresh, AgentShared};
 use crate::commands::{self, FeatureFlags, UpdateInfo};
+use crate::components::patterns::{StateKind, StateText};
 use crate::components::sidebar::Sidebar;
 use crate::pages::about::AboutPage;
 use crate::pages::batch_generate::BatchGeneratePage;
 use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
 use crate::pages::home::HomePage;
+use crate::pages::hub::HubPage;
 use crate::pages::print_analysis::PrintAnalysisPage;
 use crate::pages::printer::PrinterPage;
 use crate::pages::profile_diff::ProfileDiffPage;
@@ -19,6 +23,7 @@ use crate::pages::settings::SettingsPage;
 use crate::pages::setup_wizard::SetupWizard;
 use crate::pages::slice::SlicePage;
 use crate::printer::{PrinterEvents, PrinterShared};
+use crate::routes::{legacy_target, FILAMENT_TABS, PROFILES_TABS, SETTINGS_TABS};
 use crate::slicer::{SlicerEvents, SlicerShared};
 use crate::theme::{apply_theme, normalize_theme, ThemeContext};
 
@@ -33,6 +38,44 @@ pub struct FeatureFlagsContext {
 #[derive(Clone)]
 pub struct UpdateContext {
     pub update_info: RwSignal<Option<UpdateInfo>>,
+}
+
+/// What the router shows when no route matches: a route from before the
+/// hubs is replaced in history by the tab it moved to, so Back never lands
+/// on it and bounces; anything else is "not found".
+///
+/// The redirect waits a tick. Router navigations finish only after the
+/// destination renders, so a `<Redirect>` rendered here navigates before
+/// the click that brought us here has been pushed, and replaces the page the
+/// user came from instead.
+#[component]
+fn NoRoute() -> impl IntoView {
+    let path = use_location().pathname.get_untracked();
+    match legacy_target(&path) {
+        Some(to) => {
+            let navigate = use_navigate();
+            set_timeout(
+                move || {
+                    navigate(
+                        to,
+                        NavigateOptions {
+                            replace: true,
+                            ..Default::default()
+                        },
+                    )
+                },
+                std::time::Duration::ZERO,
+            );
+            ().into_any()
+        }
+        None => view! {
+            <div class="page">
+                <StateText kind=StateKind::Empty message="Page not found" />
+                <a href="/" class="btn btn-secondary">"Back to Home"</a>
+            </div>
+        }
+        .into_any(),
+    }
 }
 
 #[component]
@@ -121,18 +164,32 @@ pub fn App() -> impl IntoView {
                 <div class="app-layout">
                     <Sidebar />
                     <main class="content">
-                        <Routes fallback=|| view! { <p>"Page not found"</p> }>
+                        <Routes fallback=|| view! { <NoRoute /> }>
                             <Route path=path!("/") view=HomePage />
-                            <Route path=path!("/filament") view=FilamentSearchPage />
-                            <Route path=path!("/analysis") view=PrintAnalysisPage />
-                            <Route path=path!("/profiles") view=ProfileManagementPage />
-                            <Route path=path!("/batch") view=BatchGeneratePage />
-                            <Route path=path!("/compare") view=ProfileDiffPage />
-                            <Route path=path!("/slice") view=SlicePage />
-                            <Route path=path!("/settings") view=SettingsPage />
-                            <Route path=path!("/health") view=HealthPage />
-                            <Route path=path!("/about") view=AboutPage />
                             <Route path=path!("/printer") view=PrinterPage />
+                            <Route path=path!("/filament") view=|| view! {
+                                <HubPage title="Filament" tabs=FILAMENT_TABS><FilamentSearchPage /></HubPage>
+                            } />
+                            <Route path=path!("/filament/batch") view=|| view! {
+                                <HubPage title="Filament" tabs=FILAMENT_TABS><BatchGeneratePage /></HubPage>
+                            } />
+                            <Route path=path!("/profiles") view=|| view! {
+                                <HubPage title="Profiles" tabs=PROFILES_TABS><ProfileManagementPage /></HubPage>
+                            } />
+                            <Route path=path!("/profiles/compare") view=|| view! {
+                                <HubPage title="Profiles" tabs=PROFILES_TABS><ProfileDiffPage /></HubPage>
+                            } />
+                            <Route path=path!("/slice") view=SlicePage />
+                            <Route path=path!("/analysis") view=PrintAnalysisPage />
+                            <Route path=path!("/settings") view=|| view! {
+                                <HubPage title="Settings" tabs=SETTINGS_TABS><SettingsPage /></HubPage>
+                            } />
+                            <Route path=path!("/settings/health") view=|| view! {
+                                <HubPage title="Settings" tabs=SETTINGS_TABS><HealthPage /></HubPage>
+                            } />
+                            <Route path=path!("/settings/about") view=|| view! {
+                                <HubPage title="Settings" tabs=SETTINGS_TABS><AboutPage /></HubPage>
+                            } />
                         </Routes>
                     </main>
                     <AgentDrawer />

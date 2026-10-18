@@ -229,6 +229,25 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   await page.addInitScript(installTauriMock, FIXTURES);
+  // Follows an in-app link without the rail: the router handles any
+  // same-origin <a> click, which is what a link elsewhere in the app does.
+  // Fails if the browser did a full page load instead.
+  const goTo = async (route) => {
+    await page.evaluate((r) => {
+      window.__sameDocument = true;
+      const a = document.createElement("a");
+      a.href = r;
+      document.body.append(a);
+      a.click();
+      a.remove();
+    }, route);
+    await page.waitForFunction(() => window.__sameDocument === true, null, { timeout: 2000 });
+  };
+  // Opens a hub from the rail, then one of its tabs.
+  const openTab = async (hub, tab) => {
+    await page.click(`nav.sidebar a[href="${hub}"]`);
+    await page.click(`.nd-tabs a[href="${tab}"]`);
+  };
 
   console.log(`\n== ${engine} ==`);
 
@@ -237,7 +256,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await page.waitForSelector(".sidebar", { timeout: 45000 });
     const links = await page.locator(".nav-link").count();
-    if (links < 8) throw new Error(`only ${links} nav links rendered`);
+    if (links !== 7) throw new Error(`${links} nav links rendered, expected the 7 hubs`);
     return `${links} nav links`;
   });
 
@@ -345,7 +364,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click('nav.sidebar a[href="/settings"]');
     await page.waitForSelector("#slice-auto");
     await page.locator("#slice-auto").click({ trial: true });
-    await page.click('nav.sidebar a[href="/health"]');
+    await openTab("/settings", "/settings/health");
     await page.waitForSelector(".diagnostics-controls button.btn-primary");
     await page.locator(".diagnostics-controls button.btn-primary").click({ trial: true });
     // A fresh hover remains available after leaving the rail.
@@ -588,7 +607,7 @@ async function driveApp(browserType, engine, baseUrl) {
 
   // -- batch generate --------------------------------------------------------
   await step(run, page, "navigate to Batch Generate", async () => {
-    await page.click('a[href="/batch"]');
+    await openTab("/filament", "/filament/batch");
     await page.waitForSelector(".batch-generate-page", { timeout: 15000 });
     // The real select replaces a disabled "Loading brands..." placeholder only
     // once list_catalog_brands resolves.
@@ -612,7 +631,7 @@ async function driveApp(browserType, engine, baseUrl) {
 
   // -- compare profiles ------------------------------------------------------
   await step(run, page, "navigate to Compare Profiles", async () => {
-    await page.click('a[href="/compare"]');
+    await openTab("/profiles", "/profiles/compare");
     await page.waitForSelector(".profile-diff-page", { timeout: 15000 });
   });
 
@@ -869,11 +888,11 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click(".sl-slice");
     await page.waitForFunction(() => window.__ipc.calls.filter((c) => c.cmd === "slicer_slice").length === 4, null, { timeout: 5000 });
     await emitJob(running(4, 10));
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     await page.waitForFunction(() => {
       const s = window.__ipc.calls.filter((c) => c.cmd === "agent_set_app_state").at(-1)?.args.state;
-      return s?.route === "/about" && s.slice == null;
+      return s?.route === "/settings/about" && s.slice == null;
     }, null, { timeout: 5000 });
     await emitJob(running(4, 80));
     await emitJob(done(4, sliceResult()));
@@ -1068,7 +1087,7 @@ async function driveApp(browserType, engine, baseUrl) {
       const saves = await settledCount("slicer_set_settings");
       await page.click(".sl-slice");
       await calledPast("slicer_slice", slices);
-      await page.click('a[href="/about"]');
+      await goTo("/settings/about");
       await page.waitForSelector(".about-page", { timeout: 15000 });
       await release("away-slice");
       // The task's last call: it ran to the end on a closed page.
@@ -1081,7 +1100,7 @@ async function driveApp(browserType, engine, baseUrl) {
 
   await step(run, page, "leaving the page while settings load is safe", async () => {
     const errors = run.errors.length;
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     const settings = await page.evaluate(() => window.__fixtures.slicer_get_settings);
     const late = { __hold: "away-settings", answer: { ...settings, effective: { ...settings.effective, printer: null } } };
@@ -1091,7 +1110,7 @@ async function driveApp(browserType, engine, baseUrl) {
       const stls = await settledCount("list_received_stls");
       await page.click('a[href="/slice"]');
       await calledPast("slicer_get_settings", loads);
-      await page.click('a[href="/about"]');
+      await goTo("/settings/about");
       await page.waitForSelector(".about-page", { timeout: 15000 });
       await release("away-settings");
       // The task's last call: it ran to the end on a closed page.
@@ -1193,7 +1212,7 @@ async function driveApp(browserType, engine, baseUrl) {
     };
     await withFixtures({ slicer_get_settings: withChoices, slicer_set_settings: on }, async () => {
       // Reopen Settings so it loads the saved choices.
-      await page.click('a[href="/about"]');
+      await goTo("/settings/about");
       await page.waitForSelector(".about-page", { timeout: 15000 });
       await page.click('a[href="/settings"]');
       await page.waitForSelector("#slice-auto:not([disabled])", { timeout: 10000 });
@@ -1575,7 +1594,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await setFixture("printer_save", { __delay: 400, answer: FIXTURES.printer_save });
     const errors = run.errors.length;
     await page.click(".printer-trust-btn");
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     await page.waitForTimeout(800);
     if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
@@ -1586,7 +1605,7 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "Reset for clean install empties Settings → Printer", async () => {
     // A saved printer, shown when the section mounts.
     await setFixture("printer_get_config", FIXTURES.printer_save);
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     await page.click('a[href="/settings"]');
     await page.waitForFunction(() => document.querySelector("#printer-ip")?.value === "192.168.1.20", null, {
@@ -1678,7 +1697,7 @@ async function driveApp(browserType, engine, baseUrl) {
 
   // -- health check ----------------------------------------------------------
   await step(run, page, "navigate to Health Check", async () => {
-    await page.click('a[href="/health"]');
+    await openTab("/settings", "/settings/health");
     await page.waitForSelector(".health-page", { timeout: 15000 });
     await page.waitForSelector(".health-results", { timeout: 20000 });
     const items = await page.locator(".health-results .health-item").count();
@@ -1744,7 +1763,7 @@ async function driveApp(browserType, engine, baseUrl) {
 
   // -- about -----------------------------------------------------------------
   await step(run, page, "navigate to About", async () => {
-    await page.click('a[href="/about"]');
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     const version = (await page.locator(".about-version-value").first().innerText()).trim();
     if (!version.includes("1.3.0")) throw new Error(`version reads "${version}"`);
@@ -1756,6 +1775,49 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "update state reports up to date", async () => {
     await page.waitForSelector(".about-up-to-date", { timeout: 20000 });
     return (await page.locator(".about-up-to-date").first().innerText()).replace(/\s+/g, " ").trim();
+  });
+
+  // -- hubs ------------------------------------------------------------------
+  await step(run, page, "old routes land on their hub tab and Back skips them", async () => {
+    for (const [old, tab, selector] of [
+      ["/batch", "/filament/batch", ".batch-generate-page"],
+      ["/compare", "/profiles/compare", ".profile-diff-page"],
+      ["/health", "/settings/health", ".health-page"],
+      ["/about", "/settings/about", ".about-page"],
+    ]) {
+      await page.click('nav.sidebar a[href="/slice"]');
+      await page.waitForSelector(".slice-page", { timeout: 15000 });
+      await goTo(old);
+      await page.waitForFunction((t) => location.pathname === t, tab, { timeout: 5000 });
+      await page.waitForSelector(selector, { timeout: 15000 });
+      const current = await page.locator('.nd-tabs a[aria-current="page"]').getAttribute("href");
+      if (current !== tab) throw new Error(`${old}: the current tab is ${current}`);
+      await page.goBack();
+      await page.waitForFunction(() => location.pathname === "/slice", null, { timeout: 5000 });
+    }
+  });
+
+  await step(run, page, "switching tabs updates the URL and Back returns to the previous tab", async () => {
+    await page.click('nav.sidebar a[href="/settings"]');
+    await page.waitForSelector(".settings-page", { timeout: 15000 });
+    await page.click('.nd-tabs a[href="/settings/about"]');
+    await page.waitForFunction(() => location.pathname === "/settings/about", null, { timeout: 5000 });
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    await page.goBack();
+    await page.waitForFunction(() => location.pathname === "/settings", null, { timeout: 5000 });
+    await page.waitForSelector(".settings-page", { timeout: 15000 });
+    const h1 = (await page.locator("h1.nd-page-title").textContent()).trim();
+    if (h1 !== "Settings") throw new Error(`h1 reads "${h1}"`);
+  });
+
+  await step(run, page, "an unknown route says so", async () => {
+    await goTo("/nope");
+    await page.waitForFunction(
+      () => document.querySelector(".nd-state")?.textContent === "[EMPTY: Page not found]",
+      null,
+      { timeout: 5000 }
+    );
+    await page.click('nav.sidebar a[href="/"]');
   });
 
   // -- printer page -------------------------------------------------------------
@@ -2116,8 +2178,8 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".pr-picker .pr-picker-item", { timeout: 10000 });
     const errors = run.errors.length;
     await page.locator(".pr-picker-item").first().click();
-    // The picker's backdrop covers the rail, so navigate the way the agent would.
-    await page.locator('a[href="/about"]').dispatchEvent("click");
+    // The picker's backdrop covers the rail, so follow a link the way one elsewhere in the app would.
+    await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
     await page.waitForTimeout(800);
     if ((await callsOf("printer_assign_slot")).length !== before + 1) throw new Error("assign was not sent");
