@@ -19,6 +19,12 @@ const TEXT = [
   ["--nd-text-disabled", 3],
 ];
 const BACKGROUNDS = ["--nd-black", "--nd-surface", "--nd-surface-raised"];
+// Text drawn on a filled token: active tab pills and primary buttons
+// (--nd-black on --nd-text-display, and on --nd-text-primary when hovered).
+const FILLED = [
+  ["--nd-black", "--nd-text-display", 4.5],
+  ["--nd-black", "--nd-text-primary", 4.5],
+];
 const THEMES = ["dark", "bambu"];
 
 function luminance(hex) {
@@ -60,6 +66,12 @@ async function run(browserType, name) {
         console.log(`  ${name} ${ok ? "OK  " : "FAIL"} ${theme} ${fg} on ${bg}: ${ratio.toFixed(2)}:1 (min ${min})`);
         if (!ok) failures.push(`${theme}: ${fg} on ${bg} = ${ratio.toFixed(2)}:1 < ${min}`);
       }
+    }
+    for (const [fg, bg, min] of FILLED) {
+      const ratio = contrast(vars[fg], vars[bg]);
+      const ok = ratio >= min;
+      console.log(`  ${name} ${ok ? "OK  " : "FAIL"} ${theme} ${fg} on filled ${bg}: ${ratio.toFixed(2)}:1 (min ${min})`);
+      if (!ok) failures.push(`${theme}: ${fg} on filled ${bg} = ${ratio.toFixed(2)}:1 < ${min}`);
     }
   }
   await browser.close();

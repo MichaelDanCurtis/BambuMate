@@ -6,6 +6,7 @@ pub mod diagnostics_panel;
 pub mod filament_card;
 pub mod history_panel;
 pub mod icons;
+pub mod patterns;
 pub mod preset_sync_panel;
 pub mod printer_settings;
 pub mod profile_preview;
