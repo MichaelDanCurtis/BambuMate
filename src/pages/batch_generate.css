@@ -39,25 +39,3 @@
 .error-hint {
     color: var(--nd-text-secondary);
 }
-
-.loading-spinner {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 1.5rem;
-    justify-content: center;
-    color: var(--text-secondary);
-}
-
-.spinner {
-    width: 20px;
-    height: 20px;
-    border: 3px solid var(--border-primary);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-    to { transform: rotate(360deg); }
-}

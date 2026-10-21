@@ -19,6 +19,8 @@ pub fn BatchGeneratePage() -> impl IntoView {
 
     let (is_generating, set_is_generating) = signal(false);
     let (result, set_result) = signal::<Option<BatchProgress>>(None);
+    // The brand the current result was generated for, so the hero cannot name another one.
+    let (result_brand, set_result_brand) = signal(String::new());
     let (gen_error, set_gen_error) = signal::<Option<String>>(None);
 
     // Load brands on mount
@@ -47,6 +49,7 @@ pub fn BatchGeneratePage() -> impl IntoView {
 
         set_is_generating.set(true);
         set_result.set(None);
+        set_result_brand.set(brand.clone());
         set_gen_error.set(None);
 
         spawn_local(async move {
@@ -82,6 +85,7 @@ pub fn BatchGeneratePage() -> impl IntoView {
                                     class="input"
                                     on:change=move |ev| set_selected_brand.set(event_target_value(&ev))
                                     prop:value=move || selected_brand.get()
+                                    disabled=move || is_generating.get()
                                 >
                                     <option value="">"-- Select a brand --"</option>
                                     {move || brands.get().into_iter().map(|b| {
@@ -139,7 +143,7 @@ pub fn BatchGeneratePage() -> impl IntoView {
             </Show>
 
             {move || result.get().map(|r| {
-                let label = format!("Batch · {}", selected_brand.get_untracked());
+                let label = format!("Batch · {}", result_brand.get_untracked());
                 let percent = batch_percent(&r);
                 view! {
                     <div class="batch-results">
