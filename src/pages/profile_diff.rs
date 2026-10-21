@@ -4,7 +4,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::commands::{self, CompareResult, ProfileInfo};
 use crate::components::patterns::{Hero, StateKind, StateText};
 use crate::components::searchable_select::{SearchableSelect, SelectOption};
-use crate::pages::diff_view::{is_changed, visible_categories};
+use crate::pages::diff_view::{differences_unit, is_changed, visible_categories};
 
 /// Convert user + system profile lists into SelectOption vec.
 fn build_select_options(
@@ -179,17 +179,18 @@ pub fn ProfileDiffPage() -> impl IntoView {
             {move || compare_result.get().map(|r| {
                 let label = format!("{} vs {}", r.profile_a_name, r.profile_b_name);
                 let detail = format!("of {} settings", r.total_fields);
+                let unit = differences_unit(r.changed_fields);
+                // Nothing differs and the table would be empty: say so instead.
+                let no_differences = Memo::new({
+                    let none = r.changed_fields == 0;
+                    move |_| none && changed_only.get()
+                });
                 let name_a = r.profile_a_name.clone();
                 let name_b = r.profile_b_name.clone();
                 let categories = r.categories.clone();
-                view! {
-                    <div class="diff-results">
-                        <Hero
-                            label=label
-                            value=r.changed_fields.to_string()
-                            unit=" differences"
-                            detail=detail
-                        />
+                let table = move || {
+                    let (name_a, name_b, categories) = (name_a.clone(), name_b.clone(), categories.clone());
+                    view! {
                         <table class="nd-table diff-table">
                             <thead>
                                 <tr>
@@ -237,6 +238,27 @@ pub fn ProfileDiffPage() -> impl IntoView {
                                 }
                             }).collect::<Vec<_>>()}
                         </table>
+                    }
+                };
+                view! {
+                    <div class="diff-results">
+                        <Hero
+                            label=label
+                            value=r.changed_fields.to_string()
+                            unit=unit
+                            detail=detail
+                        />
+                        {move || if no_differences.get() {
+                            view! {
+                                <StateText
+                                    kind=StateKind::Empty
+                                    message="No differences. Turn off Changed only to see every setting"
+                                />
+                            }
+                            .into_any()
+                        } else {
+                            table().into_any()
+                        }}
                     </div>
                 }
             })}

@@ -105,6 +105,7 @@ pub fn BatchGeneratePage() -> impl IntoView {
                         class="input"
                         on:change=move |ev| set_selected_printer.set(event_target_value(&ev))
                         prop:value=move || selected_printer.get()
+                        disabled=move || is_generating.get()
                     >
                         {PRINTER_OPTIONS.iter().map(|&p| {
                             view! { <option value={p}>{p}</option> }
@@ -117,6 +118,7 @@ pub fn BatchGeneratePage() -> impl IntoView {
                         <input
                             type="checkbox"
                             prop:checked=move || install_profiles.get()
+                            disabled=move || is_generating.get()
                             on:change=move |ev| {
                                 let checked = event_target_checked(&ev);
                                 set_install_profiles.set(checked);
@@ -151,7 +153,13 @@ pub fn BatchGeneratePage() -> impl IntoView {
                             label=label
                             value=format!("{}/{}", r.succeeded, r.total)
                             detail=batch_line(&r)
-                            tone={if r.failed > 0 { Tone::Warning } else { Tone::Signal }}
+                            tone={if r.total == 0 {
+                                Tone::Neutral
+                            } else if r.failed > 0 {
+                                Tone::Warning
+                            } else {
+                                Tone::Signal
+                            }}
                         />
                         <SegmentedBar percent=percent total=BATCH_SEGMENTS label="Profiles generated" />
                         <table class="nd-table batch-table">

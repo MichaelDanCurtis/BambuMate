@@ -285,6 +285,15 @@ pub fn sync_line(not_syncing: usize) -> String {
     }
 }
 
+/// The hero's unit for a count of presets.
+pub fn presets_unit(n: usize) -> &'static str {
+    if n == 1 {
+        " preset"
+    } else {
+        " presets"
+    }
+}
+
 /// The question "What does this mean?" puts in the agent's composer.
 pub fn ask_about(v: &PrinterView) -> String {
     match attention_error(v) {
@@ -313,6 +322,13 @@ pub fn ask_about(v: &PrinterView) -> String {
 mod tests {
     use super::*;
     use crate::printer::types::{Nozzle, PrinterState, PrinterSummary};
+
+    #[test]
+    fn the_preset_unit_is_singular_for_one() {
+        assert_eq!(presets_unit(1), " preset");
+        assert_eq!(presets_unit(0), " presets");
+        assert_eq!(presets_unit(2), " presets");
+    }
 
     fn connected(gcode: &str) -> PrinterView {
         PrinterView {

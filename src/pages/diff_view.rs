@@ -3,6 +3,15 @@
 
 pub use crate::commands::{CompareProfileDiff, DiffCategory};
 
+/// The hero's unit for a count of differences.
+pub fn differences_unit(n: usize) -> &'static str {
+    if n == 1 {
+        " difference"
+    } else {
+        " differences"
+    }
+}
+
 pub fn is_changed(d: &CompareProfileDiff) -> bool {
     d.base_value != d.new_value
 }
@@ -49,6 +58,13 @@ mod tests {
                 diffs: vec![diff("Fan", "100", "100")],
             },
         ]
+    }
+
+    #[test]
+    fn the_difference_unit_is_singular_for_one() {
+        assert_eq!(differences_unit(1), " difference");
+        assert_eq!(differences_unit(0), " differences");
+        assert_eq!(differences_unit(7), " differences");
     }
 
     #[test]

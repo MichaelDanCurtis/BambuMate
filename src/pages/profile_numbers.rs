@@ -41,7 +41,7 @@ pub fn key_numbers(raw_json: &str) -> KeyNumbers {
         bed: or_dash(
             first(obj, "hot_plate_temp")
                 .or_else(|| first(obj, "bed_temperature"))
-                .map(|t| format!("{t} °C")),
+                .map(|t| format!("{t}°")),
         ),
         flow: or_dash(first(obj, "filament_flow_ratio")),
         pressure_advance: or_dash(first(obj, "pressure_advance")),
@@ -63,7 +63,7 @@ mod tests {
                 "filament_max_volumetric_speed":["12"]}"#,
         );
         assert_eq!(n.nozzle, "220°");
-        assert_eq!(n.bed, "65 °C");
+        assert_eq!(n.bed, "65°");
         assert_eq!(n.flow, "0.98");
         assert_eq!(n.pressure_advance, "0.04");
         assert_eq!(n.max_volumetric, "12 mm³/s");
@@ -74,7 +74,7 @@ mod tests {
         let n = key_numbers(r#"{"nozzle_temperature":[""],"bed_temperature":"60"}"#);
         assert_eq!(n.nozzle, "—");
         // Falls back to bed_temperature when there is no hot_plate_temp.
-        assert_eq!(n.bed, "60 °C");
+        assert_eq!(n.bed, "60°");
         assert_eq!(n.flow, "—");
         assert_eq!(key_numbers("not json").nozzle, "—");
     }

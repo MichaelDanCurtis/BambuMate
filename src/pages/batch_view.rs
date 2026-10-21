@@ -7,9 +7,10 @@ pub use crate::commands::BatchProgress;
 pub const BATCH_SEGMENTS: u32 = 12;
 
 pub fn batch_line(p: &BatchProgress) -> String {
-    match p.failed {
-        0 => format!("All {} generated", p.total),
-        n => format!("{n} failed"),
+    match (p.total, p.failed) {
+        (0, _) => "Nothing to generate".into(),
+        (_, 0) => format!("All {} generated", p.total),
+        (_, n) => format!("{n} failed"),
     }
 }
 
@@ -40,6 +41,11 @@ mod tests {
         assert_eq!(batch_line(&run(3, 3)), "All 3 generated");
         assert_eq!(batch_line(&run(3, 2)), "1 failed");
         assert_eq!(batch_line(&run(5, 1)), "4 failed");
+    }
+
+    #[test]
+    fn an_empty_batch_says_there_was_nothing_to_do() {
+        assert_eq!(batch_line(&run(0, 0)), "Nothing to generate");
     }
 
     #[test]
