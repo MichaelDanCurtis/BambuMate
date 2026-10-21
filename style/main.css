@@ -1994,7 +1994,8 @@ button.nd-step-btn {
     color: var(--nd-text-display);
 }
 
-button.nd-step-btn:focus-visible {
+/* Also the current step's span, which takes focus after a step is chosen. */
+.nd-step-btn:focus-visible {
     outline: 1px solid var(--nd-text-primary);
     outline-offset: 2px;
 }

@@ -563,10 +563,18 @@ pub fn FilamentSearchPage() -> impl IntoView {
         )
     });
 
-    // Back from the strip. Not after an install has run: there is nothing
-    // to go back to then.
+    // Back from the strip. Not after an install has run (there is nothing to
+    // go back to), and not while a generate or install is running: Back would
+    // clear the pending installs under a running one, and a running generate
+    // would snap the page back to Install when it finishes.
+    let can_go_back = move || {
+        install_results.with(|r| r.is_empty()) && !is_generating.get() && !is_installing.get()
+    };
     let go_back = move |index: usize| {
-        if !install_results.with_untracked(|r| r.is_empty()) {
+        if !(install_results.with_untracked(|r| r.is_empty())
+            && !is_generating.get_untracked()
+            && !is_installing.get_untracked())
+        {
             return;
         }
         match index {
@@ -775,7 +783,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                     <StepStrip
                         steps=SEARCH_STEPS
                         current=Signal::derive(move || step_index(step.get()))
-                        can_go_back=Signal::derive(move || install_results.with(|r| r.is_empty()))
+                        can_go_back=Signal::derive(can_go_back)
                         on_back=Callback::new(move |i: usize| go_back(i))
                     />
                 </div>
@@ -866,7 +874,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 let no_results = filtered.is_empty() && !is_searching_base.get() && !query.is_empty();
                 Some(view! {
                     <div class="base-profiles-section">
-                        <p class="nd-label">"Base profile (installed in Bambu Studio)"</p>
+                        <h2 class="nd-label">"Base profile (installed in Bambu Studio)"</h2>
                         <p class="section-description">
                             "Choose a base profile to build from, or keep the material default base."
                         </p>
@@ -972,7 +980,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
                 Some(view! {
                     <div class="merge-screen">
-                        <p class="nd-label">"Compare and merge settings"</p>
+                        <h2 class="nd-label">"Compare and merge settings"</h2>
                         <p class="section-description">
                             "Choose which settings to use from each source. AI-recommended values are on the left, "
                             "values from \""{base_name.clone()}"\" are on the right."
@@ -1019,7 +1027,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 }
                 Some(view! {
                     <div class="multi-profile-results">
-                        <p class="nd-label multi-profile-title">"Nozzle-Specific Adjustments"</p>
+                        <h2 class="nd-label multi-profile-title">"Nozzle-Specific Adjustments"</h2>
                         {notes.into_iter().map(|(printer, lines)| view! {
                             <div class="spec-field full-width">
                                 <label class="spec-field-label">{printer}</label>
@@ -1078,9 +1086,9 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             // Multiple profiles → compact summary table + Install All
                             view! {
                                 <div class="multi-profile-results">
-                                    <p class="nd-label multi-profile-title">
+                                    <h2 class="nd-label multi-profile-title">
                                         {format!("{} Profiles Ready to Install", success_count)}
-                                    </p>
+                                    </h2>
                                     <table class="multi-profile-table nd-table">
                                         <thead>
                                             <tr>

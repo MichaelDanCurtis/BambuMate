@@ -2,8 +2,12 @@
 //! do not restyle them locally; their CSS is the "Page patterns" section
 //! of style/main.css.
 
+use std::time::Duration;
+
+use leptos::html;
 use leptos::prelude::*;
 use leptos_router::hooks::use_location;
+use wasm_bindgen::JsCast;
 
 use crate::routes::Tab;
 
@@ -238,7 +242,9 @@ pub fn HeroStats(
 }
 
 /// Numbered steps of a flow. Steps before the current one are buttons back
-/// to that step while `can_go_back` holds; the rest are plain text.
+/// to that step while `can_go_back` holds; the rest are plain text. After a
+/// step is chosen, focus moves to the current step so keyboard users are not
+/// left on a button that has just turned into text.
 #[component]
 pub fn StepStrip(
     steps: &'static [&'static str],
@@ -246,6 +252,24 @@ pub fn StepStrip(
     #[prop(into)] can_go_back: Signal<bool>,
     #[prop(into)] on_back: Callback<usize>,
 ) -> impl IntoView {
+    let list = NodeRef::<html::Ol>::new();
+    let back = move |i: usize| {
+        on_back.run(i);
+        // Wait a tick for the strip to re-render, then focus its current step.
+        set_timeout(
+            move || {
+                if let Some(step) = list.get_untracked().and_then(|ol| {
+                    ol.query_selector(".nd-step[data-state=\"current\"] .nd-step-btn")
+                        .ok()
+                        .flatten()
+                        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+                }) {
+                    let _ = step.focus();
+                }
+            },
+            Duration::ZERO,
+        );
+    };
     let items = steps
         .iter()
         .enumerate()
@@ -265,7 +289,7 @@ pub fn StepStrip(
                             view! {
                                 <button type="button" class="nd-step-btn"
                                     title=format!("Back to {name}")
-                                    on:click=move |_| on_back.run(i)>
+                                    on:click=move |_| back(i)>
                                     {inner}
                                 </button>
                             }
@@ -273,6 +297,7 @@ pub fn StepStrip(
                         } else {
                             view! {
                                 <span class="nd-step-btn"
+                                    tabindex=move || (state() == StepState::Current).then_some("-1")
                                     aria-current=move || (state() == StepState::Current).then_some("step")>
                                     {inner}
                                 </span>
@@ -284,7 +309,7 @@ pub fn StepStrip(
             }
         })
         .collect_view();
-    view! { <ol class="nd-steps" role="list" aria-label="Steps">{items}</ol> }
+    view! { <ol class="nd-steps" role="list" aria-label="Steps" node_ref=list>{items}</ol> }
 }
 
 #[cfg(test)]

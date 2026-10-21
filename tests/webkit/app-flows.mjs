@@ -472,6 +472,14 @@ async function driveApp(browserType, engine, baseUrl) {
       await page.waitForSelector(".filament-card", { timeout: 5000 });
       const back = await page.locator('.nd-step[data-state="current"] .nd-step-name').textContent();
       if (back !== "Specs") throw new Error(`after Back the current step is "${back}"`);
+      // Keyboard focus follows to the current step instead of being lost with the button.
+      await page.waitForFunction(
+        () => document.activeElement?.matches('.nd-step[data-state="current"] .nd-step-btn'),
+        null,
+        { timeout: 2000 }
+      ).catch(() => {
+        throw new Error("after Back, focus is not on the current step");
+      });
       // Return to the editor for the steps that follow.
       await page.click(".filament-card-generate-btn");
       await page.waitForSelector(".editor-section", { timeout: 20000 });
@@ -499,6 +507,67 @@ async function driveApp(browserType, engine, baseUrl) {
       const expected = "Bambu Lab H2C 0.4 nozzle";
       if (label !== expected) throw new Error(`reads "${label}", expected "${expected}"`);
       return label;
+    });
+
+    // Back from the Install step goes to the editor; a profile can then be generated again.
+    const doneStep = (name) => page.locator(`.nd-step[data-state="done"]:has(.nd-step-name:text-is("${name}")) .nd-step-btn`);
+    const currentStep = () => page.locator('.nd-step[data-state="current"] .nd-step-name').textContent();
+    await step(run, page, "Back from Install returns to the editor", async () => {
+      await page.click('.editor-section button:has-text("Generate Profile")');
+      await page.waitForSelector(".profile-preview", { timeout: 20000 });
+      if ((await currentStep()) !== "Install") throw new Error(`current step "${await currentStep()}" after generating`);
+      await doneStep("Tune").click();
+      await page.waitForSelector(".editor-section", { timeout: 5000 });
+      if ((await page.locator(".profile-preview").count()) !== 0) throw new Error("preview still shown after Back");
+      if ((await currentStep()) !== "Tune") throw new Error(`after Back the current step is "${await currentStep()}"`);
+      await page.click('.editor-section button:has-text("Generate Profile")');
+      await page.waitForSelector(".profile-preview", { timeout: 20000 });
+      if ((await currentStep()) !== "Install") throw new Error("generating again did not land on Install");
+    });
+
+    await step(run, page, "Back is blocked while a profile is generating", async () => {
+      await doneStep("Tune").click();
+      await page.waitForSelector(".editor-section", { timeout: 5000 });
+      await withFixtures(
+        { generate_profile_from_specs: { __hold: "gen-back", answer: FIXTURES.generate_profile_from_specs } },
+        async () => {
+          const before = (await callsOf("generate_profile_from_specs")).length;
+          await page.click('.editor-section button:has-text("Generate Profile")');
+          await page.waitForFunction(
+            (n) => window.__ipc.calls.filter((c) => c.cmd === "generate_profile_from_specs").length > n,
+            before,
+            { timeout: 5000 }
+          );
+          const buttons = await page.locator("button.nd-step-btn").count();
+          if (buttons !== 0) throw new Error(`${buttons} step buttons while generating, expected none`);
+          if ((await page.locator(".nd-step[data-state=\"done\"] span.nd-step-btn").count()) < 1) {
+            throw new Error("done steps are not plain text while generating");
+          }
+          await page.evaluate(() => window.__release("gen-back"));
+          await page.waitForSelector(".profile-preview", { timeout: 20000 });
+          if ((await currentStep()) !== "Install") throw new Error("finishing the generate did not land on Install");
+          if ((await doneStep("Tune").count()) !== 1) throw new Error("Back is not offered once generating is over");
+        }
+      );
+    });
+
+    await step(run, page, "Back is blocked while a profile is installing", async () => {
+      await withFixtures(
+        { install_generated_profile: { __hold: "install-back", answer: FIXTURES.install_generated_profile } },
+        async () => {
+          await page.click(".profile-preview-actions .btn-primary");
+          await page.waitForFunction(
+            () => document.querySelector(".profile-preview-actions .btn-primary")?.disabled === true,
+            null,
+            { timeout: 5000 }
+          );
+          const buttons = await page.locator("button.nd-step-btn").count();
+          if (buttons !== 0) throw new Error(`${buttons} step buttons while installing, expected none`);
+          await page.evaluate(() => window.__release("install-back"));
+          await page.waitForSelector(".success-message", { timeout: 20000 });
+          if ((await page.locator("button.nd-step-btn").count()) !== 0) throw new Error("Back offered after an install");
+        }
+      );
     });
 
     await page.screenshot({ path: `flow-${engine}-filament.png`, fullPage: true });
@@ -709,6 +778,36 @@ async function driveApp(browserType, engine, baseUrl) {
     return `${hero}, ${detail}`;
   });
 
+  await step(run, page, "batch locks every input while generating", async () => {
+    await withFixtures(
+      { batch_generate_brand: { __hold: "batch-lock", answer: FIXTURES.batch_generate_brand } },
+      async () => {
+        await page.locator(".batch-generate-page button.btn-primary").first().click();
+        await page.waitForSelector(".batch-generate-page .nd-state", { timeout: 5000 });
+        for (const sel of ["#brand-select", "#printer-select", '.batch-config input[type="checkbox"]']) {
+          if (!(await page.locator(sel).isDisabled())) throw new Error(`${sel} is editable while generating`);
+        }
+        await page.evaluate(() => window.__release("batch-lock"));
+        await page.waitForSelector(".batch-results", { timeout: 20000 });
+        if (await page.locator("#printer-select").isDisabled()) throw new Error("printer select stayed disabled");
+      }
+    );
+  });
+
+  await step(run, page, "an empty brand reads as nothing to generate", async () => {
+    const empty = { total: 0, completed: 0, succeeded: 0, failed: 0, results: [] };
+    await withFixtures({ batch_generate_brand: empty }, async () => {
+      await page.locator(".batch-generate-page button.btn-primary").first().click();
+      await page.waitForFunction(
+        () => document.querySelector(".batch-results .nd-hero-detail")?.textContent.trim() === "Nothing to generate",
+        null,
+        { timeout: 5000 }
+      );
+      const tone = await page.locator(".batch-results .nd-hero").getAttribute("data-tone");
+      if (tone !== "neutral") throw new Error(`hero tone "${tone}", expected neutral`);
+    });
+  });
+
   // -- compare profiles ------------------------------------------------------
   await step(run, page, "navigate to Compare Profiles", async () => {
     await openTab("/profiles", "/profiles/compare");
@@ -774,6 +873,54 @@ async function driveApp(browserType, engine, baseUrl) {
       if ((await callsOf("compare_profiles")).length !== before) throw new Error("toggling re-compared");
       await page.locator(".diff-changed-only").check();
       await page.waitForSelector("tr.diff-row.identical", { state: "detached", timeout: 5000 });
+    });
+  });
+
+  await step(run, page, "a category header collapses and restores its rows", async () => {
+    const header = page.locator(".diff-category-header").first();
+    const rows = page.locator(".diff-category-group").first().locator("tr.diff-row");
+    const shown = await rows.count();
+    if (shown === 0) throw new Error("first category has no rows to collapse");
+    if ((await header.getAttribute("aria-expanded")) !== "true") throw new Error("header does not start expanded");
+    await header.click();
+    await page.waitForFunction(
+      () => document.querySelector(".diff-category-header")?.getAttribute("aria-expanded") === "false",
+      null,
+      { timeout: 5000 }
+    );
+    if ((await rows.count()) !== 0) throw new Error("rows still shown after collapsing");
+    const glyph = await header.evaluate((el) => getComputedStyle(el, "::after").content);
+    if (!glyph.includes("+")) throw new Error(`collapsed cue reads ${glyph}`);
+    await header.click();
+    await page.waitForFunction((n) => document.querySelectorAll(".diff-category-group:first-of-type tr.diff-row").length === n, shown, { timeout: 5000 });
+    if ((await header.getAttribute("aria-expanded")) !== "true") throw new Error("header did not re-expand");
+  });
+
+  await step(run, page, "singular and empty results read right", async () => {
+    const same = (k) => ({ key: k, label: k, base_value: "1", new_value: "1" });
+    const none = { ...FIXTURES.compare_profiles, categories: [{ category: "Temperature", diffs: [same("a")] }], changed_fields: 0 };
+    await withFixtures({ compare_profiles: none }, async () => {
+      await page.locator(".diff-actions button.btn-primary").first().click();
+      await page.waitForSelector('.diff-results .nd-state[data-kind="empty"]', { timeout: 5000 });
+      const text = await page.locator(".diff-results .nd-state").textContent();
+      if (!/No differences/.test(text)) throw new Error(`empty state reads "${text}"`);
+      if ((await page.locator("table.diff-table").count()) !== 0) throw new Error("table shown with no differences");
+      const hero = (await page.locator(".diff-results .nd-hero-value").textContent()).replace(/\s+/g, " ").trim();
+      if (hero !== "0 differences") throw new Error(`hero reads "${hero}"`);
+      await page.locator(".diff-changed-only").uncheck();
+      await page.waitForSelector("table.diff-table tr.diff-row.identical", { timeout: 5000 });
+      await page.locator(".diff-changed-only").check();
+    });
+    const one = {
+      ...FIXTURES.compare_profiles,
+      categories: [{ category: "Temperature", diffs: [{ key: "a", label: "a", base_value: "1", new_value: "2" }] }],
+      changed_fields: 1,
+    };
+    await withFixtures({ compare_profiles: one }, async () => {
+      await page.locator(".diff-actions button.btn-primary").first().click();
+      await page.waitForSelector("tr.diff-row.changed", { timeout: 5000 });
+      const hero = (await page.locator(".diff-results .nd-hero-value").textContent()).replace(/\s+/g, " ").trim();
+      if (hero !== "1 difference") throw new Error(`hero reads "${hero}"`);
     });
   });
 
