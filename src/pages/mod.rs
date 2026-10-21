@@ -1,5 +1,6 @@
 pub mod about;
 pub mod batch_generate;
+pub mod diff_view;
 pub mod filament_search;
 pub mod health;
 pub mod home;

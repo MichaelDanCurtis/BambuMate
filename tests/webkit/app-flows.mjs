@@ -254,6 +254,7 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click(`nav.sidebar a[href="${hub}"]`);
     await page.click(`.nd-tabs a[href="${tab}"]`);
   };
+  const callsOf = (cmd) => page.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c), cmd);
   // Swaps some fixtures for the length of `fn`, then puts the old ones back.
   const setFixture = (cmd, value) =>
     page.evaluate(([c, v]) => {
@@ -707,12 +708,17 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "compare renders a categorised diff", async () => {
     await page.locator(".diff-actions button.btn-primary").first().click();
     await page.waitForSelector(".diff-results", { timeout: 20000 });
-    const summary = (await page.locator(".diff-summary-text").first().innerText()).trim();
+    const hero = (await page.locator(".diff-results .nd-hero-number").textContent()).trim();
+    if (hero !== "3") throw new Error(`hero reads "${hero}"`);
+    const calls = await callsOf("compare_profiles");
+    if (calls.at(-1)?.args?.showIdentical !== true) {
+      throw new Error(`compare was not asked for every field: ${JSON.stringify(calls.at(-1)?.args)}`);
+    }
     const categories = await page.locator(".diff-category-name").count();
     const rows = await page.locator("tr.diff-row.changed").count();
     if (categories !== 2) throw new Error(`expected 2 categories, got ${categories}`);
     if (rows !== 3) throw new Error(`expected 3 changed rows, got ${rows}`);
-    return `${summary}, ${categories} categories`;
+    return `${hero} differences, ${categories} categories`;
   });
 
   // .diff-table carries a border-collapse fix for WebKit. Counting rows would
@@ -724,9 +730,29 @@ async function driveApp(browserType, engine, baseUrl) {
     return `row height ${Math.round(box.height)}px`;
   });
 
+  await step(run, page, "Changed only hides identical rows without comparing again", async () => {
+    const withIdentical = {
+      ...FIXTURES.compare_profiles,
+      categories: [
+        ...FIXTURES.compare_profiles.categories,
+        { category: "Cooling", diffs: [{ key: "fan_max_speed", label: "Fan Max", base_value: "100", new_value: "100" }] },
+      ],
+    };
+    await withFixtures({ compare_profiles: withIdentical }, async () => {
+      await page.locator(".diff-actions button.btn-primary").first().click();
+      await page.waitForFunction(() => document.querySelectorAll("tr.diff-row").length === 3, null, { timeout: 5000 });
+      const before = (await callsOf("compare_profiles")).length;
+      await page.locator(".diff-changed-only").uncheck();
+      await page.waitForSelector("tr.diff-row.identical", { timeout: 5000 });
+      if ((await page.locator(".diff-category-name").count()) !== 3) throw new Error("Cooling category not shown");
+      if ((await callsOf("compare_profiles")).length !== before) throw new Error("toggling re-compared");
+      await page.locator(".diff-changed-only").check();
+      await page.waitForSelector("tr.diff-row.identical", { state: "detached", timeout: 5000 });
+    });
+  });
+
   // -- slice ---------------------------------------------------------------
   const emitJob = (view) => page.evaluate((v) => window.__emit("slicer://job", v), view);
-  const callsOf = (cmd) => page.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c), cmd);
   const running = (id, percent) =>
     sliceJob(id, { state: "running", progress: { plate: 1, percent, stage: "Generating walls" } });
   const done = (id, result, extra) => sliceJob(id, { state: "done", result, cached: false }, extra);

@@ -2,7 +2,9 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, CompareResult, ProfileInfo};
+use crate::components::patterns::{Hero, StateKind, StateText};
 use crate::components::searchable_select::{SearchableSelect, SelectOption};
+use crate::pages::diff_view::{is_changed, visible_categories};
 
 /// Convert user + system profile lists into SelectOption vec.
 fn build_select_options(
@@ -46,7 +48,8 @@ pub fn ProfileDiffPage() -> impl IntoView {
 
     let (path_a, set_path_a) = signal(String::new());
     let (path_b, set_path_b) = signal(String::new());
-    let (show_identical, set_show_identical) = signal(false);
+    // On by default; filters on the client, so toggling never re-compares.
+    let (changed_only, set_changed_only) = signal(true);
 
     let (compare_result, set_compare_result) = signal::<Option<CompareResult>>(None);
     let (is_comparing, set_is_comparing) = signal(false);
@@ -83,14 +86,13 @@ pub fn ProfileDiffPage() -> impl IntoView {
             return;
         }
 
-        let identical = show_identical.get();
         set_is_comparing.set(true);
         set_compare_result.set(None);
         set_compare_error.set(None);
         set_collapsed.set(vec![]);
 
         spawn_local(async move {
-            match commands::compare_profiles(&a, &b, identical).await {
+            match commands::compare_profiles(&a, &b, true).await {
                 Ok(result) => set_compare_result.set(Some(result)),
                 Err(e) => set_compare_error.set(Some(e)),
             }
@@ -112,16 +114,10 @@ pub fn ProfileDiffPage() -> impl IntoView {
         <div class="page profile-diff-page">
             <style>{include_str!("profile_diff.css")}</style>
 
-            <h2>"Profile Comparison"</h2>
-            <p class="page-description">
-                "Compare two filament profiles side-by-side to see differences. "
-                "Includes your custom profiles and Bambu Lab factory profiles."
-            </p>
-
             <div class="diff-config">
                 <div class="diff-pickers">
                     <div class="form-group">
-                        <label>"Profile A"</label>
+                        <label class="nd-label">"Profile A"</label>
                         <SearchableSelect
                             id="profile-a"
                             placeholder="Search profiles..."
@@ -131,7 +127,7 @@ pub fn ProfileDiffPage() -> impl IntoView {
                         />
                     </div>
                     <div class="form-group">
-                        <label>"Profile B"</label>
+                        <label class="nd-label">"Profile B"</label>
                         <SearchableSelect
                             id="profile-b"
                             placeholder="Search profiles..."
@@ -146,114 +142,100 @@ pub fn ProfileDiffPage() -> impl IntoView {
                     <label class="checkbox-label">
                         <input
                             type="checkbox"
-                            prop:checked=move || show_identical.get()
+                            class="diff-changed-only"
+                            prop:checked=move || changed_only.get()
                             on:change=move |ev| {
                                 use wasm_bindgen::JsCast;
                                 let checked = ev.target()
                                     .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
                                     .map(|e| e.checked())
-                                    .unwrap_or(false);
-                                set_show_identical.set(checked);
+                                    .unwrap_or(true);
+                                set_changed_only.set(checked);
                             }
                         />
-                        " Show identical fields"
+                        " Changed only"
                     </label>
                     <Show when=move || is_loading.get()>
-                        <span class="status-text">"Loading profiles..."</span>
+                        <StateText kind=StateKind::Loading />
                     </Show>
                     <button
                         class="btn btn-primary"
                         on:click=do_compare
                         disabled=move || is_comparing.get() || path_a.get().is_empty() || path_b.get().is_empty()
                     >
-                        {move || if is_comparing.get() { "Comparing..." } else { "Compare" }}
+                        {move || if is_comparing.get() { "Comparing…" } else { "Compare" }}
                     </button>
                 </div>
             </div>
 
             {move || compare_error.get().map(|e| view! {
-                <div class="diff-error">{e}</div>
+                <StateText kind=StateKind::Error message=e />
             })}
 
+            <Show when=move || compare_result.with(|r| r.is_none()) && compare_error.with(|e| e.is_none()) && !is_comparing.get()>
+                <StateText kind=StateKind::Empty message="Pick two profiles to compare" />
+            </Show>
+
             {move || compare_result.get().map(|r| {
-                let summary = format!(
-                    "{} of {} fields differ",
-                    r.changed_fields, r.total_fields
-                );
-                let name_a_display = r.profile_a_name.clone();
-                let name_a_tip = r.profile_a_name.clone();
-                let name_b_display = r.profile_b_name.clone();
-                let name_b_tip = r.profile_b_name.clone();
-
-                let category_bodies = r.categories.into_iter().map(|cat| {
-                    let cat_name = cat.category.clone();
-                    let cat_name_display = cat_name.clone();
-                    let cat_toggle = cat_name.clone();
-                    let cat_check_1 = cat_name.clone();
-                    let cat_check_2 = cat_name.clone();
-                    let diff_count = cat.diffs.iter().filter(|d| d.base_value != d.new_value).count();
-                    let count_label = if diff_count == 1 {
-                        "1 change".to_string()
-                    } else {
-                        format!("{} changes", diff_count)
-                    };
-
-                    let diff_rows: Vec<_> = cat.diffs.into_iter().map(|d| {
-                        let is_changed = d.base_value != d.new_value;
-                        let row_class = if is_changed { "diff-row changed" } else { "diff-row identical" };
-                        view! {
-                            <tr class={row_class}>
-                                <td class="diff-key">{d.label}</td>
-                                <td class="diff-val diff-val-a">{d.base_value}</td>
-                                <td class="diff-val diff-val-b">{d.new_value}</td>
-                            </tr>
-                        }
-                    }).collect();
-
-                    view! {
-                        <tbody class="diff-category-group">
-                            <tr class="diff-category-row">
-                                <td colspan="3">
-                                    <div
-                                        class="diff-category-header"
-                                        on:click=move |_| toggle_category(cat_toggle.clone())
-                                    >
-                                        <span class={move || {
-                                            if collapsed.get().contains(&cat_check_1) {
-                                                "diff-category-arrow"
-                                            } else {
-                                                "diff-category-arrow open"
-                                            }
-                                        }}>
-                                            "\u{25B6}"
-                                        </span>
-                                        <span class="diff-category-name">{cat_name_display}</span>
-                                        <span class="diff-category-count">{count_label}</span>
-                                    </div>
-                                </td>
-                            </tr>
-                            <Show when=move || !collapsed.get().contains(&cat_check_2)>
-                                {diff_rows.clone()}
-                            </Show>
-                        </tbody>
-                    }
-                }).collect::<Vec<_>>();
-
+                let label = format!("{} vs {}", r.profile_a_name, r.profile_b_name);
+                let detail = format!("of {} settings", r.total_fields);
+                let name_a = r.profile_a_name.clone();
+                let name_b = r.profile_b_name.clone();
+                let categories = r.categories.clone();
                 view! {
                     <div class="diff-results">
-                        <div class="diff-summary">
-                            <span class="diff-summary-text">{summary}</span>
-                        </div>
-
-                        <table class="diff-table">
+                        <Hero
+                            label=label
+                            value=r.changed_fields.to_string()
+                            unit=" differences"
+                            detail=detail
+                        />
+                        <table class="nd-table diff-table">
                             <thead>
                                 <tr>
                                     <th class="diff-col-setting">"Setting"</th>
-                                    <th class="diff-col-value" title={name_a_tip}>{name_a_display}</th>
-                                    <th class="diff-col-value" title={name_b_tip}>{name_b_display}</th>
+                                    <th class="diff-col-value" title=name_a.clone()>{name_a.clone()}</th>
+                                    <th class="diff-col-value" title=name_b.clone()>{name_b.clone()}</th>
                                 </tr>
                             </thead>
-                            {category_bodies}
+                            {move || visible_categories(&categories, changed_only.get()).into_iter().map(|cat| {
+                                let name = cat.category.clone();
+                                let toggle = name.clone();
+                                let open_check = name.clone();
+                                let rows_check = name.clone();
+                                let changes = cat.diffs.iter().filter(|d| is_changed(d)).count();
+                                let count_label = if changes == 1 { "1 change".to_string() } else { format!("{changes} changes") };
+                                let rows: Vec<_> = cat.diffs.into_iter().map(|d| {
+                                    let class = if is_changed(&d) { "diff-row changed" } else { "diff-row identical" };
+                                    view! {
+                                        <tr class=class>
+                                            <td class="diff-key">{d.label}</td>
+                                            <td class="diff-val diff-val-a nd-num">{d.base_value}</td>
+                                            <td class="diff-val diff-val-b nd-num">{d.new_value}</td>
+                                        </tr>
+                                    }
+                                }).collect();
+                                view! {
+                                    <tbody class="diff-category-group">
+                                        <tr class="diff-category-row">
+                                            <td colspan="3">
+                                                <button
+                                                    type="button"
+                                                    class="diff-category-header"
+                                                    aria-expanded=move || (!collapsed.get().contains(&open_check)).to_string()
+                                                    on:click=move |_| toggle_category(toggle.clone())
+                                                >
+                                                    <span class="diff-category-name nd-label">{name}</span>
+                                                    <span class="diff-category-count">{count_label}</span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                        <Show when=move || !collapsed.get().contains(&rows_check)>
+                                            {rows.clone()}
+                                        </Show>
+                                    </tbody>
+                                }
+                            }).collect::<Vec<_>>()}
                         </table>
                     </div>
                 }

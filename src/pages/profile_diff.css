@@ -43,37 +43,6 @@
     font-size: 0.875rem;
 }
 
-.diff-error {
-    background: var(--bg-danger);
-    border: 1px solid var(--border-danger);
-    color: var(--color-danger);
-    padding: 0.75rem 1rem;
-    border-radius: 6px;
-    margin-bottom: 1rem;
-}
-
-/* --- Results --- */
-.diff-results {
-    margin-top: 0.5rem;
-}
-
-.diff-summary {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.6rem 1rem;
-    background: var(--bg-card);
-    border: 1px solid var(--border-primary);
-    border-radius: 6px;
-    margin-bottom: 1rem;
-}
-
-.diff-summary-text {
-    font-weight: 600;
-    font-size: 0.9rem;
-    color: var(--text-primary);
-}
-
 /* --- Table --- */
 .diff-table {
     width: 100%;
@@ -120,48 +89,8 @@
     padding: 0;
 }
 
-.diff-category-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.55rem 0.75rem;
-    background: var(--bg-hover);
-    cursor: pointer;
-    -webkit-user-select: none;
-    user-select: none;
-    border-top: 1px solid var(--border-primary);
-}
-
-.diff-category-header:hover {
-    /* --bg-hover and --bg-active are both --nd-surface-raised, so this hover
-       was invisible against the header's own base background. --bg-active-hover
-       (--nd-border) is one tier darker/lighter, flat and colour-only. */
-    background: var(--bg-active-hover);
-}
-
-.diff-category-arrow {
-    width: 1rem;
-    text-align: center;
-    color: var(--text-muted);
-    font-size: 0.7rem;
-    transition: transform 0.15s ease;
-}
-
-.diff-category-arrow.open {
-    transform: rotate(90deg);
-}
-
 .diff-category-name {
-    font-weight: 600;
-    font-size: 0.85rem;
     flex: 1;
-    color: var(--text-primary);
-}
-
-.diff-category-count {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    font-weight: 500;
 }
 
 /* --- Data rows --- */
@@ -177,16 +106,6 @@
     color: var(--text-secondary);
 }
 
-.diff-row .diff-val {
-    font-family: "SF Mono", "Menlo", "Monaco", monospace;
-    font-size: 0.8rem;
-}
-
-.diff-row.changed .diff-val {
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
 .diff-row.changed .diff-val-b {
     /* --accent now resolves to --nd-text-display (white), which is barely
        distinguishable from --text-primary (#e8e8e8) on the A side, so the
@@ -195,11 +114,47 @@
     color: var(--nd-interactive);
 }
 
-.diff-row.identical td {
-    opacity: 0.45;
-}
-
 /* Last row in a category group */
 .diff-category-group tr:last-child td {
     border-bottom: none;
+}
+
+.diff-results {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-lg);
+    margin-top: var(--nd-space-lg);
+}
+
+.diff-row.changed td {
+    color: var(--nd-text-display);
+}
+
+.diff-row.identical td {
+    color: var(--nd-text-disabled);
+}
+
+.diff-category-header {
+    display: flex;
+    gap: var(--nd-space-md);
+    align-items: baseline;
+    width: 100%;
+    padding: var(--nd-space-sm) 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.diff-category-header:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+.diff-category-count {
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    color: var(--nd-text-secondary);
 }
