@@ -223,6 +223,8 @@ async function checkRailOverlap(browserType, name, baseUrl) {
   const browser = await browserType.launch();
   for (const { route, path, reveal, overlapSelector } of RAIL_OVERLAP_CASES) {
     const page = await browser.newPage({ viewport: RAIL_WIDTH_VIEWPORT });
+    // If the app never mounts, say why instead of only timing out.
+    page.on("pageerror", (e) => console.log(`  pageerror ${name} ${route}: ${e.message}`));
     await page.addInitScript(installTauriMock, FIXTURES);
     try {
       await page.goto(baseUrl, { waitUntil: "domcontentloaded" });

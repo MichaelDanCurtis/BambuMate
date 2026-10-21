@@ -775,7 +775,10 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 <div class="fs-specs-hero">
                     <HeroStats label=spec_label(&s) stats=spec_stats(&s) />
                     <div class="fs-hero-actions">
+                        // A running generate or install can't be cancelled and
+                        // would land its result on the fresh search, so wait.
                         <button type="button" class="btn btn-secondary fs-search-another"
+                            disabled=move || is_generating.get() || is_installing.get()
                             on:click=move |_| reset_search()>
                             "Search another"
                         </button>

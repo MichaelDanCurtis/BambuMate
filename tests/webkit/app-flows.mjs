@@ -540,6 +540,7 @@ async function driveApp(browserType, engine, baseUrl) {
           );
           const buttons = await page.locator("button.nd-step-btn").count();
           if (buttons !== 0) throw new Error(`${buttons} step buttons while generating, expected none`);
+          if (!(await page.locator(".fs-search-another").isDisabled())) throw new Error("Search another enabled while generating");
           if ((await page.locator(".nd-step[data-state=\"done\"] span.nd-step-btn").count()) < 1) {
             throw new Error("done steps are not plain text while generating");
           }
@@ -563,9 +564,11 @@ async function driveApp(browserType, engine, baseUrl) {
           );
           const buttons = await page.locator("button.nd-step-btn").count();
           if (buttons !== 0) throw new Error(`${buttons} step buttons while installing, expected none`);
+          if (!(await page.locator(".fs-search-another").isDisabled())) throw new Error("Search another enabled while installing");
           await page.evaluate(() => window.__release("install-back"));
           await page.waitForSelector(".success-message", { timeout: 20000 });
           if ((await page.locator("button.nd-step-btn").count()) !== 0) throw new Error("Back offered after an install");
+          if (await page.locator(".fs-search-another").isDisabled()) throw new Error("Search another still disabled after the install");
         }
       );
     });
