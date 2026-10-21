@@ -462,6 +462,21 @@ async function driveApp(browserType, engine, baseUrl) {
       return `${inputs} editable fields`;
     });
 
+    await step(run, page, "the filament hero and step strip follow the flow", async () => {
+      const stats = await page.locator(".fs-specs-hero .nd-hero-stat-value").allTextContents();
+      if (stats.join(" ") !== "220° 65° 0.98") throw new Error(`hero reads "${stats.join(" ")}"`);
+      const current = await page.locator('.nd-step[data-state="current"] .nd-step-name').textContent();
+      if (current !== "Tune") throw new Error(`current step "${current}"`);
+      if ((await page.locator(".search-container").count()) !== 0) throw new Error("search box still shown after picking");
+      await page.click('.nd-step[data-state="done"] button.nd-step-btn');
+      await page.waitForSelector(".filament-card", { timeout: 5000 });
+      const back = await page.locator('.nd-step[data-state="current"] .nd-step-name').textContent();
+      if (back !== "Specs") throw new Error(`after Back the current step is "${back}"`);
+      // Return to the editor for the steps that follow.
+      await page.click(".filament-card-generate-btn");
+      await page.waitForSelector(".editor-section", { timeout: 20000 });
+    });
+
     // The editor builds the target label by prepending "Bambu Lab " to the bare
     // model name the backend sends. Pinning the exact string guards both ends of
     // that: a model name that already carries the prefix reads "Bambu Lab Bambu
@@ -487,6 +502,12 @@ async function driveApp(browserType, engine, baseUrl) {
     });
 
     await page.screenshot({ path: `flow-${engine}-filament.png`, fullPage: true });
+
+    await step(run, page, "Search another brings the search box back", async () => {
+      await page.click(".fs-search-another");
+      await page.waitForSelector(".fs-search-hero .search-input", { timeout: 5000 });
+      if ((await page.locator(".fs-specs-hero").count()) !== 0) throw new Error("specs hero still shown");
+    });
   }
 
   // -- print analysis ------------------------------------------------------
