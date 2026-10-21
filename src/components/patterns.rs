@@ -175,6 +175,116 @@ pub fn StateText(
     }
 }
 
+/// Where a step sits relative to the current one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepState {
+    Done,
+    Current,
+    Upcoming,
+}
+
+impl StepState {
+    /// `data-state` on the step.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Current => "current",
+            Self::Upcoming => "upcoming",
+        }
+    }
+}
+
+pub fn step_state(index: usize, current: usize) -> StepState {
+    match index.cmp(&current) {
+        std::cmp::Ordering::Less => StepState::Done,
+        std::cmp::Ordering::Equal => StepState::Current,
+        std::cmp::Ordering::Greater => StepState::Upcoming,
+    }
+}
+
+/// A hero with several Doto values side by side, each under its own mono
+/// label. Still the page's one hero.
+#[component]
+pub fn HeroStats(
+    #[prop(into)] label: Signal<String>,
+    #[prop(into)] stats: Signal<Vec<(String, String)>>,
+    #[prop(into, optional)] detail: MaybeProp<String>,
+) -> impl IntoView {
+    view! {
+        <section class="nd-hero">
+            <p class="nd-label nd-hero-label">{move || label.get()}</p>
+            <div class="nd-hero-stats">
+                {move || {
+                    stats
+                        .get()
+                        .into_iter()
+                        .map(|(name, value)| view! {
+                            <div class="nd-hero-stat">
+                                <span class="nd-label">{name}</span>
+                                <span class="nd-display nd-hero-stat-value">{value}</span>
+                            </div>
+                        })
+                        .collect_view()
+                }}
+            </div>
+            {move || {
+                detail
+                    .get()
+                    .filter(|d| !d.is_empty())
+                    .map(|d| view! { <p class="nd-hero-detail">{d}</p> })
+            }}
+        </section>
+    }
+}
+
+/// Numbered steps of a flow. Steps before the current one are buttons back
+/// to that step while `can_go_back` holds; the rest are plain text.
+#[component]
+pub fn StepStrip(
+    steps: &'static [&'static str],
+    #[prop(into)] current: Signal<usize>,
+    #[prop(into)] can_go_back: Signal<bool>,
+    #[prop(into)] on_back: Callback<usize>,
+) -> impl IntoView {
+    let items = steps
+        .iter()
+        .enumerate()
+        .map(|(i, &name)| {
+            let state = move || step_state(i, current.get());
+            let number = format!("{:02}", i + 1);
+            view! {
+                <li class="nd-step" data-state=move || state().key()>
+                    {move || {
+                        let inner = view! {
+                            <span class="nd-step-num">{number.clone()}</span>
+                            <span class="nd-step-name">{name}</span>
+                        };
+                        if state() == StepState::Done && can_go_back.get() {
+                            view! {
+                                <button type="button" class="nd-step-btn"
+                                    title=format!("Back to {name}")
+                                    on:click=move |_| on_back.run(i)>
+                                    {inner}
+                                </button>
+                            }
+                            .into_any()
+                        } else {
+                            view! {
+                                <span class="nd-step-btn"
+                                    aria-current=move || (state() == StepState::Current).then_some("step")>
+                                    {inner}
+                                </span>
+                            }
+                            .into_any()
+                        }
+                    }}
+                </li>
+            }
+        })
+        .collect_view();
+    view! { <ol class="nd-steps" aria-label="Steps">{items}</ol> }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +330,19 @@ mod tests {
         let keys = [Tone::Neutral, Tone::Signal, Tone::Warning, Tone::Accent].map(Tone::key);
         assert_eq!(keys, ["neutral", "signal", "warning", "accent"]);
         assert_eq!(Tone::default(), Tone::Neutral);
+    }
+
+    #[test]
+    fn steps_before_the_current_one_are_done() {
+        assert_eq!(step_state(0, 1), StepState::Done);
+        assert_eq!(step_state(1, 1), StepState::Current);
+        assert_eq!(step_state(2, 1), StepState::Upcoming);
+        assert_eq!(step_state(0, 0), StepState::Current);
+    }
+
+    #[test]
+    fn step_states_have_distinct_keys() {
+        let keys = [StepState::Done, StepState::Current, StepState::Upcoming].map(StepState::key);
+        assert_eq!(keys, ["done", "current", "upcoming"]);
     }
 }
