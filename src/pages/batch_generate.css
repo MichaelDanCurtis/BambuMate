@@ -21,75 +21,23 @@
     cursor: pointer;
 }
 
-.batch-error {
-    background: var(--error-bg);
-    border: 1px solid var(--error-border);
-    color: var(--error-text);
-    padding: 0.75rem 1rem;
-    border-radius: 6px;
-    margin-bottom: 1rem;
-}
-
 .batch-results {
-    margin-top: 1.5rem;
-}
-
-.batch-summary {
     display: flex;
-    gap: 1.5rem;
-    margin-bottom: 1rem;
-    padding: 0.75rem 1rem;
-    background: var(--bg-secondary);
-    border-radius: 6px;
-    border: 1px solid var(--border-primary);
-}
-
-.batch-stat {
-    font-weight: 600;
-}
-
-.batch-success {
-    color: var(--success-text);
-}
-
-.batch-fail {
-    color: var(--error-text);
-}
-
-.batch-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.9rem;
-}
-
-.batch-table th,
-.batch-table td {
-    padding: 0.5rem 0.75rem;
-    text-align: left;
-    border-bottom: 1px solid var(--border-primary);
-}
-
-.batch-table th {
-    font-weight: 600;
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    flex-direction: column;
+    gap: var(--nd-space-md);
+    margin-top: var(--nd-space-lg);
 }
 
 .row-success .status-cell {
-    color: var(--success-text);
-    font-weight: 600;
+    color: var(--nd-signal);
 }
 
 .row-fail .status-cell {
-    color: var(--error-text);
-    font-weight: 600;
+    color: var(--nd-accent);
 }
 
 .error-hint {
-    color: var(--error-text);
-    font-size: 0.8rem;
+    color: var(--nd-text-secondary);
 }
 
 .loading-spinner {

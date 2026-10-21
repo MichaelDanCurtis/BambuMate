@@ -677,10 +677,15 @@ async function driveApp(browserType, engine, baseUrl) {
     if (await generate.isDisabled()) throw new Error("Generate stayed disabled after picking a brand");
     await generate.click();
     await page.waitForSelector(".batch-results", { timeout: 20000 });
-    const summary = (await page.locator(".batch-summary").first().innerText()).replace(/\s+/g, " ").trim();
+    const hero = (await page.locator(".batch-results .nd-hero-number").textContent()).trim();
+    if (hero !== "2/3") throw new Error(`hero reads "${hero}"`);
+    const detail = (await page.locator(".batch-results .nd-hero-detail").textContent()).trim();
+    if (detail !== "1 failed") throw new Error(`detail reads "${detail}"`);
+    const on = await page.locator(".batch-results .nd-seg-on").count();
+    if (on !== 8) throw new Error(`${on} segments for 2 of 3`);
     const failed = await page.locator("tr.row-fail").count();
     if (failed !== 1) throw new Error(`expected 1 failed row, got ${failed}`);
-    return summary;
+    return `${hero}, ${detail}`;
   });
 
   // -- compare profiles ------------------------------------------------------

@@ -2,7 +2,9 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, BatchProgress};
+use crate::components::patterns::{Hero, SegmentedBar, StateKind, StateText, Tone};
 use crate::components::specs_editor::PRINTER_OPTIONS;
+use crate::pages::batch_view::{batch_line, batch_percent, BATCH_SEGMENTS};
 
 #[component]
 pub fn BatchGeneratePage() -> impl IntoView {
@@ -60,15 +62,10 @@ pub fn BatchGeneratePage() -> impl IntoView {
         <div class="page batch-generate-page">
             <style>{include_str!("batch_generate.css")}</style>
 
-            <h2>"Batch Profile Generation"</h2>
-            <p class="page-description">
-                "Generate profiles for all filaments from a brand at once."
-            </p>
-
             // Configuration section
             <div class="batch-config">
                 <div class="form-group">
-                    <label for="brand-select">"Brand"</label>
+                    <label for="brand-select" class="nd-label">"Brand"</label>
                     <Show
                         when=move || !brands_loading.get()
                         fallback=|| view! { <select class="input" disabled=true><option>"Loading brands..."</option></select> }
@@ -76,7 +73,7 @@ pub fn BatchGeneratePage() -> impl IntoView {
                         {move || {
                             if let Some(err) = brands_error.get() {
                                 return view! {
-                                    <div class="batch-error">{err}</div>
+                                    <StateText kind=StateKind::Error message=err />
                                 }.into_any();
                             }
                             view! {
@@ -98,7 +95,7 @@ pub fn BatchGeneratePage() -> impl IntoView {
                 </div>
 
                 <div class="form-group">
-                    <label for="printer-select">"Target Printer"</label>
+                    <label for="printer-select" class="nd-label">"Target Printer"</label>
                     <select
                         id="printer-select"
                         class="input"
@@ -135,35 +132,31 @@ pub fn BatchGeneratePage() -> impl IntoView {
             </div>
 
             // Error
-            {move || gen_error.get().map(|e| view! {
-                <div class="batch-error">{e}</div>
-            })}
+            {move || gen_error.get().map(|e| view! { <StateText kind=StateKind::Error message=e /> })}
 
-            // Generating spinner
             <Show when=move || is_generating.get()>
-                <div class="loading-spinner">
-                    <div class="spinner"></div>
-                    <span>"Generating profiles... This may take a moment."</span>
-                </div>
+                <StateText kind=StateKind::Loading message="Generating profiles" />
             </Show>
 
-            // Results
             {move || result.get().map(|r| {
+                let label = format!("Batch · {}", selected_brand.get_untracked());
+                let percent = batch_percent(&r);
                 view! {
                     <div class="batch-results">
-                        <div class="batch-summary">
-                            <span class="batch-stat">{format!("{} total", r.total)}</span>
-                            <span class="batch-stat batch-success">{format!("{} succeeded", r.succeeded)}</span>
-                            <span class="batch-stat batch-fail">{format!("{} failed", r.failed)}</span>
-                        </div>
-
-                        <table class="batch-table">
+                        <Hero
+                            label=label
+                            value=format!("{}/{}", r.succeeded, r.total)
+                            detail=batch_line(&r)
+                            tone={if r.failed > 0 { Tone::Warning } else { Tone::Signal }}
+                        />
+                        <SegmentedBar percent=percent total=BATCH_SEGMENTS label="Profiles generated" />
+                        <table class="nd-table batch-table">
                             <thead>
                                 <tr>
                                     <th>"Status"</th>
                                     <th>"Filament"</th>
                                     <th>"Material"</th>
-                                    <th>"Profile Name"</th>
+                                    <th>"Profile"</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -173,14 +166,14 @@ pub fn BatchGeneratePage() -> impl IntoView {
                                     let name = entry.profile_name.clone().unwrap_or_default();
                                     let err = entry.error.clone().unwrap_or_default();
                                     view! {
-                                        <tr class={class}>
-                                            <td class="status-cell">{status}</td>
+                                        <tr class=class>
+                                            <td class="status-cell nd-label">{status}</td>
                                             <td>{entry.filament_name.clone()}</td>
-                                            <td>{entry.material.clone()}</td>
+                                            <td class="nd-label">{entry.material.clone()}</td>
                                             <td>
                                                 {name}
                                                 {(!err.is_empty()).then(|| view! {
-                                                    <span class="error-hint" title={err.clone()}>{format!(" ({})", err)}</span>
+                                                    <span class="error-hint" title=err.clone()>{format!(" ({})", err)}</span>
                                                 })}
                                             </td>
                                         </tr>
