@@ -648,6 +648,16 @@ async function driveApp(browserType, engine, baseUrl) {
     );
   });
 
+  await step(run, page, "a failed unsynced scan still shows the profile list", async () => {
+    await withFixtures({ list_unsynced_presets: { __reject: "scan failed" } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await page.click('nav.sidebar a[href="/profiles"]');
+      await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+      const dots = await page.locator(".pm-sync-dot").count();
+      if (dots !== 0) throw new Error(`${dots} dots after a failed scan`);
+    });
+  });
+
   // -- batch generate --------------------------------------------------------
   await step(run, page, "navigate to Batch Generate", async () => {
     await openTab("/filament", "/filament/batch");

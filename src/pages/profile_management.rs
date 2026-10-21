@@ -103,10 +103,12 @@ pub fn ProfileManagementPage() -> impl IntoView {
                 }
                 Err(e) => set_list_error.set(Some(e)),
             }
-            if let Ok(list) = commands::list_unsynced_presets().await {
-                set_not_syncing.set(list.presets.into_iter().map(|p| p.path).collect());
-            }
             set_is_loading.set(false);
+            // The dots are an enhancement: the list shows without them.
+            match commands::list_unsynced_presets().await {
+                Ok(list) => set_not_syncing.set(list.presets.into_iter().map(|p| p.path).collect()),
+                Err(_) => set_not_syncing.set(Default::default()),
+            }
         });
     };
 
@@ -363,6 +365,8 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                         let path = p.path.clone();
                                         let path_click = path.clone();
                                         let path_dot = path.clone();
+                                        let path_aria = path.clone();
+                                        let is_current = move || selected_path.get().as_deref() == Some(&path_aria);
                                         let is_selected = move || selected_path.get().as_deref() == Some(&path);
                                         let syncing_problem = move || not_syncing.with(|s| s.contains(&path_dot));
                                         view! {
@@ -370,6 +374,7 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                                 type="button"
                                                 class="profile-list-item"
                                                 class:selected=is_selected
+                                                aria-current=move || is_current().then_some("true")
                                                 on:click=move |_| select_profile(path_click.clone())
                                             >
                                                 <span class="profile-item-name">{p.name.clone()}</span>

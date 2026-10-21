@@ -70,12 +70,19 @@
     cursor: pointer;
 }
 
-.profile-list-item:hover {
-    background: var(--bg-primary);
+.profile-list-item:last-child {
+    border-bottom: 0;
 }
 
+.profile-list-item:hover {
+    background-color: var(--nd-surface-raised);
+}
+
+/* Declared after :hover so a selected row keeps its cue under the pointer. */
 .profile-list-item.selected {
     background-color: var(--nd-surface-raised);
+    box-shadow: inset 2px 0 0 var(--nd-text-display);
+    color: var(--nd-text-display);
 }
 
 .profile-list-item:focus-visible {
