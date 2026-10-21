@@ -258,6 +258,8 @@ pub fn StepStrip(
                         let inner = view! {
                             <span class="nd-step-num">{number.clone()}</span>
                             <span class="nd-step-name">{name}</span>
+                            {(state() == StepState::Done)
+                                .then(|| view! { <span class="nd-visually-hidden">" (done)"</span> })}
                         };
                         if state() == StepState::Done && can_go_back.get() {
                             view! {
@@ -282,7 +284,7 @@ pub fn StepStrip(
             }
         })
         .collect_view();
-    view! { <ol class="nd-steps" aria-label="Steps">{items}</ol> }
+    view! { <ol class="nd-steps" role="list" aria-label="Steps">{items}</ol> }
 }
 
 #[cfg(test)]

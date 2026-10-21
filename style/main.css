@@ -1978,11 +1978,11 @@ select.input option {
     font-size: 11px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--nd-text-disabled);
+    color: var(--nd-text-secondary);
 }
 
 .nd-step[data-state="done"] .nd-step-btn {
-    color: var(--nd-text-secondary);
+    color: var(--nd-text-primary);
     border-color: var(--nd-border-visible);
 }
 
@@ -1990,8 +1990,8 @@ button.nd-step-btn {
     cursor: pointer;
 }
 
-button.nd-step-btn:hover {
-    color: var(--nd-text-primary);
+.nd-step[data-state="done"] button.nd-step-btn:hover {
+    color: var(--nd-text-display);
 }
 
 button.nd-step-btn:focus-visible {
