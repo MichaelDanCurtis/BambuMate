@@ -15,7 +15,7 @@ use crate::components::patterns::{Hero, SegmentedBar, StateKind, StateText, Tone
 use crate::pages::home_state::{
     active_slot, ask_about, attention_detail, attention_label, attention_word, home_mode,
     idle_label, idle_word, last_print_detail, mode_key, no_printer_label, percent_text,
-    printing_detail, printing_label, recent_line, sync_line, HomeMode, HOME_SEGMENTS,
+    presets_unit, printing_detail, printing_label, recent_line, sync_line, HomeMode, HOME_SEGMENTS,
 };
 use crate::pages::printer::SlotPicker;
 use crate::printer::types::{swatch_color, untrusted_text, ConnectionState, SlotView};
@@ -148,7 +148,10 @@ pub fn HomePage() -> impl IntoView {
                     Some(Err(_)) => "—".to_string(),
                     None => "…".to_string(),
                 })
-                unit=" presets"
+                unit=Signal::derive(move || match profiles.get() {
+                    Some(Ok(n)) => presets_unit(n).to_string(),
+                    _ => " presets".to_string(),
+                })
                 detail=Signal::derive(move || match unsynced.get() {
                     Some(Ok(n)) => sync_line(n),
                     _ => String::new(),

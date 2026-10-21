@@ -62,8 +62,14 @@ pub fn SpecsEditor(
         Effect::new(move |_| {
             spawn_local(async move {
                 if let Ok(options) = commands::list_target_printer_options().await {
-                    let current_printer = selected_printer_model.get_untracked();
-                    let current_nozzles = selected_nozzle_sizes.get_untracked();
+                    // The editor can be closed (Back, Generate) before the
+                    // options arrive; its signals are gone by then.
+                    let (Some(current_printer), Some(current_nozzles)) = (
+                        selected_printer_model.try_get_untracked(),
+                        selected_nozzle_sizes.try_get_untracked(),
+                    ) else {
+                        return;
+                    };
 
                     if !options
                         .printer_models

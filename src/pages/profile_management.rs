@@ -2,7 +2,9 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, FilamentSpecs, ProfileDetail, ProfileInfo};
+use crate::components::patterns::{Hero, StatRow, StateKind, StateText};
 use crate::components::specs_editor::SpecsEditor;
+use crate::pages::profile_numbers::key_numbers;
 
 /// Key profile fields to display in the detail panel.
 const KEY_FIELDS: &[&str] = &[
@@ -62,6 +64,11 @@ pub fn ProfileManagementPage() -> impl IntoView {
     let (is_loading, set_is_loading) = signal(true);
     let (list_error, set_list_error) = signal::<Option<String>>(None);
     let (filter_query, set_filter_query) = signal(String::new());
+    // Paths `list_unsynced_presets` reports as not syncing; they get a
+    // warning dot. Nothing marks a preset as synced, since BambuMate can't
+    // confirm one reached the cloud.
+    let (not_syncing, set_not_syncing) =
+        signal::<std::collections::HashSet<String>>(Default::default());
 
     // Selection state
     let (selected_path, set_selected_path) = signal::<Option<String>>(None);
@@ -97,6 +104,11 @@ pub fn ProfileManagementPage() -> impl IntoView {
                 Err(e) => set_list_error.set(Some(e)),
             }
             set_is_loading.set(false);
+            // The dots are an enhancement: the list shows without them.
+            match commands::list_unsynced_presets().await {
+                Ok(list) => set_not_syncing.set(list.presets.into_iter().map(|p| p.path).collect()),
+                Err(_) => set_not_syncing.set(Default::default()),
+            }
         });
     };
 
@@ -301,17 +313,12 @@ pub fn ProfileManagementPage() -> impl IntoView {
         <div class="page profile-management-page">
             <style>{include_str!("profile_management.css")}</style>
 
-            <h2>"Profile Management"</h2>
-            <p class="page-description">
-                "Browse, edit, and manage your Bambu Studio filament profiles."
-            </p>
-
             // Action feedback
             {move || action_error.get().map(|e| view! {
-                <div class="profile-error">{e}</div>
+                <StateText kind=StateKind::Error message=e />
             })}
             {move || action_success.get().map(|s| view! {
-                <div class="profile-success">{s}</div>
+                <p class="nd-state pm-done" role="status">{s}</p>
             })}
 
             // Toolbar
@@ -338,15 +345,11 @@ pub fn ProfileManagementPage() -> impl IntoView {
 
             // Loading
             <Show when=move || is_loading.get()>
-                <div class="profile-loading">
-                    <span>"Loading profiles..."</span>
-                </div>
+                <StateText kind=StateKind::Loading />
             </Show>
 
             // List error
-            {move || list_error.get().map(|e| view! {
-                <div class="profile-error">{e}</div>
-            })}
+            {move || list_error.get().map(|e| view! { <StateText kind=StateKind::Error message=e /> })}
 
             // Main layout
             <Show when=move || !is_loading.get()>
@@ -361,30 +364,33 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                     children=move |p| {
                                         let path = p.path.clone();
                                         let path_click = path.clone();
+                                        let path_dot = path.clone();
+                                        let path_aria = path.clone();
+                                        let is_current = move || selected_path.get().as_deref() == Some(&path_aria);
                                         let is_selected = move || selected_path.get().as_deref() == Some(&path);
+                                        let syncing_problem = move || not_syncing.with(|s| s.contains(&path_dot));
                                         view! {
-                                            <div
+                                            <button
+                                                type="button"
                                                 class="profile-list-item"
                                                 class:selected=is_selected
+                                                aria-current=move || is_current().then_some("true")
                                                 on:click=move |_| select_profile(path_click.clone())
                                             >
-                                                <div class="profile-item-info">
-                                                    <div class="profile-item-name">{p.name.clone()}</div>
-                                                    <div class="profile-item-type">
-                                                        {p.filament_type.clone().unwrap_or_default()}
-                                                    </div>
-                                                </div>
-                                                {p.filament_type.clone().map(|t| view! {
-                                                    <span class="profile-item-badge">{t}</span>
-                                                })}
-                                            </div>
+                                                <span class="profile-item-name">{p.name.clone()}</span>
+                                                <span class="profile-item-type nd-label">
+                                                    {p.filament_type.clone().unwrap_or_default()}
+                                                </span>
+                                                <Show when=syncing_problem>
+                                                    <span class="pm-sync-dot" role="img" aria-label="Not syncing"
+                                                        title="Not syncing to your Bambu account — see Settings → Health"></span>
+                                                </Show>
+                                            </button>
                                         }
                                     }
                                 />
                                 <Show when=move || filtered_profiles().is_empty() && !is_loading.get()>
-                                    <div class="profile-detail-empty">
-                                        <span>"No profiles found"</span>
-                                    </div>
+                                    <StateText kind=StateKind::Empty message="No profiles match" />
                                 </Show>
                             </div>
 
@@ -393,98 +399,99 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                 {move || {
                                     if selected_path.get().is_none() {
                                         return view! {
-                                            <div class="profile-detail-empty">
-                                                <span>"Select a profile to view details"</span>
-                                            </div>
+                                            <StateText kind=StateKind::Empty message="Select a profile" />
                                         }.into_any();
                                     }
 
                                     if detail_loading.get() {
                                         return view! {
-                                            <div class="profile-loading">
-                                                <span>"Loading profile..."</span>
-                                            </div>
+                                            <StateText kind=StateKind::Loading />
                                         }.into_any();
                                     }
 
                                     if let Some(e) = detail_error.get() {
                                         return view! {
-                                            <div class="profile-error">{e}</div>
+                                            <StateText kind=StateKind::Error message=e />
                                         }.into_any();
                                     }
 
                                     match selected_detail.get() {
                                         None => view! {
-                                            <div class="profile-detail-empty">
-                                                <span>"Select a profile to view details"</span>
-                                            </div>
+                                            <StateText kind=StateKind::Empty message="Select a profile" />
                                         }.into_any(),
                                         Some(detail) => {
                                             view! {
                                                 <div>
-                                                    <div class="profile-detail-header">
-                                                        <div>
-                                                            <h3 class="profile-detail-title">
-                                                                {detail.name.clone().unwrap_or_else(|| "(unnamed)".to_string())}
-                                                            </h3>
-                                                            <div class="profile-detail-subtitle">
-                                                                {detail.filament_type.clone().unwrap_or_default()}
-                                                                " | "
-                                                                {format!("{} fields", detail.field_count)}
+                                                    {
+                                                        let numbers = key_numbers(&detail.raw_json);
+                                                        let title = detail.name.clone().unwrap_or_else(|| "(unnamed)".to_string());
+                                                        let subtitle = format!(
+                                                            "{} · {} fields",
+                                                            detail.filament_type.clone().unwrap_or_default(),
+                                                            detail.field_count
+                                                        );
+                                                        view! {
+                                                            <div class="pm-detail-head">
+                                                                <Hero
+                                                                    label=title
+                                                                    value=numbers.nozzle.clone()
+                                                                    detail=subtitle
+                                                                />
+                                                                <div class="pm-stats">
+                                                                    <StatRow label="Bed" value=numbers.bed.clone() />
+                                                                    <StatRow label="Flow ratio" value=numbers.flow.clone() />
+                                                                    <StatRow label="Pressure advance" value=numbers.pressure_advance.clone() />
+                                                                    <StatRow label="Max volumetric speed" value=numbers.max_volumetric.clone() />
+                                                                </div>
                                                             </div>
-                                                        </div>
-                                                        <div class="profile-detail-actions">
-                                                            <button
-                                                                class="btn-icon"
-                                                                title="Open in Bambu Studio"
-                                                                on:click=move |_| {
-                                                                    let path = selected_path.get();
-                                                                    spawn_local(async move {
-                                                                        let profile = path;
-                                                                        match commands::launch_bambu_studio(None, profile).await {
-                                                                            Ok(_) => set_action_success.set(Some("Bambu Studio launched".to_string())),
-                                                                            Err(e) => set_action_error.set(Some(e)),
-                                                                        }
-                                                                    });
-                                                                }
-                                                            >
-                                                                "Open in BS"
-                                                            </button>
-                                                            <button
-                                                                class="btn-icon btn-edit-specs"
-                                                                title="Edit Specs"
-                                                                disabled=move || specs_loading.get()
-                                                                on:click=move |_| open_specs_editor()
-                                                            >
-                                                                {move || if specs_loading.get() { "Loading..." } else { "Edit Specs" }}
-                                                            </button>
-                                                            <button
-                                                                class="btn-icon"
-                                                                title="Duplicate"
-                                                                on:click=move |_| {
-                                                                    let name = selected_detail.get()
-                                                                        .and_then(|d| d.name.clone())
-                                                                        .unwrap_or_default();
-                                                                    set_duplicate_name.set(format!("{} (copy)", name));
-                                                                    set_show_duplicate_input.set(true);
-                                                                    set_action_error.set(None);
-                                                                    set_action_success.set(None);
-                                                                }
-                                                            >
-                                                                "Copy"
-                                                            </button>
-                                                            <button
-                                                                class="btn-icon btn-danger"
-                                                                title="Delete"
-                                                                on:click=move |_| {
-                                                                    set_show_delete_confirm.set(true);
-                                                                    set_action_error.set(None);
-                                                                    set_action_success.set(None);
-                                                                }
-                                                            >
-                                                                "Delete"
-                                                            </button>
-                                                        </div>
+                                                        }
+                                                    }
+                                                    <div class="pm-actions">
+                                                        <button
+                                                            class="btn btn-secondary"
+                                                            on:click=move |_| {
+                                                                let path = selected_path.get();
+                                                                spawn_local(async move {
+                                                                    match commands::launch_bambu_studio(None, path).await {
+                                                                        Ok(_) => set_action_success.set(Some("Bambu Studio launched".to_string())),
+                                                                        Err(e) => set_action_error.set(Some(e)),
+                                                                    }
+                                                                });
+                                                            }
+                                                        >
+                                                            "Open in Bambu Studio"
+                                                        </button>
+                                                        <button
+                                                            class="btn btn-secondary btn-edit-specs"
+                                                            disabled=move || specs_loading.get()
+                                                            on:click=move |_| open_specs_editor()
+                                                        >
+                                                            {move || if specs_loading.get() { "Loading…" } else { "Edit specs" }}
+                                                        </button>
+                                                        <button
+                                                            class="btn btn-secondary"
+                                                            on:click=move |_| {
+                                                                let name = selected_detail.get()
+                                                                    .and_then(|d| d.name.clone())
+                                                                    .unwrap_or_default();
+                                                                set_duplicate_name.set(format!("{} (copy)", name));
+                                                                set_show_duplicate_input.set(true);
+                                                                set_action_error.set(None);
+                                                                set_action_success.set(None);
+                                                            }
+                                                        >
+                                                            "Duplicate"
+                                                        </button>
+                                                        <button
+                                                            class="btn btn-danger"
+                                                            on:click=move |_| {
+                                                                set_show_delete_confirm.set(true);
+                                                                set_action_error.set(None);
+                                                                set_action_success.set(None);
+                                                            }
+                                                        >
+                                                            "Delete"
+                                                        </button>
                                                     </div>
 
                                                     // Duplicate input
@@ -533,7 +540,7 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                                             .unwrap_or_default();
 
                                                         view! {
-                                                            <table class="profile-fields">
+                                                            <table class="nd-table profile-fields">
                                                                 <tbody>
                                                                     {rows.into_iter().map(|(key, value)| {
                                                                         let key_edit = key.clone();
@@ -542,7 +549,7 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                                                         let value_for_edit = value.clone();
                                                                         view! {
                                                                             <tr>
-                                                                                <td class="field-key">{key_display}</td>
+                                                                                <td class="field-key nd-label">{key_display}</td>
                                                                                 <td class="field-value">
                                                                                     {move || {
                                                                                         let is_editing = editing_field.get().as_deref() == Some(&key_edit);

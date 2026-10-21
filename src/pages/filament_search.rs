@@ -7,9 +7,13 @@ use crate::commands::{
     GenerateResult, InstallResult,
 };
 use crate::components::filament_card::FilamentCard;
+use crate::components::patterns::{HeroStats, StateKind, StateText, StepStrip};
 use crate::components::profile_preview::ProfilePreview;
 use crate::components::settings_merge::SettingsMerge;
 use crate::components::specs_editor::{GenerateRequest, SpecsEditor};
+use crate::pages::filament_steps::{
+    search_step, spec_label, spec_stats, step_index, SearchStep, SEARCH_STEPS,
+};
 
 /// Return the default Bambu Studio base profile name for a given material
 /// string, matching the mapping in `generator::base_profile_name` on the
@@ -548,48 +552,57 @@ pub fn FilamentSearchPage() -> impl IntoView {
         set_show_editor.set(true);
     };
 
+    // Where the flow is; drives the hero and the step strip.
+    let step = Memo::new(move |_| {
+        search_step(
+            current_specs.with(|s| s.is_some()),
+            show_merge_screen.get(),
+            show_editor.get(),
+            !generate_results.with(|r| r.is_empty()),
+            !install_results.with(|r| r.is_empty()),
+        )
+    });
+
+    // Back from the strip. Not after an install has run (there is nothing to
+    // go back to), and not while a generate or install is running: Back would
+    // clear the pending installs under a running one, and a running generate
+    // would snap the page back to Install when it finishes.
+    let can_go_back = move || {
+        install_results.with(|r| r.is_empty()) && !is_generating.get() && !is_installing.get()
+    };
+    let go_back = move |index: usize| {
+        if !(install_results.with_untracked(|r| r.is_empty())
+            && !is_generating.get_untracked()
+            && !is_installing.get_untracked())
+        {
+            return;
+        }
+        match index {
+            0 => {
+                cancel_generate();
+                set_show_merge_screen.set(false);
+                set_show_editor.set(false);
+            }
+            1 => cancel_generate(),
+            _ => {}
+        }
+    };
+
     view! {
         <div class="page filament-search-page">
             <style>{include_str!("filament_search.css")}</style>
 
-            <h2>"Filament Search"</h2>
-            <p class="page-description">
-                {move || if filament_ai_enabled.get() {
-                    "Type to search from our catalog, or use AI to find any filament."
-                } else {
-                    "Web-only mode — specs pulled from manufacturer sites. Enable AI in Settings for AI-powered search."
-                }}
-            </p>
-
-            // Catalog status
-            <div class="catalog-status">
-                {move || {
-                    if is_refreshing_catalog.get() {
-                        view! {
-                            <span class="status-refreshing">
-                                <span class="mini-spinner"></span>
-                                " Updating catalog..."
-                            </span>
-                        }.into_any()
-                    } else if let Some(status) = catalog_status.get() {
-                        view! {
-                            <span>{format!("{} filaments", status.entry_count)}</span>
-                            <button class="btn-small" on:click=move |_| refresh_catalog()>
-                                "Refresh"
-                            </button>
-                        }.into_any()
-                    } else {
-                        view! { <span>"Loading..."</span> }.into_any()
-                    }
-                }}
-            </div>
-
+            <Show when=move || step.get() == SearchStep::Search>
+                <section class="nd-hero fs-search-hero">
+                    <p class="nd-label nd-hero-label">
+                        {move || if filament_ai_enabled.get() { "Find a filament" } else { "Find a filament · web only" }}
+                    </p>
             // Search input with autocomplete
             <div class="search-container">
                 <div class="search-bar">
                     <input
                         type="text"
-                        class="search-input"
+                        class="search-input fs-hero-input"
                         placeholder="Search filaments..."
                         prop:value=move || search_query.get()
                         on:input=move |ev| {
@@ -733,6 +746,52 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 </Show>
             </div>
 
+            // Catalog status
+            <div class="catalog-status">
+                {move || {
+                    if is_refreshing_catalog.get() {
+                        view! {
+                            <span class="status-refreshing">
+                                <span class="mini-spinner"></span>
+                                " Updating catalog..."
+                            </span>
+                        }.into_any()
+                    } else if let Some(status) = catalog_status.get() {
+                        view! {
+                            <span>{format!("{} filaments", status.entry_count)}</span>
+                            <button class="btn-small" on:click=move |_| refresh_catalog()>
+                                "Refresh"
+                            </button>
+                        }.into_any()
+                    } else {
+                        view! { <span>"Loading..."</span> }.into_any()
+                    }
+                }}
+            </div>
+                </section>
+            </Show>
+
+            {move || current_specs.get().map(|s| view! {
+                <div class="fs-specs-hero">
+                    <HeroStats label=spec_label(&s) stats=spec_stats(&s) />
+                    <div class="fs-hero-actions">
+                        // A running generate or install can't be cancelled and
+                        // would land its result on the fresh search, so wait.
+                        <button type="button" class="btn btn-secondary fs-search-another"
+                            disabled=move || is_generating.get() || is_installing.get()
+                            on:click=move |_| reset_search()>
+                            "Search another"
+                        </button>
+                    </div>
+                    <StepStrip
+                        steps=SEARCH_STEPS
+                        current=Signal::derive(move || step_index(step.get()))
+                        can_go_back=Signal::derive(can_go_back)
+                        on_back=Callback::new(move |i: usize| go_back(i))
+                    />
+                </div>
+            })}
+
             // URL input section
             <Show when=move || show_url_input.get()>
                 <div class="url-input-section">
@@ -772,19 +831,14 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
             // Fetching indicator
             <Show when=move || is_fetching.get()>
-                <div class="loading-spinner">
-                    <div class="spinner"></div>
-                    <span>"Fetching specifications..."</span>
-                </div>
+                <StateText kind=StateKind::Loading message="Fetching specifications" />
             </Show>
 
             // Fetch error (hidden when dropdown is visible)
             {move || {
                 if show_suggestions.get() { return None; }
                 fetch_error.get().map(|e| view! {
-                    <div class="error-message">
-                        <strong>"Error: "</strong>{e}
-                    </div>
+                    <StateText kind=StateKind::Error message=e />
                 })
             }}
 
@@ -823,7 +877,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 let no_results = filtered.is_empty() && !is_searching_base.get() && !query.is_empty();
                 Some(view! {
                     <div class="base-profiles-section">
-                        <h4>"Base Profile (Installed in Bambu Studio)"</h4>
+                        <h2 class="nd-label">"Base profile (installed in Bambu Studio)"</h2>
                         <p class="section-description">
                             "Choose a base profile to build from, or keep the material default base."
                         </p>
@@ -929,7 +983,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
                 Some(view! {
                     <div class="merge-screen">
-                        <h3>"Compare & Merge Settings"</h3>
+                        <h2 class="nd-label">"Compare and merge settings"</h2>
                         <p class="section-description">
                             "Choose which settings to use from each source. AI-recommended values are on the left, "
                             "values from \""{base_name.clone()}"\" are on the right."
@@ -965,10 +1019,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
             // Generating indicator
             <Show when=move || is_generating.get()>
-                <div class="loading-spinner">
-                    <div class="spinner"></div>
-                    <span>"Generating profile(s)..."</span>
-                </div>
+                <StateText kind=StateKind::Loading message="Generating profiles" />
             </Show>
 
             // Per-nozzle AI tuning summary — what was changed for each nozzle
@@ -979,7 +1030,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                 }
                 Some(view! {
                     <div class="multi-profile-results">
-                        <h3 class="multi-profile-title">"Nozzle-Specific Adjustments"</h3>
+                        <h2 class="nd-label multi-profile-title">"Nozzle-Specific Adjustments"</h2>
                         {notes.into_iter().map(|(printer, lines)| view! {
                             <div class="spec-field full-width">
                                 <label class="spec-field-label">{printer}</label>
@@ -1020,9 +1071,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                     <div class="generate-section">
                         // Per-nozzle generation errors
                         {gen_errors.into_iter().map(|(label, e)| view! {
-                            <div class="error-message">
-                                <strong>{format!("Generation failed ({}): ", label)}</strong>{e}
-                            </div>
+                            <StateText kind=StateKind::Error message=format!("Generation failed ({label}): {e}") />
                         }).collect::<Vec<_>>()}
 
                         // Single profile → full ProfilePreview with diff table
@@ -1040,10 +1089,10 @@ pub fn FilamentSearchPage() -> impl IntoView {
                             // Multiple profiles → compact summary table + Install All
                             view! {
                                 <div class="multi-profile-results">
-                                    <h3 class="multi-profile-title">
+                                    <h2 class="nd-label multi-profile-title">
                                         {format!("{} Profiles Ready to Install", success_count)}
-                                    </h3>
-                                    <table class="multi-profile-table">
+                                    </h2>
+                                    <table class="multi-profile-table nd-table">
                                         <thead>
                                             <tr>
                                                 <th>"Profile Name"</th>
@@ -1139,9 +1188,7 @@ pub fn FilamentSearchPage() -> impl IntoView {
                         }}
 
                         {inst_errors.into_iter().map(|(name, e)| view! {
-                            <div class="error-message">
-                                <strong>{format!("Installation failed ({}): ", name)}</strong>{e}
-                            </div>
+                            <StateText kind=StateKind::Error message=format!("Installation failed ({name}): {e}") />
                         }).collect::<Vec<_>>()}
 
                         <div class="success-actions">

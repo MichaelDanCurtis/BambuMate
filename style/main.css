@@ -1942,3 +1942,66 @@ select.input option {
     clip: rect(0 0 0 0);
     white-space: nowrap;
 }
+
+.nd-hero-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--nd-space-xl);
+}
+
+.nd-hero-stat {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-xs);
+}
+
+.nd-hero-stat-value {
+    font-size: clamp(36px, 5vw, 56px);
+}
+
+.nd-steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--nd-space-sm);
+    list-style: none;
+}
+
+.nd-step-btn {
+    display: inline-flex;
+    gap: var(--nd-space-sm);
+    align-items: baseline;
+    padding: 6px 14px;
+    border: 1px solid var(--nd-border);
+    border-radius: var(--nd-radius-pill);
+    background: transparent;
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-text-secondary);
+}
+
+.nd-step[data-state="done"] .nd-step-btn {
+    color: var(--nd-text-primary);
+    border-color: var(--nd-border-visible);
+}
+
+button.nd-step-btn {
+    cursor: pointer;
+}
+
+.nd-step[data-state="done"] button.nd-step-btn:hover {
+    color: var(--nd-text-display);
+}
+
+/* Also the current step's span, which takes focus after a step is chosen. */
+.nd-step-btn:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+.nd-step[data-state="current"] .nd-step-btn {
+    color: var(--nd-black);
+    background-color: var(--nd-text-display);
+    border-color: var(--nd-text-display);
+}

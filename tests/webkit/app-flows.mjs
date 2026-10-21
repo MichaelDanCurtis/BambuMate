@@ -254,6 +254,21 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click(`nav.sidebar a[href="${hub}"]`);
     await page.click(`.nd-tabs a[href="${tab}"]`);
   };
+  const callsOf = (cmd) => page.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c), cmd);
+  // Swaps some fixtures for the length of `fn`, then puts the old ones back.
+  const setFixture = (cmd, value) =>
+    page.evaluate(([c, v]) => {
+      window.__fixtures[c] = v;
+    }, [cmd, value]);
+  const withFixtures = async (changes, fn) => {
+    const saved = await page.evaluate((keys) => keys.map((k) => [k, window.__fixtures[k]]), Object.keys(changes));
+    for (const [cmd, value] of Object.entries(changes)) await setFixture(cmd, value);
+    try {
+      return await fn();
+    } finally {
+      for (const [cmd, value] of saved) await setFixture(cmd, value);
+    }
+  };
 
   console.log(`\n== ${engine} ==`);
 
@@ -447,6 +462,29 @@ async function driveApp(browserType, engine, baseUrl) {
       return `${inputs} editable fields`;
     });
 
+    await step(run, page, "the filament hero and step strip follow the flow", async () => {
+      const stats = await page.locator(".fs-specs-hero .nd-hero-stat-value").allTextContents();
+      if (stats.join(" ") !== "220° 65° 0.98") throw new Error(`hero reads "${stats.join(" ")}"`);
+      const current = await page.locator('.nd-step[data-state="current"] .nd-step-name').textContent();
+      if (current !== "Tune") throw new Error(`current step "${current}"`);
+      if ((await page.locator(".search-container").count()) !== 0) throw new Error("search box still shown after picking");
+      await page.click('.nd-step[data-state="done"] button.nd-step-btn');
+      await page.waitForSelector(".filament-card", { timeout: 5000 });
+      const back = await page.locator('.nd-step[data-state="current"] .nd-step-name').textContent();
+      if (back !== "Specs") throw new Error(`after Back the current step is "${back}"`);
+      // Keyboard focus follows to the current step instead of being lost with the button.
+      await page.waitForFunction(
+        () => document.activeElement?.matches('.nd-step[data-state="current"] .nd-step-btn'),
+        null,
+        { timeout: 2000 }
+      ).catch(() => {
+        throw new Error("after Back, focus is not on the current step");
+      });
+      // Return to the editor for the steps that follow.
+      await page.click(".filament-card-generate-btn");
+      await page.waitForSelector(".editor-section", { timeout: 20000 });
+    });
+
     // The editor builds the target label by prepending "Bambu Lab " to the bare
     // model name the backend sends. Pinning the exact string guards both ends of
     // that: a model name that already carries the prefix reads "Bambu Lab Bambu
@@ -471,7 +509,77 @@ async function driveApp(browserType, engine, baseUrl) {
       return label;
     });
 
+    // Back from the Install step goes to the editor; a profile can then be generated again.
+    const doneStep = (name) => page.locator(`.nd-step[data-state="done"]:has(.nd-step-name:text-is("${name}")) .nd-step-btn`);
+    const currentStep = () => page.locator('.nd-step[data-state="current"] .nd-step-name').textContent();
+    await step(run, page, "Back from Install returns to the editor", async () => {
+      await page.click('.editor-section button:has-text("Generate Profile")');
+      await page.waitForSelector(".profile-preview", { timeout: 20000 });
+      if ((await currentStep()) !== "Install") throw new Error(`current step "${await currentStep()}" after generating`);
+      await doneStep("Tune").click();
+      await page.waitForSelector(".editor-section", { timeout: 5000 });
+      if ((await page.locator(".profile-preview").count()) !== 0) throw new Error("preview still shown after Back");
+      if ((await currentStep()) !== "Tune") throw new Error(`after Back the current step is "${await currentStep()}"`);
+      await page.click('.editor-section button:has-text("Generate Profile")');
+      await page.waitForSelector(".profile-preview", { timeout: 20000 });
+      if ((await currentStep()) !== "Install") throw new Error("generating again did not land on Install");
+    });
+
+    await step(run, page, "Back is blocked while a profile is generating", async () => {
+      await doneStep("Tune").click();
+      await page.waitForSelector(".editor-section", { timeout: 5000 });
+      await withFixtures(
+        { generate_profile_from_specs: { __hold: "gen-back", answer: FIXTURES.generate_profile_from_specs } },
+        async () => {
+          const before = (await callsOf("generate_profile_from_specs")).length;
+          await page.click('.editor-section button:has-text("Generate Profile")');
+          await page.waitForFunction(
+            (n) => window.__ipc.calls.filter((c) => c.cmd === "generate_profile_from_specs").length > n,
+            before,
+            { timeout: 5000 }
+          );
+          const buttons = await page.locator("button.nd-step-btn").count();
+          if (buttons !== 0) throw new Error(`${buttons} step buttons while generating, expected none`);
+          if (!(await page.locator(".fs-search-another").isDisabled())) throw new Error("Search another enabled while generating");
+          if ((await page.locator(".nd-step[data-state=\"done\"] span.nd-step-btn").count()) < 1) {
+            throw new Error("done steps are not plain text while generating");
+          }
+          await page.evaluate(() => window.__release("gen-back"));
+          await page.waitForSelector(".profile-preview", { timeout: 20000 });
+          if ((await currentStep()) !== "Install") throw new Error("finishing the generate did not land on Install");
+          if ((await doneStep("Tune").count()) !== 1) throw new Error("Back is not offered once generating is over");
+        }
+      );
+    });
+
+    await step(run, page, "Back is blocked while a profile is installing", async () => {
+      await withFixtures(
+        { install_generated_profile: { __hold: "install-back", answer: FIXTURES.install_generated_profile } },
+        async () => {
+          await page.click(".profile-preview-actions .btn-primary");
+          await page.waitForFunction(
+            () => document.querySelector(".profile-preview-actions .btn-primary")?.disabled === true,
+            null,
+            { timeout: 5000 }
+          );
+          const buttons = await page.locator("button.nd-step-btn").count();
+          if (buttons !== 0) throw new Error(`${buttons} step buttons while installing, expected none`);
+          if (!(await page.locator(".fs-search-another").isDisabled())) throw new Error("Search another enabled while installing");
+          await page.evaluate(() => window.__release("install-back"));
+          await page.waitForSelector(".success-message", { timeout: 20000 });
+          if ((await page.locator("button.nd-step-btn").count()) !== 0) throw new Error("Back offered after an install");
+          if (await page.locator(".fs-search-another").isDisabled()) throw new Error("Search another still disabled after the install");
+        }
+      );
+    });
+
     await page.screenshot({ path: `flow-${engine}-filament.png`, fullPage: true });
+
+    await step(run, page, "Search another brings the search box back", async () => {
+      await page.click(".fs-search-another");
+      await page.waitForSelector(".fs-search-hero .search-input", { timeout: 5000 });
+      if ((await page.locator(".fs-specs-hero").count()) !== 0) throw new Error("specs hero still shown");
+    });
   }
 
   // -- print analysis ------------------------------------------------------
@@ -602,13 +710,46 @@ async function driveApp(browserType, engine, baseUrl) {
 
   await step(run, page, "opening a profile shows its fields", async () => {
     await page.locator(".profile-list-item").first().click();
-    await page.waitForSelector(".profile-detail-title", { timeout: 15000 });
+    await page.waitForSelector(".profile-management-page .nd-hero", { timeout: 15000 });
     await page.waitForSelector("table.profile-fields", { timeout: 15000 });
-    const title = (await page.locator(".profile-detail-title").first().innerText()).trim();
-    const subtitle = (await page.locator(".profile-detail-subtitle").first().innerText()).trim();
+    const title = (await page.locator(".pm-detail-head .nd-hero-label").textContent()).trim();
+    const nozzle = (await page.locator(".pm-detail-head .nd-hero-number").textContent()).trim();
+    if (nozzle !== "220°") throw new Error(`hero reads "${nozzle}"`);
+    const subtitle = (await page.locator(".pm-detail-head .nd-hero-detail").textContent()).trim();
+    if (!subtitle.includes("42 fields")) throw new Error(`detail reads "${subtitle}"`);
+    const stats = await page.locator(".pm-stats .nd-stat-row").count();
+    if (stats !== 4) throw new Error(`${stats} stat rows`);
     const keys = await page.locator("td.field-key").count();
     if (keys === 0) throw new Error("fields table rendered with no rows");
-    return `${title} (${subtitle}), ${keys} field rows`;
+    const pills = await page.locator(".pm-actions .btn").count();
+    if (pills !== 4) throw new Error(`${pills} action buttons`);
+    return `${title}, ${keys} field rows`;
+  });
+
+  await step(run, page, "a preset that isn't syncing gets a warning dot", async () => {
+    const path = FIXTURES.list_profiles[0].path;
+    await withFixtures(
+      { list_unsynced_presets: { presets: [{ path, profile_name: "x", file_name: "x.json", source: "confirmed" }], bambu_studio_running: false } },
+      async () => {
+        await page.click('nav.sidebar a[href="/"]');
+        await page.click('nav.sidebar a[href="/profiles"]');
+        await page.waitForSelector(".profile-list-item .pm-sync-dot", { timeout: 15000 });
+        const dots = await page.locator(".pm-sync-dot").count();
+        if (dots !== 1) throw new Error(`${dots} dots, expected 1`);
+        const label = await page.locator(".pm-sync-dot").getAttribute("aria-label");
+        if (label !== "Not syncing") throw new Error(`dot label "${label}"`);
+      }
+    );
+  });
+
+  await step(run, page, "a failed unsynced scan still shows the profile list", async () => {
+    await withFixtures({ list_unsynced_presets: { __reject: "scan failed" } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await page.click('nav.sidebar a[href="/profiles"]');
+      await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+      const dots = await page.locator(".pm-sync-dot").count();
+      if (dots !== 0) throw new Error(`${dots} dots after a failed scan`);
+    });
   });
 
   // -- batch generate --------------------------------------------------------
@@ -629,10 +770,45 @@ async function driveApp(browserType, engine, baseUrl) {
     if (await generate.isDisabled()) throw new Error("Generate stayed disabled after picking a brand");
     await generate.click();
     await page.waitForSelector(".batch-results", { timeout: 20000 });
-    const summary = (await page.locator(".batch-summary").first().innerText()).replace(/\s+/g, " ").trim();
+    const hero = (await page.locator(".batch-results .nd-hero-number").textContent()).trim();
+    if (hero !== "2/3") throw new Error(`hero reads "${hero}"`);
+    const detail = (await page.locator(".batch-results .nd-hero-detail").textContent()).trim();
+    if (detail !== "1 failed") throw new Error(`detail reads "${detail}"`);
+    const on = await page.locator(".batch-results .nd-seg-on").count();
+    if (on !== 8) throw new Error(`${on} segments for 2 of 3`);
     const failed = await page.locator("tr.row-fail").count();
     if (failed !== 1) throw new Error(`expected 1 failed row, got ${failed}`);
-    return summary;
+    return `${hero}, ${detail}`;
+  });
+
+  await step(run, page, "batch locks every input while generating", async () => {
+    await withFixtures(
+      { batch_generate_brand: { __hold: "batch-lock", answer: FIXTURES.batch_generate_brand } },
+      async () => {
+        await page.locator(".batch-generate-page button.btn-primary").first().click();
+        await page.waitForSelector(".batch-generate-page .nd-state", { timeout: 5000 });
+        for (const sel of ["#brand-select", "#printer-select", '.batch-config input[type="checkbox"]']) {
+          if (!(await page.locator(sel).isDisabled())) throw new Error(`${sel} is editable while generating`);
+        }
+        await page.evaluate(() => window.__release("batch-lock"));
+        await page.waitForSelector(".batch-results", { timeout: 20000 });
+        if (await page.locator("#printer-select").isDisabled()) throw new Error("printer select stayed disabled");
+      }
+    );
+  });
+
+  await step(run, page, "an empty brand reads as nothing to generate", async () => {
+    const empty = { total: 0, completed: 0, succeeded: 0, failed: 0, results: [] };
+    await withFixtures({ batch_generate_brand: empty }, async () => {
+      await page.locator(".batch-generate-page button.btn-primary").first().click();
+      await page.waitForFunction(
+        () => document.querySelector(".batch-results .nd-hero-detail")?.textContent.trim() === "Nothing to generate",
+        null,
+        { timeout: 5000 }
+      );
+      const tone = await page.locator(".batch-results .nd-hero").getAttribute("data-tone");
+      if (tone !== "neutral") throw new Error(`hero tone "${tone}", expected neutral`);
+    });
   });
 
   // -- compare profiles ------------------------------------------------------
@@ -660,12 +836,17 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "compare renders a categorised diff", async () => {
     await page.locator(".diff-actions button.btn-primary").first().click();
     await page.waitForSelector(".diff-results", { timeout: 20000 });
-    const summary = (await page.locator(".diff-summary-text").first().innerText()).trim();
+    const hero = (await page.locator(".diff-results .nd-hero-number").textContent()).trim();
+    if (hero !== "3") throw new Error(`hero reads "${hero}"`);
+    const calls = await callsOf("compare_profiles");
+    if (calls.at(-1)?.args?.showIdentical !== true) {
+      throw new Error(`compare was not asked for every field: ${JSON.stringify(calls.at(-1)?.args)}`);
+    }
     const categories = await page.locator(".diff-category-name").count();
     const rows = await page.locator("tr.diff-row.changed").count();
     if (categories !== 2) throw new Error(`expected 2 categories, got ${categories}`);
     if (rows !== 3) throw new Error(`expected 3 changed rows, got ${rows}`);
-    return `${summary}, ${categories} categories`;
+    return `${hero} differences, ${categories} categories`;
   });
 
   // .diff-table carries a border-collapse fix for WebKit. Counting rows would
@@ -677,9 +858,77 @@ async function driveApp(browserType, engine, baseUrl) {
     return `row height ${Math.round(box.height)}px`;
   });
 
+  await step(run, page, "Changed only hides identical rows without comparing again", async () => {
+    const withIdentical = {
+      ...FIXTURES.compare_profiles,
+      categories: [
+        ...FIXTURES.compare_profiles.categories,
+        { category: "Cooling", diffs: [{ key: "fan_max_speed", label: "Fan Max", base_value: "100", new_value: "100" }] },
+      ],
+    };
+    await withFixtures({ compare_profiles: withIdentical }, async () => {
+      await page.locator(".diff-actions button.btn-primary").first().click();
+      await page.waitForFunction(() => document.querySelectorAll("tr.diff-row").length === 3, null, { timeout: 5000 });
+      const before = (await callsOf("compare_profiles")).length;
+      await page.locator(".diff-changed-only").uncheck();
+      await page.waitForSelector("tr.diff-row.identical", { timeout: 5000 });
+      if ((await page.locator(".diff-category-name").count()) !== 3) throw new Error("Cooling category not shown");
+      if ((await callsOf("compare_profiles")).length !== before) throw new Error("toggling re-compared");
+      await page.locator(".diff-changed-only").check();
+      await page.waitForSelector("tr.diff-row.identical", { state: "detached", timeout: 5000 });
+    });
+  });
+
+  await step(run, page, "a category header collapses and restores its rows", async () => {
+    const header = page.locator(".diff-category-header").first();
+    const rows = page.locator(".diff-category-group").first().locator("tr.diff-row");
+    const shown = await rows.count();
+    if (shown === 0) throw new Error("first category has no rows to collapse");
+    if ((await header.getAttribute("aria-expanded")) !== "true") throw new Error("header does not start expanded");
+    await header.click();
+    await page.waitForFunction(
+      () => document.querySelector(".diff-category-header")?.getAttribute("aria-expanded") === "false",
+      null,
+      { timeout: 5000 }
+    );
+    if ((await rows.count()) !== 0) throw new Error("rows still shown after collapsing");
+    const glyph = await header.evaluate((el) => getComputedStyle(el, "::after").content);
+    if (!glyph.includes("+")) throw new Error(`collapsed cue reads ${glyph}`);
+    await header.click();
+    await page.waitForFunction((n) => document.querySelectorAll(".diff-category-group:first-of-type tr.diff-row").length === n, shown, { timeout: 5000 });
+    if ((await header.getAttribute("aria-expanded")) !== "true") throw new Error("header did not re-expand");
+  });
+
+  await step(run, page, "singular and empty results read right", async () => {
+    const same = (k) => ({ key: k, label: k, base_value: "1", new_value: "1" });
+    const none = { ...FIXTURES.compare_profiles, categories: [{ category: "Temperature", diffs: [same("a")] }], changed_fields: 0 };
+    await withFixtures({ compare_profiles: none }, async () => {
+      await page.locator(".diff-actions button.btn-primary").first().click();
+      await page.waitForSelector('.diff-results .nd-state[data-kind="empty"]', { timeout: 5000 });
+      const text = await page.locator(".diff-results .nd-state").textContent();
+      if (!/No differences/.test(text)) throw new Error(`empty state reads "${text}"`);
+      if ((await page.locator("table.diff-table").count()) !== 0) throw new Error("table shown with no differences");
+      const hero = (await page.locator(".diff-results .nd-hero-value").textContent()).replace(/\s+/g, " ").trim();
+      if (hero !== "0 differences") throw new Error(`hero reads "${hero}"`);
+      await page.locator(".diff-changed-only").uncheck();
+      await page.waitForSelector("table.diff-table tr.diff-row.identical", { timeout: 5000 });
+      await page.locator(".diff-changed-only").check();
+    });
+    const one = {
+      ...FIXTURES.compare_profiles,
+      categories: [{ category: "Temperature", diffs: [{ key: "a", label: "a", base_value: "1", new_value: "2" }] }],
+      changed_fields: 1,
+    };
+    await withFixtures({ compare_profiles: one }, async () => {
+      await page.locator(".diff-actions button.btn-primary").first().click();
+      await page.waitForSelector("tr.diff-row.changed", { timeout: 5000 });
+      const hero = (await page.locator(".diff-results .nd-hero-value").textContent()).replace(/\s+/g, " ").trim();
+      if (hero !== "1 difference") throw new Error(`hero reads "${hero}"`);
+    });
+  });
+
   // -- slice ---------------------------------------------------------------
   const emitJob = (view) => page.evaluate((v) => window.__emit("slicer://job", v), view);
-  const callsOf = (cmd) => page.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c), cmd);
   const running = (id, percent) =>
     sliceJob(id, { state: "running", progress: { plate: 1, percent, stage: "Generating walls" } });
   const done = (id, result, extra) => sliceJob(id, { state: "done", result, cached: false }, extra);
@@ -768,20 +1017,6 @@ async function driveApp(browserType, engine, baseUrl) {
     return deltas.join(", ");
   });
 
-  // Swaps some fixtures for the length of `fn`, then puts the old ones back.
-  const setFixture = (cmd, value) =>
-    page.evaluate(([c, v]) => {
-      window.__fixtures[c] = v;
-    }, [cmd, value]);
-  const withFixtures = async (changes, fn) => {
-    const saved = await page.evaluate((keys) => keys.map((k) => [k, window.__fixtures[k]]), Object.keys(changes));
-    for (const [cmd, value] of Object.entries(changes)) await setFixture(cmd, value);
-    try {
-      return await fn();
-    } finally {
-      for (const [cmd, value] of saved) await setFixture(cmd, value);
-    }
-  };
   const openJob = async (id) => {
     await page.click(`.sl-recent-row[data-job="${id}"]`);
     await page.waitForSelector(`.sl-recent-row[data-job="${id}"].active`, { timeout: 5000 });
