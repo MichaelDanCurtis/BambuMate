@@ -9,6 +9,7 @@ pub mod print_analysis;
 pub mod printer;
 pub mod profile_diff;
 pub mod profile_management;
+pub mod profile_numbers;
 pub mod settings;
 pub mod setup_wizard;
 pub mod slice;

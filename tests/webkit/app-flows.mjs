@@ -254,6 +254,20 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click(`nav.sidebar a[href="${hub}"]`);
     await page.click(`.nd-tabs a[href="${tab}"]`);
   };
+  // Swaps some fixtures for the length of `fn`, then puts the old ones back.
+  const setFixture = (cmd, value) =>
+    page.evaluate(([c, v]) => {
+      window.__fixtures[c] = v;
+    }, [cmd, value]);
+  const withFixtures = async (changes, fn) => {
+    const saved = await page.evaluate((keys) => keys.map((k) => [k, window.__fixtures[k]]), Object.keys(changes));
+    for (const [cmd, value] of Object.entries(changes)) await setFixture(cmd, value);
+    try {
+      return await fn();
+    } finally {
+      for (const [cmd, value] of saved) await setFixture(cmd, value);
+    }
+  };
 
   console.log(`\n== ${engine} ==`);
 
@@ -602,13 +616,36 @@ async function driveApp(browserType, engine, baseUrl) {
 
   await step(run, page, "opening a profile shows its fields", async () => {
     await page.locator(".profile-list-item").first().click();
-    await page.waitForSelector(".profile-detail-title", { timeout: 15000 });
+    await page.waitForSelector(".profile-management-page .nd-hero", { timeout: 15000 });
     await page.waitForSelector("table.profile-fields", { timeout: 15000 });
-    const title = (await page.locator(".profile-detail-title").first().innerText()).trim();
-    const subtitle = (await page.locator(".profile-detail-subtitle").first().innerText()).trim();
+    const title = (await page.locator(".pm-detail-head .nd-hero-label").textContent()).trim();
+    const nozzle = (await page.locator(".pm-detail-head .nd-hero-number").textContent()).trim();
+    if (nozzle !== "220°") throw new Error(`hero reads "${nozzle}"`);
+    const subtitle = (await page.locator(".pm-detail-head .nd-hero-detail").textContent()).trim();
+    if (!subtitle.includes("42 fields")) throw new Error(`detail reads "${subtitle}"`);
+    const stats = await page.locator(".pm-stats .nd-stat-row").count();
+    if (stats !== 4) throw new Error(`${stats} stat rows`);
     const keys = await page.locator("td.field-key").count();
     if (keys === 0) throw new Error("fields table rendered with no rows");
-    return `${title} (${subtitle}), ${keys} field rows`;
+    const pills = await page.locator(".pm-actions .btn").count();
+    if (pills !== 4) throw new Error(`${pills} action buttons`);
+    return `${title}, ${keys} field rows`;
+  });
+
+  await step(run, page, "a preset that isn't syncing gets a warning dot", async () => {
+    const path = FIXTURES.list_profiles[0].path;
+    await withFixtures(
+      { list_unsynced_presets: { presets: [{ path, profile_name: "x", file_name: "x.json", source: "confirmed" }], bambu_studio_running: false } },
+      async () => {
+        await page.click('nav.sidebar a[href="/"]');
+        await page.click('nav.sidebar a[href="/profiles"]');
+        await page.waitForSelector(".profile-list-item .pm-sync-dot", { timeout: 15000 });
+        const dots = await page.locator(".pm-sync-dot").count();
+        if (dots !== 1) throw new Error(`${dots} dots, expected 1`);
+        const label = await page.locator(".pm-sync-dot").getAttribute("aria-label");
+        if (label !== "Not syncing") throw new Error(`dot label "${label}"`);
+      }
+    );
   });
 
   // -- batch generate --------------------------------------------------------
@@ -768,20 +805,6 @@ async function driveApp(browserType, engine, baseUrl) {
     return deltas.join(", ");
   });
 
-  // Swaps some fixtures for the length of `fn`, then puts the old ones back.
-  const setFixture = (cmd, value) =>
-    page.evaluate(([c, v]) => {
-      window.__fixtures[c] = v;
-    }, [cmd, value]);
-  const withFixtures = async (changes, fn) => {
-    const saved = await page.evaluate((keys) => keys.map((k) => [k, window.__fixtures[k]]), Object.keys(changes));
-    for (const [cmd, value] of Object.entries(changes)) await setFixture(cmd, value);
-    try {
-      return await fn();
-    } finally {
-      for (const [cmd, value] of saved) await setFixture(cmd, value);
-    }
-  };
   const openJob = async (id) => {
     await page.click(`.sl-recent-row[data-job="${id}"]`);
     await page.waitForSelector(`.sl-recent-row[data-job="${id}"].active`, { timeout: 5000 });
