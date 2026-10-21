@@ -1,6 +1,5 @@
 .profile-diff-page {
     max-width: 1100px;
-    margin: 0 auto;
 }
 
 /* --- Config panel --- */
@@ -44,30 +43,12 @@
 }
 
 /* --- Table --- */
+/* Look comes from .nd-table; only the column layout lives here. */
 .diff-table {
-    width: 100%;
-    /* `separate` + zero spacing rather than `collapse`: WebKit does not clip
-       collapsed-border cell backgrounds to the table's border-radius, so on
-       macOS the header background squared off the rounded corners. Cells only
-       ever set `border-bottom`, so nothing doubles up under `separate`. */
-    border-collapse: separate;
-    border-spacing: 0;
     table-layout: fixed;
-    border: 1px solid var(--border-primary);
-    border-radius: 8px;
-    overflow: hidden;
 }
 
 .diff-table thead th {
-    padding: 0.65rem 0.75rem;
-    font-weight: 600;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-secondary);
-    background: var(--bg-card);
-    border-bottom: 2px solid var(--border-primary);
-    text-align: left;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -80,38 +61,18 @@
 .diff-table thead th.diff-col-value {
     width: 32%;
     max-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    text-align: right;
 }
 
 /* --- Category row --- */
-.diff-category-row td {
-    padding: 0;
-}
-
 .diff-category-name {
     flex: 1;
 }
 
 /* --- Data rows --- */
 .diff-row td {
-    padding: 0.4rem 0.75rem;
-    border-bottom: 1px solid var(--border-primary);
-    font-size: 0.84rem;
     vertical-align: top;
     word-break: break-word;
-}
-
-.diff-row .diff-key {
-    color: var(--text-secondary);
-}
-
-.diff-row.changed .diff-val-b {
-    /* --accent now resolves to --nd-text-display (white), which is barely
-       distinguishable from --text-primary (#e8e8e8) on the A side, so the
-       Compare page no longer marks which value is the B side. Use
-       --nd-interactive instead for a real colour distinction. */
-    color: var(--nd-interactive);
 }
 
 /* Last row in a category group */
@@ -139,13 +100,37 @@
     gap: var(--nd-space-md);
     align-items: baseline;
     width: 100%;
-    padding: var(--nd-space-sm) 0;
+    /* The cell's own padding gives the row its height and left inset. */
+    padding: 0;
     background: transparent;
     border: 0;
     color: inherit;
     font: inherit;
     text-align: left;
     cursor: pointer;
+}
+
+.diff-category-header:hover .diff-category-name {
+    color: var(--nd-text-primary);
+}
+
+/* The collapse cue: minus while the rows show, plus while they are hidden. */
+.diff-category-header::after {
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    color: var(--nd-text-secondary);
+}
+
+.diff-category-header[aria-expanded="true"]::after {
+    content: "\2212";
+}
+
+.diff-category-header[aria-expanded="false"]::after {
+    content: "+";
+}
+
+.diff-category-header:hover::after {
+    color: var(--nd-text-primary);
 }
 
 .diff-category-header:focus-visible {

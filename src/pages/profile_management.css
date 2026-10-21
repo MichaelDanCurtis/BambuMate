@@ -2,7 +2,6 @@
 
 .profile-management-page {
     max-width: 1000px;
-    margin: 0 auto;
 }
 
 .profile-toolbar {
@@ -120,7 +119,6 @@
 
 .profile-item-name {
     font-weight: 500;
-    color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -153,12 +151,9 @@
 
 .field-key {
     padding: 8px 12px 8px 0;
-    font-size: 0.8rem;
-    color: var(--text-secondary);
     white-space: nowrap;
     width: 180px;
     vertical-align: top;
-    font-family: "SF Mono", "Menlo", monospace;
 }
 
 .field-value {
@@ -251,21 +246,6 @@
 
 .duplicate-input-row input:focus {
     border-color: var(--accent);
-}
-
-/* Edit Specs button */
-.btn-edit-specs {
-    background: var(--nd-surface-raised);
-    border-color: var(--accent);
-    color: var(--accent);
-    font-weight: 500;
-}
-
-.btn-edit-specs:hover {
-    /* The base background was the same --nd-surface-raised, so this hover
-       was invisible. --nd-border is one tier darker/lighter, flat and
-       colour-only. */
-    background: var(--nd-border);
 }
 
 /* Specs Editor embedded styles (shared with filament_search) */
