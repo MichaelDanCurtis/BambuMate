@@ -1,0 +1,187 @@
+//! A welded triangle mesh in millimetres, plus the small vector maths the
+//! viewport needs.
+
+use std::collections::HashMap;
+
+pub type Vec3 = [f32; 3];
+
+/// A 3MF transform: the 3×4 matrix "m00 m01 m02 m10 m11 m12 m20 m21 m22
+/// m30 m31 m32", applied to row vectors: p' = (x, y, z, 1) · M.
+pub type Transform = [f32; 12];
+
+pub const IDENTITY: Transform = [1., 0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0.];
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Mesh {
+    pub positions: Vec<Vec3>,
+    pub triangles: Vec<[u32; 3]>,
+}
+
+impl Mesh {
+    /// The corners of the triangle at `i`.
+    pub fn tri(&self, i: usize) -> [Vec3; 3] {
+        let [a, b, c] = self.triangles[i];
+        [
+            self.positions[a as usize],
+            self.positions[b as usize],
+            self.positions[c as usize],
+        ]
+    }
+
+    /// Axis-aligned bounds of the vertices used by triangles; `None` when empty.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        let mut it = self
+            .triangles
+            .iter()
+            .flatten()
+            .map(|&i| self.positions[i as usize]);
+        let first = it.next()?;
+        Some(it.fold((first, first), |(lo, hi), p| {
+            (
+                [lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])],
+                [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])],
+            )
+        }))
+    }
+}
+
+pub fn add(a: Vec3, b: Vec3) -> Vec3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+pub fn sub(a: Vec3, b: Vec3) -> Vec3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+pub fn scale(a: Vec3, s: f32) -> Vec3 {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+pub fn dot(a: Vec3, b: Vec3) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+pub fn length(a: Vec3) -> f32 {
+    dot(a, a).sqrt()
+}
+pub fn normalize(a: Vec3) -> Vec3 {
+    let l = length(a);
+    if l > 0.0 {
+        scale(a, 1.0 / l)
+    } else {
+        [0., 0., 0.]
+    }
+}
+pub fn tri_area(a: Vec3, b: Vec3, c: Vec3) -> f32 {
+    0.5 * length(cross(sub(b, a), sub(c, a)))
+}
+/// The unit normal by the right-hand rule; zero for a degenerate triangle.
+pub fn tri_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    normalize(cross(sub(b, a), sub(c, a)))
+}
+
+pub fn apply(t: &Transform, p: Vec3) -> Vec3 {
+    [
+        p[0] * t[0] + p[1] * t[3] + p[2] * t[6] + t[9],
+        p[0] * t[1] + p[1] * t[4] + p[2] * t[7] + t[10],
+        p[0] * t[2] + p[1] * t[5] + p[2] * t[8] + t[11],
+    ]
+}
+
+/// `first`, then `then`: apply(compose(f, t), p) == apply(t, apply(f, p)).
+pub fn compose(first: &Transform, then: &Transform) -> Transform {
+    let col = |m: &Transform, r: usize| [m[r * 3], m[r * 3 + 1], m[r * 3 + 2]];
+    let mut out = [0f32; 12];
+    for r in 0..3 {
+        let row = col(first, r);
+        for c in 0..3 {
+            out[r * 3 + c] = row[0] * then[c] + row[1] * then[3 + c] + row[2] * then[6 + c];
+        }
+    }
+    let moved = apply(then, [first[9], first[10], first[11]]);
+    out[9] = moved[0];
+    out[10] = moved[1];
+    out[11] = moved[2];
+    out
+}
+
+/// Builds a mesh from loose triangles, sharing identical vertices so edges
+/// can be found, and dropping triangles with repeated corners.
+#[derive(Default)]
+pub struct Welder {
+    map: HashMap<[u32; 3], u32>,
+    mesh: Mesh,
+}
+
+impl Welder {
+    /// -0.0 and 0.0 are the same point.
+    fn key(p: Vec3) -> [u32; 3] {
+        p.map(|c| if c == 0.0 { 0 } else { c.to_bits() })
+    }
+
+    fn index(&mut self, p: Vec3) -> u32 {
+        let next = self.mesh.positions.len() as u32;
+        let positions = &mut self.mesh.positions;
+        *self.map.entry(Self::key(p)).or_insert_with(|| {
+            positions.push(p);
+            next
+        })
+    }
+
+    pub fn push_triangle(&mut self, a: Vec3, b: Vec3, c: Vec3) {
+        // Check for repeated corners first so a dropped triangle leaves no
+        // orphan vertices behind.
+        let (ka, kb, kc) = (Self::key(a), Self::key(b), Self::key(c));
+        if ka == kb || kb == kc || ka == kc {
+            return;
+        }
+        let (ia, ib, ic) = (self.index(a), self.index(b), self.index(c));
+        self.mesh.triangles.push([ia, ib, ic]);
+    }
+
+    pub fn triangle_count(&self) -> usize {
+        self.mesh.triangles.len()
+    }
+
+    pub fn finish(self) -> Mesh {
+        self.mesh
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transforms_apply_as_3mf_rows() {
+        // Translate by (10, 20, 30).
+        let t: Transform = [1., 0., 0., 0., 1., 0., 0., 0., 1., 10., 20., 30.];
+        assert_eq!(apply(&t, [1., 2., 3.]), [11., 22., 33.]);
+        // Scale by 2, then translate: compose(first, then).
+        let s: Transform = [2., 0., 0., 0., 2., 0., 0., 0., 2., 0., 0., 0.];
+        assert_eq!(apply(&compose(&s, &t), [1., 1., 1.]), [12., 22., 32.]);
+        assert_eq!(apply(&IDENTITY, [4., 5., 6.]), [4., 5., 6.]);
+    }
+
+    #[test]
+    fn the_welder_shares_vertices_and_drops_degenerate_triangles() {
+        let mut w = Welder::default();
+        w.push_triangle([0., 0., 0.], [1., 0., 0.], [0., 1., 0.]);
+        w.push_triangle([1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        w.push_triangle([2., 2., 2.], [2., 2., 2.], [3., 3., 3.]);
+        let m = w.finish();
+        assert_eq!(m.positions.len(), 4);
+        assert_eq!(m.triangles.len(), 2);
+    }
+
+    #[test]
+    fn area_and_normal() {
+        let (a, b, c) = ([0., 0., 0.], [2., 0., 0.], [0., 2., 0.]);
+        assert!((tri_area(a, b, c) - 2.0).abs() < 1e-6);
+        assert_eq!(tri_normal(a, b, c), [0., 0., 1.]);
+        assert_eq!(tri_normal(a, a, a), [0., 0., 0.]);
+    }
+}

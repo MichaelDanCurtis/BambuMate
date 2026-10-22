@@ -6,6 +6,7 @@ mod commands;
 pub mod diagnostics;
 pub mod history;
 pub mod mapper;
+pub mod model;
 pub mod model_catalog;
 pub mod printer;
 mod process_command;
