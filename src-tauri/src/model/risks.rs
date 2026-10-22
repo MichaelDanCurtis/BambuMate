@@ -9,8 +9,8 @@ use serde::Serialize;
 // The spec's 0.7071, kept as written rather than 1/sqrt(2).
 #[allow(clippy::approx_constant)]
 pub const OVERHANG_MAX_NZ: f32 = -0.7071;
-/// Faces whose lowest point is within this many mm of the bed are resting on
-/// it, not overhanging it, and count towards bed contact.
+/// Faces with every vertex within this many mm of the bed are resting on it,
+/// not overhanging it, and count towards bed contact.
 pub const BED_ZONE_MM: f32 = 0.3;
 /// Overhang regions smaller than this many mm² are ignored.
 pub const MIN_OVERHANG_AREA_MM2: f64 = 4.0;
