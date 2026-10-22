@@ -23,7 +23,7 @@ Show the model the user is working with as an interactive 3D view in the Nothing
 - **Honest copy.** Risks describe the model as it is oriented in the file. Bambu Studio may reorient it, because Slice runs `--orient 1` for STLs, and the risk panel says so in one line. Thresholds are heuristics, worded as "may", never "will".
 - **Bounded work.** The view degrades instead of hanging on huge files:
   - files over 256 MB, or meshes over 5,000,000 triangles, are refused with a clear message;
-  - 3MF reads reuse the slicer's ZIP limits.
+  - 3MF model documents stream from the ZIP under byte limits (512 MiB each, 1 GiB in all), with at most 5,000,000 vertices and triangles kept; each is converted to millimetres by its own unit, and the root part comes from `_rels/.rels` (else `3D/3dmodel.model`).
 - **Both themes.** Colours come from `--nd-*` tokens, read at render time. Nothing is hard-coded.
 - **Accessible.**
   - Pins are real buttons, laid over the canvas, each with a label.
