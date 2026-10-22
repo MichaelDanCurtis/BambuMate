@@ -1,8 +1,12 @@
 //! 3MF: objects, components (also in other model files), build transforms
 //! and units, flattened into one welded mesh in millimetres.
+//!
+//! Model documents are streamed from the archive, never buffered whole.
+//! Byte limits bound the time a parse takes; caps on what parsing keeps
+//! bound its memory, so a small ZIP bomb can't allocate gigabytes.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek};
+use std::io::{BufReader, Read, Seek};
 use std::rc::Rc;
 
 use quick_xml::events::{BytesStart, Event};
@@ -13,8 +17,13 @@ use super::{ModelError, MAX_TRIANGLES};
 
 const ROOT_MODEL: &str = "3D/3dmodel.model";
 const MAX_ENTRIES: usize = 4096;
-const MAX_ENTRY_BYTES: u64 = 1 << 30;
-const MAX_TOTAL_BYTES: u64 = 2 << 30;
+/// Decompressed bytes read from one model document, and across the parse.
+/// Documents are streamed, so these bound time, not memory.
+const MAX_ENTRY_BYTES: u64 = 512 << 20;
+const MAX_TOTAL_BYTES: u64 = 1 << 30;
+/// Bytes read for one XML event: a tag, or the text between two tags.
+/// The parser buffers a whole event, so this bounds that buffer.
+const MAX_EVENT_BYTES: u64 = 16 << 20;
 const MAX_DEPTH: usize = 8;
 /// Objects visited while resolving, counting every component reference,
 /// including ones cut off by the depth cap or with a refused path. Stops a
@@ -30,7 +39,45 @@ const DAMAGED: &str = "The 3MF is damaged and couldn't be read.";
 const TOO_LARGE: &str = "The 3MF is too large to read.";
 const TOO_MANY_COMPONENTS: &str = "The 3MF has too many components to read.";
 
+/// What one parse may read and keep. Tests inject small ones.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    /// Decompressed bytes read from one entry.
+    entry_bytes: u64,
+    /// Decompressed bytes read across the parse.
+    total_bytes: u64,
+    /// Bytes read for one XML event.
+    event_bytes: u64,
+    /// Vertices kept across all documents, and separately triangles.
+    parsed: usize,
+    /// Objects, components and build items kept across all documents.
+    records: usize,
+}
+
+impl Limits {
+    const DEFAULT: Limits = Limits {
+        entry_bytes: MAX_ENTRY_BYTES,
+        total_bytes: MAX_TOTAL_BYTES,
+        event_bytes: MAX_EVENT_BYTES,
+        parsed: MAX_TRIANGLES,
+        records: MAX_VISITS,
+    };
+}
+
+/// What the parse has read and kept so far, across documents.
+#[derive(Debug, Default)]
+struct Budget {
+    read_bytes: u64,
+    vertices: usize,
+    triangles: usize,
+    records: usize,
+}
+
 pub fn parse_3mf(bytes: &[u8]) -> Result<Mesh, ModelError> {
+    parse_with(bytes, Limits::DEFAULT)
+}
+
+fn parse_with(bytes: &[u8], limits: Limits) -> Result<Mesh, ModelError> {
     let zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| {
         tracing::warn!("3MF is not a ZIP: {e}");
         ModelError::Archive(NOT_A_ZIP)
@@ -41,8 +88,9 @@ pub fn parse_3mf(bytes: &[u8]) -> Result<Mesh, ModelError> {
     }
     let mut ctx = Ctx {
         zip,
+        limits,
         docs: HashMap::new(),
-        read_bytes: 0,
+        budget: Budget::default(),
         welder: Welder::default(),
         attempted: 0,
         visits: 0,
@@ -98,9 +146,10 @@ struct Item {
 
 struct Ctx<R> {
     zip: zip::ZipArchive<R>,
+    limits: Limits,
     /// Parsed documents by archive path; `None` when the entry is missing.
     docs: HashMap<String, Option<Rc<Doc>>>,
-    read_bytes: u64,
+    budget: Budget,
     welder: Welder,
     /// Triangles offered to the welder, including ones it drops.
     attempted: usize,
@@ -114,22 +163,24 @@ impl<R: Read + Seek> Ctx<R> {
         if let Some(d) = self.docs.get(name) {
             return Ok(d.clone());
         }
-        let doc = match read_entry(&mut self.zip, name, &mut self.read_bytes)? {
-            Some(bytes) => Some(Rc::new(parse_doc(name, &bytes)?)),
-            None => None,
-        };
+        // The entry borrows the archive mutably; `read_doc` drops it before
+        // the parsed document is cached.
+        let doc = read_doc(&mut self.zip, name, &self.limits, &mut self.budget)?.map(Rc::new);
         self.docs.insert(name.to_string(), doc.clone());
         Ok(doc)
     }
 }
 
-/// Reads one entry, at most 1 GiB, and at most 2 GiB across the parse.
-/// `None` when the archive has no entry by that (case-sensitive) name.
-fn read_entry<R: Read + Seek>(
-    zip: &mut zip::ZipArchive<R>,
+/// Opens one entry to read at most `cap` bytes, and no more than is left of
+/// the total. `None` when the archive has no entry by that (case-sensitive)
+/// name.
+fn open_entry<'z, R: Read + Seek>(
+    zip: &'z mut zip::ZipArchive<R>,
     name: &str,
-    read_bytes: &mut u64,
-) -> Result<Option<Vec<u8>>, ModelError> {
+    cap: u64,
+    limits: &Limits,
+    budget: &Budget,
+) -> Result<Option<(zip::read::ZipFile<'z, R>, u64)>, ModelError> {
     let entry = match zip.by_name(name) {
         Ok(e) => e,
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
@@ -138,22 +189,74 @@ fn read_entry<R: Read + Seek>(
             return Err(ModelError::Archive(DAMAGED));
         }
     };
-    let limit = MAX_ENTRY_BYTES.min(MAX_TOTAL_BYTES.saturating_sub(*read_bytes));
-    let too_large = || ModelError::Archive(TOO_LARGE);
+    let limit = cap.min(limits.total_bytes.saturating_sub(budget.read_bytes));
     if entry.size() > limit {
-        return Err(too_large());
+        tracing::warn!(
+            "3MF entry {name} declares {} bytes (limit {limit})",
+            entry.size()
+        );
+        return Err(ModelError::Archive(TOO_LARGE));
     }
+    Ok(Some((entry, limit)))
+}
+
+/// Streams and parses one model document. `None` when it is missing.
+fn read_doc<R: Read + Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    name: &str,
+    limits: &Limits,
+    budget: &mut Budget,
+) -> Result<Option<Doc>, ModelError> {
+    let Some((entry, limit)) = open_entry(zip, name, limits.entry_bytes, limits, budget)? else {
+        return Ok(None);
+    };
     // Never trust the declared size: read at most limit + 1 bytes.
-    let mut buf = Vec::new();
-    entry.take(limit + 1).read_to_end(&mut buf).map_err(|e| {
-        tracing::warn!("3MF entry {name}: {e}");
-        ModelError::Archive(DAMAGED)
-    })?;
-    if buf.len() as u64 > limit {
-        return Err(too_large());
+    let mut source = Counted {
+        inner: entry.take(limit + 1),
+        read: 0,
+        mark: 0,
+        event_cap: limits.event_bytes,
+        refused: false,
+    };
+    let parsed = parse_doc(name, &mut source, limits, budget);
+    budget.read_bytes += source.read;
+    // Running out of bytes mid-document usually shows as a parse error, so
+    // the limits are checked first.
+    if source.read > limit || source.refused {
+        tracing::warn!("3MF entry {name} is over its limit of {limit} bytes, or has one huge tag");
+        return Err(ModelError::Archive(TOO_LARGE));
     }
-    *read_bytes += buf.len() as u64;
-    Ok(Some(buf))
+    parsed.map(Some)
+}
+
+/// Counts the bytes read through it, and refuses to read more than
+/// `event_cap` past the last [`Counted::mark`], so one huge tag or text
+/// can't grow the XML parser's buffer without bound.
+struct Counted<R> {
+    inner: R,
+    read: u64,
+    mark: u64,
+    event_cap: u64,
+    refused: bool,
+}
+
+impl<R> Counted<R> {
+    /// Called before each XML event.
+    fn mark(&mut self) {
+        self.mark = self.read;
+    }
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.read - self.mark > self.event_cap {
+            self.refused = true;
+            return Err(std::io::Error::other("one XML event is too large"));
+        }
+        let n = self.inner.read(buf)?;
+        self.read += n as u64;
+        Ok(n)
+    }
 }
 
 fn unit_scale(unit: Option<&str>) -> f32 {
@@ -196,23 +299,49 @@ fn transform(e: &BytesStart) -> Transform {
     vals.try_into().unwrap_or(IDENTITY)
 }
 
-/// Parses one model document. Elements it doesn't know are ignored.
-fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
-    let mut reader = Reader::from_reader(bytes);
+/// Counts one kept item against `cap`.
+fn spend(
+    count: &mut usize,
+    cap: usize,
+    err: impl FnOnce(usize) -> ModelError,
+) -> Result<(), ModelError> {
+    *count += 1;
+    if *count > cap {
+        return Err(err(*count));
+    }
+    Ok(())
+}
+
+/// Parses one model document as it streams in. Elements it doesn't know
+/// are ignored. What it keeps is counted in `budget` against `limits`.
+fn parse_doc<R: Read>(
+    name: &str,
+    source: &mut Counted<R>,
+    limits: &Limits,
+    budget: &mut Budget,
+) -> Result<Doc, ModelError> {
+    let mut reader = Reader::from_reader(BufReader::new(source));
     reader.config_mut().trim_text(true);
     let mut doc = Doc {
         unit: 1.0,
         ..Doc::default()
     };
+    let too_large = |_| ModelError::Archive(TOO_LARGE);
+    let too_many = |_| ModelError::Archive(TOO_MANY_COMPONENTS);
     // The object being read, and whether we are inside <build>.
     let mut current: Option<(String, Object)> = None;
     let mut in_build = false;
-    let mut triangle_total = 0usize;
+    let mut buf = Vec::new();
     loop {
-        let event = reader.read_event().map_err(|e| {
-            tracing::warn!("3MF {name} at {}: {e}", reader.buffer_position());
-            ModelError::Archive(DAMAGED)
-        })?;
+        buf.clear();
+        reader.get_mut().get_mut().mark();
+        let event = match reader.read_event_into(&mut buf) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("3MF {name} at {}: {e}", reader.buffer_position());
+                return Err(ModelError::Archive(DAMAGED));
+            }
+        };
         let (e, empty) = match event {
             Event::Start(e) => (e, false),
             Event::Empty(e) => (e, true),
@@ -236,6 +365,7 @@ fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
             "object" if !empty => {
                 current = attr(&e, "id").map(|id| (id, Object::Components(Vec::new())));
                 if let Some((id, _)) = &current {
+                    spend(&mut budget.records, limits.records, too_many)?;
                     // A missing type means "model".
                     let kind = attr(&e, "type").map(|t| t.trim().to_ascii_lowercase());
                     if matches!(
@@ -256,6 +386,7 @@ fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
             }
             "vertex" => {
                 if let Some((_, Object::Mesh { vertices, .. })) = current.as_mut() {
+                    spend(&mut budget.vertices, limits.parsed, too_large)?;
                     // An unreadable vertex keeps its index but is NaN, so
                     // the welder drops the triangles that use it.
                     let c = |k| num::<f32>(&e, k).unwrap_or(f32::NAN);
@@ -264,10 +395,11 @@ fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
             }
             "triangle" => {
                 if let Some((_, Object::Mesh { triangles, .. })) = current.as_mut() {
-                    triangle_total += 1;
-                    if triangle_total > MAX_TRIANGLES {
-                        return Err(ModelError::TooManyTriangles(triangle_total));
-                    }
+                    spend(
+                        &mut budget.triangles,
+                        limits.parsed,
+                        ModelError::TooManyTriangles,
+                    )?;
                     if let (Some(a), Some(b), Some(c)) =
                         (num(&e, "v1"), num(&e, "v2"), num(&e, "v3"))
                     {
@@ -278,6 +410,7 @@ fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
             "component" => {
                 if let Some((_, Object::Components(list))) = current.as_mut() {
                     if let Some(objectid) = attr(&e, "objectid") {
+                        spend(&mut budget.records, limits.records, too_many)?;
                         list.push(Component {
                             objectid,
                             path: attr(&e, "path"),
@@ -293,6 +426,7 @@ fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
                     .map(|v| !matches!(v.trim(), "0" | "false"))
                     .unwrap_or(true);
                 if let (true, Some(objectid)) = (printable, attr(&e, "objectid")) {
+                    spend(&mut budget.records, limits.records, too_many)?;
                     doc.build.push(Item {
                         objectid,
                         transform: transform(&e),
@@ -351,7 +485,7 @@ fn resolve<R: Read + Seek>(
             triangles,
         }) => {
             let n = ctx.attempted + triangles.len();
-            if n > MAX_TRIANGLES {
+            if n > ctx.limits.parsed {
                 return Err(ModelError::TooManyTriangles(n));
             }
             ctx.attempted = n;
@@ -394,11 +528,14 @@ mod tests {
     use std::io::Write;
 
     fn archive(files: &[(&str, &str)]) -> Vec<u8> {
+        archive_with(zip::CompressionMethod::Stored, files)
+    }
+
+    fn archive_with(method: zip::CompressionMethod, files: &[(&str, &str)]) -> Vec<u8> {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut z = zip::ZipWriter::new(&mut buf);
-            let opts = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored);
+            let opts = zip::write::SimpleFileOptions::default().compression_method(method);
             for (name, body) in files {
                 z.start_file(*name, opts).unwrap();
                 z.write_all(body.as_bytes()).unwrap();
@@ -635,6 +772,192 @@ mod tests {
             parse_3mf(&fan_out(2, 3, r#"objectid="1""#)),
             Err(ModelError::NoObjects)
         );
+    }
+
+    /// `n` empty elements the reader skips: 4 bytes each, and they deflate
+    /// to almost nothing.
+    fn filler(n: usize) -> String {
+        "<x/>".repeat(n)
+    }
+
+    /// Object `id`: three vertices and `tris` triangles over them.
+    fn mesh_object(id: &str, tris: usize) -> String {
+        format!(
+            r#"<object id="{id}"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices><triangles>{}</triangles></mesh></object>"#,
+            r#"<triangle v1="0" v2="1" v3="2"/>"#.repeat(tris)
+        )
+    }
+
+    /// A root whose object 2 is one component: object 1 of `part.model`.
+    fn root_with_part(extra: &str) -> String {
+        model(
+            "millimeter",
+            &format!(
+                r#"{extra}<object id="2"><components><component p:path="/3D/Objects/part.model" objectid="1"/></components></object>"#
+            ),
+            r#"<item objectid="2"/>"#,
+        )
+    }
+
+    /// Rewrites every entry's declared uncompressed size to 64 bytes, in
+    /// the local and central headers, as a ZIP bomb would.
+    fn understate_sizes(mut bytes: Vec<u8>) -> Vec<u8> {
+        for i in 0..bytes.len().saturating_sub(4) {
+            let at = match &bytes[i..i + 4] {
+                b"PK\x03\x04" => i + 22,
+                b"PK\x01\x02" => i + 24,
+                _ => continue,
+            };
+            bytes[at..at + 4].copy_from_slice(&64u32.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn an_entry_that_decompresses_past_the_entry_limit_is_refused() {
+        // 4 MiB of XML that deflates to a few KiB: a small ZIP bomb.
+        let m = model(
+            "millimeter",
+            &format!("{TRI_OBJECT}{}", filler(1 << 20)),
+            r#"<item objectid="1"/>"#,
+        );
+        let bytes = archive_with(
+            zip::CompressionMethod::Deflated,
+            &[("3D/3dmodel.model", &m)],
+        );
+        assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
+        let small = Limits {
+            entry_bytes: 1 << 20,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with(&bytes, small),
+            Err(ModelError::Archive(TOO_LARGE))
+        );
+        // The same file is fine under a limit it fits.
+        let roomy = Limits {
+            entry_bytes: 8 << 20,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(parse_with(&bytes, roomy).unwrap().triangles.len(), 1);
+        // A header that understates the size passes the declared-size check,
+        // so the bytes actually read are what stop it.
+        let lying = understate_sizes(bytes);
+        assert_eq!(
+            parse_with(&lying, small),
+            Err(ModelError::Archive(TOO_LARGE))
+        );
+        assert_eq!(parse_with(&lying, roomy).unwrap().triangles.len(), 1);
+    }
+
+    #[test]
+    fn the_total_limit_spans_documents() {
+        // Each document is about 600 KiB: either fits the entry limit, but
+        // not both the total.
+        let pad = filler(150_000);
+        let root = root_with_part(&pad);
+        let part = model("millimeter", &format!("{TRI_OBJECT}{pad}"), "");
+        let bytes = archive_with(
+            zip::CompressionMethod::Deflated,
+            &[
+                ("3D/3dmodel.model", &root),
+                ("3D/Objects/part.model", &part),
+            ],
+        );
+        let tight = Limits {
+            entry_bytes: 1 << 20,
+            total_bytes: 1 << 20,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with(&bytes, tight),
+            Err(ModelError::Archive(TOO_LARGE))
+        );
+        let enough = Limits {
+            total_bytes: 2 << 20,
+            ..tight
+        };
+        assert_eq!(parse_with(&bytes, enough).unwrap().triangles.len(), 1);
+    }
+
+    #[test]
+    fn parsed_triangles_are_capped_across_documents() {
+        // 3 triangles in an unbuilt root object and 4 in the part: 7 kept,
+        // though only the part's 4 are ever placed.
+        let root = root_with_part(&mesh_object("5", 3));
+        let part = model("millimeter", &mesh_object("1", 4), "");
+        let bytes = archive(&[
+            ("3D/3dmodel.model", &root),
+            ("3D/Objects/part.model", &part),
+        ]);
+        let cap = |parsed| Limits {
+            parsed,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with(&bytes, cap(6)),
+            Err(ModelError::TooManyTriangles(7))
+        );
+        assert!(parse_with(&bytes, cap(7)).is_ok());
+    }
+
+    #[test]
+    fn parsed_vertices_are_capped_across_documents() {
+        // A part of vertices and no triangles still costs memory.
+        let root = root_with_part(TRI_OBJECT);
+        let part = model(
+            "millimeter",
+            r#"<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices></mesh></object>"#,
+            "",
+        );
+        let bytes = archive(&[
+            ("3D/3dmodel.model", &root),
+            ("3D/Objects/part.model", &part),
+        ]);
+        let cap = Limits {
+            parsed: 5,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(parse_with(&bytes, cap), Err(ModelError::Archive(TOO_LARGE)));
+    }
+
+    #[test]
+    fn parsed_objects_components_and_items_are_capped() {
+        // Objects 1 and 2, one component, one item: four records.
+        let m = model(
+            "millimeter",
+            &format!(
+                r#"{TRI_OBJECT}<object id="2"><components><component objectid="1"/></components></object>"#
+            ),
+            r#"<item objectid="2"/>"#,
+        );
+        let bytes = archive(&[("3D/3dmodel.model", &m)]);
+        let cap = |records| Limits {
+            records,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            parse_with(&bytes, cap(3)),
+            Err(ModelError::Archive(TOO_MANY_COMPONENTS))
+        );
+        assert!(parse_with(&bytes, cap(4)).is_ok());
+    }
+
+    #[test]
+    fn one_huge_tag_or_text_is_refused() {
+        // The parser buffers a whole event, so one event is capped too.
+        let m = model(
+            "millimeter",
+            TRI_OBJECT,
+            &format!(r#"<item objectid="1"/><x>{}</x>"#, "a".repeat(256 * 1024)),
+        );
+        let bytes = archive(&[("3D/3dmodel.model", &m)]);
+        let cap = Limits {
+            event_bytes: 64 * 1024,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(parse_with(&bytes, cap), Err(ModelError::Archive(TOO_LARGE)));
+        assert!(parse_3mf(&bytes).is_ok());
     }
 
     #[test]
