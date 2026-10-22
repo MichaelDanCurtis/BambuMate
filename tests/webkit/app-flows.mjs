@@ -396,6 +396,19 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65);
   });
 
+  await step(run, page, "Settings leads with the Health summary", async () => {
+    await page.click('nav.sidebar a[href="/settings"]');
+    await page.waitForFunction(
+      () => /^(ALL GOOD|\d+ ISSUES?)$/.test(document.querySelector(".settings-page .health-hero .nd-hero-number")?.textContent?.trim() ?? ""),
+      null,
+      { timeout: 15000 },
+    );
+    const word = (await page.locator(".settings-page .health-hero .nd-hero-number").textContent()).trim();
+    if (!/^(ALL GOOD|\d+ ISSUES?)$/.test(word)) throw new Error(`hero reads "${word}"`);
+    const h2s = await page.locator(".settings-page h2.settings-section-title").count();
+    if (h2s < 4) throw new Error(`${h2s} section titles`);
+  });
+
   // -- filament search and selection ---------------------------------------
   await step(run, page, "navigate to Create Profile", async () => {
     await page.click('a[href="/filament"]');
@@ -1968,7 +1981,9 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".health-results", { timeout: 20000 });
     const items = await page.locator(".health-results .health-item").count();
     if (items !== 6) throw new Error(`expected 6 health rows, got ${items}`);
-    return (await page.locator(".health-results .health-summary").first().innerText()).trim();
+    const word = (await page.locator(".health-hero .nd-hero-number").textContent()).trim();
+    if (!/^(ALL GOOD|\d+ ISSUES?)$/.test(word)) throw new Error(`health hero reads "${word}"`);
+    return word;
   });
 
   await step(run, page, "diagnostics panel badges each result", async () => {

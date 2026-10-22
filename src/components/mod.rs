@@ -4,6 +4,7 @@ pub mod change_preview;
 pub mod defect_report;
 pub mod diagnostics_panel;
 pub mod filament_card;
+pub mod health_hero;
 pub mod history_panel;
 pub mod icons;
 pub mod patterns;

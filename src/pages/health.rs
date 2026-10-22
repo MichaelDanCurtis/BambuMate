@@ -3,12 +3,14 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, HealthReport};
 use crate::components::diagnostics_panel::DiagnosticsPanel;
+use crate::components::health_hero::HealthHero;
 use crate::components::status_badge::{CheckStatus, StatusBadge};
 
 #[component]
 pub fn HealthPage() -> impl IntoView {
     let (checking, set_checking) = signal(false);
-    let (report, set_report) = signal::<Option<HealthReport>>(None);
+    // Shared with the hero, which runs the first check on mount.
+    let report = RwSignal::new(None::<HealthReport>);
     let (error, set_error) = signal::<Option<String>>(None);
 
     let do_health_check = move || {
@@ -17,7 +19,7 @@ pub fn HealthPage() -> impl IntoView {
         spawn_local(async move {
             match commands::run_health_check().await {
                 Ok(r) => {
-                    set_report.set(Some(r));
+                    report.set(Some(r));
                 }
                 Err(e) => {
                     set_error.set(Some(format!("Health check failed: {}", e)));
@@ -27,22 +29,13 @@ pub fn HealthPage() -> impl IntoView {
         });
     };
 
-    // Auto-run health check on mount
-    let auto_check = do_health_check.clone();
-    Effect::new(move |_| {
-        auto_check();
-    });
-
     let run_check = move |_| {
         do_health_check();
     };
 
     view! {
         <div class="page health-page">
-            <h2>"Health Check"</h2>
-            <p class="page-description">
-                "Verify that BambuMate can access all required services and directories."
-            </p>
+            <HealthHero report=report />
 
             <button
                 class="btn btn-primary"
@@ -64,15 +57,6 @@ pub fn HealthPage() -> impl IntoView {
 
             {move || {
                 report.get().map(|r| {
-                    let passed = [
-                        r.bambu_studio_installed,
-                        r.profile_dir_accessible,
-                        r.claude_api_key_set,
-                        r.openai_api_key_set,
-                        r.kimi_api_key_set,
-                        r.openrouter_api_key_set,
-                    ].iter().filter(|&&v| v).count();
-
                     let bs_status = if r.bambu_studio_installed { CheckStatus::Pass } else { CheckStatus::Fail };
                     let bs_detail = r.bambu_studio_path.clone().unwrap_or_else(|| "Not found".to_string());
 
@@ -91,20 +75,14 @@ pub fn HealthPage() -> impl IntoView {
                     let openrouter_status = if r.openrouter_api_key_set { CheckStatus::Pass } else { CheckStatus::Fail };
                     let openrouter_detail = if r.openrouter_api_key_set { "Configured".to_string() } else { "Not configured".to_string() };
 
-                    let summary_class = if passed == 6 { "summary-all-pass" } else if passed == 0 { "summary-all-fail" } else { "summary-partial" };
-
                     view! {
                         <div class="health-results">
                             <StatusBadge label="Bambu Studio" status=bs_status detail=bs_detail />
                             <StatusBadge label="Profile Directory" status=pd_status detail=pd_detail />
-                            <StatusBadge label="Claude API Key" status=claude_status detail=claude_detail />
-                            <StatusBadge label="OpenAI API Key" status=openai_status detail=openai_detail />
-                            <StatusBadge label="Kimi K2 API Key" status=kimi_status detail=kimi_detail />
-                            <StatusBadge label="OpenRouter API Key" status=openrouter_status detail=openrouter_detail />
-
-                            <div class={format!("health-summary {}", summary_class)}>
-                                {format!("{} of 6 checks passed", passed)}
-                            </div>
+                            <StatusBadge label="Claude API key (optional)" status=claude_status detail=claude_detail />
+                            <StatusBadge label="OpenAI API key (optional)" status=openai_status detail=openai_detail />
+                            <StatusBadge label="Kimi K2 API key (optional)" status=kimi_status detail=kimi_detail />
+                            <StatusBadge label="OpenRouter API key (optional)" status=openrouter_status detail=openrouter_detail />
                         </div>
                     }
                 })

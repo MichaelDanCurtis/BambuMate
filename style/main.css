@@ -424,24 +424,21 @@ body {
 /* ===== Settings ===== */
 
 .settings-section {
-    margin-bottom: 32px;
-    background: var(--nd-surface);
-    border: 1px solid var(--border-primary);
-    border-radius: 22px;
-    padding: 24px;
-    box-shadow: var(--shadow-card);
+    padding: var(--nd-space-xl) 0;
+    border-top: 1px solid var(--nd-border);
 }
 
-.settings-section h3 {
-    font-size: 18px;
-    font-weight: 600;
-    color: var(--text-bright);
-    margin-bottom: 4px;
+/* h2 for screen-reader navigation; `.page h2` would otherwise make it 24px. */
+.settings-section .settings-section-title {
+    margin: 0 0 var(--nd-space-sm);
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--nd-text-secondary);
 }
 
 .section-description {
     font-size: 13px;
-    color: var(--text-muted);
+    color: var(--nd-text-secondary);
     margin-bottom: 16px;
 }
 
@@ -691,8 +688,7 @@ select.input option {
 }
 
 .settings-section-danger {
-    border-top: 1px solid var(--border-danger);
-    padding-top: 24px;
+    border-top-color: var(--nd-accent);
 }
 
 .reset-confirm {
