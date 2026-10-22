@@ -665,6 +665,47 @@ async function driveApp(browserType, engine, baseUrl) {
       return `${n - 1} profiles`;
     });
 
+    // The picker is the page's own control; the mock answers with SLICE_MODEL.
+    // No slice has run yet, so there is no "last sliced model" to offer.
+    const settledNow = (cmd) => page.evaluate((c) => window.__ipc.settled.filter((x) => x === c).length, cmd);
+    const toReady = async () => {
+      await page.click("text=Choose Different Photo");
+      await page.waitForSelector(".drop-zone", { timeout: 15000 });
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+    };
+
+    await step(run, page, "the ready state offers an optional model, picked and cleared", async () => {
+      await page.waitForSelector(".an-pick-model", { timeout: 5000 });
+      if ((await page.locator(".an-last-model").count()) !== 0) throw new Error("offered a last sliced model with no jobs");
+      if ((await page.locator(".an-model-name").count()) !== 0) throw new Error("a model is named before one is chosen");
+      await page.click(".an-pick-model");
+      await page.waitForSelector(".an-model-name", { timeout: 5000 });
+      const name = (await page.locator(".an-model-name").textContent()).trim();
+      if (name !== "cube.stl") throw new Error(`named "${name}"`);
+      await page.click(".an-model-clear");
+      await page.waitForFunction(() => !document.querySelector(".an-model-name"), null, { timeout: 5000 });
+      await page.click(".an-pick-model");
+      await page.waitForSelector(".an-model-name", { timeout: 5000 });
+    });
+
+    await step(run, page, "a model does not survive Reset, and a pick finishing after Reset is dropped", async () => {
+      await toReady();
+      if ((await page.locator(".an-model-name").count()) !== 0) throw new Error("the model came back after Reset");
+      const settled = await settledNow("slicer_pick_model");
+      await withFixtures({ slicer_pick_model: { __hold: "an-pick-back", answer: SLICE_MODEL } }, async () => {
+        await page.click(".an-pick-model");
+        await toReady();
+        await page.evaluate(() => window.__release("an-pick-back"));
+        await page.waitForFunction((k) => window.__ipc.settled.filter((x) => x === "slicer_pick_model").length > k, settled, { timeout: 5000 });
+        // One more round trip to the page: the app's continuation ran before it.
+        await page.evaluate(() => 0);
+      });
+      if ((await page.locator(".an-model-name").count()) !== 0) throw new Error("a late pick set the model after Reset");
+      await page.click(".an-pick-model");
+      await page.waitForSelector(".an-model-name", { timeout: 5000 });
+    });
+
     await step(run, page, "analysis runs and reports defects", async () => {
       await page.selectOption(".profile-select", { index: 1 });
       await page.click("text=Analyze Print");
@@ -688,6 +729,85 @@ async function driveApp(browserType, engine, baseUrl) {
         if (!text.includes(want)) throw new Error(`"${want}" missing from results`);
       }
       return "temperature and retraction shown";
+    });
+
+    await step(run, page, "the model's 3D view shows with its risks beside the analysis", async () => {
+      await page.waitForSelector(".analysis-results .an-model .vp", { timeout: 15000 });
+      await page.waitForSelector(".analysis-results .an-model .vp-risk", { timeout: 15000 });
+      const risks = await page.locator(".analysis-results .an-model .vp-risk").count();
+      if (risks !== 2) throw new Error(`${risks} risk rows`);
+      const asked = (await callsOf("model_view")).at(-1)?.args;
+      if (asked?.path !== SLICE_MODEL) throw new Error(`model_view asked for ${JSON.stringify(asked)}`);
+      const name = (await page.locator(".analysis-results .an-model .vp-name").textContent()).trim();
+      if (name !== "cube.stl") throw new Error(`the view names "${name}"`);
+      const geometry = await page.evaluate(() => {
+        const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+        const vp = document.querySelector(".an-model .vp");
+        const cs = getComputedStyle(vp);
+        const photo = box(".an-hero-row").bottom;
+        return {
+          below: box(".an-model").top >= photo - 1,
+          wrapper: box(".an-model").width,
+          view: box(".an-model .vp").width,
+          border: cs.borderTopWidth,
+          padding: cs.paddingTop,
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
+      });
+      if (!geometry.below) throw new Error("the model sits above the hero row");
+      if (geometry.view > geometry.wrapper + 1) throw new Error(`view ${geometry.view} wider than its section ${geometry.wrapper}`);
+      if (geometry.border !== "0px" || geometry.padding !== "0px") throw new Error(`the view is styled as a card: ${JSON.stringify(geometry)}`);
+      if (geometry.overflow > 0) throw new Error(`page overflows by ${geometry.overflow}px`);
+      const gl2 = await page.evaluate(() => !!document.createElement("canvas").getContext("webgl2"));
+      if (gl2 && (await page.locator(".analysis-results .an-model .vp-canvas").count()) !== 1) {
+        throw new Error("WebGL2 is available but there is no canvas");
+      }
+      return `${Math.round(geometry.view)}px wide, ${gl2 ? "webgl" : "fallback"}`;
+    });
+
+    await step(run, page, "Analyze Another Photo leaves no model behind", async () => {
+      await page.click("text=Analyze Another Photo");
+      await page.waitForSelector(".drop-zone", { timeout: 15000 });
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+      if ((await page.locator(".an-model-name").count()) !== 0) throw new Error("the model is still named");
+      await page.selectOption(".profile-select", { index: 1 });
+      await page.click("text=Analyze Print");
+      await page.waitForSelector(".analysis-results", { timeout: 30000 });
+      await page.waitForSelector(".analysis-results .defects-list", { timeout: 15000 });
+      if ((await page.locator(".an-model").count()) !== 0) throw new Error("a model section shows without a chosen model");
+    });
+
+    await step(run, page, "Use last sliced model picks the newest job's model", async () => {
+      const older = "/Users/runner/models/older.stl";
+      const newer = "/Users/runner/models/newer.stl";
+      const fb = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+      fb.on("pageerror", (e) => run.errors.push(`pageerror: ${e.message}`));
+      fb.on("console", (m) => { if (m.type() === "error") run.errors.push(`console.error: ${m.text()}`); });
+      try {
+        await fb.addInitScript(installTauriMock, {
+          ...FIXTURES,
+          slicer_jobs: [
+            sliceJob(1, { state: "cancelled" }, { source_path: older }),
+            sliceJob(2, { state: "queued", position: 0 }, { source_path: newer, model_name: "newer.stl" }),
+            sliceJob(3, { state: "cancelled" }, { source_path: "" }),
+          ],
+        });
+        await fb.goto(baseUrl, { waitUntil: "domcontentloaded" });
+        await fb.waitForSelector(".sidebar", { timeout: 45000 });
+        await fb.click('a[href="/analysis"]');
+        await fb.waitForSelector(".drop-zone", { timeout: 15000 });
+        await fb.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+        await fb.waitForSelector(".an-last-model", { timeout: 15000 });
+        await fb.click(".an-last-model");
+        await fb.waitForFunction(() => document.querySelector(".an-model-name")?.textContent.trim() === "newer.stl", null, { timeout: 5000 });
+        await fb.click("text=Analyze Print");
+        await fb.waitForSelector(".analysis-results .an-model .vp-risk", { timeout: 30000 });
+        const asked = await fb.evaluate(() => window.__ipc.calls.filter((c) => c.cmd === "model_view").at(-1)?.args.path);
+        if (asked !== newer) throw new Error(`model_view asked for ${asked}`);
+      } finally {
+        await fb.close();
+      }
     });
 
     // The apply dialog is the overlay whose full-screen positioning was the

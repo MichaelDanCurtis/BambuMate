@@ -247,3 +247,46 @@
     color: var(--color-danger);
     border: 1px solid var(--border-danger);
 }
+
+/* Model (optional): pick a file before analysing */
+.an-model-pick {
+    margin-bottom: 1.5rem;
+    width: 100%;
+    max-width: 500px;
+}
+
+.an-model-pick .nd-label {
+    margin: 0 0 0.5rem;
+}
+
+.an-model-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--nd-space-sm);
+}
+
+.an-model-chosen {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--nd-space-md);
+    margin-top: var(--nd-space-sm);
+}
+
+.an-model-name {
+    min-width: 0;
+    font-family: var(--nd-font-mono);
+    font-size: 13px;
+    color: var(--nd-text-display);
+    overflow-wrap: anywhere;
+}
+
+/* The 3D view, under the photo and over the defects. No card of its own. */
+.an-model {
+    width: 100%;
+    margin-bottom: var(--nd-space-xl);
+}
+
+.an-model > .nd-label {
+    margin: 0 0 var(--nd-space-md);
+}

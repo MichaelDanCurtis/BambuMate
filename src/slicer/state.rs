@@ -107,6 +107,16 @@ pub fn latest_for_source<'a>(jobs: &'a [JobView], source_path: &str) -> Option<&
         .find(|j| j.source_path == source_path && j.state != JobState::Cancelled)
 }
 
+/// The model of the newest job that has one, for "use the last sliced
+/// model". Jobs are in ascending id order. A job with no source path (a
+/// blank string) has nothing to open, so it is skipped.
+pub fn newest_source(jobs: &[JobView]) -> Option<&str> {
+    jobs.iter()
+        .rev()
+        .map(|j| j.source_path.as_str())
+        .find(|p| !p.trim().is_empty())
+}
+
 /// The STL indicator's per-file state: "Slicing…", "2h 14m · 38 g" or
 /// "Slice failed". `None` for a cancelled job.
 pub fn badge_text(job: &JobView) -> Option<String> {
@@ -301,6 +311,21 @@ mod tests {
         upsert(&mut jobs, job(2, "/b", JobState::Queued { position: 0 }));
         assert_eq!(jobs.iter().map(|j| j.id).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(jobs[1].source_path, "/b");
+    }
+
+    #[test]
+    fn the_newest_source_skips_jobs_without_one() {
+        assert_eq!(newest_source(&[]), None);
+        let mut jobs = vec![];
+        upsert(&mut jobs, job(1, "/w/a.stl", JobState::Cancelled));
+        upsert(
+            &mut jobs,
+            job(2, "/w/b.stl", JobState::Queued { position: 0 }),
+        );
+        upsert(&mut jobs, job(3, "  ", JobState::Cancelled));
+        assert_eq!(newest_source(&jobs), Some("/w/b.stl"));
+        let blank = vec![job(1, "", JobState::Cancelled)];
+        assert_eq!(newest_source(&blank), None);
     }
 
     #[test]

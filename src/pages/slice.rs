@@ -58,7 +58,7 @@ async fn stage_dropped(file: web_sys::File) -> Result<String, String> {
     .await
 }
 
-fn file_name(path: &str) -> String {
+pub(crate) fn file_name(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 

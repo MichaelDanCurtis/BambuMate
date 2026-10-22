@@ -3,6 +3,9 @@
    at draw time (src/viewport/gl.rs). */
 
 .vp {
+    /* The risk rows wrap by the width of the view, not of the window: it sits
+       in a narrow column on Slice and a wide one on Analyze. */
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     gap: var(--nd-space-md);
@@ -125,7 +128,7 @@
 
 /* On a narrow screen the message takes its own row under the number and kind,
    instead of wrapping a word per line in what is left of the first. */
-@media (max-width: 480px) {
+@container (max-width: 480px) {
     .vp-risk-msg {
         grid-column: 1 / -1;
     }
