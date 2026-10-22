@@ -4,6 +4,7 @@
 
 pub mod mesh;
 pub mod stl;
+pub mod threemf;
 
 /// Largest model file the viewport will read.
 pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
