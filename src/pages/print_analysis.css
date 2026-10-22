@@ -149,6 +149,14 @@
     .an-hero-row {
         grid-template-columns: 1fr;
     }
+
+    /* One column would stretch a portrait photo to the full width and push
+       the defects below the fold. */
+    .an-photo {
+        width: auto;
+        max-width: 100%;
+        max-height: 320px;
+    }
 }
 
 /* Profile Selector */

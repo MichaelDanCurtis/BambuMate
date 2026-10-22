@@ -311,6 +311,20 @@ body {
     margin-bottom: 8px;
 }
 
+/* Section headings are h2 for screen-reader navigation. `.page h2` above would
+   otherwise make them 24px, so this puts the 11px mono label look back. It is
+   the one place that does so; pages only add what differs (spacing, borders). */
+.page h2.nd-label {
+    margin: 0 0 var(--nd-space-sm);
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 1.2;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-text-secondary);
+}
+
 .page-description {
     color: var(--text-muted);
     margin-bottom: 24px;
@@ -408,14 +422,6 @@ body {
 .settings-section {
     padding: var(--nd-space-xl) 0;
     border-top: 1px solid var(--nd-border);
-}
-
-/* h2 for screen-reader navigation; `.page h2` would otherwise make it 24px. */
-.settings-section .settings-section-title {
-    margin: 0 0 var(--nd-space-sm);
-    font-size: 11px;
-    font-weight: 400;
-    color: var(--nd-text-secondary);
 }
 
 .section-description {
@@ -725,6 +731,8 @@ select.input option {
 .status-pass { color: var(--nd-signal); background: transparent; }
 .status-fail { color: var(--nd-accent); background: transparent; }
 .status-unknown { color: var(--nd-text-secondary); background: transparent; }
+/* An optional item that is known not to be set: neutral, not a problem. */
+.status-optional { color: var(--nd-text-secondary); background: transparent; }
 
 .health-name {
     font-size: 14px;
@@ -740,6 +748,10 @@ select.input option {
 
 .health-error {
     margin-top: 16px;
+}
+
+.health-page .health-hero {
+    margin-bottom: var(--nd-space-lg);
 }
 
 .health-summary {
@@ -1427,14 +1439,6 @@ select.input option {
 
 .about-links {
     margin-top: var(--nd-space-xl);
-}
-
-/* .page h2 would otherwise make this a 24px heading. */
-.about-page h2.nd-label {
-    font-size: 11px;
-    font-weight: 400;
-    color: var(--nd-text-secondary);
-    margin: 0 0 var(--nd-space-sm);
 }
 
 .about-link-list {

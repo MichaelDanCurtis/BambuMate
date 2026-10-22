@@ -516,7 +516,7 @@ fn PhotoDropZone(
                 }
             >
                 <div class="drop-zone-loading-content">
-                    <StateText kind=StateKind::Loading message="Loading image" />
+                    <StateText kind=StateKind::Loading message="Image" />
                 </div>
             </Show>
         </div>

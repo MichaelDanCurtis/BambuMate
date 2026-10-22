@@ -4,6 +4,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::commands::{self, HealthReport};
 use crate::components::diagnostics_panel::DiagnosticsPanel;
 use crate::components::health_hero::HealthHero;
+use crate::components::patterns::{StateKind, StateText};
 use crate::components::status_badge::{CheckStatus, StatusBadge};
 
 #[component]
@@ -51,7 +52,7 @@ pub fn HealthPage() -> impl IntoView {
                 error.get().map(|e| {
                     view! {
                         <div class="health-error">
-                            <span class="status-text status-error">{e}</span>
+                            <StateText kind=StateKind::Error message=e />
                         </div>
                     }
                 })
@@ -65,16 +66,16 @@ pub fn HealthPage() -> impl IntoView {
                     let pd_status = if r.profile_dir_accessible { CheckStatus::Pass } else { CheckStatus::Fail };
                     let pd_detail = r.profile_dir_path.clone().unwrap_or_else(|| "Not found".to_string());
 
-                    let claude_status = if r.claude_api_key_set { CheckStatus::Pass } else { CheckStatus::Unknown };
+                    let claude_status = if r.claude_api_key_set { CheckStatus::Pass } else { CheckStatus::Optional };
                     let claude_detail = if r.claude_api_key_set { "Configured".to_string() } else { "Not set (optional)".to_string() };
 
-                    let openai_status = if r.openai_api_key_set { CheckStatus::Pass } else { CheckStatus::Unknown };
+                    let openai_status = if r.openai_api_key_set { CheckStatus::Pass } else { CheckStatus::Optional };
                     let openai_detail = if r.openai_api_key_set { "Configured".to_string() } else { "Not set (optional)".to_string() };
 
-                    let kimi_status = if r.kimi_api_key_set { CheckStatus::Pass } else { CheckStatus::Unknown };
+                    let kimi_status = if r.kimi_api_key_set { CheckStatus::Pass } else { CheckStatus::Optional };
                     let kimi_detail = if r.kimi_api_key_set { "Configured".to_string() } else { "Not set (optional)".to_string() };
 
-                    let openrouter_status = if r.openrouter_api_key_set { CheckStatus::Pass } else { CheckStatus::Unknown };
+                    let openrouter_status = if r.openrouter_api_key_set { CheckStatus::Pass } else { CheckStatus::Optional };
                     let openrouter_detail = if r.openrouter_api_key_set { "Configured".to_string() } else { "Not set (optional)".to_string() };
 
                     view! {

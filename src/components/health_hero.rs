@@ -1,6 +1,8 @@
 //! The Health summary as a hero: runs the health check on mount and leads
 //! Settings · General and Settings · Health with it.
 
+use std::time::Duration;
+
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -8,6 +10,9 @@ use crate::commands::{self, HealthReport};
 use crate::components::patterns::{Hero, StateKind, StateText, Tone};
 use crate::pages::health_view::{health_detail, health_summary};
 use crate::pages::home_state::format_ago;
+
+/// How often "last run" is brought up to date.
+const CLOCK_TICK: Duration = Duration::from_secs(30);
 
 #[component]
 pub fn HealthHero(
@@ -22,6 +27,17 @@ pub fn HealthHero(
     let report = report.unwrap_or_else(|| RwSignal::new(None));
     let ran_at = ran_at.unwrap_or_else(|| RwSignal::new(None));
     let error = RwSignal::new(None::<String>);
+    // "last run 2m ago" is worked out against this clock, so it keeps up
+    // while the page stays open.
+    let now = RwSignal::new(js_sys::Date::now());
+    if let Ok(clock) = set_interval_with_handle(
+        move || {
+            now.try_set(js_sys::Date::now());
+        },
+        CLOCK_TICK,
+    ) {
+        on_cleanup(move || clock.clear());
+    }
     spawn_local(async move {
         match commands::run_health_check().await {
             Ok(r) => {
@@ -40,7 +56,7 @@ pub fn HealthHero(
                     let s = health_summary(&r);
                     let ago = ran_at
                         .get()
-                        .map(|t| format_ago(js_sys::Date::now(), t))
+                        .map(|t| format_ago(now.get(), t))
                         .unwrap_or_default();
                     view! {
                         <Hero label="System" value=s.word.clone() detail=health_detail(&s, &ago) tone=s.tone />

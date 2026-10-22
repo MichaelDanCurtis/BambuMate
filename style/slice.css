@@ -2,6 +2,8 @@
    borders instead of shadows, red only for failures. */
 
 .slice-page { display: grid; gap: var(--nd-space-lg); max-width: 1040px; }
+/* The grid gap already spaces the header from what follows. */
+.slice-page .nd-page-header { margin-bottom: 0; }
 .slice-page section {
     border: 1px solid var(--nd-border-visible);
     background: var(--nd-surface);
@@ -95,13 +97,13 @@
 
 .sl-compare-table td { vertical-align: top; }
 .sl-compare-table td.best { color: var(--nd-success); }
-.sl-col-name { display: block; color: var(--nd-text-display); font-weight: 500; }
+.sl-col-name { display: block; color: var(--nd-text-display); text-transform: none; }
 .sl-col-state { display: block; }
 .sl-delta { display: block; font-family: var(--nd-font-mono); font-size: 11px; color: var(--nd-text-secondary); }
 
 .sl-recent ul { list-style: none; margin: 0; padding: 0; }
-/* .page h2 would otherwise make this a 24px heading. */
-.slice-page .sl-recent h2.nd-label { margin: 0; font-size: 11px; font-weight: 400; color: var(--nd-text-secondary); }
+/* The label look comes from `.page h2.nd-label` in main.css; the section's grid gap spaces it. */
+.slice-page .sl-recent h2.nd-label { margin: 0; }
 .sl-recent-row {
     display: grid;
     grid-template-columns: 1fr 1fr auto;

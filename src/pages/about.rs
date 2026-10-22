@@ -3,7 +3,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::app::UpdateContext;
 use crate::commands::{self, UpdateInfo};
-use crate::components::patterns::{Hero, StatRow};
+use crate::components::patterns::{Hero, StatRow, StateKind, StateText};
 
 #[component]
 pub fn AboutPage() -> impl IntoView {
@@ -111,9 +111,10 @@ pub fn AboutPage() -> impl IntoView {
                 {move || {
                     check_error.get().map(|e| view! {
                         <div class="about-check-error">
-                            <span class="status-text status-error">
-                                {format!("Could not check for updates: {}", e)}
-                            </span>
+                            <StateText
+                                kind=StateKind::Error
+                                message=format!("Could not check for updates: {}", e)
+                            />
                         </div>
                     })
                 }}
