@@ -24,6 +24,7 @@ const BACKGROUNDS = ["--nd-black", "--nd-surface", "--nd-surface-raised"];
 const FILLED = [
   ["--nd-black", "--nd-text-display", 4.5],
   ["--nd-black", "--nd-text-primary", 4.5],
+  ["--nd-black", "--nd-accent", 4.5],
 ];
 const THEMES = ["dark", "bambu"];
 

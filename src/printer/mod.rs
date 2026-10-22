@@ -2,6 +2,7 @@
 //! `printer://state` and `printer://connection` events.
 
 pub mod bridge;
+pub mod hms_history;
 pub mod last_print;
 pub mod types;
 
@@ -19,6 +20,8 @@ pub struct PrinterShared {
     /// The print the app last watched finish; `None` until one does.
     /// Session only.
     pub last_print: RwSignal<Option<LastPrint>>,
+    /// HMS codes reported this session, newest first. Session only.
+    pub seen_errors: RwSignal<Vec<hms_history::SeenError>>,
     /// Counts delivered events, so a refresh that started before one can't
     /// overwrite what it brought.
     events: StoredValue<Seen>,
@@ -63,6 +66,7 @@ impl PrinterShared {
         Self {
             view: RwSignal::new(PrinterView::default()),
             last_print: RwSignal::new(None),
+            seen_errors: RwSignal::new(Vec::new()),
             events: StoredValue::new(Seen::default()),
             config_changes: RwSignal::new(0),
         }
@@ -158,6 +162,19 @@ pub fn PrinterEvents() -> impl IntoView {
         if let Some(p) = finished {
             shared.last_print.set(Some(p));
         }
+    });
+    // Remembers every HMS code the printer reports, for Printer's "Earlier
+    // this session" list. An empty report leaves the history as it was.
+    let active_errors = Memo::new(move |_| shared.view.with(|v| v.errors.clone()));
+    Effect::new(move |_| {
+        let active = active_errors.get();
+        if active.is_empty() {
+            return;
+        }
+        let now = js_sys::Date::now();
+        shared
+            .seen_errors
+            .update(|h| *h = hms_history::merge_seen(h, &active, now));
     });
     shared.refresh();
 }

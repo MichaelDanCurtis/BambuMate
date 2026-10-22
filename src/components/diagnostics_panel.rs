@@ -54,7 +54,7 @@ pub fn DiagnosticsPanel() -> impl IntoView {
 
     view! {
         <div class="diagnostics-panel">
-            <h3>"Self-Test Diagnostics"</h3>
+            <h2 class="nd-label">"Self-test diagnostics"</h2>
             <p class="page-description">
                 "Runs the full platform test suite against this machine. Use this when \
                  something behaves differently here than it does elsewhere, and attach \

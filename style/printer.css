@@ -10,8 +10,8 @@
 
 /* -- page ------------------------------------------------------------------ */
 .printer-page { display: grid; gap: var(--nd-space-lg); max-width: 1100px; }
-.pr-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--nd-space-md); flex-wrap: wrap; }
-.pr-head h2 { margin: 0; color: var(--nd-text-display); }
+/* The grid gap already spaces the header from what follows. */
+.printer-page .nd-page-header { margin-bottom: 0; }
 .pr-ident { font-size: 12px; color: var(--nd-text-secondary); }
 .pr-empty { padding: var(--nd-space-xl); border: 1px dashed var(--nd-border-visible); border-radius: 12px; text-align: center; }
 .pr-setup-link { color: var(--nd-interactive); }
@@ -26,9 +26,10 @@
 
 .pr-hero-top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--nd-space-md); }
 .pr-hero-state { font-size: 14px; letter-spacing: 0.08em; color: var(--nd-text-secondary); }
-.pr-hero-percent { font-size: 48px; line-height: 1; font-weight: 300; color: var(--nd-text-display); }
-.pr-progress { height: 4px; background: var(--nd-border); border-radius: 2px; overflow: hidden; }
-.pr-progress-fill { height: 100%; background: var(--nd-text-display); }
+.pr-hero-percent { font-size: 56px; }
+.pr-earlier { margin-top: var(--nd-space-md); }
+.pr-earlier-list { list-style: none; margin: 0; padding: 0; }
+.pr-earlier-item { display: flex; gap: var(--nd-space-sm); color: var(--nd-text-secondary); font-size: 12px; }
 .pr-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--nd-space-md); margin: 0; }
 .pr-facts dt { font-family: var(--nd-font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--nd-text-secondary); }
 .pr-facts dd { margin: 2px 0 0; color: var(--nd-text-primary); overflow-wrap: anywhere; }

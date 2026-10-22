@@ -4,6 +4,9 @@
 
 use leptos::prelude::*;
 
+use crate::components::patterns::{StateKind, StateText};
+use crate::components::severity::severity_tier;
+use crate::pages::analysis_view::defects_by_severity;
 use crate::pages::print_analysis::{Conflict, DefectReport, RecommendationDisplay};
 
 /// Display component for analysis results.
@@ -27,33 +30,28 @@ pub fn DefectReportDisplay(
         <div class="defect-report">
             <style>{include_str!("defect_report.css")}</style>
 
-            // Overall quality badge
-            <div class="quality-section">
-                <h3>"Overall Quality"</h3>
-                <QualityBadge quality=defect_report.overall_quality.clone() />
+            // Detected defects (the overall quality is the page hero)
+            <div class="defects-section">
+                <h2 class="nd-label">"Defects"</h2>
                 {defect_report.notes.clone().map(|notes| view! {
                     <p class="quality-notes">{notes}</p>
                 })}
-            </div>
-
-            // Detected defects
-            <div class="defects-section">
-                <h3>"Detected Defects"</h3>
                 {if defect_report.defects.is_empty() {
                     view! {
-                        <p class="no-defects">"No defects detected - your print looks great!"</p>
+                        <StateText kind=StateKind::Empty message="No defects detected" />
                     }.into_any()
                 } else {
                     view! {
-                        <div class="defects-list">
-                            {defect_report.defects.iter().map(|d| view! {
+                        <ol class="defects-list">
+                            {defects_by_severity(&defect_report.defects).into_iter().enumerate().map(|(i, d)| view! {
                                 <DefectCard
-                                    defect_type=d.defect_type.clone()
+                                    number=i + 1
+                                    defect_type=d.defect_type
                                     severity=d.severity
                                     confidence=d.confidence
                                 />
                             }).collect::<Vec<_>>()}
-                        </div>
+                        </ol>
                     }.into_any()
                 }}
             </div>
@@ -63,7 +61,7 @@ pub fn DefectReportDisplay(
                 let mat = material_type.clone();
                 view! {
                     <div class="recommendations-section">
-                        <h3>"Recommended Changes"</h3>
+                        <h2 class="nd-label">"Recommended Changes"</h2>
                         <p class="section-subtitle">
                             "Adjustments for " <strong>{mat}</strong> " filament:"
                         </p>
@@ -99,7 +97,7 @@ pub fn DefectReportDisplay(
             // Conflicts warning
             {(!conflicts.is_empty()).then(|| view! {
                 <div class="conflicts-section">
-                    <h3>"Conflicts Detected"</h3>
+                    <h2 class="nd-label">"Conflicts Detected"</h2>
                     <p class="conflicts-warning">
                         "Some defects require opposite adjustments. Review carefully:"
                     </p>
@@ -114,55 +112,19 @@ pub fn DefectReportDisplay(
     }
 }
 
-/// Quality badge component.
-#[component]
-fn QualityBadge(quality: String) -> impl IntoView {
-    let (badge_class, icon) = match quality.as_str() {
-        "excellent" => ("quality-badge quality-excellent", "[check]"),
-        "good" => ("quality-badge quality-good", "[check]"),
-        "acceptable" => ("quality-badge quality-acceptable", "~"),
-        "poor" => ("quality-badge quality-poor", "!"),
-        "failed" => ("quality-badge quality-failed", "X"),
-        _ => ("quality-badge", "?"),
-    };
-
-    view! {
-        <span class=badge_class>
-            <span class="quality-icon">{icon}</span>
-            <span class="quality-text">{quality.to_uppercase()}</span>
-        </span>
-    }
-}
-
 /// Individual defect card.
 #[component]
-fn DefectCard(defect_type: String, severity: f32, confidence: f32) -> impl IntoView {
-    let display_name = defect_display_name(&defect_type);
-    let severity_label = severity_label(severity);
-    let severity_class = format!("severity-badge severity-{}", severity_label.to_lowercase());
-
+fn DefectCard(number: usize, defect_type: String, severity: f32, confidence: f32) -> impl IntoView {
+    let tier = severity_tier(severity);
     view! {
-        <div class="defect-card">
-            <div class="defect-header">
-                <span class="defect-name">{display_name}</span>
-                <span class=severity_class>
-                    {severity_label}
-                </span>
-            </div>
-            <div class="defect-details">
-                <div class="detail-row">
-                    <span class="detail-label">"Severity:"</span>
-                    <div class="severity-bar">
-                        <div class="severity-fill" style=format!("width: {}%", severity * 100.0)></div>
-                    </div>
-                    <span class="detail-value">{format!("{:.0}%", severity * 100.0)}</span>
-                </div>
-                <div class="detail-row">
-                    <span class="detail-label">"Confidence:"</span>
-                    <span class="detail-value">{format!("{:.0}%", confidence * 100.0)}</span>
-                </div>
-            </div>
-        </div>
+        <li class="defect-card" data-tier=tier.key()>
+            <span class="defect-number nd-mono">{format!("{number:02}")}</span>
+            <span class="defect-name">{defect_display_name(&defect_type)}</span>
+            <span class=format!("severity-badge severity-{}", tier.key())>{tier.label()}</span>
+            <span class="defect-meta nd-mono">
+                {format!("Severity {:.0}% · confidence {:.0}%", severity * 100.0, confidence * 100.0)}
+            </span>
+        </li>
     }
 }
 
@@ -237,18 +199,5 @@ fn defect_display_name(defect_type: &str) -> String {
         "over_extrusion" => "Over-Extrusion".to_string(),
         "z_banding" => "Z-Banding".to_string(),
         _ => defect_type.replace('_', " "),
-    }
-}
-
-/// Convert severity value to label.
-fn severity_label(severity: f32) -> String {
-    if severity < 0.3 {
-        "Minor".to_string()
-    } else if severity < 0.5 {
-        "Noticeable".to_string()
-    } else if severity < 0.7 {
-        "Significant".to_string()
-    } else {
-        "Severe".to_string()
     }
 }

@@ -4,6 +4,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::app::FeatureFlagsContext;
 use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
+use crate::components::health_hero::HealthHero;
 use crate::components::printer_settings::PrinterSettings;
 use crate::components::slicer_settings::SlicerSettingsSection;
 use crate::theme::ThemeContext;
@@ -160,11 +161,19 @@ pub fn SettingsPage() -> impl IntoView {
             }
             match commands::set_preference("bambu_studio_path", &path).await {
                 Ok(()) => {
-                    if path_valid.get_untracked() {
+                    // The page may have unmounted during the awaits above;
+                    // reading a disposed signal panics, so bail out instead.
+                    let Some(valid) = path_valid.try_get_untracked() else {
+                        return;
+                    };
+                    if valid {
                         set_path_status.set(Some("Path saved and validated".to_string()));
                     } else {
                         // Keep the warning from validation
-                        let existing = path_status.get_untracked().unwrap_or_default();
+                        let Some(existing) = path_status.try_get_untracked() else {
+                            return;
+                        };
+                        let existing = existing.unwrap_or_default();
                         if existing.is_empty() {
                             set_path_status.set(Some("Path saved".to_string()));
                         }
@@ -284,7 +293,10 @@ pub fn SettingsPage() -> impl IntoView {
                     set_catalog_recommended.set(response.recommended_id);
                     set_models.set(response.models);
                     set_models_loading.set(false);
-                    let selected_model = ai_model.get_untracked();
+                    // Unmounted during the awaits above: reading would panic.
+                    let Some(selected_model) = ai_model.try_get_untracked() else {
+                        return;
+                    };
                     if !selected_model.is_empty() {
                         set_model_checking.set(true);
                         set_model_status.set(Some("Checking model compatibility...".to_string()));
@@ -376,10 +388,10 @@ pub fn SettingsPage() -> impl IntoView {
 
     view! {
         <div class="page settings-page">
-            <h2>"Settings"</h2>
+            <HealthHero />
 
             <section class="settings-section">
-                <h3>"Filament Search Mode"</h3>
+                <h2 class="nd-label settings-section-title">"Filament Search Mode"</h2>
                 <p class="section-description">
                     "Choose whether BambuMate should use AI features (search + print analysis) or web-only filament lookup."
                 </p>
@@ -430,7 +442,7 @@ pub fn SettingsPage() -> impl IntoView {
             </section>
 
             <section class="settings-section">
-                <h3>"Appearance"</h3>
+                <h2 class="nd-label settings-section-title">"Appearance"</h2>
                 <p class="section-description">"Choose how BambuMate looks."</p>
 
                 <div class="form-group">
@@ -491,7 +503,7 @@ pub fn SettingsPage() -> impl IntoView {
 
             {move || filament_ai_enabled.get().then(|| view! {
                 <section class="settings-section">
-                    <h3>"API Keys"</h3>
+                    <h2 class="nd-label settings-section-title">"API Keys"</h2>
                     <p class="section-description">"API keys are stored securely in your system keychain."</p>
 
                     <ApiKeyForm
@@ -530,7 +542,7 @@ pub fn SettingsPage() -> impl IntoView {
             })}
 
             <section class="settings-section">
-                <h3>"Model Configuration"</h3>
+                <h2 class="nd-label settings-section-title">"Model Configuration"</h2>
                 <p class="section-description">"Select which AI provider and model to use for analysis."</p>
 
                 <div class="form-group">
@@ -714,7 +726,7 @@ pub fn SettingsPage() -> impl IntoView {
             <PrinterSettings />
 
             <section class="settings-section">
-                <h3>"Application"</h3>
+                <h2 class="nd-label settings-section-title">"Application"</h2>
                 <p class="section-description">"Configure application paths and preferences."</p>
 
                 <div class="form-group">
@@ -781,7 +793,7 @@ pub fn SettingsPage() -> impl IntoView {
             </section>
 
             <section class="settings-section settings-section-danger">
-                <h3>"Reset / Clean Installation"</h3>
+                <h2 class="nd-label settings-section-title">"Reset / Clean Installation"</h2>
                 <p class="section-description">
                     "Delete all BambuMate preferences and stored API keys to return to a fresh installation state. "
                     "This will not affect your Bambu Studio profiles or configuration."

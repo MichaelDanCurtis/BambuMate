@@ -1,10 +1,12 @@
 pub mod about;
+pub mod analysis_view;
 pub mod batch_generate;
 pub mod batch_view;
 pub mod diff_view;
 pub mod filament_search;
 pub mod filament_steps;
 pub mod health;
+pub mod health_view;
 pub mod home;
 pub mod home_state;
 pub mod hub;

@@ -396,6 +396,21 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForFunction(() => document.querySelector("nav.sidebar").getBoundingClientRect().width <= 65);
   });
 
+  await step(run, page, "Settings leads with the Health summary", async () => {
+    await page.click('nav.sidebar a[href="/settings"]');
+    await page.waitForFunction(
+      () => /^(ALL GOOD|\d+ ISSUES?)$/.test(document.querySelector(".settings-page .health-hero .nd-hero-number")?.textContent?.trim() ?? ""),
+      null,
+      { timeout: 15000 },
+    );
+    const word = (await page.locator(".settings-page .health-hero .nd-hero-number").textContent()).trim();
+    if (!/^(ALL GOOD|\d+ ISSUES?)$/.test(word)) throw new Error(`hero reads "${word}"`);
+    const h2s = await page.locator(".settings-page h2.settings-section-title").count();
+    if (h2s < 4) throw new Error(`${h2s} section titles`);
+    const h3s = await page.locator(".settings-page .settings-section h3").count();
+    if (h3s !== 0) throw new Error(`${h3s} section h3s left unstyled`);
+  });
+
   // -- filament search and selection ---------------------------------------
   await step(run, page, "navigate to Create Profile", async () => {
     await page.click('a[href="/filament"]');
@@ -656,6 +671,14 @@ async function driveApp(browserType, engine, baseUrl) {
       await page.waitForSelector(".analysis-results", { timeout: 30000 });
       const text = await page.locator(".analysis-results").innerText();
       if (!/string/i.test(text)) throw new Error("detected defect not shown");
+      const word = (await page.locator(".an-hero-row .nd-hero-number").textContent()).trim();
+      if (word !== "FAIR") throw new Error(`quality reads "${word}"`);
+      const tone = await page.locator(".an-hero-row .nd-hero").getAttribute("data-tone");
+      if (tone !== "warning") throw new Error(`quality tone ${tone}`);
+      const order = await page.locator(".defects-list .defect-card").evaluateAll((els) => els.map((e) => e.dataset.tier));
+      if (order.join(",") !== "significant,noticeable") throw new Error(`defects in order ${order}`);
+      const first = (await page.locator(".defects-list .defect-number").first().textContent()).trim();
+      if (first !== "01") throw new Error(`first defect numbered ${first}`);
       return `${text.replace(/\s+/g, " ").slice(0, 70)}...`;
     });
 
@@ -937,6 +960,8 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click('a[href="/slice"]');
     await page.waitForSelector(".slice-page.nd", { timeout: 15000 });
     await page.waitForFunction(() => document.querySelector(".sl-version")?.innerText.includes("02.08.02.61"), null, { timeout: 10000 });
+    const title = (await page.locator(".slice-page h1.nd-page-title").textContent()).trim();
+    if (title !== "Slice") throw new Error(`Slice page title was "${title}"`);
   });
 
   await step(run, page, "preset pickers load for the default printer", async () => {
@@ -1960,7 +1985,50 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".health-results", { timeout: 20000 });
     const items = await page.locator(".health-results .health-item").count();
     if (items !== 6) throw new Error(`expected 6 health rows, got ${items}`);
-    return (await page.locator(".health-results .health-summary").first().innerText()).trim();
+    // The fixture has Bambu Studio and the profile folder OK, so nothing may
+    // fail: unset API keys are optional and must not read as failures.
+    const fails = await page.locator(".health-results .status-fail").count();
+    if (fails !== 0) throw new Error(`${fails} failed health rows`);
+    const word = (await page.locator(".health-hero .nd-hero-number").textContent()).trim();
+    if (!/^(ALL GOOD|\d+ ISSUES?)$/.test(word)) throw new Error(`health hero reads "${word}"`);
+    // Unset optional keys are known to be unset: a neutral dash, not a "?".
+    // The fixture sets only the OpenAI key, so three rows are optional.
+    const optional = await page.locator(".health-results .status-optional").allTextContents();
+    if (optional.length !== 3 || optional.some((t) => t.trim() !== "\u2013")) {
+      throw new Error(`optional badges read ${JSON.stringify(optional)}`);
+    }
+    const unknown = await page.locator(".health-results .status-unknown").count();
+    if (unknown !== 0) throw new Error(`${unknown} unknown badges for keys that are known unset`);
+    return word;
+  });
+
+  await step(run, page, "a failed health re-run reads through StateText", async () => {
+    await withFixtures({ run_health_check: { __reject: "backend gone" } }, async () => {
+      await page.locator(".health-page > button.btn-primary").click();
+      await page.waitForSelector(".health-error .nd-state[data-kind='error']", { timeout: 10000 });
+      const text = (await page.locator(".health-error .nd-state").textContent()).trim();
+      if (!text.startsWith("[ERROR: Health check failed") || !text.includes("backend gone")) {
+        throw new Error(`error reads "${text}"`);
+      }
+    });
+    // Run it once more, so later steps and the screenshot see a clean page.
+    await page.locator(".health-page > button.btn-primary").click();
+    await page.waitForSelector(".health-error .nd-state", { state: "detached", timeout: 10000 });
+  });
+
+  // Every h2.nd-label is restyled by one `.page h2.nd-label` rule; without it
+  // `.page h2` would make them 24px headings.
+  await step(run, page, "section headings keep the 11px mono label look", async () => {
+    const heading = page.locator(".diagnostics-panel h2.nd-label");
+    if ((await heading.textContent()).trim() !== "Self-test diagnostics") throw new Error("diagnostics heading text");
+    const css = await heading.evaluate((el) => {
+      const c = getComputedStyle(el);
+      return { size: c.fontSize, weight: c.fontWeight, transform: c.textTransform, family: c.fontFamily };
+    });
+    if (css.size !== "11px" || css.transform !== "uppercase" || css.weight !== "400" || !/mono/i.test(css.family)) {
+      throw new Error(`diagnostics heading styled ${JSON.stringify(css)}`);
+    }
+    return JSON.stringify(css);
   });
 
   await step(run, page, "diagnostics panel badges each result", async () => {
@@ -2023,7 +2091,7 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "navigate to About", async () => {
     await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
-    const version = (await page.locator(".about-version-value").first().innerText()).trim();
+    const version = (await page.locator(".about-rows .nd-stat-row-value").first().innerText()).trim();
     if (!version.includes("1.3.0")) throw new Error(`version reads "${version}"`);
     return version;
   });
@@ -2032,7 +2100,22 @@ async function driveApp(browserType, engine, baseUrl) {
   // user pressing anything.
   await step(run, page, "update state reports up to date", async () => {
     await page.waitForSelector(".about-up-to-date", { timeout: 20000 });
+    await page.screenshot({ path: `flow-${engine}-about.png`, fullPage: false });
     return (await page.locator(".about-up-to-date").first().innerText()).replace(/\s+/g, " ").trim();
+  });
+
+  await step(run, page, "a failed update check reads through StateText", async () => {
+    await withFixtures({ check_for_updates: { __reject: "offline" } }, async () => {
+      await page.locator(".about-update-actions button", { hasText: "Check for Updates" }).click();
+      await page.waitForSelector(".about-check-error .nd-state[data-kind='error']", { timeout: 10000 });
+      const text = (await page.locator(".about-check-error .nd-state").textContent()).trim();
+      if (text !== "[ERROR: Could not check for updates: offline]") throw new Error(`error reads "${text}"`);
+    });
+  });
+
+  await step(run, page, "About's Links heading keeps the 11px mono label look", async () => {
+    const size = await page.locator(".about-links h2.nd-label").evaluate((el) => getComputedStyle(el).fontSize);
+    if (size !== "11px") throw new Error(`Links heading is ${size}`);
   });
 
   // -- hubs ------------------------------------------------------------------
@@ -2326,6 +2409,26 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await page.locator(".pr-slot, .pr-hero").count()) !== 0) throw new Error("empty cards shown");
     await emitEvent("printer://state", PRINTER_VIEW);
     await page.waitForSelector(".pr-hero", { timeout: 5000 });
+  });
+
+  await step(run, page, "the printer page has the shared header and lists HMS codes seen earlier", async () => {
+    const title = (await page.locator(".printer-page h1.nd-page-title").innerText()).trim();
+    if (title !== "Printer") throw new Error(`page title reads "${title}"`);
+    const code = PRINTER_VIEW.errors[0].code;
+    // While active, the code sits in the active list and not under Earlier.
+    if ((await page.locator(".pr-earlier-item", { hasText: code }).count()) !== 0) throw new Error("active code listed under Earlier");
+    // Cleared: the history keeps it, the active list no longer does.
+    await emitEvent("printer://state", { ...PRINTER_VIEW, errors: [] });
+    await page.waitForSelector(".pr-earlier-item", { timeout: 5000 });
+    const earlier = await page.locator(".pr-earlier-item").allInnerTexts();
+    if (!earlier.some((t) => t.includes(code))) throw new Error(`Earlier lacks ${code}: ${earlier.join(" | ")}`);
+    if ((await page.locator(".pr-error").count()) !== 0) throw new Error("cleared errors still active");
+    // Reported again: back in the active list, gone from Earlier.
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await page.waitForFunction((c) => [...document.querySelectorAll(".pr-error-code")].some((e) => e.textContent === c), code, {
+      timeout: 5000,
+    });
+    if ((await page.locator(".pr-earlier-item", { hasText: code }).count()) !== 0) throw new Error("active code still under Earlier");
   });
 
   // A state event arrives about twice a second during a print. One that only
@@ -2776,6 +2879,9 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, wizard, "setup distinguishes analysis providers from agent chat without requesting agent auth", async () => {
     await wizard.goto(baseUrl);
     await wizard.waitForSelector(".wizard-overlay");
+    const counter = (await wizard.locator(".wizard-counter").textContent()).trim();
+    if (counter !== "01 / 05") throw new Error(`counter reads "${counter}"`);
+    if ((await wizard.locator("h1.wizard-question").count()) !== 1) throw new Error("expected one wizard question h1");
     await wizard.click(".wizard-footer .btn-primary");
     await wizard.locator(".wizard-mode-card", { hasText: "Use Analysis AI" }).click();
     await wizard.click(".wizard-footer .btn-primary");

@@ -1,9 +1,9 @@
 pub mod api_key_form;
-pub mod branding;
 pub mod change_preview;
 pub mod defect_report;
 pub mod diagnostics_panel;
 pub mod filament_card;
+pub mod health_hero;
 pub mod history_panel;
 pub mod icons;
 pub mod patterns;
@@ -12,6 +12,7 @@ pub mod printer_settings;
 pub mod profile_preview;
 pub mod searchable_select;
 pub mod settings_merge;
+pub mod severity;
 pub mod sidebar;
 pub mod slicer_settings;
 pub mod specs_editor;

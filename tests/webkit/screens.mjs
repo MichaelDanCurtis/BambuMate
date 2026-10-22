@@ -6,7 +6,9 @@
 //
 //   trunk build && cd tests/webkit && node screens.mjs ../..
 //
-// writes tests/webkit/screens/<theme>-<width>-<route>.png (git-ignored).
+// writes tests/webkit/screens/<theme>-<width>-<route>.png (git-ignored), plus
+// two states that are not a route: the Analyze results (`analysis-results`)
+// and the setup wizard (`wizard`, and `wizard-step-2` for its second step).
 
 import { webkit } from "playwright";
 import { createServer } from "node:http";
@@ -101,6 +103,74 @@ function fileName(theme, width, route) {
   return `${theme}-${width}-${name}.png`;
 }
 
+// Takes the whole page. The app shell is 100vh and scrolls inside `.content`,
+// so fullPage alone stops at the fold: grow the viewport to the content's
+// height first.
+async function capture(page, theme, width, file) {
+  const tall = await page.evaluate(() => {
+    const c = document.querySelector(".content");
+    return c ? c.scrollHeight + c.getBoundingClientRect().top : 0;
+  });
+  if (tall > HEIGHT) {
+    await page.setViewportSize({ width, height: Math.ceil(tall) });
+    await page.waitForTimeout(200);
+  }
+  await page.screenshot({ path: join(outDir, file), fullPage: true });
+  console.log(`  ${file}`);
+  written++;
+}
+
+// A 64x48 PNG: the photo the Analyze flow is given.
+const PHOTO = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwCAIAAAAuKetIAAAAQklEQVR4nO3PQQ0AIBDAsAP/nkHGPstbqyCbr9/fK9F1gH0dSqTEkdQA9JOWuNuO2aF3wpKkOEgAAAAAAAAAAAAA8MkBn6IBR3qGPVgAAAAASUVORK5CYII=",
+  "base64",
+);
+
+// The Analyze results: a photo, a profile and the (fixture) analysis.
+async function analysisResults(browser, theme, width) {
+  const page = await browser.newPage({ viewport: { width, height: HEIGHT } });
+  page.on("pageerror", (e) => console.log(`  pageerror on analysis results: ${e.message}`));
+  try {
+    await page.addInitScript(installTauriMock, { fixtures: FIXTURES, theme });
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".sidebar", { timeout: 45000 });
+    await page.click('a.nav-link[href="/analysis"]');
+    await page.waitForSelector(".drop-zone");
+    await page.setInputFiles("#photo-file-input", { name: "p.png", mimeType: "image/png", buffer: PHOTO });
+    await page.waitForSelector(".profile-select option:nth-child(2)", { state: "attached", timeout: 20000 });
+    await page.selectOption(".profile-select", { index: 1 });
+    await page.click("text=Analyze Print");
+    await page.waitForSelector(".analysis-results", { timeout: 30000 });
+    await page.mouse.move(width - 20, HEIGHT - 20);
+    await page.waitForTimeout(500);
+    await capture(page, theme, width, `${theme}-${width}-analysis-results.png`);
+  } finally {
+    await page.close();
+  }
+}
+
+// The setup wizard: a first run, with nothing configured. Its first two steps.
+async function wizard(browser, theme, width) {
+  const page = await browser.newPage({ viewport: { width, height: HEIGHT } });
+  page.on("pageerror", (e) => console.log(`  pageerror on wizard: ${e.message}`));
+  try {
+    const fixtures = {
+      ...FIXTURES,
+      check_setup_complete: { bambu_studio_path: null, ai_provider: null, has_api_key: false, setup_complete: false },
+    };
+    await page.addInitScript(installTauriMock, { fixtures, theme });
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".wizard-overlay", { timeout: 45000 });
+    await page.waitForTimeout(800);
+    await capture(page, theme, width, `${theme}-${width}-wizard.png`);
+    await page.click(".wizard-footer .btn-primary");
+    await page.waitForTimeout(300);
+    await capture(page, theme, width, `${theme}-${width}-wizard-step-2.png`);
+  } finally {
+    await page.close();
+  }
+}
+
 const server = await serve();
 const baseUrl = `http://127.0.0.1:${server.address().port}/`;
 await mkdir(outDir, { recursive: true });
@@ -126,23 +196,11 @@ try {
         await page.waitForTimeout(600);
         const applied = await page.evaluate(() => document.documentElement.dataset.theme);
         if (applied !== theme) console.log(`  WARNING ${route}: data-theme is '${applied}', expected '${theme}'`);
-        // The app shell is 100vh and scrolls inside `.content`, so fullPage
-        // alone stops at the fold. Grow the viewport to the content's height so
-        // the whole page is in the shot.
-        const tall = await page.evaluate(() => {
-          const c = document.querySelector(".content");
-          return c ? c.scrollHeight + c.getBoundingClientRect().top : 0;
-        });
-        if (tall > HEIGHT) {
-          await page.setViewportSize({ width, height: Math.ceil(tall) });
-          await page.waitForTimeout(200);
-        }
-        const path = join(outDir, fileName(theme, width, route));
-        await page.screenshot({ path, fullPage: true });
+        await capture(page, theme, width, fileName(theme, width, route));
         await page.close();
-        written++;
-        console.log(`  ${fileName(theme, width, route)}`);
       }
+      await analysisResults(browser, theme, width);
+      await wizard(browser, theme, width);
     }
   }
 } finally {

@@ -529,7 +529,7 @@ pub fn PrinterSettings() -> impl IntoView {
 
     view! {
         <section class="settings-section printer-settings" id="printer">
-            <h3>"Printer"</h3>
+            <h2 class="nd-label settings-section-title">"Printer"</h2>
             <p class="section-description">
                 "Connect to your Bambu printer on the local network to see live status and what is loaded in each AMS slot. BambuMate only reads from the printer."
             </p>

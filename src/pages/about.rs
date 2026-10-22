@@ -3,7 +3,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::app::UpdateContext;
 use crate::commands::{self, UpdateInfo};
-use crate::components::branding::BrandMark;
+use crate::components::patterns::{Hero, StatRow, StateKind, StateText};
 
 #[component]
 pub fn AboutPage() -> impl IntoView {
@@ -18,7 +18,7 @@ pub fn AboutPage() -> impl IntoView {
     Effect::new(move |_| {
         spawn_local(async move {
             if let Ok(info) = commands::get_app_version().await {
-                set_current_version.set(info.current_version);
+                set_current_version.try_set(info.current_version);
             }
         });
         // Pre-populate with whatever the startup check already found
@@ -34,12 +34,14 @@ pub fn AboutPage() -> impl IntoView {
         spawn_local(async move {
             match commands::check_for_updates().await {
                 Ok(info) => {
-                    update_ctx.update_info.set(Some(info.clone()));
-                    set_update_info.set(Some(info));
+                    update_ctx.update_info.try_set(Some(info.clone()));
+                    set_update_info.try_set(Some(info));
                 }
-                Err(e) => set_check_error.set(Some(e)),
+                Err(e) => {
+                    set_check_error.try_set(Some(e));
+                }
             }
-            set_checking.set(false);
+            set_checking.try_set(false);
         });
     };
 
@@ -54,22 +56,19 @@ pub fn AboutPage() -> impl IntoView {
 
     view! {
         <div class="page about-page">
-            <div class="about-header">
-                <div class="about-logo">
-                    <BrandMark />
-                </div>
-                <h2 class="about-title">"BambuMate"</h2>
-                <p class="about-subtitle">"Studio-inspired filament workflow"</p>
+            <Hero
+                label="About"
+                value="BambuMate"
+                detail=Signal::derive(move || format!("v{}", current_version.get()))
+            />
+            <div class="about-rows">
+                <StatRow label="Current version" value=Signal::derive(move || format!("v{}", current_version.get())) />
+                {move || update_info.get().map(|info| view! {
+                    <StatRow label="Latest release" value=format!("v{}", info.latest_version) />
+                })}
             </div>
 
-            <div class="about-version-card">
-                <div class="about-version-row">
-                    <span class="about-version-label">"Current Version"</span>
-                    <span class="about-version-value">
-                        {move || format!("v{}", current_version.get())}
-                    </span>
-                </div>
-
+            <div class="about-update">
                 {move || {
                     update_info.get().map(|info| {
                         if info.has_update {
@@ -112,9 +111,10 @@ pub fn AboutPage() -> impl IntoView {
                 {move || {
                     check_error.get().map(|e| view! {
                         <div class="about-check-error">
-                            <span class="status-text status-error">
-                                {format!("Could not check for updates: {}", e)}
-                            </span>
+                            <StateText
+                                kind=StateKind::Error
+                                message=format!("Could not check for updates: {}", e)
+                            />
                         </div>
                     })
                 }}
@@ -134,7 +134,7 @@ pub fn AboutPage() -> impl IntoView {
             </div>
 
             <div class="about-links">
-                <h3>"Links"</h3>
+                <h2 class="nd-label">"Links"</h2>
                 <ul class="about-link-list">
                     <li>
                         <button
