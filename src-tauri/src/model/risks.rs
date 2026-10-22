@@ -50,19 +50,23 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
     x
 }
 
+/// Whether triangle `i` rests on the bed: every one of its vertices is
+/// within [`BED_ZONE_MM`] of the model's lowest point `min_z`. A face with
+/// even one vertex above that band is rising off the bed: if it faces
+/// steeply down it is an overhang, not bed contact, so overhang and contact
+/// partition the downward faces.
+fn rests_on_bed(mesh: &Mesh, i: usize, min_z: f32) -> bool {
+    mesh.triangles[i]
+        .iter()
+        .all(|&v| mesh.positions[v as usize][2] <= min_z + BED_ZONE_MM)
+}
+
 /// Overhang regions (faces joined by shared edges) of at least
 /// [`MIN_OVERHANG_AREA_MM2`], largest first, at most [`MAX_OVERHANG_REGIONS`].
 /// Each is its area and area-weighted centroid.
 fn overhang_regions(mesh: &Mesh, normals: &[Vec3], min_z: f32) -> Vec<(f64, Vec3)> {
-    let lowest = |i: usize| {
-        let [a, b, c] = mesh.triangles[i];
-        [a, b, c]
-            .into_iter()
-            .map(|v| mesh.positions[v as usize][2])
-            .fold(f32::INFINITY, f32::min)
-    };
     let is_overhang = |i: usize| {
-        has_normal(normals[i]) && normals[i][2] < OVERHANG_MAX_NZ && lowest(i) > min_z + BED_ZONE_MM
+        has_normal(normals[i]) && normals[i][2] < OVERHANG_MAX_NZ && !rests_on_bed(mesh, i, min_z)
     };
 
     // Only overhang faces are linked, so the edge list stays small.
@@ -77,6 +81,8 @@ fn overhang_regions(mesh: &Mesh, normals: &[Vec3], min_z: f32) -> Vec<(f64, Vec3
             }
         }
     }
+
+    drop(sides);
 
     // (region root, face area, area x centroid) per overhang face, grouped by
     // sorting rather than a Vec per region.
@@ -147,17 +153,17 @@ pub fn find_risks(mesh: &Mesh) -> Vec<Risk> {
         });
     }
 
-    // Faces lying on the bed: facing down, every corner within the bed zone.
+    // Faces lying on the bed: facing down and resting on it.
     let mut contact = 0f64;
     let mut weighted = [0f64; 3];
     for (i, &n) in normals.iter().enumerate() {
         if !has_normal(n) || n[2] >= BED_CONTACT_MAX_NZ {
             continue;
         }
-        let [a, b, c] = mesh.tri(i);
-        if [a, b, c].iter().any(|p| p[2] > lo[2] + BED_ZONE_MM) {
+        if !rests_on_bed(mesh, i, lo[2]) {
             continue;
         }
+        let [a, b, c] = mesh.tri(i);
         let area = tri_area(a, b, c) as f64;
         contact += area;
         for k in 0..3 {
@@ -372,14 +378,196 @@ mod tests {
         assert_eq!(pos(&a), pos(&b));
     }
 
-    #[test]
-    fn sliver_faces_are_never_overhangs_or_bed_contact() {
-        // A long needle triangle pointing straight down at the bed, plus a
-        // floor and a roof so the bounds are sensible. The needle's area is
-        // tiny and its normal is noise.
+    /// A downward-facing ramp: `run` along x, `len` along y, rising `rise`
+    /// over the run from height `z0`. Its normal points down.
+    fn ramp(w: &mut Welder, run: f32, len: f32, rise: f32, z0: f32) {
+        let (a, b) = ([0., 0., z0], [run, 0., z0 + rise]);
+        let (c, d) = ([run, len, z0 + rise], [0., len, z0]);
+        w.push_triangle(a, c, b);
+        w.push_triangle(a, d, c);
+    }
+
+    /// A big downward floor at z = 0, so the bed sits where the test expects.
+    fn floor(w: &mut Welder) {
+        let p = |x: f32, y: f32| [x, y, 0.];
+        w.push_triangle(p(-50., -50.), p(50., 50.), p(50., -50.));
+        w.push_triangle(p(-50., -50.), p(-50., 50.), p(50., 50.));
+    }
+
+    fn underside_at(degrees_from_horizontal: f32, z0: f32) -> Mesh {
         let mut w = Welder::default();
-        w.push_triangle([0., 0., 0.], [100., 0., 0.], [50., 1e-5, 0.]);
-        w.push_triangle([0., 0., 5.], [100., 0., 5.], [50., 0., 6.]);
+        floor(&mut w);
+        let rise = 10.0 * degrees_from_horizontal.to_radians().tan();
+        ramp(&mut w, 10.0, 10.0, rise, z0);
+        w.finish()
+    }
+
+    #[test]
+    fn only_undersides_within_45_degrees_of_flat_overhang() {
+        // The normal's z is -cos(angle from horizontal): a ceiling-like 30 or
+        // 40 degrees needs support; a wall-like 50 or 60 does not.
+        for (degrees, overhangs) in [(0.0, true), (30.0, true), (40.0, true)]
+            .into_iter()
+            .chain([(50.0, false), (60.0, false), (80.0, false)])
+        {
+            let found = of_kind(find_risks(&underside_at(degrees, 5.0)), RiskKind::Overhang);
+            assert_eq!(!found.is_empty(), overhangs, "{degrees} degrees: {found:?}");
+        }
+    }
+
+    #[test]
+    fn upward_faces_are_never_overhangs() {
+        // The same 30 degree ramp, wound the other way up.
+        let mut w = Welder::default();
+        floor(&mut w);
+        w.push_triangle([0., 0., 5.], [10., 0., 10.], [10., 10., 10.]);
+        w.push_triangle([0., 0., 5.], [10., 10., 10.], [0., 10., 5.]);
+        assert!(of_kind(find_risks(&w.finish()), RiskKind::Overhang).is_empty());
+    }
+
+    #[test]
+    fn a_ceiling_inside_the_bed_band_rests_on_the_bed() {
+        let ceiling = |z| {
+            let mut w = Welder::default();
+            floor(&mut w);
+            ramp(&mut w, 10.0, 10.0, 0.0, z);
+            of_kind(find_risks(&w.finish()), RiskKind::Overhang)
+        };
+        assert!(ceiling(0.2).is_empty());
+        let high = ceiling(0.5);
+        assert_eq!(high.len(), 1);
+        assert!((high[0].value - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_bed_is_the_models_lowest_point_not_zero() {
+        // A block floating with its base at z = 5 still sits on its own bed.
+        let risks = find_risks(&boxes(&[([0., 0., 5.], [20., 20., 15.])]));
+        assert!(risks.is_empty(), "{risks:?}");
+        // And a lifted T-shape has the same overhangs, at its own height.
+        let t = boxes(&[
+            ([8., 0., 100.], [12., 4., 112.]),
+            ([0., 0., 110.], [8., 4., 112.]),
+            ([12., 0., 110.], [20., 4., 112.]),
+        ]);
+        let over = of_kind(find_risks(&t), RiskKind::Overhang);
+        assert_eq!(over.len(), 2, "{over:?}");
+        assert!(over.iter().all(|r| (r.position[2] - 110.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn an_inverted_pyramid_is_an_overhang_not_bed_contact() {
+        // Apex on the bed, a 80 mm square at z = 10: each side has one
+        // vertex in the bed band and two far above it, and faces steeply down
+        // (n.z about -0.97).
+        let ring = [
+            [40., 40., 10.],
+            [-40., 40., 10.],
+            [-40., -40., 10.],
+            [40., -40., 10.],
+        ];
+        let mut w = Welder::default();
+        for i in 0..4 {
+            w.push_triangle([0., 0., 0.], ring[(i + 1) % 4], ring[i]);
+        }
+        w.push_triangle(ring[0], ring[1], ring[2]);
+        w.push_triangle(ring[0], ring[2], ring[3]);
+        let risks = find_risks(&w.finish());
+        let over = of_kind(risks.clone(), RiskKind::Overhang);
+        assert_eq!(over.len(), 1, "the four sides join into one: {over:?}");
+        // Each side is 80 x sqrt(40^2 + 10^2) / 2 = 1649 mm2.
+        assert!((over[0].value - 4.0 * 1649.24).abs() < 5.0, "{over:?}");
+        // Nothing lies on the bed.
+        let contact = of_kind(risks, RiskKind::SmallBedContact);
+        assert_eq!(contact.len(), 1);
+        assert_eq!(contact[0].value, 0.0);
+    }
+
+    #[test]
+    fn only_nearly_flat_faces_on_the_bed_count_as_contact() {
+        // Strips lying in the bed band. At n.z = -0.8 the face leans too far
+        // to be contact; at -0.95 it counts, and 95 mm2 is plenty.
+        let strip = |run: f32, rise: f32| {
+            let mut w = Welder::default();
+            ramp(&mut w, run, 100.0, rise, 0.0);
+            of_kind(find_risks(&w.finish()), RiskKind::SmallBedContact)
+        };
+        let steep = strip(0.4, 0.3);
+        assert_eq!(steep.len(), 1, "{steep:?}");
+        assert_eq!(steep[0].value, 0.0);
+        let gentle = strip(0.9, 0.296);
+        assert!(gentle.is_empty(), "{gentle:?}");
+    }
+
+    #[test]
+    fn a_big_plate_on_a_small_foot_may_lift() {
+        let plate_on_foot = |foot: f32| {
+            let (lo, hi) = (50. - foot / 2., 50. + foot / 2.);
+            let m = boxes(&[
+                ([lo, lo, 0.], [hi, hi, 5.]),
+                ([0., 0., 5.], [100., 100., 6.]),
+            ]);
+            of_kind(find_risks(&m), RiskKind::SmallBedContact)
+        };
+        // 36 mm2 clears 20 but is under 5% of the 100 x 100 footprint.
+        let small = plate_on_foot(6.0);
+        assert_eq!(small.len(), 1, "{small:?}");
+        assert!((small[0].value - 36.0).abs() < 0.01);
+        // 900 mm2 is 9% of it, and is fine.
+        assert!(plate_on_foot(30.0).is_empty());
+    }
+
+    #[test]
+    fn modest_contact_over_twenty_mm2_is_fine() {
+        let m = boxes(&[([0., 0., 0.], [10., 10., 2.])]);
+        assert!(find_risks(&m).is_empty());
+    }
+
+    #[test]
+    fn tall_and_thin_is_height_over_the_narrower_width() {
+        let tower = |x: f32, y: f32, h: f32| {
+            of_kind(
+                find_risks(&boxes(&[([0., 0., 0.], [x, y, h])])),
+                RiskKind::TallThin,
+            )
+        };
+        // 70 over the narrower 10 is 7:1; over the wider 40 it would not be.
+        assert_eq!(tower(10., 40., 70.).len(), 1);
+        assert_eq!(tower(40., 10., 70.).len(), 1);
+        // Either side of 5:1; exactly 5:1 is not tall and thin.
+        assert!(tower(10., 10., 49.).is_empty());
+        assert!(tower(10., 10., 50.).is_empty());
+        let tall = tower(10., 10., 51.);
+        assert_eq!(tall.len(), 1);
+        assert!((tall[0].value - 5.1).abs() < 1e-4);
+        assert_eq!(tall[0].position, [5., 5., 51.]);
+        assert!(tall[0].message.starts_with("Tall and thin · 5:1"));
+        // A 3:1 part is not.
+        assert!(tower(10., 10., 30.).is_empty());
+    }
+
+    #[test]
+    fn a_sliver_does_not_bridge_overhang_regions() {
+        // Two ceilings at z = 5 meet a downward needle triangle along its two
+        // short sides. The needle is so thin its normal is rounding noise
+        // (-z here), so it must not link them into one region.
+        let (p0, p1, p2) = ([0., 0., 5.], [100., 0., 5.], [50., 5e-5, 5.]);
+        let mut w = Welder::default();
+        floor(&mut w);
+        w.push_triangle(p0, p2, p1);
+        w.push_triangle(p0, p2, [25., -5., 5.]);
+        w.push_triangle(p2, p1, [75., -5., 5.]);
+        let over = of_kind(find_risks(&w.finish()), RiskKind::Overhang);
+        assert_eq!(over.len(), 2, "{over:?}");
+        assert!(over.iter().all(|r| (r.value - 125.0).abs() < 0.5));
+    }
+
+    #[test]
+    fn a_sliver_on_the_bed_is_not_contact() {
+        // A downward needle at z = 0, with a roof above it.
+        let mut w = Welder::default();
+        w.push_triangle([0., 0., 0.], [50., 5e-5, 0.], [100., 0., 0.]);
+        w.push_triangle([0., 0., 3.], [10., 0., 3.], [0., 10., 3.]);
         let risks = find_risks(&w.finish());
         assert!(risks.iter().all(|r| r.kind != RiskKind::Overhang));
         let contact = of_kind(risks, RiskKind::SmallBedContact);

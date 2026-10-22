@@ -114,7 +114,8 @@ pub fn has_normal(n: Vec3) -> bool {
 /// `keep` accepts, sorted so the faces sharing an edge sit together. Flat,
 /// so memory stays at 12 bytes per side however many edges there are.
 pub fn sorted_sides(mesh: &Mesh, keep: impl Fn(usize) -> bool) -> Vec<(u32, u32, u32)> {
-    let mut sides: Vec<(u32, u32, u32)> = Vec::new();
+    let kept = (0..mesh.triangles.len()).filter(|&i| keep(i)).count();
+    let mut sides: Vec<(u32, u32, u32)> = Vec::with_capacity(kept * 3);
     for (i, t) in mesh.triangles.iter().enumerate().filter(|(i, _)| keep(*i)) {
         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             sides.push((a.min(b), a.max(b), i as u32));

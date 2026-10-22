@@ -44,6 +44,7 @@ pub fn feature_edges(mesh: &Mesh, min_angle_deg: f32, cap: usize) -> Vec<(Vec3, 
             found.push((s, (a, b)));
         }
     }
+    drop(sides);
 
     found.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
     found.truncate(cap);
