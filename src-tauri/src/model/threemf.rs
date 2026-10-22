@@ -1,7 +1,7 @@
 //! 3MF: objects, components (also in other model files), build transforms
 //! and units, flattened into one welded mesh in millimetres.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek};
 use std::rc::Rc;
 
@@ -58,6 +58,9 @@ pub fn parse_3mf(bytes: &[u8]) -> Result<Mesh, ModelError> {
 struct Doc {
     unit: f32,
     objects: HashMap<String, Object>,
+    /// Objects whose `type` isn't `model` (support, surface, other…); they
+    /// are not part of the printed shape.
+    unbuilt: HashSet<String>,
     build: Vec<Item>,
 }
 
@@ -218,6 +221,16 @@ fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
             "model" => doc.unit = unit_scale(attr(&e, "unit").as_deref()),
             "object" if !empty => {
                 current = attr(&e, "id").map(|id| (id, Object::Components(Vec::new())));
+                if let Some((id, _)) = &current {
+                    // A missing type means "model".
+                    let kind = attr(&e, "type").map(|t| t.trim().to_ascii_lowercase());
+                    if matches!(
+                        kind.as_deref(),
+                        Some("support" | "solidsupport" | "surface" | "other")
+                    ) {
+                        doc.unbuilt.insert(id.clone());
+                    }
+                }
             }
             "mesh" => {
                 if let Some((_, obj)) = current.as_mut() {
@@ -261,7 +274,11 @@ fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
             }
             "build" => in_build = !empty,
             "item" if in_build => {
-                if let Some(objectid) = attr(&e, "objectid") {
+                // `printable="0"` (or "false") keeps an item out of the print.
+                let printable = attr(&e, "printable")
+                    .map(|v| !matches!(v.trim(), "0" | "false"))
+                    .unwrap_or(true);
+                if let (true, Some(objectid)) = (printable, attr(&e, "objectid")) {
                     doc.build.push(Item {
                         objectid,
                         transform: transform(&e),
@@ -275,10 +292,11 @@ fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
 }
 
 /// A component path as an archive entry name: "/3D/x.model" → "3D/x.model".
-/// `None` for anything outside `3D/` or with `..`.
+/// `None` for anything outside `3D/`, with `..`, or not a `.model` file.
 fn entry_path(path: &str) -> Option<String> {
     let p = path.strip_prefix('/').unwrap_or(path);
-    (p.starts_with("3D/") && !p.contains("..")).then(|| p.to_string())
+    (p.starts_with("3D/") && !p.contains("..") && p.to_ascii_lowercase().ends_with(".model"))
+        .then(|| p.to_string())
 }
 
 /// Adds object `id` of document `doc_name`, placed by `world`, to the mesh.
@@ -299,6 +317,9 @@ fn resolve<R: Read + Seek>(
     let Some(doc) = ctx.doc(doc_name)? else {
         return Ok(());
     };
+    if doc.unbuilt.contains(id) {
+        return Ok(());
+    }
     match doc.objects.get(id) {
         Some(Object::Mesh {
             vertices,
@@ -453,5 +474,83 @@ mod tests {
             parse_3mf(&archive(&files)),
             Err(ModelError::Archive(_))
         ));
+    }
+
+    /// A one-triangle object far from the origin, so tests can tell it apart.
+    fn far_object(id: &str, kind: &str) -> String {
+        format!(
+            r#"<object id="{id}" type="{kind}"><mesh>
+            <vertices><vertex x="100" y="100" z="0"/><vertex x="101" y="100" z="0"/><vertex x="100" y="101" z="0"/></vertices>
+            <triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>"#
+        )
+    }
+
+    #[test]
+    fn support_and_other_non_model_objects_are_not_built() {
+        for kind in ["support", "solidsupport", "surface", "other"] {
+            let m = model(
+                "millimeter",
+                &format!("{TRI_OBJECT}{}", far_object("2", kind)),
+                r#"<item objectid="1"/><item objectid="2"/>"#,
+            );
+            let mesh = parse_3mf(&archive(&[("3D/3dmodel.model", &m)])).unwrap();
+            assert_eq!(mesh.triangles.len(), 1, "{kind}");
+            assert_eq!(mesh.bounds(), Some(([0., 0., 0.], [1., 1., 0.])), "{kind}");
+        }
+    }
+
+    #[test]
+    fn an_object_without_a_type_is_built() {
+        let obj = far_object("2", "model").replace(r#" type="model""#, "");
+        let m = model("millimeter", &obj, r#"<item objectid="2"/>"#);
+        let mesh = parse_3mf(&archive(&[("3D/3dmodel.model", &m)])).unwrap();
+        assert_eq!(mesh.triangles.len(), 1);
+    }
+
+    #[test]
+    fn unprintable_build_items_are_skipped() {
+        let m = model(
+            "millimeter",
+            &format!("{TRI_OBJECT}{}", far_object("2", "model")),
+            r#"<item objectid="1"/><item objectid="2" printable="0"/>"#,
+        );
+        let mesh = parse_3mf(&archive(&[("3D/3dmodel.model", &m)])).unwrap();
+        assert_eq!(mesh.triangles.len(), 1);
+        assert_eq!(mesh.bounds(), Some(([0., 0., 0.], [1., 1., 0.])));
+    }
+
+    #[test]
+    fn only_model_files_are_followed_as_component_targets() {
+        let root = model(
+            "millimeter",
+            &format!(
+                r#"{TRI_OBJECT}<object id="2"><components><component p:path="/3D/Textures/x.png" objectid="1"/></components></object>"#
+            ),
+            r#"<item objectid="2"/>"#,
+        );
+        // A texture whose bytes would parse as a model if it were followed.
+        let fake = model("millimeter", TRI_OBJECT, "");
+        assert_eq!(
+            parse_3mf(&archive(&[
+                ("3D/3dmodel.model", &root),
+                ("3D/Textures/x.png", &fake),
+            ])),
+            Err(ModelError::NoObjects)
+        );
+        // The extension check ignores case.
+        let upper = model(
+            "millimeter",
+            r#"<object id="2"><components><component p:path="/3D/Objects/Part.MODEL" objectid="1"/></components></object>"#,
+            r#"<item objectid="2"/>"#,
+        );
+        let mesh = parse_3mf(&archive(&[
+            ("3D/3dmodel.model", &upper),
+            (
+                "3D/Objects/Part.MODEL",
+                &model("millimeter", TRI_OBJECT, ""),
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(mesh.triangles.len(), 1);
     }
 }
