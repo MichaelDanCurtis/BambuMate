@@ -83,6 +83,52 @@ pub fn tri_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     normalize(cross(sub(b, a), sub(c, a)))
 }
 
+/// The unit normal of every triangle, or exactly zero for one with no
+/// reliable normal: a (nearly) flat sliver, where rounding noise would point
+/// the normal anywhere. That is a cross product no longer than 1e-6 x the
+/// square of the longest side. See [`has_normal`].
+pub fn face_normals(mesh: &Mesh) -> Vec<Vec3> {
+    (0..mesh.triangles.len())
+        .map(|i| {
+            let [a, b, c] = mesh.tri(i);
+            let longest = [sub(b, a), sub(c, b), sub(a, c)]
+                .into_iter()
+                .map(|e| dot(e, e))
+                .fold(0f32, f32::max);
+            if length(cross(sub(b, a), sub(c, a))) <= 1e-6 * longest {
+                [0., 0., 0.]
+            } else {
+                tri_normal(a, b, c)
+            }
+        })
+        .collect()
+}
+
+/// Whether a normal from [`face_normals`] is real: each is a unit vector or
+/// exactly zero.
+pub fn has_normal(n: Vec3) -> bool {
+    dot(n, n) > 0.5
+}
+
+/// One (low vertex, high vertex, face) entry per side of each triangle that
+/// `keep` accepts, sorted so the faces sharing an edge sit together. Flat,
+/// so memory stays at 12 bytes per side however many edges there are.
+pub fn sorted_sides(mesh: &Mesh, keep: impl Fn(usize) -> bool) -> Vec<(u32, u32, u32)> {
+    let mut sides: Vec<(u32, u32, u32)> = Vec::new();
+    for (i, t) in mesh.triangles.iter().enumerate().filter(|(i, _)| keep(*i)) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            sides.push((a.min(b), a.max(b), i as u32));
+        }
+    }
+    sides.sort_unstable();
+    sides
+}
+
+/// The runs of `sides` (from [`sorted_sides`]) that share one edge.
+pub fn edge_groups(sides: &[(u32, u32, u32)]) -> impl Iterator<Item = &[(u32, u32, u32)]> {
+    sides.chunk_by(|x, y| (x.0, x.1) == (y.0, y.1))
+}
+
 pub fn apply(t: &Transform, p: Vec3) -> Vec3 {
     [
         p[0] * t[0] + p[1] * t[3] + p[2] * t[6] + t[9],

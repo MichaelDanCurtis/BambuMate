@@ -1,7 +1,7 @@
 //! Feature edges: mesh edges where the surface bends sharply, drawn as
 //! lines over the dots.
 
-use super::mesh::{cross, dot, length, sub, tri_normal, Mesh, Vec3};
+use super::mesh::{dot, edge_groups, face_normals, has_normal, sorted_sides, Mesh, Vec3};
 
 /// Edges bending at least this many degrees are drawn.
 pub const EDGE_ANGLE_DEG: f32 = 30.0;
@@ -18,50 +18,17 @@ pub const EDGE_CAP: usize = 60_000;
 ///   (a zero-area, collinear or sliver triangle) there is no dihedral angle, so the
 ///   edge is not drawn.
 pub fn feature_edges(mesh: &Mesh, min_angle_deg: f32, cap: usize) -> Vec<(Vec3, Vec3)> {
-    // One (low vertex, high vertex, face) entry per triangle side, sorted so
-    // the faces sharing an edge sit together. Flat, so memory stays at 12
-    // bytes per side however many edges there are.
-    let mut sides: Vec<(u32, u32, u32)> = Vec::with_capacity(mesh.triangles.len() * 3);
-    for (i, t) in mesh.triangles.iter().enumerate() {
-        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-            sides.push((a.min(b), a.max(b), i as u32));
-        }
-    }
-    sides.sort_unstable();
-
-    // A face with (nearly) no area has no meaningful normal: rounding noise
-    // would point it anywhere. That is a cross product shorter than
-    // 1e-6 x the square of its longest side; `has_normal` is then false.
-    let normals: Vec<Vec3> = (0..mesh.triangles.len())
-        .map(|i| {
-            let [a, b, c] = mesh.tri(i);
-            let longest = [sub(b, a), sub(c, b), sub(a, c)]
-                .into_iter()
-                .map(|e| dot(e, e))
-                .fold(0f32, f32::max);
-            if length(cross(sub(b, a), sub(c, a))) <= 1e-6 * longest {
-                [0., 0., 0.]
-            } else {
-                tri_normal(a, b, c)
-            }
-        })
-        .collect();
-    // Each normal is a unit vector or exactly zero.
-    let has_normal = |f: u32| dot(normals[f as usize], normals[f as usize]) > 0.5;
+    let sides = sorted_sides(mesh, |_| true);
+    let normals = face_normals(mesh);
+    let reliable = |f: u32| has_normal(normals[f as usize]);
 
     let min_angle = min_angle_deg.to_radians();
     let mut found: Vec<(f32, (u32, u32))> = Vec::new();
-    let mut start = 0;
-    while start < sides.len() {
-        let (a, b, _) = sides[start];
-        let end = start
-            + sides[start..]
-                .iter()
-                .take_while(|s| (s.0, s.1) == (a, b))
-                .count();
-        let sharpness = match &sides[start..end] {
+    for group in edge_groups(&sides) {
+        let (a, b, _) = group[0];
+        let sharpness = match group {
             [(_, _, f), (_, _, g)] => {
-                if has_normal(*f) && has_normal(*g) {
+                if reliable(*f) && reliable(*g) {
                     Some(
                         dot(normals[*f as usize], normals[*g as usize])
                             .clamp(-1.0, 1.0)
@@ -76,7 +43,6 @@ pub fn feature_edges(mesh: &Mesh, min_angle_deg: f32, cap: usize) -> Vec<(Vec3, 
         if let Some(s) = sharpness.filter(|&s| s >= min_angle) {
             found.push((s, (a, b)));
         }
-        start = end;
     }
 
     found.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));

@@ -4,6 +4,7 @@
 
 pub mod edges;
 pub mod mesh;
+pub mod risks;
 pub mod sample;
 pub mod stl;
 pub mod threemf;
