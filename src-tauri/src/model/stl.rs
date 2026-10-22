@@ -20,11 +20,16 @@ pub fn parse_stl(bytes: &[u8]) -> Result<Mesh, ModelError> {
 fn is_binary(bytes: &[u8]) -> bool {
     if bytes.len() >= 84 {
         let count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
-        if 84 + count * 50 == bytes.len() {
+        if binary_len(count) == Some(bytes.len()) {
             return true;
         }
     }
     !bytes.trim_ascii_start().starts_with(b"solid")
+}
+
+/// The length of a binary STL holding `count` triangles; `None` on overflow.
+fn binary_len(count: usize) -> Option<usize> {
+    count.checked_mul(50).and_then(|n| n.checked_add(84))
 }
 
 fn binary(bytes: &[u8]) -> Result<Mesh, ModelError> {
@@ -35,8 +40,9 @@ fn binary(bytes: &[u8]) -> Result<Mesh, ModelError> {
     if count > MAX_TRIANGLES {
         return Err(ModelError::TooManyTriangles(count));
     }
-    if bytes.len() < 84 + count * 50 {
-        return Err(ModelError::Truncated);
+    match binary_len(count) {
+        Some(need) if bytes.len() >= need => {}
+        _ => return Err(ModelError::Truncated),
     }
     let f = |o: usize| f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
     let mut w = Welder::default();
@@ -164,6 +170,16 @@ mod tests {
         bytes.truncate(bytes.len() - 25);
         // Still starts like binary (no "solid"), so it must not parse as ASCII.
         assert_eq!(parse_stl(&bytes), Err(ModelError::Truncated));
+    }
+
+    #[test]
+    fn a_huge_header_count_is_refused_without_overflow() {
+        let mut bytes = vec![0u8; 84];
+        bytes[80..84].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            parse_stl(&bytes),
+            Err(ModelError::TooManyTriangles(u32::MAX as usize))
+        );
     }
 
     #[test]

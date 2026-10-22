@@ -109,7 +109,7 @@ pub fn compose(first: &Transform, then: &Transform) -> Transform {
 }
 
 /// Builds a mesh from loose triangles, sharing identical vertices so edges
-/// can be found, and dropping triangles with repeated corners.
+/// can be found, and dropping triangles with repeated or non-finite corners.
 #[derive(Default)]
 pub struct Welder {
     map: HashMap<[u32; 3], u32>,
@@ -132,8 +132,11 @@ impl Welder {
     }
 
     pub fn push_triangle(&mut self, a: Vec3, b: Vec3, c: Vec3) {
-        // Check for repeated corners first so a dropped triangle leaves no
-        // orphan vertices behind.
+        // Check for bad or repeated corners first so a dropped triangle
+        // leaves no orphan vertices behind.
+        if ![a, b, c].iter().flatten().all(|v| v.is_finite()) {
+            return;
+        }
         let (ka, kb, kc) = (Self::key(a), Self::key(b), Self::key(c));
         if ka == kb || kb == kc || ka == kc {
             return;
@@ -175,6 +178,32 @@ mod tests {
         let m = w.finish();
         assert_eq!(m.positions.len(), 4);
         assert_eq!(m.triangles.len(), 2);
+    }
+
+    #[test]
+    fn compose_applies_first_then_then_for_non_commuting_transforms() {
+        // F: 90 degrees about z, then move by (1, 0, 0).
+        let f: Transform = [0., 1., 0., -1., 0., 0., 0., 0., 1., 1., 0., 0.];
+        // T: stretch x by 2, then move by (0, 5, 0).
+        let t: Transform = [2., 0., 0., 0., 1., 0., 0., 0., 1., 0., 5., 0.];
+        let p = [1., 0., 0.];
+        assert_eq!(apply(&t, apply(&f, p)), [2., 6., 0.]);
+        assert_eq!(apply(&compose(&f, &t), p), [2., 6., 0.]);
+        // The other order differs, so the test would catch a swap.
+        assert_ne!(apply(&compose(&t, &f), p), [2., 6., 0.]);
+    }
+
+    #[test]
+    fn the_welder_drops_triangles_with_non_finite_corners() {
+        let mut w = Welder::default();
+        w.push_triangle([f32::NAN, 0., 0.], [1., 0., 0.], [0., 1., 0.]);
+        w.push_triangle([0., 0., 0.], [f32::INFINITY, 0., 0.], [0., 1., 0.]);
+        w.push_triangle([0., 0., 0.], [1., 0., 0.], [0., f32::NEG_INFINITY, 0.]);
+        w.push_triangle([0., 0., 0.], [1., 0., 0.], [0., 1., 0.]);
+        let m = w.finish();
+        assert_eq!(m.triangles.len(), 1);
+        assert_eq!(m.positions.len(), 3);
+        assert!(m.positions.iter().flatten().all(|c| c.is_finite()));
     }
 
     #[test]
