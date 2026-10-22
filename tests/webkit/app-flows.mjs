@@ -2358,6 +2358,26 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".pr-hero", { timeout: 5000 });
   });
 
+  await step(run, page, "the printer page has the shared header and lists HMS codes seen earlier", async () => {
+    const title = (await page.locator(".printer-page h1.nd-page-title").innerText()).trim();
+    if (title !== "Printer") throw new Error(`page title reads "${title}"`);
+    const code = PRINTER_VIEW.errors[0].code;
+    // While active, the code sits in the active list and not under Earlier.
+    if ((await page.locator(".pr-earlier-item", { hasText: code }).count()) !== 0) throw new Error("active code listed under Earlier");
+    // Cleared: the history keeps it, the active list no longer does.
+    await emitEvent("printer://state", { ...PRINTER_VIEW, errors: [] });
+    await page.waitForSelector(".pr-earlier-item", { timeout: 5000 });
+    const earlier = await page.locator(".pr-earlier-item").allInnerTexts();
+    if (!earlier.some((t) => t.includes(code))) throw new Error(`Earlier lacks ${code}: ${earlier.join(" | ")}`);
+    if ((await page.locator(".pr-error").count()) !== 0) throw new Error("cleared errors still active");
+    // Reported again: back in the active list, gone from Earlier.
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await page.waitForFunction((c) => [...document.querySelectorAll(".pr-error-code")].some((e) => e.textContent === c), code, {
+      timeout: 5000,
+    });
+    if ((await page.locator(".pr-earlier-item", { hasText: code }).count()) !== 0) throw new Error("active code still under Earlier");
+  });
+
   // A state event arrives about twice a second during a print. One that only
   // changes temperatures must leave the cards and errors (and anything the
   // user is clicking or typing into) alone.

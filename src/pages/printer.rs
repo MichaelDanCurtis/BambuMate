@@ -18,6 +18,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::commands::{self, ProfileInfo};
+use crate::components::patterns::{PageHeader, SegmentedBar};
 use crate::printer::bridge;
 use crate::printer::types::{
     connection_message, format_remaining, format_temp, nozzle_label, row_title, swatch_color,
@@ -57,10 +58,9 @@ pub fn PrinterPage() -> impl IntoView {
 
     view! {
         <div class="page printer-page nd">
-            <header class="pr-head">
-                <h2>"Printer"</h2>
+            <PageHeader title="Printer">
                 {move || header.get().map(|text| view! { <span class="pr-ident nd-mono">{text}</span> })}
-            </header>
+            </PageHeader>
 
             <Show
                 when=move || configured.get()
@@ -251,11 +251,9 @@ fn Hero(view: RwSignal<PrinterView>) -> impl IntoView {
             <p class="nd-label">"Current print"</p>
             <div class="pr-hero-top">
                 <span class="pr-hero-state nd-mono">{move || gcode.get().unwrap_or_else(|| "—".into())}</span>
-                <span class="pr-hero-percent">{move || percent.get().map(|p| format!("{p}%")).unwrap_or_else(|| "—".into())}</span>
+                <span class="pr-hero-percent nd-display">{move || percent.get().map(|p| format!("{p}%")).unwrap_or_else(|| "—".into())}</span>
             </div>
-            <div class="pr-progress">
-                <div class="pr-progress-fill" style:width=move || format!("{}%", percent.get().unwrap_or(0).min(100))></div>
-            </div>
+            <SegmentedBar percent=Signal::derive(move || percent.get().unwrap_or(0).min(100)) total=12 label="Print progress" />
             <dl class="pr-facts">
                 <div><dt>"Layer"</dt><dd class="pr-layer">{move || layer.get()}</dd></div>
                 <div><dt>"Remaining"</dt><dd class="pr-remaining">{move || remaining.get().map(format_remaining).unwrap_or_else(|| "—".into())}</dd></div>
@@ -431,6 +429,7 @@ fn unique_errors(v: &PrinterView) -> Vec<ErrorView> {
 #[component]
 fn Errors(view: RwSignal<PrinterView>) -> impl IntoView {
     let errors = Memo::new(move |_| view.with(unique_errors));
+    let seen = expect_context::<PrinterShared>().seen_errors;
     view! {
         <section class="pr-section pr-errors">
             <p class="nd-label">"Errors"</p>
@@ -467,6 +466,23 @@ fn Errors(view: RwSignal<PrinterView>) -> impl IntoView {
                     />
                 </ul>
             </Show>
+            {move || {
+                let active: Vec<String> = errors.with(|e| e.iter().map(|e| e.code.clone()).collect());
+                let earlier: Vec<_> = seen.with(|h| h.iter().filter(|s| !active.contains(&s.code)).cloned().collect());
+                (!earlier.is_empty()).then(|| view! {
+                    <div class="pr-earlier">
+                        <p class="nd-label">"Earlier this session"</p>
+                        <ul class="pr-earlier-list">
+                            {earlier.into_iter().map(|s| view! {
+                                <li class="pr-earlier-item">
+                                    <span class="nd-mono">{s.code}</span>
+                                    {s.text.map(|t| view! { <span class="pr-earlier-text">{t}</span> })}
+                                </li>
+                            }).collect::<Vec<_>>()}
+                        </ul>
+                    </div>
+                })
+            }}
         </section>
     }
 }
