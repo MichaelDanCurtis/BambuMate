@@ -15,7 +15,16 @@ use quick_xml::{Reader, XmlVersion};
 use super::mesh::{apply, compose, Mesh, Transform, Vec3, Welder, IDENTITY};
 use super::{ModelError, MAX_TRIANGLES};
 
+/// The root model part when the package relationships name none.
 const ROOT_MODEL: &str = "3D/3dmodel.model";
+/// The package relationships, which name the root model part, and the
+/// most they may hold.
+const RELS: &str = "_rels/.rels";
+const MAX_RELS_BYTES: u64 = 1 << 20;
+/// The end of the start-part relationship type,
+/// "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel", matched
+/// ignoring case.
+const START_PART_TYPE_END: &str = "/3dmodel";
 const MAX_ENTRIES: usize = 4096;
 /// Decompressed bytes read from one model document, and across the parse.
 /// Documents are streamed, so these bound time, not memory.
@@ -95,11 +104,9 @@ fn parse_with(bytes: &[u8], limits: Limits) -> Result<Mesh, ModelError> {
         attempted: 0,
         visits: 0,
     };
-    let root = ctx
-        .doc(ROOT_MODEL)?
-        .ok_or(ModelError::Archive(NO_ROOT_MODEL))?;
+    let (root_name, root) = ctx.root()?;
     for item in &root.build {
-        resolve(&mut ctx, ROOT_MODEL, &item.objectid, &item.transform, 0)?;
+        resolve(&mut ctx, &root_name, &item.objectid, &item.transform, 0)?;
     }
     if ctx.welder.triangle_count() == 0 {
         return Err(ModelError::NoObjects);
@@ -165,6 +172,94 @@ impl<R: Read + Seek> Ctx<R> {
         self.docs.insert(name.to_string(), doc.clone());
         Ok(doc)
     }
+
+    /// The root model document and its name: the start part named in the
+    /// package relationships, or [`ROOT_MODEL`] when they name no usable
+    /// part or that part is missing.
+    fn root(&mut self) -> Result<(String, Rc<Doc>), ModelError> {
+        if let Some(name) = self.start_part() {
+            if let Some(doc) = self.doc(&name)? {
+                return Ok((name, doc));
+            }
+            tracing::warn!("3MF start part {name} is missing; trying {ROOT_MODEL}");
+        }
+        let doc = self
+            .doc(ROOT_MODEL)?
+            .ok_or(ModelError::Archive(NO_ROOT_MODEL))?;
+        Ok((ROOT_MODEL.to_string(), doc))
+    }
+
+    /// The start part named in [`RELS`]. A missing, oversized or damaged
+    /// relationships part just means there is none.
+    fn start_part(&mut self) -> Option<String> {
+        let read = read_small(
+            &mut self.zip,
+            RELS,
+            MAX_RELS_BYTES,
+            &self.limits,
+            &mut self.budget,
+        );
+        match read {
+            Ok(bytes) => start_part(&bytes?),
+            Err(e) => {
+                tracing::warn!("3MF {RELS} is unreadable ({e}); trying {ROOT_MODEL}");
+                None
+            }
+        }
+    }
+}
+
+/// The first start-part `Target` in a relationships part that names a
+/// usable model part.
+fn start_part(bytes: &[u8]) -> Option<String> {
+    let mut reader = Reader::from_reader(bytes);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e) | Event::Empty(e)) if e.local_name().as_ref() == "Relationship" => {
+                let is_start = attr(&e, "Type")
+                    .is_some_and(|t| t.trim().to_ascii_lowercase().ends_with(START_PART_TYPE_END));
+                if !is_start {
+                    continue;
+                }
+                let target = attr(&e, "Target").unwrap_or_default();
+                match part_name(target.trim()) {
+                    Some(name) => return Some(name),
+                    None => tracing::warn!("3MF start part {target:?} is not usable"),
+                }
+            }
+            Ok(Event::Eof) => return None,
+            Err(e) => {
+                tracing::warn!("3MF {RELS} at {}: {e}", reader.buffer_position());
+                return None;
+            }
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Reads one small entry whole: at most `cap` bytes, and no more than is
+/// left of the total. `None` when it is missing.
+fn read_small<R: Read + Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    name: &str,
+    cap: u64,
+    limits: &Limits,
+    budget: &mut Budget,
+) -> Result<Option<Vec<u8>>, ModelError> {
+    let Some((entry, limit)) = open_entry(zip, name, cap, limits, budget)? else {
+        return Ok(None);
+    };
+    // Never trust the declared size: read at most limit + 1 bytes.
+    let mut buf = Vec::new();
+    entry.take(limit + 1).read_to_end(&mut buf).map_err(|e| {
+        tracing::warn!("3MF entry {name}: {e}");
+        ModelError::Archive(DAMAGED)
+    })?;
+    budget.read_bytes += buf.len() as u64;
+    if buf.len() as u64 > limit {
+        return Err(ModelError::Archive(TOO_LARGE));
+    }
+    Ok(Some(buf))
 }
 
 /// Opens one entry to read at most `cap` bytes, and no more than is left of
@@ -440,12 +535,23 @@ fn parse_doc<R: Read>(
     Ok(doc)
 }
 
-/// A component path as an archive entry name: "/3D/x.model" → "3D/x.model".
-/// `None` for anything outside `3D/`, with `..`, or not a `.model` file.
-fn entry_path(path: &str) -> Option<String> {
+/// A part name as an archive entry name: "/3D/x.model" → "3D/x.model".
+/// `None` for anything with `..`, outside the archive (a URI or a network
+/// path), or not a `.model` file.
+fn part_name(path: &str) -> Option<String> {
     let p = path.strip_prefix('/').unwrap_or(path);
-    (p.starts_with("3D/") && !p.contains("..") && p.to_ascii_lowercase().ends_with(".model"))
-        .then(|| p.to_string())
+    let inside = !p.is_empty()
+        && !p.starts_with('/')
+        && !p.contains("..")
+        && !p.contains(':')
+        && !p.contains('\\');
+    (inside && p.to_ascii_lowercase().ends_with(".model")).then(|| p.to_string())
+}
+
+/// A component path as an archive entry name, as [`part_name`], and also
+/// only under `3D/`.
+fn entry_path(path: &str) -> Option<String> {
+    part_name(path).filter(|p| p.starts_with("3D/"))
 }
 
 impl<R> Ctx<R> {
@@ -637,6 +743,110 @@ mod tests {
         let mesh = units_across_documents("centimeter", "millimeter");
         // x: 0..1, then +1 (part), +10 (component); y: 0..1, +20.
         assert_bounds(&mesh, [11., 20., 0.], [12., 21., 0.]);
+    }
+
+    /// A package relationships part naming `target` as the start part.
+    fn rels(kind: &str, target: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/Metadata/thumbnail.png" Id="rel1" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"/><Relationship Target="{target}" Id="rel0" Type="{kind}"/></Relationships>"#
+        )
+    }
+
+    const START_PART: &str = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel";
+
+    #[test]
+    fn the_start_part_comes_from_the_package_relationships() {
+        // Object 2 places object 1 from the same document (no path) and,
+        // shifted, object 1 of a part elsewhere.
+        let root = model(
+            "millimeter",
+            &format!(
+                r#"{TRI_OBJECT}<object id="2"><components><component objectid="1"/><component p:path="/3D/Objects/part.model" objectid="1" transform="1 0 0 0 1 0 0 0 1 5 0 0"/></components></object>"#
+            ),
+            r#"<item objectid="2"/>"#,
+        );
+        let part = model("millimeter", TRI_OBJECT, "");
+        for (kind, target, name) in [
+            (START_PART, "/3D/Model.model", "3D/Model.model"),
+            // The type ignores case, and the root needn't live under 3D/.
+            (
+                "http://schemas.microsoft.com/3dmanufacturing/2013/01/3DModel",
+                "Main.model",
+                "Main.model",
+            ),
+        ] {
+            let mesh = parse_3mf(&archive(&[
+                ("_rels/.rels", &rels(kind, target)),
+                (name, &root),
+                ("3D/Objects/part.model", &part),
+            ]))
+            .unwrap_or_else(|e| panic!("{target}: {e}"));
+            assert_eq!(mesh.triangles.len(), 2, "{target}");
+            assert_eq!(
+                mesh.bounds(),
+                Some(([0., 0., 0.], [6., 1., 0.])),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relationship_to_a_missing_part_falls_back_to_the_default_root() {
+        let rels = rels(START_PART, "/3D/missing.model");
+        let m = model("millimeter", TRI_OBJECT, r#"<item objectid="1"/>"#);
+        let mesh = parse_3mf(&archive(&[
+            ("_rels/.rels", &rels),
+            ("3D/3dmodel.model", &m),
+        ]))
+        .unwrap();
+        assert_eq!(mesh.triangles.len(), 1);
+        assert_eq!(
+            parse_3mf(&archive(&[("_rels/.rels", &rels)])),
+            Err(ModelError::Archive(NO_ROOT_MODEL))
+        );
+    }
+
+    #[test]
+    fn unusable_relationships_are_ignored() {
+        let fallback = model("millimeter", TRI_OBJECT, r#"<item objectid="1"/>"#);
+        let decoy = model(
+            "millimeter",
+            &far_object("1", "model"),
+            r#"<item objectid="1"/>"#,
+        );
+        for (rels_body, name) in [
+            // `..`, even when an entry by that name exists.
+            (
+                rels(START_PART, "/3D/../3D/decoy.model"),
+                "3D/../3D/decoy.model",
+            ),
+            // Not a model part.
+            (rels(START_PART, "/3D/decoy.png"), "3D/decoy.png"),
+            // Outside the archive.
+            (
+                rels(START_PART, "http://example.com/decoy.model"),
+                "decoy.model",
+            ),
+            // Not the start-part type.
+            (
+                rels("http://example.com/other", "/decoy.model"),
+                "decoy.model",
+            ),
+            // Not XML at all.
+            ("<Relationships".to_string(), "decoy.model"),
+        ] {
+            let mesh = parse_3mf(&archive(&[
+                ("_rels/.rels", &rels_body),
+                (name, &decoy),
+                ("3D/3dmodel.model", &fallback),
+            ]))
+            .unwrap_or_else(|e| panic!("{rels_body}: {e}"));
+            assert_eq!(
+                mesh.bounds(),
+                Some(([0., 0., 0.], [1., 1., 0.])),
+                "{rels_body}"
+            );
+        }
     }
 
     #[test]
