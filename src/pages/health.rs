@@ -11,6 +11,7 @@ pub fn HealthPage() -> impl IntoView {
     let (checking, set_checking) = signal(false);
     // Shared with the hero, which runs the first check on mount.
     let report = RwSignal::new(None::<HealthReport>);
+    let ran_at = RwSignal::new(None::<f64>);
     let (error, set_error) = signal::<Option<String>>(None);
 
     let do_health_check = move || {
@@ -20,6 +21,7 @@ pub fn HealthPage() -> impl IntoView {
             match commands::run_health_check().await {
                 Ok(r) => {
                     report.set(Some(r));
+                    ran_at.set(Some(js_sys::Date::now()));
                 }
                 Err(e) => {
                     set_error.set(Some(format!("Health check failed: {}", e)));
@@ -35,7 +37,7 @@ pub fn HealthPage() -> impl IntoView {
 
     view! {
         <div class="page health-page">
-            <HealthHero report=report />
+            <HealthHero report=report ran_at=ran_at />
 
             <button
                 class="btn btn-primary"
@@ -63,17 +65,17 @@ pub fn HealthPage() -> impl IntoView {
                     let pd_status = if r.profile_dir_accessible { CheckStatus::Pass } else { CheckStatus::Fail };
                     let pd_detail = r.profile_dir_path.clone().unwrap_or_else(|| "Not found".to_string());
 
-                    let claude_status = if r.claude_api_key_set { CheckStatus::Pass } else { CheckStatus::Fail };
-                    let claude_detail = if r.claude_api_key_set { "Configured".to_string() } else { "Not configured".to_string() };
+                    let claude_status = if r.claude_api_key_set { CheckStatus::Pass } else { CheckStatus::Unknown };
+                    let claude_detail = if r.claude_api_key_set { "Configured".to_string() } else { "Not set (optional)".to_string() };
 
-                    let openai_status = if r.openai_api_key_set { CheckStatus::Pass } else { CheckStatus::Fail };
-                    let openai_detail = if r.openai_api_key_set { "Configured".to_string() } else { "Not configured".to_string() };
+                    let openai_status = if r.openai_api_key_set { CheckStatus::Pass } else { CheckStatus::Unknown };
+                    let openai_detail = if r.openai_api_key_set { "Configured".to_string() } else { "Not set (optional)".to_string() };
 
-                    let kimi_status = if r.kimi_api_key_set { CheckStatus::Pass } else { CheckStatus::Fail };
-                    let kimi_detail = if r.kimi_api_key_set { "Configured".to_string() } else { "Not configured".to_string() };
+                    let kimi_status = if r.kimi_api_key_set { CheckStatus::Pass } else { CheckStatus::Unknown };
+                    let kimi_detail = if r.kimi_api_key_set { "Configured".to_string() } else { "Not set (optional)".to_string() };
 
-                    let openrouter_status = if r.openrouter_api_key_set { CheckStatus::Pass } else { CheckStatus::Fail };
-                    let openrouter_detail = if r.openrouter_api_key_set { "Configured".to_string() } else { "Not configured".to_string() };
+                    let openrouter_status = if r.openrouter_api_key_set { CheckStatus::Pass } else { CheckStatus::Unknown };
+                    let openrouter_detail = if r.openrouter_api_key_set { "Configured".to_string() } else { "Not set (optional)".to_string() };
 
                     view! {
                         <div class="health-results">

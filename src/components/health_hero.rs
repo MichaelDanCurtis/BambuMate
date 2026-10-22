@@ -14,10 +14,14 @@ pub fn HealthHero(
     /// The report, shared with the page so it can list each check.
     #[prop(optional)]
     report: Option<RwSignal<Option<HealthReport>>>,
+    /// When the report was last produced (ms), so a re-run on the page keeps
+    /// "last run" accurate.
+    #[prop(optional)]
+    ran_at: Option<RwSignal<Option<f64>>>,
 ) -> impl IntoView {
     let report = report.unwrap_or_else(|| RwSignal::new(None));
+    let ran_at = ran_at.unwrap_or_else(|| RwSignal::new(None));
     let error = RwSignal::new(None::<String>);
-    let ran_at = RwSignal::new(None::<f64>);
     spawn_local(async move {
         match commands::run_health_check().await {
             Ok(r) => {

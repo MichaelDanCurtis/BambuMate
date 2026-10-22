@@ -407,6 +407,8 @@ async function driveApp(browserType, engine, baseUrl) {
     if (!/^(ALL GOOD|\d+ ISSUES?)$/.test(word)) throw new Error(`hero reads "${word}"`);
     const h2s = await page.locator(".settings-page h2.settings-section-title").count();
     if (h2s < 4) throw new Error(`${h2s} section titles`);
+    const h3s = await page.locator(".settings-page .settings-section h3").count();
+    if (h3s !== 0) throw new Error(`${h3s} section h3s left unstyled`);
   });
 
   // -- filament search and selection ---------------------------------------
@@ -1981,6 +1983,10 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".health-results", { timeout: 20000 });
     const items = await page.locator(".health-results .health-item").count();
     if (items !== 6) throw new Error(`expected 6 health rows, got ${items}`);
+    // The fixture has Bambu Studio and the profile folder OK, so nothing may
+    // fail: unset API keys are optional and must not read as failures.
+    const fails = await page.locator(".health-results .status-fail").count();
+    if (fails !== 0) throw new Error(`${fails} failed health rows`);
     const word = (await page.locator(".health-hero .nd-hero-number").textContent()).trim();
     if (!/^(ALL GOOD|\d+ ISSUES?)$/.test(word)) throw new Error(`health hero reads "${word}"`);
     return word;

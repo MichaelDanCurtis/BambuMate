@@ -50,7 +50,11 @@ pub fn health_detail(s: &HealthSummary, ago: &str) -> String {
     } else {
         format!("{} API keys set", s.keys_set)
     };
-    format!("{REQUIRED} required checks · {keys} · last run {ago}")
+    if ago.is_empty() {
+        format!("{REQUIRED} required checks · {keys}")
+    } else {
+        format!("{REQUIRED} required checks · {keys} · last run {ago}")
+    }
 }
 
 #[cfg(test)]
@@ -94,6 +98,7 @@ mod tests {
             "2 required checks · 1 API key set · last run just now"
         );
         let s = health_summary(&report(true, true, [true, true, false, false]));
+        assert_eq!(health_detail(&s, ""), "2 required checks · 2 API keys set");
         assert_eq!(
             health_detail(&s, "5m ago"),
             "2 required checks · 2 API keys set · last run 5m ago"
