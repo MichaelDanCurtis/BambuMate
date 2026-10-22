@@ -12,6 +12,7 @@ pub mod printer_settings;
 pub mod profile_preview;
 pub mod searchable_select;
 pub mod settings_merge;
+pub mod severity;
 pub mod sidebar;
 pub mod slicer_settings;
 pub mod specs_editor;

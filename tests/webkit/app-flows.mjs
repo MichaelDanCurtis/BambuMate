@@ -656,6 +656,14 @@ async function driveApp(browserType, engine, baseUrl) {
       await page.waitForSelector(".analysis-results", { timeout: 30000 });
       const text = await page.locator(".analysis-results").innerText();
       if (!/string/i.test(text)) throw new Error("detected defect not shown");
+      const word = (await page.locator(".an-hero-row .nd-hero-number").textContent()).trim();
+      if (word !== "FAIR") throw new Error(`quality reads "${word}"`);
+      const tone = await page.locator(".an-hero-row .nd-hero").getAttribute("data-tone");
+      if (tone !== "warning") throw new Error(`quality tone ${tone}`);
+      const order = await page.locator(".defects-list .defect-card").evaluateAll((els) => els.map((e) => e.dataset.tier));
+      if (order.join(",") !== "significant,noticeable") throw new Error(`defects in order ${order}`);
+      const first = (await page.locator(".defects-list .defect-number").first().textContent()).trim();
+      if (first !== "01") throw new Error(`first defect numbered ${first}`);
       return `${text.replace(/\s+/g, " ").slice(0, 70)}...`;
     });
 

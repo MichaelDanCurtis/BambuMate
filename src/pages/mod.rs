@@ -1,4 +1,5 @@
 pub mod about;
+pub mod analysis_view;
 pub mod batch_generate;
 pub mod batch_view;
 pub mod diff_view;

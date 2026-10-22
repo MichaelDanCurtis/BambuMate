@@ -5,58 +5,20 @@
     margin-top: 1.5rem;
 }
 
-.defect-report h3 {
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: var(--text-bright);
-    margin-bottom: 0.75rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 1px solid var(--border-primary);
-}
-
-/* Quality Section */
-.quality-section {
-    margin-bottom: 1.5rem;
-}
-
-.quality-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 1rem;
-    border-radius: 20px;
-    font-weight: 600;
-    font-size: 0.9rem;
-}
-
-.quality-excellent {
-    background: var(--bg-success);
-    color: var(--color-success);
-}
-
-.quality-good {
-    background: var(--nd-surface-raised);
-    color: var(--nd-interactive);
-}
-
-.quality-acceptable {
-    background: var(--nd-surface-raised);
-    color: var(--nd-warning);
-}
-
-.quality-poor {
-    background: var(--nd-surface-raised);
-    color: var(--nd-accent);
-}
-
-.quality-failed {
-    background: var(--bg-danger);
-    color: var(--color-danger);
+/* Section headings are h2 for screen-reader navigation. `.page h2` in
+   main.css would otherwise win over `.nd-label`, so put the label look back. */
+.defect-report h2.nd-label {
+    margin: 0 0 var(--nd-space-sm);
+    padding-bottom: var(--nd-space-sm);
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--nd-text-secondary);
+    border-bottom: 1px solid var(--nd-border);
 }
 
 .quality-notes {
-    margin-top: 0.75rem;
-    color: var(--text-muted);
+    margin-bottom: var(--nd-space-md);
+    color: var(--nd-text-secondary);
     font-style: italic;
     font-size: 0.9rem;
 }
@@ -66,106 +28,63 @@
     margin-bottom: 1.5rem;
 }
 
-.defects-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-}
-
-.defect-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-primary);
-    border-radius: 8px;
-    padding: 1rem;
-}
-
-.defect-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.75rem;
-}
-
-.defect-name {
-    font-weight: 600;
-    color: var(--text-bright);
-}
-
 .severity-badge {
-    padding: 0.25rem 0.75rem;
-    border-radius: 12px;
-    font-size: 0.7rem;
-    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: var(--nd-radius-pill);
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
+    border: 1px solid var(--nd-border-visible);
 }
 
 .severity-minor {
-    background: var(--nd-surface-raised);
-    color: var(--nd-interactive);
+    color: var(--nd-text-secondary);
 }
 
 .severity-noticeable {
-    background: var(--nd-surface-raised);
     color: var(--nd-warning);
 }
 
 .severity-significant {
-    background: var(--nd-surface-raised);
     color: var(--nd-accent);
+    border-color: var(--nd-accent);
 }
 
 .severity-severe {
-    background: var(--bg-danger);
-    color: var(--color-danger);
+    color: var(--nd-black);
+    background-color: var(--nd-accent);
+    border-color: var(--nd-accent);
 }
 
-.defect-details {
+.defects-list {
+    list-style: none;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
 }
 
-.detail-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
+.defect-card {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 2px var(--nd-space-md);
+    align-items: baseline;
+    padding: var(--nd-space-sm) 0;
+    border-bottom: 1px solid var(--nd-border);
 }
 
-.detail-label {
-    font-size: 0.85rem;
-    color: var(--text-muted);
-    min-width: 80px;
+.defect-number {
+    color: var(--nd-text-secondary);
 }
 
-.severity-bar {
-    flex: 1;
-    height: 8px;
-    background: var(--bg-hover);
-    border-radius: 4px;
-    overflow: hidden;
+.defect-name {
+    font-weight: 600;
+    color: var(--nd-text-primary);
 }
 
-.severity-fill {
-    height: 100%;
-    background: var(--color-danger);
-    border-radius: 4px;
-}
-
-.detail-value {
-    font-size: 0.85rem;
-    font-weight: 500;
-    color: var(--text-primary);
-    min-width: 40px;
-}
-
-.no-defects {
-    padding: 1.5rem;
-    text-align: center;
-    background: var(--bg-success);
-    border: 1px solid var(--border-success);
-    border-radius: 8px;
-    color: var(--color-success);
-    font-weight: 500;
+.defect-meta {
+    grid-column: 2 / -1;
+    font-size: 11px;
+    color: var(--nd-text-secondary);
 }
 
 /* Recommendations Section */

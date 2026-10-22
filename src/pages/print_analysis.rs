@@ -14,6 +14,8 @@ use crate::commands;
 use crate::components::change_preview::ChangePreview;
 use crate::components::defect_report::DefectReportDisplay;
 use crate::components::history_panel::HistoryPanel;
+use crate::components::patterns::{Hero, PageHeader, StateKind, StateText};
+use crate::pages::analysis_view::{analysis_detail, quality_tone, quality_word};
 
 /// Request payload for print analysis.
 #[derive(Debug, Clone, Serialize)]
@@ -154,13 +156,13 @@ pub fn PrintAnalysisPage() -> impl IntoView {
         <div class="page print-analysis-page">
             <style>{include_str!("print_analysis.css")}</style>
 
-            <h2>"Print Analysis"</h2>
+            <PageHeader title="Analyze" />
 
             <Show
                 when=move || ff_ctx.flags.get().analysis_enabled
                 fallback=move || view! {
                     <div class="ai-required-notice">
-                        <h3>"AI Required"</h3>
+                        <p class="nd-label">"AI required"</p>
                         <p>
                             "Print Analysis uses AI vision models to detect defects in your prints "
                             "and suggest parameter corrections. "
@@ -171,10 +173,6 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                     </div>
                 }
             >
-            <p class="page-description">
-                "Upload a photo of your test print to detect defects and get recommendations."
-            </p>
-
             {move || {
                 let current = state.get();
                 match current {
@@ -265,11 +263,7 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                             {move || image_preview.get().map(|src| view! {
                                 <img src=src class="preview-image analyzing" alt="Analyzing..." />
                             })}
-                            <div class="loading-indicator">
-                                <div class="spinner"></div>
-                                <p>"Analyzing your print..."</p>
-                                <p class="hint">"This may take 10-30 seconds"</p>
-                            </div>
+                            <StateText kind=StateKind::Loading message="Analyzing your print — this may take 10–30 seconds" />
                         </div>
                     }.into_any(),
 
@@ -280,9 +274,17 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                         let path_for_dialog = profile_path.get().unwrap_or_default();
                         view! {
                             <div class="analysis-results">
-                                {move || image_preview.get().map(|src| view! {
-                                    <img src=src class="preview-image small" alt="Analyzed print" />
-                                })}
+                                <div class="an-hero-row">
+                                    <Hero
+                                        label="Overall quality"
+                                        value=quality_word(&response.defect_report.overall_quality)
+                                        detail=analysis_detail(&response.defect_report, &response.material_type)
+                                        tone=quality_tone(&response.defect_report.overall_quality)
+                                    />
+                                    {move || image_preview.get().map(|src| view! {
+                                        <img src=src class="preview-image an-photo" alt="Analyzed print" />
+                                    })}
+                                </div>
 
                                 // Show apply success/error message
                                 {move || apply_message.get().map(|msg| {
@@ -398,10 +400,7 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                         let msg = msg.clone();
                         view! {
                             <div class="error-state">
-                                <div class="error-message">
-                                    <h3>"Analysis Failed"</h3>
-                                    <p>{msg}</p>
-                                </div>
+                                <StateText kind=StateKind::Error message=msg />
                                 <button class="btn btn-secondary" on:click=on_reset>
                                     "Try Again"
                                 </button>
@@ -517,8 +516,7 @@ fn PhotoDropZone(
                 }
             >
                 <div class="drop-zone-loading-content">
-                    <div class="spinner"></div>
-                    <p>"Loading image..."</p>
+                    <StateText kind=StateKind::Loading message="Loading image" />
                 </div>
             </Show>
         </div>

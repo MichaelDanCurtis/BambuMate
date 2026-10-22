@@ -79,11 +79,6 @@
     border: 1px solid var(--border-primary);
 }
 
-.preview-image.small {
-    max-height: 200px;
-    margin-bottom: 1rem;
-}
-
 .preview-image.analyzing {
     opacity: 0.6;
 }
@@ -112,43 +107,36 @@
     margin-top: 1rem;
 }
 
-/* Loading State */
-.loading-indicator {
-    text-align: center;
-    padding: 2rem;
-}
-
-.hint {
-    color: var(--text-muted);
-    font-size: 0.875rem;
-}
-
 /* Error State */
 .error-state {
     text-align: center;
     padding: 2rem;
 }
 
-.error-message {
-    background: var(--bg-danger);
-    border: 1px solid var(--border-danger);
-    border-radius: 8px;
-    padding: 1.5rem;
-    margin-bottom: 1.5rem;
-}
-
-.error-message h3 {
-    color: var(--color-danger);
-    margin-bottom: 0.5rem;
-}
-
-.error-message p {
-    color: var(--text-primary);
-}
-
 /* Analysis Results */
 .analysis-results {
     width: 100%;
+}
+
+.an-hero-row {
+    display: grid;
+    grid-template-columns: 1fr minmax(180px, 280px);
+    gap: var(--nd-space-xl);
+    align-items: start;
+    width: 100%;
+    margin-bottom: var(--nd-space-xl);
+}
+
+.an-photo {
+    width: 100%;
+    border-radius: var(--nd-radius-card);
+    border: 1px solid var(--nd-border);
+}
+
+@media (max-width: 900px) {
+    .an-hero-row {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* Profile Selector */
