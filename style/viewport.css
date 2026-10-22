@@ -122,3 +122,11 @@
 .vp-risk-msg {
     color: var(--nd-text-primary);
 }
+
+/* On a narrow screen the message takes its own row under the number and kind,
+   instead of wrapping a word per line in what is left of the first. */
+@media (max-width: 480px) {
+    .vp-risk-msg {
+        grid-column: 1 / -1;
+    }
+}

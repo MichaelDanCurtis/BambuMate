@@ -149,6 +149,15 @@ impl Mesh {
     }
 }
 
+/// Why there is no renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlProblem {
+    /// The browser gave no WebGL2 context.
+    NoWebGl,
+    /// There is a context, but the program or buffers could not be built.
+    SetupFailed,
+}
+
 pub struct Renderer {
     canvas: HtmlCanvasElement,
     gl: Gl,
@@ -162,24 +171,25 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// `None` when the canvas cannot give a WebGL2 context or the shaders do
-    /// not build. The reason goes to the console.
-    pub fn new(canvas: &HtmlCanvasElement) -> Option<Renderer> {
-        let gl = context(canvas)?;
+    /// `NoWebGl` when the canvas cannot give a WebGL2 context; `SetupFailed`
+    /// when it can but the shaders or buffers do not build (the reason goes to
+    /// the console).
+    pub fn new(canvas: &HtmlCanvasElement) -> Result<Renderer, GlProblem> {
+        let gl = context(canvas).ok_or(GlProblem::NoWebGl)?;
         let program = match link(&gl) {
             Ok(p) => p,
             Err(e) => {
                 web_sys::console::warn_1(&format!("viewport: {e}").into());
-                return None;
+                return Err(GlProblem::SetupFailed);
             }
         };
-        let dots = Mesh::new(&gl)?;
-        let edges = Mesh::new(&gl)?;
+        let dots = Mesh::new(&gl).ok_or(GlProblem::SetupFailed)?;
+        let edges = Mesh::new(&gl).ok_or(GlProblem::SetupFailed)?;
         // Dots blend into each other, so no depth test.
         gl.disable(Gl::DEPTH_TEST);
         gl.enable(Gl::BLEND);
         gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
-        Some(Renderer {
+        Ok(Renderer {
             canvas: canvas.clone(),
             u_vp: gl.get_uniform_location(&program, "u_vp"),
             u_size: gl.get_uniform_location(&program, "u_size"),

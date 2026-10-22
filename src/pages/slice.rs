@@ -429,7 +429,7 @@ pub fn SlicePage() -> impl IntoView {
                             None => "Drop an STL or 3MF here".to_string(),
                         }}
                     </p>
-                    <ModelViewport path=Signal::derive(move || model.get()) />
+                    <ModelViewport path=Signal::derive(move || model.get()) hide_name=true />
                     <div class="sl-drop-actions">
                         <button class="sl-btn sl-browse" on:click=browse>"Choose file"</button>
                         <Show when=move || !watched.with(Vec::is_empty)>

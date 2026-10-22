@@ -21,7 +21,7 @@ use web_sys::HtmlCanvasElement;
 
 use crate::components::patterns::{StateKind, StateText};
 use camera::Orbit;
-use gl::{Colors, Mode, Renderer};
+use gl::{Colors, GlProblem, Mode, Renderer};
 use types::{ModelView, Risk, RiskKind};
 
 /// Radians of turn per pixel dragged.
@@ -37,6 +37,14 @@ const WHEEL_LINE_PX: f64 = 16.0;
 const WHEEL_PAGE_PX: f64 = 800.0;
 /// One wheel event zooms by at most `exp(1)`.
 const WHEEL_MAX_PX: f64 = 1000.0;
+
+/// What the canvas area says when there is no renderer.
+pub fn problem_message(problem: GlProblem) -> &'static str {
+    match problem {
+        GlProblem::NoWebGl => "3D preview needs WebGL2",
+        GlProblem::SetupFailed => "3D preview couldn't start",
+    }
+}
 
 pub fn kind_label(kind: RiskKind) -> &'static str {
     match kind {
@@ -187,7 +195,7 @@ struct Gpu {
 type Pins = Vec<Option<(f32, f32)>>;
 
 enum Frame {
-    NoWebGl,
+    Failed(GlProblem),
     Drawn(Pins),
 }
 
@@ -203,8 +211,9 @@ fn render(
     if slot.as_ref().is_none_or(|g| g.renderer.canvas() != canvas) {
         // A new canvas: let the old context go before taking another.
         *slot = None;
-        let Some(renderer) = Renderer::new(canvas) else {
-            return Frame::NoWebGl;
+        let renderer = match Renderer::new(canvas) {
+            Ok(r) => r,
+            Err(problem) => return Frame::Failed(problem),
         };
         *slot = Some(Gpu {
             renderer,
@@ -212,7 +221,7 @@ fn render(
         });
     }
     let Some(gpu) = slot.as_mut() else {
-        return Frame::NoWebGl;
+        return Frame::Failed(GlProblem::SetupFailed);
     };
     if gpu.shows.as_ptr() != Arc::as_ptr(model) {
         gpu.renderer.set_geometry(&model.dots, &model.edges);
@@ -311,16 +320,20 @@ struct Ctx {
     mode: RwSignal<Mode>,
     selected: RwSignal<Option<usize>>,
     pins: RwSignal<Pins>,
-    gl_failed: RwSignal<bool>,
+    gl_failed: RwSignal<Option<GlProblem>>,
     canvas: NodeRef<html::Canvas>,
     /// The pointer dragging the view and its last position.
     drag: StoredValue<Option<(i32, i32, i32)>>,
 }
 
 /// A 3D view of the model at `path`, with its geometry risks. Renders nothing
-/// while `path` is `None`.
+/// while `path` is `None`. `hide_name` drops the file name from the header for
+/// pages that already show it.
 #[component]
-pub fn ModelViewport(#[prop(into)] path: Signal<Option<String>>) -> impl IntoView {
+pub fn ModelViewport(
+    #[prop(into)] path: Signal<Option<String>>,
+    #[prop(optional)] hide_name: bool,
+) -> impl IntoView {
     let state = RwSignal::new(Load::Idle);
     let redraw = RwSignal::new(0u32);
     let cx = Ctx {
@@ -328,7 +341,7 @@ pub fn ModelViewport(#[prop(into)] path: Signal<Option<String>>) -> impl IntoVie
         mode: RwSignal::new(Mode::Dots),
         selected: RwSignal::new(None),
         pins: RwSignal::new(Vec::new()),
-        gl_failed: RwSignal::new(false),
+        gl_failed: RwSignal::new(None),
         canvas: NodeRef::new(),
         drag: StoredValue::new(None),
     };
@@ -383,15 +396,15 @@ pub fn ModelViewport(#[prop(into)] path: Signal<Option<String>>) -> impl IntoVie
         let (Some(canvas), Some(model)) = (canvas, model) else {
             return;
         };
-        if cx.gl_failed.get_untracked() {
+        if cx.gl_failed.get_untracked().is_some() {
             return;
         }
         match gpu.try_update_value(|slot| render(slot, &canvas, &model, &orbit, mode)) {
             Some(Frame::Drawn(pins)) => {
                 cx.pins.try_set(pins);
             }
-            Some(Frame::NoWebGl) => {
-                cx.gl_failed.try_set(true);
+            Some(Frame::Failed(problem)) => {
+                cx.gl_failed.try_set(Some(problem));
             }
             None => {}
         }
@@ -401,11 +414,11 @@ pub fn ModelViewport(#[prop(into)] path: Signal<Option<String>>) -> impl IntoVie
         Load::Idle => ().into_any(),
         Load::Loading => view! { <StateText kind=StateKind::Loading message="Model" /> }.into_any(),
         Load::Failed(e) => view! { <StateText kind=StateKind::Error message=e /> }.into_any(),
-        Load::Ready(model) => loaded_view(model, cx).into_any(),
+        Load::Ready(model) => loaded_view(model, cx, hide_name).into_any(),
     }
 }
 
-fn loaded_view(model: Arc<Loaded>, cx: Ctx) -> impl IntoView {
+fn loaded_view(model: Arc<Loaded>, cx: Ctx, hide_name: bool) -> impl IntoView {
     let (min, max) = (model.min, model.max);
     let refit = move || {
         cx.orbit.try_set(Orbit::fit(min, max));
@@ -471,8 +484,8 @@ fn loaded_view(model: Arc<Loaded>, cx: Ctx) -> impl IntoView {
     let count = model.risks.len();
     let pin_model = Arc::clone(&model);
     let stage = move || {
-        if cx.gl_failed.get() {
-            return view! { <StateText kind=StateKind::Error message="3D preview needs WebGL2" /> }
+        if let Some(problem) = cx.gl_failed.get() {
+            return view! { <StateText kind=StateKind::Error message=problem_message(problem) /> }
                 .into_any();
         }
         let pins = pin_model
@@ -546,7 +559,9 @@ fn loaded_view(model: Arc<Loaded>, cx: Ctx) -> impl IntoView {
     view! {
         <section class="vp" data-mode=move || cx.mode.get().key()>
             <header class="vp-head">
-                <span class="nd-label vp-name">{model.name.clone()}</span>
+                {(!hide_name).then(|| view! {
+                    <span class="nd-label vp-name">{model.name.clone()}</span>
+                })}
                 <span class="nd-label vp-meta">{model.meta.clone()}</span>
                 <div class="vp-modes" role="group" aria-label="View">
                     {mode_button(Mode::Dots, "Dots")}
@@ -563,6 +578,18 @@ fn loaded_view(model: Arc<Loaded>, cx: Ctx) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_context_and_a_failed_setup_read_differently() {
+        assert_eq!(
+            problem_message(GlProblem::NoWebGl),
+            "3D preview needs WebGL2"
+        );
+        assert_eq!(
+            problem_message(GlProblem::SetupFailed),
+            "3D preview couldn't start"
+        );
+    }
 
     #[test]
     fn kinds_read_as_plain_words() {

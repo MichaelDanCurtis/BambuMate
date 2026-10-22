@@ -262,7 +262,7 @@ const UNSYNCED_SIGNATURE_PATH =
 // -- model viewport ---------------------------------------------------------
 //
 // A 10 mm cube: its corners as dots, its 12 edges as line segments, and two
-// risks at the same point (the top centre), as `model_view` returns them.
+// risks (the top centre and a top corner), as `model_view` returns them.
 const f32b64 = (arr) => Buffer.from(new Float32Array(arr).buffer).toString("base64");
 const CUBE = [0,0,0, 10,0,0, 10,10,0, 0,10,0, 0,0,10, 10,0,10, 10,10,10, 0,10,10];
 const E = (a, b) => [...CUBE.slice(a * 3, a * 3 + 3), ...CUBE.slice(b * 3, b * 3 + 3)];
@@ -276,7 +276,7 @@ export const MODEL_VIEW = {
   edges: f32b64([0,1, 1,2, 2,3, 3,0, 4,5, 5,6, 6,7, 7,4, 0,4, 1,5, 2,6, 3,7].reduce((acc, _, i, a) => (i % 2 ? acc : [...acc, ...E(a[i], a[i + 1])]), [])),
   risks: [
     { kind: "overhang", position: [5, 5, 10], value: 64, message: "Overhang · 64 mm² steeper than 45° — may need support" },
-    { kind: "tall_thin", position: [5, 5, 10], value: 6, message: "Tall and thin · 6:1 — may wobble; slow down or add support" },
+    { kind: "tall_thin", position: [10, 10, 10], value: 6, message: "Tall and thin · 6:1 — may wobble; slow down or add support" },
   ],
 };
 
