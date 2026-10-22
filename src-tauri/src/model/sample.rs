@@ -118,9 +118,10 @@ mod tests {
             [21., 0., 0.],
             [22., 0., 0.],
         ];
+        // The sliver is in the middle of the index order, between the others.
         let m = Mesh {
             positions,
-            triangles: vec![[0, 1, 2], [3, 4, 5], [6, 7, 8]],
+            triangles: vec![[0, 1, 2], [6, 7, 8], [3, 4, 5]],
         };
         let s = sample_surface(&m, 10_000, 99);
         let mut small = 0;
@@ -142,5 +143,29 @@ mod tests {
         let cube = parse_stl(&cube_stl()).unwrap();
         assert!(sample_surface(&cube, 0, 1).points.is_empty());
         assert_eq!(sample_surface(&cube, usize::MAX, 1).points.len(), MAX_COUNT);
+    }
+
+    #[test]
+    fn small_triangles_still_get_dots_after_a_huge_one() {
+        // One triangle of about 1e7 mm2, then 40,000 of 0.25 mm2 (0.1% of
+        // the area). f32 running totals would round each small area away.
+        let leg = 4472.136;
+        let mut triangles = vec![[0, 1, 2]];
+        triangles.extend((0..40_000).map(|_| [3, 4, 5]));
+        let m = Mesh {
+            positions: vec![
+                [0., 0., 0.],
+                [leg, 0., 0.],
+                [0., leg, 0.],
+                [10_000., 0., 0.],
+                [10_001., 0., 0.],
+                [10_000., 0.5, 0.],
+            ],
+            triangles,
+        };
+        let s = sample_surface(&m, 200_000, 5);
+        let small = s.points.iter().filter(|p| p[0] >= 10_000.0).count();
+        // About 200 expected.
+        assert!((100..=320).contains(&small), "{small}");
     }
 }

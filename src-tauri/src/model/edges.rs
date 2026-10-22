@@ -1,7 +1,7 @@
 //! Feature edges: mesh edges where the surface bends sharply, drawn as
 //! lines over the dots.
 
-use super::mesh::{dot, tri_normal, Mesh, Vec3};
+use super::mesh::{cross, dot, length, sub, tri_normal, Mesh, Vec3};
 
 /// Edges bending at least this many degrees are drawn.
 pub const EDGE_ANGLE_DEG: f32 = 30.0;
@@ -15,7 +15,7 @@ pub const EDGE_CAP: usize = 60_000;
 /// - 1 face (an open boundary) or 3+ faces (non-manifold): maximally sharp
 ///   (180°), so it is always drawn and sorts ahead of real creases.
 /// - 2 faces: the angle between their normals. If either face has no normal
-///   (a zero-area, collinear triangle) there is no dihedral angle, so the
+///   (a zero-area, collinear or sliver triangle) there is no dihedral angle, so the
 ///   edge is not drawn.
 pub fn feature_edges(mesh: &Mesh, min_angle_deg: f32, cap: usize) -> Vec<(Vec3, Vec3)> {
     // One (low vertex, high vertex, face) entry per triangle side, sorted so
@@ -29,13 +29,24 @@ pub fn feature_edges(mesh: &Mesh, min_angle_deg: f32, cap: usize) -> Vec<(Vec3, 
     }
     sides.sort_unstable();
 
+    // A face with (nearly) no area has no meaningful normal: rounding noise
+    // would point it anywhere. That is a cross product shorter than
+    // 1e-6 x the square of its longest side; `has_normal` is then false.
     let normals: Vec<Vec3> = (0..mesh.triangles.len())
         .map(|i| {
             let [a, b, c] = mesh.tri(i);
-            tri_normal(a, b, c)
+            let longest = [sub(b, a), sub(c, b), sub(a, c)]
+                .into_iter()
+                .map(|e| dot(e, e))
+                .fold(0f32, f32::max);
+            if length(cross(sub(b, a), sub(c, a))) <= 1e-6 * longest {
+                [0., 0., 0.]
+            } else {
+                tri_normal(a, b, c)
+            }
         })
         .collect();
-    // `tri_normal` is a unit vector or exactly zero.
+    // Each normal is a unit vector or exactly zero.
     let has_normal = |f: u32| dot(normals[f as usize], normals[f as usize]) > 0.5;
 
     let min_angle = min_angle_deg.to_radians();
@@ -162,6 +173,38 @@ mod tests {
         assert!(unique.len() > 1000);
         assert!(feature < unique.len());
         assert_eq!(feature, 0);
+    }
+
+    #[test]
+    fn imprecise_sphere_poles_do_not_create_edges() {
+        // Rings 0..=rings, so each pole is a ring of coincident vertices.
+        // The south one sits at sin(pi), about -8.7e-8, not exactly 0.
+        let (seg, rings) = (32u32, 16u32);
+        let mut positions = Vec::new();
+        for r in 0..=rings {
+            let phi = std::f32::consts::PI * r as f32 / rings as f32;
+            for s in 0..seg {
+                let th = std::f32::consts::TAU * s as f32 / seg as f32;
+                positions.push([phi.sin() * th.cos(), phi.sin() * th.sin(), phi.cos()]);
+            }
+        }
+        let at = |r: u32, s: u32| r * seg + s % seg;
+        let mut tris = Vec::new();
+        for r in 0..rings {
+            for s in 0..seg {
+                let (a, b, c, d) = (at(r, s), at(r + 1, s), at(r + 1, s + 1), at(r, s + 1));
+                tris.push([a, b, c]);
+                tris.push([a, c, d]);
+            }
+        }
+        // Close each pole's ring with a fan so no edge is left open.
+        for r in [0, rings] {
+            for s in 1..seg - 1 {
+                tris.push([at(r, 0), at(r, s), at(r, s + 1)]);
+            }
+        }
+        let sphere = mesh(&positions, &tris);
+        assert_eq!(feature_edges(&sphere, EDGE_ANGLE_DEG, EDGE_CAP).len(), 0);
     }
 
     #[test]
