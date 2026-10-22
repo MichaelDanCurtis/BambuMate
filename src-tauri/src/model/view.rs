@@ -229,6 +229,51 @@ mod tests {
         assert_eq!(load_model(&p).unwrap().triangles.len(), 12);
     }
 
+    /// A one-triangle 3MF, zipped.
+    fn small_3mf() -> Vec<u8> {
+        use std::io::Write;
+        let model = r#"<?xml version="1.0"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><object id="1" type="model"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="0" y="10" z="0"/></vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object></resources><build><item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 2"/></build></model>"#;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            z.start_file("3D/3dmodel.model", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            z.write_all(model.as_bytes()).unwrap();
+            z.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn load_model_reads_a_temp_3mf_with_any_case() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["part.3mf", "Part.3MF"] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, small_3mf()).unwrap();
+            let open = open_model(&p).unwrap();
+            assert!(!open.is_stl, "{name}");
+            let mesh = open.parse().unwrap();
+            assert_eq!(mesh.triangles.len(), 1, "{name}");
+            assert_eq!(
+                mesh.bounds(),
+                Some(([0., 0., 2.], [10., 10., 2.])),
+                "{name}"
+            );
+            assert_eq!(load_model(&p).unwrap(), mesh, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_damaged_3mf_gives_a_plain_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("broken.3MF");
+        std::fs::write(&p, b"not a zip").unwrap();
+        assert_eq!(
+            load_model(&p).unwrap_err().to_string(),
+            "The 3MF isn't a readable ZIP archive."
+        );
+    }
+
     #[test]
     fn load_model_reports_missing_file_as_io() {
         let dir = tempfile::tempdir().unwrap();
