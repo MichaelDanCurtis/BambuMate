@@ -1119,6 +1119,8 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".slice-page .vp", { timeout: 15000 });
     const risks = await page.locator(".slice-page .vp-risk").count();
     if (risks !== 2) throw new Error(`${risks} risk rows`);
+    // WebKit drops list semantics from an unstyled <ol>; the role restores them.
+    if ((await page.locator(".slice-page .vp-risks").getAttribute("role")) !== "list") throw new Error("the risk list has no list role");
     const asked = (await callsOf("model_view")).at(-1)?.args;
     if (asked?.path !== SLICE_MODEL) throw new Error(`model_view asked for ${JSON.stringify(asked)}`);
     if ((await page.locator(".slice-page .vp-name").count()) !== 0) throw new Error("the viewport repeats the file name");
@@ -1144,6 +1146,16 @@ async function driveApp(browserType, engine, baseUrl) {
         await pins.nth(i).click();
         if ((await page.locator(".slice-page .vp-risk[data-selected]").count()) !== 1) throw new Error(`pin ${i + 1} did not select exactly one row`);
         if ((await page.locator(`.slice-page .vp-risk:nth-child(${i + 1})[data-selected]`).count()) !== 1) throw new Error(`pin ${i + 1} selected the wrong row`);
+        // The selected row says so to assistive tech, and shows it by more than colour.
+        if ((await page.locator('.slice-page .vp-risk[aria-current="true"]').count()) !== 1) throw new Error(`pin ${i + 1}: not exactly one aria-current row`);
+        if ((await page.locator(`.slice-page .vp-risk:nth-child(${i + 1})[aria-current="true"]`).count()) !== 1) throw new Error(`pin ${i + 1}: aria-current on the wrong row`);
+        const cue = (n) => page.locator(`.slice-page .vp-risk:nth-child(${n}) .vp-risk-num`).evaluate((el) => {
+          const s = getComputedStyle(el);
+          return `${s.fontWeight} ${s.textDecorationLine}`;
+        });
+        const [on, off] = [await cue(i + 1), await cue(2 - i)];
+        if (on !== "700 underline") throw new Error(`selected number is "${on}", not bold and underlined`);
+        if (off !== "400 none") throw new Error(`unselected number is "${off}"`);
         for (const j of [0, 1]) {
           const pressed = await pins.nth(j).getAttribute("aria-pressed");
           if (pressed !== (j === i ? "true" : "false")) throw new Error(`pin ${j + 1} aria-pressed=${pressed} with pin ${i + 1} selected`);

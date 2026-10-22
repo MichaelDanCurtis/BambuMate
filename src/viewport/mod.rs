@@ -557,7 +557,9 @@ fn loaded_view(model: Arc<Loaded>, cx: Ctx, hide_name: bool) -> impl IntoView {
             .enumerate()
             .map(|(i, risk)| {
                 view! {
-                    <li class="vp-risk" data-selected=move || (cx.selected.get() == Some(i)).then_some("")>
+                    <li class="vp-risk"
+                        data-selected=move || (cx.selected.get() == Some(i)).then_some("")
+                        aria-current=move || (cx.selected.get() == Some(i)).then_some("true")>
                         <span class="vp-risk-num nd-mono">{risk_number(i)}</span>
                         <span class="nd-label">{kind_label(risk.kind)}</span>
                         <span class="vp-risk-msg">{risk.message.clone()}</span>
@@ -565,7 +567,9 @@ fn loaded_view(model: Arc<Loaded>, cx: Ctx, hide_name: bool) -> impl IntoView {
                 }
             })
             .collect_view();
-        view! { <ol class="vp-risks">{rows}</ol> }.into_any()
+        // The role keeps list semantics: WebKit drops them from an <ol> with
+        // list-style: none.
+        view! { <ol class="vp-risks" role="list">{rows}</ol> }.into_any()
     };
 
     let mode_button = move |mode: Mode, text: &'static str| {

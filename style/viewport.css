@@ -118,8 +118,13 @@
     color: var(--nd-text-secondary);
 }
 
+/* Selection is not shown by colour alone: the number also turns bold and
+   underlined. Space Mono's bold has the same advance, so nothing shifts. */
 .vp-risk[data-selected] .vp-risk-num {
     color: var(--nd-signal);
+    font-weight: 700;
+    text-decoration: underline;
+    text-underline-offset: var(--nd-space-xs);
 }
 
 .vp-risk-msg {
