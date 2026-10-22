@@ -31,7 +31,7 @@ impl SeverityTier {
     }
 }
 
-/// The thresholds `defect_report::severity_label` used before.
+/// The tier thresholds: 0.3, 0.5 and 0.7.
 pub fn severity_tier(severity: f32) -> SeverityTier {
     if severity < 0.3 {
         SeverityTier::Minor

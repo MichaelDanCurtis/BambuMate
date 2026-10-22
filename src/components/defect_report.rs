@@ -32,10 +32,10 @@ pub fn DefectReportDisplay(
 
             // Detected defects (the overall quality is the page hero)
             <div class="defects-section">
+                <h2 class="nd-label">"Defects"</h2>
                 {defect_report.notes.clone().map(|notes| view! {
                     <p class="quality-notes">{notes}</p>
                 })}
-                <h2 class="nd-label">"Defects"</h2>
                 {if defect_report.defects.is_empty() {
                     view! {
                         <StateText kind=StateKind::Empty message="No defects detected" />

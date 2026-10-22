@@ -1380,13 +1380,6 @@ select.input option {
     gap: 16px;
 }
 
-.ai-required-notice h3 {
-    font-size: 20px;
-    font-weight: 600;
-    margin: 0;
-    color: var(--text-primary);
-}
-
 .ai-required-notice p {
     font-size: 14px;
     color: var(--text-muted);

@@ -41,10 +41,11 @@ pub enum StateKind {
     Error,
 }
 
-/// `[LOADING…]`, `[EMPTY]`, `[EMPTY: …]`, `[ERROR]` or `[ERROR: …]`.
+/// `[LOADING…]`, `[LOADING: …]`, `[EMPTY]`, `[EMPTY: …]`, `[ERROR]` or `[ERROR: …]`.
 pub fn state_text(kind: StateKind, message: Option<&str>) -> String {
     match (kind, message) {
-        (StateKind::Loading, _) => "[LOADING…]".into(),
+        (StateKind::Loading, None) => "[LOADING…]".into(),
+        (StateKind::Loading, Some(m)) => format!("[LOADING: {m}]"),
         (StateKind::Empty, None) => "[EMPTY]".into(),
         (StateKind::Empty, Some(m)) => format!("[EMPTY: {m}]"),
         (StateKind::Error, None) => "[ERROR]".into(),
@@ -339,7 +340,7 @@ mod tests {
     #[test]
     fn state_text_is_bracketed() {
         assert_eq!(state_text(StateKind::Loading, None), "[LOADING…]");
-        assert_eq!(state_text(StateKind::Loading, Some("x")), "[LOADING…]");
+        assert_eq!(state_text(StateKind::Loading, Some("x")), "[LOADING: x]");
         assert_eq!(state_text(StateKind::Empty, None), "[EMPTY]");
         assert_eq!(
             state_text(StateKind::Empty, Some("Page not found")),

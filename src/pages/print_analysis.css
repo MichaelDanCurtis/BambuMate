@@ -113,6 +113,14 @@
     padding: 2rem;
 }
 
+/* `.ai-required-notice p` in main.css would otherwise win over `.nd-label`. */
+.ai-required-notice p.nd-label {
+    max-width: none;
+    font-size: 11px;
+    line-height: 1.2;
+    color: var(--nd-text-secondary);
+}
+
 /* Analysis Results */
 .analysis-results {
     width: 100%;
@@ -129,6 +137,10 @@
 
 .an-photo {
     width: 100%;
+    height: auto;
+    max-height: none;
+    object-fit: contain;
+    margin-bottom: 0;
     border-radius: var(--nd-radius-card);
     border: 1px solid var(--nd-border);
 }
