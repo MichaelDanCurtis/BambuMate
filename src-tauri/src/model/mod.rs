@@ -29,8 +29,9 @@ pub enum ModelError {
     Truncated,
     #[error("The 3MF has no printable objects.")]
     NoObjects,
-    #[error("The 3MF couldn't be read: {0}")]
-    Archive(String),
+    /// A plain sentence saying why the 3MF couldn't be read.
+    #[error("{0}")]
+    Archive(&'static str),
     #[error("The model couldn't be read: {0}")]
     Io(String),
 }

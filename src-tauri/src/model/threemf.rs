@@ -16,18 +16,28 @@ const MAX_ENTRIES: usize = 4096;
 const MAX_ENTRY_BYTES: u64 = 1 << 30;
 const MAX_TOTAL_BYTES: u64 = 2 << 30;
 const MAX_DEPTH: usize = 8;
-/// Objects visited while resolving; stops a small file that instances an
-/// empty object millions of times through nested components.
+/// Objects visited while resolving, counting every component reference,
+/// including ones cut off by the depth cap or with a refused path. Stops a
+/// small file that instances an object millions of times through nested
+/// components.
 const MAX_VISITS: usize = 1_000_000;
 
+/// The plain sentences a 3MF failure is shown as. Details go to the log.
+const NOT_A_ZIP: &str = "The 3MF isn't a readable ZIP archive.";
+const TOO_MANY_ENTRIES: &str = "The 3MF has too many files in it to read.";
+const NO_ROOT_MODEL: &str = "The 3MF has no 3D model in it.";
+const DAMAGED: &str = "The 3MF is damaged and couldn't be read.";
+const TOO_LARGE: &str = "The 3MF is too large to read.";
+const TOO_MANY_COMPONENTS: &str = "The 3MF has too many components to read.";
+
 pub fn parse_3mf(bytes: &[u8]) -> Result<Mesh, ModelError> {
-    let zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-        .map_err(|e| ModelError::Archive(format!("not a ZIP ({e})")))?;
+    let zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| {
+        tracing::warn!("3MF is not a ZIP: {e}");
+        ModelError::Archive(NOT_A_ZIP)
+    })?;
     if zip.len() > MAX_ENTRIES {
-        return Err(ModelError::Archive(format!(
-            "{} entries (the limit is {MAX_ENTRIES})",
-            zip.len()
-        )));
+        tracing::warn!("3MF has {} entries (limit {MAX_ENTRIES})", zip.len());
+        return Err(ModelError::Archive(TOO_MANY_ENTRIES));
     }
     let mut ctx = Ctx {
         zip,
@@ -40,7 +50,7 @@ pub fn parse_3mf(bytes: &[u8]) -> Result<Mesh, ModelError> {
     };
     let root = ctx
         .doc(ROOT_MODEL)?
-        .ok_or_else(|| ModelError::Archive(format!("no {ROOT_MODEL}")))?;
+        .ok_or(ModelError::Archive(NO_ROOT_MODEL))?;
     // Translations are in model units too, so the unit scales the whole
     // world position, not just the vertex.
     ctx.unit = root.unit;
@@ -123,19 +133,22 @@ fn read_entry<R: Read + Seek>(
     let entry = match zip.by_name(name) {
         Ok(e) => e,
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
-        Err(e) => return Err(ModelError::Archive(format!("{name}: {e}"))),
+        Err(e) => {
+            tracing::warn!("3MF entry {name}: {e}");
+            return Err(ModelError::Archive(DAMAGED));
+        }
     };
     let limit = MAX_ENTRY_BYTES.min(MAX_TOTAL_BYTES.saturating_sub(*read_bytes));
-    let too_large = || ModelError::Archive("too large".into());
+    let too_large = || ModelError::Archive(TOO_LARGE);
     if entry.size() > limit {
         return Err(too_large());
     }
     // Never trust the declared size: read at most limit + 1 bytes.
     let mut buf = Vec::new();
-    entry
-        .take(limit + 1)
-        .read_to_end(&mut buf)
-        .map_err(|e| ModelError::Archive(format!("{name}: {e}")))?;
+    entry.take(limit + 1).read_to_end(&mut buf).map_err(|e| {
+        tracing::warn!("3MF entry {name}: {e}");
+        ModelError::Archive(DAMAGED)
+    })?;
     if buf.len() as u64 > limit {
         return Err(too_large());
     }
@@ -197,7 +210,8 @@ fn parse_doc(name: &str, bytes: &[u8]) -> Result<Doc, ModelError> {
     let mut triangle_total = 0usize;
     loop {
         let event = reader.read_event().map_err(|e| {
-            ModelError::Archive(format!("{name} at {}: {e}", reader.buffer_position()))
+            tracing::warn!("3MF {name} at {}: {e}", reader.buffer_position());
+            ModelError::Archive(DAMAGED)
         })?;
         let (e, empty) = match event {
             Event::Start(e) => (e, false),
@@ -299,6 +313,17 @@ fn entry_path(path: &str) -> Option<String> {
         .then(|| p.to_string())
 }
 
+impl<R> Ctx<R> {
+    /// Counts one object reference against [`MAX_VISITS`].
+    fn visit(&mut self) -> Result<(), ModelError> {
+        self.visits += 1;
+        if self.visits > MAX_VISITS {
+            return Err(ModelError::Archive(TOO_MANY_COMPONENTS));
+        }
+        Ok(())
+    }
+}
+
 /// Adds object `id` of document `doc_name`, placed by `world`, to the mesh.
 fn resolve<R: Read + Seek>(
     ctx: &mut Ctx<R>,
@@ -307,12 +332,12 @@ fn resolve<R: Read + Seek>(
     world: &Transform,
     depth: usize,
 ) -> Result<(), ModelError> {
+    // Counted before the depth check, so references past the cap still
+    // cost something and a wide object at the deepest level can't loop
+    // for free.
+    ctx.visit()?;
     if depth > MAX_DEPTH {
         return Ok(());
-    }
-    ctx.visits += 1;
-    if ctx.visits > MAX_VISITS {
-        return Err(ModelError::Archive("too many components".into()));
     }
     let Some(doc) = ctx.doc(doc_name)? else {
         return Ok(());
@@ -347,7 +372,11 @@ fn resolve<R: Read + Seek>(
                     None => doc_name.to_string(),
                     Some(p) => match entry_path(p) {
                         Some(p) => p,
-                        None => continue,
+                        None => {
+                            // A refused path is still a reference.
+                            ctx.visit()?;
+                            continue;
+                        }
                     },
                 };
                 let child = compose(&comp.transform, world);
@@ -552,5 +581,82 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(mesh.triangles.len(), 1);
+    }
+
+    /// Objects `d0`…`d7` each hold `branch` components of the next, and
+    /// `d8`, at the depth cap, holds `wide` components whose own resolve
+    /// stops at the depth cap (or whose path is refused). Under 3 KB zipped.
+    fn fan_out(branch: usize, wide: usize, target: &str) -> Vec<u8> {
+        let mut objects = String::from(TRI_OBJECT);
+        for d in 0..MAX_DEPTH {
+            objects.push_str(&format!(r#"<object id="d{d}"><components>"#));
+            for _ in 0..branch {
+                objects.push_str(&format!(r#"<component objectid="d{}"/>"#, d + 1));
+            }
+            objects.push_str("</components></object>");
+        }
+        objects.push_str(&format!(r#"<object id="d{MAX_DEPTH}"><components>"#));
+        for _ in 0..wide {
+            objects.push_str(&format!("<component {target}/>"));
+        }
+        objects.push_str("</components></object>");
+        let root = model("millimeter", &objects, r#"<item objectid="d0"/>"#);
+        archive(&[("3D/3dmodel.model", &root)])
+    }
+
+    #[test]
+    fn component_fan_out_at_the_depth_cap_counts_against_the_visit_cap() {
+        // With 6 components per level, about 336k visits reach d8 and some
+        // 664k visits of d8 fit under the cap. When d8's 200 components
+        // were free, that was about 133M uncounted calls: tens of seconds
+        // here, and hours for a wider d8. Each must count, so the parse
+        // stops after a million and says why.
+        for target in [r#"objectid="d9""#, r#"p:path="/../x.model" objectid="1""#] {
+            let bytes = fan_out(6, 200, target);
+            let start = std::time::Instant::now();
+            let r = parse_3mf(&bytes);
+            let took = start.elapsed();
+            assert_eq!(r, Err(ModelError::Archive(TOO_MANY_COMPONENTS)), "{target}");
+            assert!(
+                took < std::time::Duration::from_millis(900),
+                "{target}: took {took:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_modest_fan_out_is_not_mistaken_for_too_many_components() {
+        // 2 per level and 3 at d8 is about 1,300 references: well under the
+        // cap, so the parse runs to the end. Everything past d8 is cut off
+        // by the depth cap, so nothing is built.
+        assert_eq!(
+            parse_3mf(&fan_out(2, 3, r#"objectid="1""#)),
+            Err(ModelError::NoObjects)
+        );
+    }
+
+    #[test]
+    fn archive_errors_are_plain_sentences() {
+        let msg = |r: Result<Mesh, ModelError>| r.unwrap_err().to_string();
+        let not_zip = msg(parse_3mf(b"not a zip"));
+        let no_root = msg(parse_3mf(&archive(&[("other.txt", "x")])));
+        let bad_xml = msg(parse_3mf(&archive(&[(
+            "3D/3dmodel.model",
+            "<model><resources></object>",
+        )])));
+        assert_eq!(not_zip, NOT_A_ZIP);
+        assert_eq!(no_root, NO_ROOT_MODEL);
+        assert_eq!(bad_xml, DAMAGED);
+        for m in [
+            NOT_A_ZIP,
+            TOO_MANY_ENTRIES,
+            NO_ROOT_MODEL,
+            DAMAGED,
+            TOO_LARGE,
+            TOO_MANY_COMPONENTS,
+        ] {
+            assert!(m.starts_with("The 3MF ") && m.ends_with('.'), "{m}");
+            assert!(!m.contains(':'), "{m}");
+        }
     }
 }
