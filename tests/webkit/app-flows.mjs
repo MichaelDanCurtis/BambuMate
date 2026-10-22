@@ -2806,6 +2806,9 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, wizard, "setup distinguishes analysis providers from agent chat without requesting agent auth", async () => {
     await wizard.goto(baseUrl);
     await wizard.waitForSelector(".wizard-overlay");
+    const counter = (await wizard.locator(".wizard-counter").textContent()).trim();
+    if (counter !== "01 / 05") throw new Error(`counter reads "${counter}"`);
+    if ((await wizard.locator("h1.wizard-question").count()) !== 1) throw new Error("expected one wizard question h1");
     await wizard.click(".wizard-footer .btn-primary");
     await wizard.locator(".wizard-mode-card", { hasText: "Use Analysis AI" }).click();
     await wizard.click(".wizard-footer .btn-primary");

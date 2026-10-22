@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::commands;
+use crate::components::patterns::{SegmentedBar, StateKind, StateText};
 
 /// Provider info for the wizard selection UI.
 struct ProviderInfo {
@@ -433,17 +434,14 @@ pub fn SetupWizard(
         <div class="wizard-overlay">
             <div class="wizard-container">
                 <div class="wizard-header">
-                    <h2>"BambuMate Setup"</h2>
-                    <div class="wizard-steps-indicator">
-                        <span class={move || if step.get() == 0 { "wizard-dot active" } else if step.get() > 0 { "wizard-dot completed" } else { "wizard-dot" }}></span>
-                        <span class="wizard-dot-line"></span>
-                        <span class={move || if step.get() == 1 { "wizard-dot active" } else if step.get() > 1 { "wizard-dot completed" } else { "wizard-dot" }}></span>
-                        <span class="wizard-dot-line"></span>
-                        <span class={move || if step.get() == 2 { "wizard-dot active" } else if step.get() > 2 { "wizard-dot completed" } else { "wizard-dot" }}></span>
-                        <span class="wizard-dot-line"></span>
-                        <span class={move || if step.get() == 3 { "wizard-dot active" } else if step.get() > 3 { "wizard-dot completed" } else { "wizard-dot" }}></span>
-                        <span class="wizard-dot-line"></span>
-                        <span class={move || if step.get() == 4 { "wizard-dot active" } else { "wizard-dot" }}></span>
+                    <p class="nd-label">"BambuMate setup"</p>
+                    <div class="wizard-progress">
+                        <span class="nd-mono wizard-counter">{move || wizard_counter(step.get() as usize, WIZARD_STEPS)}</span>
+                        <SegmentedBar
+                            percent=Signal::derive(move || ((step.get() as u32 + 1) * 100 / WIZARD_STEPS as u32))
+                            total=WIZARD_STEPS as u32
+                            label="Setup progress"
+                        />
                     </div>
                 </div>
 
@@ -451,7 +449,7 @@ pub fn SetupWizard(
                     // Step 0: Welcome + Bambu Studio detection
                     <Show when=move || step.get() == 0>
                         <div class="wizard-step">
-                            <h3>"Welcome to BambuMate"</h3>
+                            <h1 class="wizard-question">"Welcome to BambuMate"</h1>
                             <p class="wizard-description">
                                 "BambuMate helps you optimize your Bambu Studio filament profiles using AI-powered analysis. "
                                 "Let's get you set up in a few quick steps."
@@ -552,7 +550,7 @@ pub fn SetupWizard(
                     // Step 1: AI mode choice
                     <Show when=move || step.get() == 1>
                         <div class="wizard-step">
-                            <h3>"How would you like to find filament specs?"</h3>
+                            <h1 class="wizard-question">"How would you like to find filament specs?"</h1>
                             <p class="wizard-description">
                                 "BambuMate can use an AI model to intelligently extract filament settings "
                                 "and analyze print quality, or it can pull specs directly from manufacturer "
@@ -605,7 +603,7 @@ pub fn SetupWizard(
                     // Step 2: AI Provider selection (was step 1)
                     <Show when=move || step.get() == 2>
                         <div class="wizard-step">
-                            <h3>"Analysis Provider"</h3>
+                            <h1 class="wizard-question">"Analysis Provider"</h1>
                             <p class="wizard-description">
                                 "Choose an API provider or local model server for automatic filament-spec extraction and Print Analysis. "
                                 "Print Analysis also requires a vision-capable model."
@@ -660,7 +658,7 @@ pub fn SetupWizard(
                     <Show when=move || step.get() == 3>
                         <div class="wizard-step">
                             <Show when=move || selected_provider.get() == "local">
-                                <h3>"Local Server Configuration"</h3>
+                                <h1 class="wizard-question">"Local Server Configuration"</h1>
                                 <p class="wizard-description">
                                     "Enter the URL of your local OpenAI-compatible server. "
                                     "This works with LM Studio, Ollama, llama.cpp, and similar tools. "
@@ -685,7 +683,7 @@ pub fn SetupWizard(
                                 </div>
                             </Show>
                             <Show when=move || selected_provider.get() != "local">
-                                <h3>"Enter API Key"</h3>
+                                <h1 class="wizard-question">"Enter API Key"</h1>
                                 <p class="wizard-description">
                                     {move || {
                                         let provider = selected_provider.get();
@@ -744,7 +742,7 @@ pub fn SetupWizard(
                     // Step 4: Model Selection (was step 3)
                     <Show when=move || step.get() == 4>
                         <div class="wizard-step">
-                            <h3>"Select AI Model"</h3>
+                            <h1 class="wizard-question">"Select AI Model"</h1>
                             <p class="wizard-description">
                                 "Choose which model to use for filament analysis and profile generation."
                             </p>
@@ -833,7 +831,7 @@ pub fn SetupWizard(
                     // Error message
                     <Show when=move || !error_msg.get().is_empty()>
                         <div class="wizard-error">
-                            {move || error_msg.get()}
+                            <StateText kind=StateKind::Error message=Signal::derive(move || error_msg.get()) />
                         </div>
                     </Show>
                 </div>
@@ -887,5 +885,24 @@ pub fn SetupWizard(
                 </div>
             </div>
         </div>
+    }
+}
+
+/// Steps in the wizard (0-4).
+const WIZARD_STEPS: usize = 5;
+
+/// `02 / 05` for step index 1.
+fn wizard_counter(step: usize, total: usize) -> String {
+    format!("{:02} / {:02}", step + 1, total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_counter_is_two_digit_and_one_based() {
+        assert_eq!(wizard_counter(0, 5), "01 / 05");
+        assert_eq!(wizard_counter(4, 5), "05 / 05");
     }
 }
