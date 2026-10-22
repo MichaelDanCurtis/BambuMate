@@ -2,7 +2,6 @@
    borders instead of shadows, red only for failures. */
 
 .slice-page { display: grid; gap: var(--nd-space-lg); max-width: 1040px; }
-.slice-page h2 { margin: 0; font-weight: 500; color: var(--nd-text-display); }
 .slice-page section {
     border: 1px solid var(--nd-border-visible);
     background: var(--nd-surface);
@@ -11,7 +10,6 @@
     gap: var(--nd-space-md);
 }
 
-.sl-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--nd-space-md); }
 .sl-version { margin: 0; }
 
 .sl-btn {
@@ -67,8 +65,6 @@
 .sl-job-head { display: flex; justify-content: space-between; align-items: start; gap: var(--nd-space-md); }
 .sl-job-model { margin: 0 0 var(--nd-space-xs); color: var(--nd-text-display); }
 .sl-job-status { margin: 0; color: var(--nd-text-secondary); }
-.sl-progress { height: 4px; background: var(--nd-border); }
-.sl-progress-bar { height: 100%; background: var(--nd-text-display); transition: width 200ms var(--nd-ease); }
 
 .sl-plate-tabs { display: flex; gap: var(--nd-space-xs); }
 .sl-plate-tab {
@@ -86,7 +82,7 @@
 .sl-thumb { aspect-ratio: 1; background: var(--nd-surface-raised); border: 1px solid var(--nd-border); }
 .sl-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .sl-metrics { display: grid; gap: var(--nd-space-md); align-content: start; }
-.sl-hero { margin: 0; font-size: 48px; line-height: 1; color: var(--nd-text-display); }
+.sl-hero { margin: 0; font-size: 56px; }
 .sl-stats { display: flex; gap: var(--nd-space-xl); margin: 0; }
 .sl-stats dd { margin: var(--nd-space-xs) 0 0; font-family: var(--nd-font-mono); color: var(--nd-text-display); }
 .sl-filaments,
@@ -97,16 +93,15 @@
 .sl-warning-warning { border-left-color: var(--nd-warning); }
 .sl-open { justify-self: start; }
 
-.sl-compare-table { width: 100%; border-collapse: collapse; }
-.sl-compare-table th,
-.sl-compare-table td { padding: var(--nd-space-sm); border-bottom: 1px solid var(--nd-border); text-align: left; vertical-align: top; }
+.sl-compare-table td { vertical-align: top; }
 .sl-compare-table td.best { color: var(--nd-success); }
 .sl-col-name { display: block; color: var(--nd-text-display); font-weight: 500; }
 .sl-col-state { display: block; }
 .sl-delta { display: block; font-family: var(--nd-font-mono); font-size: 11px; color: var(--nd-text-secondary); }
 
 .sl-recent ul { list-style: none; margin: 0; padding: 0; }
-.sl-recent h3 { margin: 0; }
+/* .page h2 would otherwise make this a 24px heading. */
+.slice-page .sl-recent h2.nd-label { margin: 0; font-size: 11px; font-weight: 400; color: var(--nd-text-secondary); }
 .sl-recent-row {
     display: grid;
     grid-template-columns: 1fr 1fr auto;

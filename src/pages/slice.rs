@@ -15,6 +15,7 @@ use wasm_bindgen_futures::spawn_local;
 use crate::agent::drawer::AgentShared;
 use crate::agent::types::SliceContext;
 use crate::commands::{self, StlFile};
+use crate::components::patterns::{PageHeader, SegmentedBar};
 use crate::slicer::state::{
     compare_rows, format_cost, format_duration, format_grams, insert_if_absent, keyed_rows,
     remember_choices, status_line, swatch_color, totals, Totals,
@@ -396,8 +397,7 @@ pub fn SlicePage() -> impl IntoView {
 
     view! {
         <div class="page slice-page nd">
-            <header class="sl-head">
-                <h2>"Slice"</h2>
+            <PageHeader title="Slice">
                 <p class="nd-label sl-version">
                     {move || match status.get() {
                         Some(s) if s.supported => format!("Bambu Studio {}", s.version.unwrap_or_default()),
@@ -405,7 +405,7 @@ pub fn SlicePage() -> impl IntoView {
                         None => "Checking Bambu Studio…".to_string(),
                     }}
                 </p>
-            </header>
+            </PageHeader>
 
             {move || status.get().and_then(|s| s.message).map(|m| view! {
                 <p class="sl-error sl-status-error">{m}</p>
@@ -518,7 +518,7 @@ pub fn SlicePage() -> impl IntoView {
             {move || selected.get().map(|id| view! { <JobCard id=id selected=selected plate_selection=plate_selection /> })}
 
             <section class="sl-recent">
-                <h3 class="nd-label">"Recent"</h3>
+                <h2 class="nd-label">"Recent"</h2>
                 <ul>
                     <For each=move || recent_ids.get() key=|id| *id let:id>
                         <RecentRow id=id selected=selected />
@@ -655,7 +655,7 @@ fn JobCard(
             </header>
             <p class="nd-mono sl-job-status">{move || job.with(|j| j.as_ref().map(status_line).unwrap_or_else(|| "This job is no longer available.".into()))}</p>
             <Show when=move || running.get()>
-                <div class="sl-progress"><div class="sl-progress-bar" style:width=move || format!("{}%", percent())></div></div>
+                <SegmentedBar percent=Signal::derive(move || u32::from(percent())) total=12 label="Slicing progress" />
             </Show>
             {move || match phase.get() {
                 Phase::Failed(message) => view! { <p class="sl-error sl-job-error">{message}</p> }.into_any(),
@@ -794,7 +794,7 @@ fn ResultView(
                     {move || thumb.get().map(|src| view! { <img src=src alt="Plate preview" /> })}
                 </div>
                 <div class="sl-metrics">
-                    <p class="sl-hero nd-mono">{field(|p| format_duration(p.time_seconds))}</p>
+                    <p class="sl-hero nd-display">{field(|p| format_duration(p.time_seconds))}</p>
                     <dl class="sl-stats">
                         <div><dt class="nd-label">"Weight"</dt><dd class="sl-weight">{field(|p| format_grams(p.weight_g))}</dd></div>
                         <div><dt class="nd-label">"Cost"</dt><dd class="sl-cost">{field(|p| p.cost.map(format_cost).unwrap_or_else(|| "—".into()))}</dd></div>
@@ -857,7 +857,7 @@ fn CompareTable(ids: Signal<Vec<u64>>) -> impl IntoView {
     let rows = Memo::new(move |_| columns.with(|c| compare_rows(c)));
     view! {
         <section class="sl-compare">
-            <table class="sl-compare-table">
+            <table class="nd-table sl-compare-table">
                 <thead>
                     <tr>
                         <th></th>

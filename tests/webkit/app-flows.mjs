@@ -960,6 +960,8 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click('a[href="/slice"]');
     await page.waitForSelector(".slice-page.nd", { timeout: 15000 });
     await page.waitForFunction(() => document.querySelector(".sl-version")?.innerText.includes("02.08.02.61"), null, { timeout: 10000 });
+    const title = (await page.locator(".slice-page h1.nd-page-title").textContent()).trim();
+    if (title !== "Slice") throw new Error(`Slice page title was "${title}"`);
   });
 
   await step(run, page, "preset pickers load for the default printer", async () => {
