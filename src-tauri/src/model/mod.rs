@@ -2,7 +2,9 @@
 //! they may print badly (spec 2026-10-22). Read-only: files are never
 //! written.
 
+pub mod edges;
 pub mod mesh;
+pub mod sample;
 pub mod stl;
 pub mod threemf;
 

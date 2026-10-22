@@ -122,8 +122,7 @@ pub(crate) mod tests_support {
         out
     }
 
-    /// The unit cube as a binary STL file (used by later model tests).
-    #[allow(dead_code)]
+    /// The unit cube as a binary STL file.
     pub(crate) fn cube_stl() -> Vec<u8> {
         binary_stl(&cube_tris())
     }
