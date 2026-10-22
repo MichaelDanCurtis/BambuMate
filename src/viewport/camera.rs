@@ -31,10 +31,12 @@ impl Orbit {
     /// this holds; a narrower canvas would clip the sides.
     ///
     /// Degenerate boxes (a point, a line) still give a finite camera.
-    /// Non-finite bounds give a default orbit around a 256 mm cube.
+    /// Non-finite bounds, and finite ones so huge the maths overflows (about
+    /// 1e19 and up), give a default orbit around a 256 mm cube.
     pub fn fit(min: [f32; 3], max: [f32; 3]) -> Orbit {
+        let fallback = || Orbit::fit([0.0; 3], [256.0; 3]);
         if !min.iter().chain(max.iter()).all(|v| v.is_finite()) {
-            return Orbit::fit([0.0; 3], [256.0; 3]);
+            return fallback();
         }
         let target = [
             (min[0] + max[0]) * 0.5,
@@ -45,10 +47,16 @@ impl Orbit {
         let dy = max[1] - min[1];
         let dz = max[2] - min[2];
         let radius = ((dx * dx + dy * dy + dz * dz).sqrt() * 0.5).max(0.001);
+        let distance = radius / (FOV * 0.5).sin() / FILL;
+        // The far plane is distance + 4 radius, so that must be finite too.
+        let far = distance + 4.0 * radius;
+        if !(target.iter().all(|v| v.is_finite()) && far.is_finite()) {
+            return fallback();
+        }
         Orbit {
             yaw: (-45f32).to_radians(),
             pitch: 30f32.to_radians(),
-            distance: radius / (FOV * 0.5).sin() / FILL,
+            distance,
             target,
             radius,
         }
@@ -350,6 +358,25 @@ mod tests {
             let (x, y) = o.project(o.target, ASPECT_W, ASPECT_H).unwrap();
             assert!((x - 200.0).abs() < 0.5 && (y - 150.0).abs() < 0.5);
         }
+    }
+
+    #[test]
+    fn huge_finite_bounds_give_the_default_too() {
+        let default = Orbit::fit([0.; 3], [256.; 3]);
+        for (min, max) in [
+            ([-1e30; 3], [1e30; 3]),
+            ([0.; 3], [1e20, 0., 0.]),
+            ([3e38; 3], [3.4e38; 3]),
+            ([-3.4e38, 0., 0.], [3.4e38, 1., 1.]),
+        ] {
+            let o = Orbit::fit(min, max);
+            assert_eq!(o, default, "{min:?}..{max:?}");
+            assert!(o.view_proj(1.5).iter().all(|v| v.is_finite()));
+        }
+        // Large but sane bounds are still framed as given.
+        let big = Orbit::fit([0.; 3], [1e6; 3]);
+        assert_eq!(big.target, [5e5; 3]);
+        assert!(big.view_proj(1.5).iter().all(|v| v.is_finite()));
     }
 
     #[test]
