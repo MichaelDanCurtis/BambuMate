@@ -41,6 +41,9 @@
 }
 .sl-drop-over { border-color: var(--nd-interactive); }
 .sl-model { margin: 0; font-family: var(--nd-font-mono); color: var(--nd-text-display); }
+/* The viewport sits in the drop zone's centred grid. Its canvas is 4:3, so
+   the width is capped to keep the drop zone from growing taller than a screen. */
+.sl-drop .vp { width: min(100%, 35rem); text-align: left; }
 .sl-drop-actions { display: flex; flex-wrap: wrap; gap: var(--nd-space-sm); align-items: center; }
 
 .sl-presets,

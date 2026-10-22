@@ -25,6 +25,7 @@ use crate::slicer::types::{
     FILES_CLEARED_KIND,
 };
 use crate::slicer::{bridge, SlicerShared};
+use crate::viewport::ModelViewport;
 
 /// Up to three filaments next to the main one: four columns at most.
 const MAX_EXTRA: usize = 3;
@@ -428,6 +429,7 @@ pub fn SlicePage() -> impl IntoView {
                             None => "Drop an STL or 3MF here".to_string(),
                         }}
                     </p>
+                    <ModelViewport path=Signal::derive(move || model.get()) />
                     <div class="sl-drop-actions">
                         <button class="sl-btn sl-browse" on:click=browse>"Choose file"</button>
                         <Show when=move || !watched.with(Vec::is_empty)>

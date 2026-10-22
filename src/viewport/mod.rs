@@ -317,104 +317,91 @@ struct Ctx {
     drag: StoredValue<Option<(i32, i32, i32)>>,
 }
 
-// Slice (plan Task 8) and Analyze (Task 9) mount the component. Until then it,
-// and the props struct `#[component]` generates, are the only unused items;
-// everything else here is reached from it. Drop both allows once it is mounted.
-#[allow(unused_imports)]
-pub use component::ModelViewport;
+/// A 3D view of the model at `path`, with its geometry risks. Renders nothing
+/// while `path` is `None`.
+#[component]
+pub fn ModelViewport(#[prop(into)] path: Signal<Option<String>>) -> impl IntoView {
+    let state = RwSignal::new(Load::Idle);
+    let redraw = RwSignal::new(0u32);
+    let cx = Ctx {
+        orbit: RwSignal::new(Orbit::fit([0.0; 3], [1.0; 3])),
+        mode: RwSignal::new(Mode::Dots),
+        selected: RwSignal::new(None),
+        pins: RwSignal::new(Vec::new()),
+        gl_failed: RwSignal::new(false),
+        canvas: NodeRef::new(),
+        drag: StoredValue::new(None),
+    };
+    let gpu = StoredValue::new_local(None::<Gpu>);
+    // Bumped per path, so a slow load for an old path cannot land late.
+    let generation = StoredValue::new(0u64);
 
-#[allow(dead_code)]
-mod component {
-    use super::*;
+    let hooks = StoredValue::new_local(Some(PageHooks::new(redraw)));
+    on_cleanup(move || {
+        hooks.try_update_value(|h| h.take());
+    });
 
-    /// A 3D view of the model at `path`, with its geometry risks. Renders nothing
-    /// while `path` is `None`.
-    #[component]
-    pub fn ModelViewport(#[prop(into)] path: Signal<Option<String>>) -> impl IntoView {
-        let state = RwSignal::new(Load::Idle);
-        let redraw = RwSignal::new(0u32);
-        let cx = Ctx {
-            orbit: RwSignal::new(Orbit::fit([0.0; 3], [1.0; 3])),
-            mode: RwSignal::new(Mode::Dots),
-            selected: RwSignal::new(None),
-            pins: RwSignal::new(Vec::new()),
-            gl_failed: RwSignal::new(false),
-            canvas: NodeRef::new(),
-            drag: StoredValue::new(None),
+    Effect::new(move |_| {
+        let path = path.get();
+        let this = generation.get_value().wrapping_add(1);
+        generation.set_value(this);
+        let Some(path) = path else {
+            state.set(Load::Idle);
+            return;
         };
-        let gpu = StoredValue::new_local(None::<Gpu>);
-        // Bumped per path, so a slow load for an old path cannot land late.
-        let generation = StoredValue::new(0u64);
-
-        let hooks = StoredValue::new_local(Some(PageHooks::new(redraw)));
-        on_cleanup(move || {
-            hooks.try_update_value(|h| h.take());
-        });
-
-        Effect::new(move |_| {
-            let path = path.get();
-            let this = generation.get_value().wrapping_add(1);
-            generation.set_value(this);
-            let Some(path) = path else {
-                state.set(Load::Idle);
-                return;
-            };
-            state.set(Load::Loading);
-            spawn_local(async move {
-                let result = types::load_view(&path).await.and_then(Loaded::from_view);
-                // A newer path (or an unmount) wins.
-                if generation.try_get_value() != Some(this) {
-                    return;
-                }
-                match result {
-                    Ok(model) => {
-                        cx.orbit.try_set(Orbit::fit(model.min, model.max));
-                        cx.selected.try_set(None);
-                        cx.pins.try_set(Vec::new());
-                        state.try_set(Load::Ready(Arc::new(model)));
-                    }
-                    Err(e) => {
-                        state.try_set(Load::Failed(e));
-                    }
-                }
-            });
-        });
-
-        // Draw whenever the canvas, model, camera, mode, size or theme changes.
-        Effect::new(move |_| {
-            let canvas = cx.canvas.get();
-            let model = state.with(|s| match s {
-                Load::Ready(m) => Some(Arc::clone(m)),
-                _ => None,
-            });
-            let orbit = cx.orbit.get();
-            let mode = cx.mode.get();
-            redraw.track();
-            let (Some(canvas), Some(model)) = (canvas, model) else {
-                return;
-            };
-            if cx.gl_failed.get_untracked() {
+        state.set(Load::Loading);
+        spawn_local(async move {
+            let result = types::load_view(&path).await.and_then(Loaded::from_view);
+            // A newer path (or an unmount) wins.
+            if generation.try_get_value() != Some(this) {
                 return;
             }
-            match gpu.try_update_value(|slot| render(slot, &canvas, &model, &orbit, mode)) {
-                Some(Frame::Drawn(pins)) => {
-                    cx.pins.try_set(pins);
+            match result {
+                Ok(model) => {
+                    cx.orbit.try_set(Orbit::fit(model.min, model.max));
+                    cx.selected.try_set(None);
+                    cx.pins.try_set(Vec::new());
+                    state.try_set(Load::Ready(Arc::new(model)));
                 }
-                Some(Frame::NoWebGl) => {
-                    cx.gl_failed.try_set(true);
+                Err(e) => {
+                    state.try_set(Load::Failed(e));
                 }
-                None => {}
             }
         });
+    });
 
-        move || match state.get() {
-            Load::Idle => ().into_any(),
-            Load::Loading => {
-                view! { <StateText kind=StateKind::Loading message="Model" /> }.into_any()
-            }
-            Load::Failed(e) => view! { <StateText kind=StateKind::Error message=e /> }.into_any(),
-            Load::Ready(model) => loaded_view(model, cx).into_any(),
+    // Draw whenever the canvas, model, camera, mode, size or theme changes.
+    Effect::new(move |_| {
+        let canvas = cx.canvas.get();
+        let model = state.with(|s| match s {
+            Load::Ready(m) => Some(Arc::clone(m)),
+            _ => None,
+        });
+        let orbit = cx.orbit.get();
+        let mode = cx.mode.get();
+        redraw.track();
+        let (Some(canvas), Some(model)) = (canvas, model) else {
+            return;
+        };
+        if cx.gl_failed.get_untracked() {
+            return;
         }
+        match gpu.try_update_value(|slot| render(slot, &canvas, &model, &orbit, mode)) {
+            Some(Frame::Drawn(pins)) => {
+                cx.pins.try_set(pins);
+            }
+            Some(Frame::NoWebGl) => {
+                cx.gl_failed.try_set(true);
+            }
+            None => {}
+        }
+    });
+
+    move || match state.get() {
+        Load::Idle => ().into_any(),
+        Load::Loading => view! { <StateText kind=StateKind::Loading message="Model" /> }.into_any(),
+        Load::Failed(e) => view! { <StateText kind=StateKind::Error message=e /> }.into_any(),
+        Load::Ready(model) => loaded_view(model, cx).into_any(),
     }
 }
 

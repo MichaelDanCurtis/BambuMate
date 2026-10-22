@@ -990,6 +990,63 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_set_settings"), null, { timeout: 5000 });
   });
 
+  await step(run, page, "the model shows as a 3D view with its risks", async () => {
+    await page.waitForSelector(".slice-page .vp", { timeout: 15000 });
+    const risks = await page.locator(".slice-page .vp-risk").count();
+    if (risks !== 2) throw new Error(`${risks} risk rows`);
+    const hasCanvas = (await page.locator(".slice-page .vp-canvas").count()) === 1;
+    const fallback = (await page.locator(".slice-page .vp .nd-state").allTextContents()).some((t) => t.includes("WebGL2"));
+    if (!hasCanvas && !fallback) throw new Error("neither a canvas nor the WebGL2 fallback");
+    if (hasCanvas) {
+      const pins = await page.locator(".slice-page .vp-pin").count();
+      if (pins !== 2) throw new Error(`${pins} pins`);
+      await page.locator(".slice-page .vp-pin").first().click();
+      if ((await page.locator('.slice-page .vp-risk[data-selected]').count()) !== 1) throw new Error("pin did not select its row");
+      const yaw0 = await page.locator(".slice-page .vp-canvas").getAttribute("data-yaw");
+      await page.locator(".slice-page .vp-canvas").focus();
+      await page.keyboard.press("ArrowRight");
+      const yaw1 = await page.locator(".slice-page .vp-canvas").getAttribute("data-yaw");
+      if (yaw0 === yaw1) throw new Error("arrow key did not rotate");
+    }
+    await page.click('.slice-page .vp-mode:has-text("Wireframe")');
+    if ((await page.locator(".slice-page .vp").getAttribute("data-mode")) !== "wireframe") throw new Error("mode did not switch");
+    return hasCanvas ? "webgl" : "fallback";
+  });
+
+  await step(run, page, "the 3D view leaves the drop zone and the file picker alone", async () => {
+    const canvas = page.locator(".slice-page .vp-canvas");
+    if ((await canvas.count()) === 1) {
+      const picks = (await callsOf("slicer_pick_model")).length;
+      const box = await canvas.boundingBox();
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      const yaw0 = await canvas.getAttribute("data-yaw");
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx + 40, cy + 10, { steps: 5 });
+      if ((await page.locator(".sl-drop.sl-drop-over").count()) !== 0) throw new Error("rotating lit the drop zone");
+      await page.mouse.up();
+      if ((await page.locator(".sl-drop.sl-drop-over").count()) !== 0) throw new Error("the drop zone stayed lit after rotating");
+      if ((await canvas.getAttribute("data-yaw")) === yaw0) throw new Error("dragging did not rotate");
+      await page.locator(".slice-page .vp-pin").first().click();
+      await page.click('.slice-page .vp-mode:has-text("Dots")');
+      if ((await callsOf("slicer_pick_model")).length !== picks) throw new Error("the view opened the file picker");
+      // A file dragged over, then dropped on, the canvas still reaches the drop zone.
+      await canvas.dispatchEvent("dragover");
+      if ((await page.locator(".sl-drop.sl-drop-over").count()) !== 1) throw new Error("dragover on the canvas did not light the drop zone");
+      await canvas.dispatchEvent("dragleave");
+      const staged = (await callsOf("slicer_stage_model")).length;
+      const dropped = await page.evaluateHandle(() => {
+        const dt = new DataTransfer();
+        dt.items.add(new File(["solid cube"], "cube.stl", { type: "model/stl" }));
+        return dt;
+      });
+      await canvas.dispatchEvent("drop", { dataTransfer: dropped });
+      await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "slicer_stage_model").length > n, staged, { timeout: 5000 });
+      await page.waitForSelector(".slice-page .vp-canvas", { timeout: 15000 });
+    }
+  });
+
   await step(run, page, "progress shows and Cancel reaches the backend", async () => {
     await emitJob(running(1, 50));
     await page.waitForFunction(() => document.querySelector(".sl-job-status")?.innerText === "Plate 1 · Generating walls · 50%", null, { timeout: 5000 });
