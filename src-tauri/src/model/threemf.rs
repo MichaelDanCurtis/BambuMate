@@ -12,7 +12,7 @@ use std::rc::Rc;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
-use super::mesh::{apply, compose, scale, Mesh, Transform, Vec3, Welder, IDENTITY};
+use super::mesh::{apply, compose, Mesh, Transform, Vec3, Welder, IDENTITY};
 use super::{ModelError, MAX_TRIANGLES};
 
 const ROOT_MODEL: &str = "3D/3dmodel.model";
@@ -94,14 +94,10 @@ fn parse_with(bytes: &[u8], limits: Limits) -> Result<Mesh, ModelError> {
         welder: Welder::default(),
         attempted: 0,
         visits: 0,
-        unit: 1.0,
     };
     let root = ctx
         .doc(ROOT_MODEL)?
         .ok_or(ModelError::Archive(NO_ROOT_MODEL))?;
-    // Translations are in model units too, so the unit scales the whole
-    // world position, not just the vertex.
-    ctx.unit = root.unit;
     for item in &root.build {
         resolve(&mut ctx, ROOT_MODEL, &item.objectid, &item.transform, 0)?;
     }
@@ -111,10 +107,11 @@ fn parse_with(bytes: &[u8], limits: Limits) -> Result<Mesh, ModelError> {
     Ok(ctx.welder.finish())
 }
 
-/// One model document.
+/// One model document, already in millimetres: its vertices and the
+/// translations of its transforms are scaled by its own `unit` as it is
+/// parsed.
 #[derive(Debug, Default)]
 struct Doc {
-    unit: f32,
     objects: HashMap<String, Object>,
     /// Objects whose `type` isn't `model` (support, surface, other…); they
     /// are not part of the printed shape.
@@ -154,7 +151,6 @@ struct Ctx<R> {
     /// Triangles offered to the welder, including ones it drops.
     attempted: usize,
     visits: usize,
-    unit: f32,
 }
 
 impl<R: Read + Seek> Ctx<R> {
@@ -287,8 +283,10 @@ fn num<T: std::str::FromStr>(e: &BytesStart, local: &str) -> Option<T> {
     attr(e, local).and_then(|v| v.trim().parse().ok())
 }
 
-/// "m00 m01 … m32"; missing or malformed counts as the identity.
-fn transform(e: &BytesStart) -> Transform {
+/// "m00 m01 … m32"; missing or malformed counts as the identity. The
+/// translation is in the document's unit, so `unit` scales it to
+/// millimetres. The rotation and scale part has no unit.
+fn transform(e: &BytesStart, unit: f32) -> Transform {
     let Some(text) = attr(e, "transform") else {
         return IDENTITY;
     };
@@ -296,7 +294,11 @@ fn transform(e: &BytesStart) -> Transform {
         .split_ascii_whitespace()
         .map_while(|t| t.parse().ok())
         .collect();
-    vals.try_into().unwrap_or(IDENTITY)
+    let mut t: Transform = vals.try_into().unwrap_or(IDENTITY);
+    for v in &mut t[9..] {
+        *v *= unit;
+    }
+    t
 }
 
 /// Counts one kept item against `cap`.
@@ -322,10 +324,9 @@ fn parse_doc<R: Read>(
 ) -> Result<Doc, ModelError> {
     let mut reader = Reader::from_reader(BufReader::new(source));
     reader.config_mut().trim_text(true);
-    let mut doc = Doc {
-        unit: 1.0,
-        ..Doc::default()
-    };
+    let mut doc = Doc::default();
+    // Millimetres per model unit, from the root <model> element.
+    let mut unit = 1.0;
     let too_large = |_| ModelError::Archive(TOO_LARGE);
     let too_many = |_| ModelError::Archive(TOO_MANY_COMPONENTS);
     // The object being read, and whether we are inside <build>.
@@ -361,7 +362,7 @@ fn parse_doc<R: Read>(
             _ => continue,
         };
         match e.local_name().as_ref() {
-            "model" => doc.unit = unit_scale(attr(&e, "unit").as_deref()),
+            "model" => unit = unit_scale(attr(&e, "unit").as_deref()),
             "object" if !empty => {
                 current = attr(&e, "id").map(|id| (id, Object::Components(Vec::new())));
                 if let Some((id, _)) = &current {
@@ -389,7 +390,7 @@ fn parse_doc<R: Read>(
                     spend(&mut budget.vertices, limits.parsed, too_large)?;
                     // An unreadable vertex keeps its index but is NaN, so
                     // the welder drops the triangles that use it.
-                    let c = |k| num::<f32>(&e, k).unwrap_or(f32::NAN);
+                    let c = |k| num::<f32>(&e, k).unwrap_or(f32::NAN) * unit;
                     vertices.push([c("x"), c("y"), c("z")]);
                 }
             }
@@ -414,7 +415,7 @@ fn parse_doc<R: Read>(
                         list.push(Component {
                             objectid,
                             path: attr(&e, "path"),
-                            transform: transform(&e),
+                            transform: transform(&e, unit),
                         });
                     }
                 }
@@ -429,7 +430,7 @@ fn parse_doc<R: Read>(
                     spend(&mut budget.records, limits.records, too_many)?;
                     doc.build.push(Item {
                         objectid,
-                        transform: transform(&e),
+                        transform: transform(&e, unit),
                     });
                 }
             }
@@ -459,6 +460,7 @@ impl<R> Ctx<R> {
 }
 
 /// Adds object `id` of document `doc_name`, placed by `world`, to the mesh.
+/// Everything is in millimetres already, so transforms just compose.
 fn resolve<R: Read + Seek>(
     ctx: &mut Ctx<R>,
     doc_name: &str,
@@ -489,11 +491,7 @@ fn resolve<R: Read + Seek>(
                 return Err(ModelError::TooManyTriangles(n));
             }
             ctx.attempted = n;
-            let place = |i: u32| {
-                vertices
-                    .get(i as usize)
-                    .map(|&v| scale(apply(world, v), ctx.unit))
-            };
+            let place = |i: u32| vertices.get(i as usize).map(|&v| apply(world, v));
             for &[a, b, c] in triangles {
                 if let (Some(a), Some(b), Some(c)) = (place(a), place(b), place(c)) {
                     ctx.welder.push_triangle(a, b, c);
@@ -589,6 +587,56 @@ mod tests {
         let mesh = parse_3mf(&archive(&[("3D/3dmodel.model", &m)])).unwrap();
         let (_, hi) = mesh.bounds().unwrap();
         assert!((hi[0] - 25.4).abs() < 1e-4);
+    }
+
+    fn assert_bounds(mesh: &Mesh, lo: Vec3, hi: Vec3) {
+        let (got_lo, got_hi) = mesh.bounds().unwrap();
+        for (got, want) in got_lo.iter().chain(&got_hi).zip(lo.iter().chain(&hi)) {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "bounds {got_lo:?}..{got_hi:?}, want {lo:?}..{hi:?}"
+            );
+        }
+    }
+
+    /// A root in `root_unit` whose object 2 places object 1 of
+    /// `part.model` (in `part_unit`), with a translation at each level.
+    fn units_across_documents(root_unit: &str, part_unit: &str) -> Mesh {
+        let root = model(
+            root_unit,
+            r#"<object id="2"><components><component p:path="/3D/Objects/part.model" objectid="1" transform="1 0 0 0 1 0 0 0 1 1 0 0"/></components></object>"#,
+            r#"<item objectid="2" transform="1 0 0 0 1 0 0 0 1 0 2 0"/>"#,
+        );
+        // Object 1 places mesh 3 one unit along x, in the part's own unit.
+        let part = model(
+            part_unit,
+            &format!(
+                r#"<object id="1"><components><component objectid="3" transform="1 0 0 0 1 0 0 0 1 1 0 0"/></components></object>{}"#,
+                TRI_OBJECT.replace(r#"id="1""#, r#"id="3""#)
+            ),
+            "",
+        );
+        parse_3mf(&archive(&[
+            ("3D/3dmodel.model", &root),
+            ("3D/Objects/part.model", &part),
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_inch_component_document_under_a_millimetre_root() {
+        // The part's mesh and its own translation are in inches; the root's
+        // component and build translations are in millimetres.
+        let mesh = units_across_documents("millimeter", "inch");
+        // x: 0..25.4, then +25.4 (part), +1 (component); y: 0..25.4, +2.
+        assert_bounds(&mesh, [26.4, 2., 0.], [51.8, 27.4, 0.]);
+    }
+
+    #[test]
+    fn a_centimetre_root_referencing_a_millimetre_document() {
+        let mesh = units_across_documents("centimeter", "millimeter");
+        // x: 0..1, then +1 (part), +10 (component); y: 0..1, +20.
+        assert_bounds(&mesh, [11., 20., 0.], [12., 21., 0.]);
     }
 
     #[test]
