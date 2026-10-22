@@ -48,7 +48,7 @@ Show the model the user is working with as an interactive 3D view in the Nothing
 - **`sample.rs`.** Picks area-weighted random points on the surface with a fixed-seed xorshift, so results are deterministic. The default is 40,000 points. It also outputs the face normal of each sampled triangle.
 - **`edges.rs`.** Finds feature edges: an edge is kept where the angle between its two faces is above 30°, or where only one face uses it. The output is capped at 60,000 segments, keeping the sharpest first.
 - **`risks.rs`.** Three checks, each returning `Risk { kind, position: [f32; 3], value, message }`:
-  1. **Overhang.** A face is an overhang when its outward normal points more than 45° below horizontal (`n.z < -0.7071`), and it isn't resting on the bed. A face rests on the bed when every vertex is within 0.3 mm of the model's minimum Z, so a steep face rising from the bed (an inverted pyramid) still counts.
+  1. **Overhang.** A face is an overhang when its outward normal points more than 45° below horizontal (`n.z < -0.7071 - 0.002`, a small margin so an exact 45° face isn't flagged), and it isn't resting on the bed. A face rests on the bed when every vertex is within 0.3 mm of the model's minimum Z, so a steep face rising from the bed (an inverted pyramid) still counts.
      - Faces that share an edge are grouped into regions. A region counts when its area is at least 4 mm².
      - The pin goes at the region's area-weighted centroid.
      - Message: "Overhang · N mm² steeper than 45° — may need support".
