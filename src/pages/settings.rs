@@ -161,11 +161,19 @@ pub fn SettingsPage() -> impl IntoView {
             }
             match commands::set_preference("bambu_studio_path", &path).await {
                 Ok(()) => {
-                    if path_valid.get_untracked() {
+                    // The page may have unmounted during the awaits above;
+                    // reading a disposed signal panics, so bail out instead.
+                    let Some(valid) = path_valid.try_get_untracked() else {
+                        return;
+                    };
+                    if valid {
                         set_path_status.set(Some("Path saved and validated".to_string()));
                     } else {
                         // Keep the warning from validation
-                        let existing = path_status.get_untracked().unwrap_or_default();
+                        let Some(existing) = path_status.try_get_untracked() else {
+                            return;
+                        };
+                        let existing = existing.unwrap_or_default();
                         if existing.is_empty() {
                             set_path_status.set(Some("Path saved".to_string()));
                         }
@@ -285,7 +293,10 @@ pub fn SettingsPage() -> impl IntoView {
                     set_catalog_recommended.set(response.recommended_id);
                     set_models.set(response.models);
                     set_models_loading.set(false);
-                    let selected_model = ai_model.get_untracked();
+                    // Unmounted during the awaits above: reading would panic.
+                    let Some(selected_model) = ai_model.try_get_untracked() else {
+                        return;
+                    };
                     if !selected_model.is_empty() {
                         set_model_checking.set(true);
                         set_model_status.set(Some("Checking model compatibility...".to_string()));

@@ -304,6 +304,11 @@ pub fn SetupWizard(
                             }
                         }
                     }
+                    // `load_models` reads signals; if the wizard unmounted while
+                    // the key was saving, reading a disposed signal would panic.
+                    if step.try_get_untracked().is_none() {
+                        return;
+                    }
                     step.set(current + 1);
                     load_models();
                 });
