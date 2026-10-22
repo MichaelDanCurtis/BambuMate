@@ -49,6 +49,10 @@ impl ViewCache {
 
 static CACHE: OnceLock<Mutex<ViewCache>> = OnceLock::new();
 
+fn new_cache() -> Mutex<ViewCache> {
+    Mutex::new(ViewCache::new(CACHE_SIZE))
+}
+
 fn lock(cache: &Mutex<ViewCache>) -> MutexGuard<'_, ViewCache> {
     cache.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -61,36 +65,38 @@ fn key_for(path: &Path, open: &OpenModel) -> Option<Key> {
 }
 
 /// The view for `path`: from `cache` when the file is unchanged, otherwise
-/// from `build`. The lock is never held while `build` runs, and only
-/// successes are cached.
+/// from `build`, which says whether its result may be cached (false when the
+/// file changed while it was being read). The lock is never held while
+/// `build` runs, and only cacheable successes are stored.
 fn cached_view(
     path: &Path,
     cache: &Mutex<ViewCache>,
-    build: impl FnOnce(OpenModel) -> Result<ModelView, ModelError>,
+    open: impl FnOnce(&Path) -> Result<OpenModel, ModelError>,
+    build: impl FnOnce(OpenModel) -> Result<(ModelView, bool), ModelError>,
 ) -> Result<ModelView, ModelError> {
-    let open = open_model(path)?;
+    let open = open(path)?;
     let key = key_for(path, &open);
     if let Some(key) = &key {
         if let Some(view) = lock(cache).get(key) {
             return Ok(view);
         }
     }
-    let view = build(open)?;
-    if let Some(key) = key {
+    let (view, cacheable) = build(open)?;
+    if let (Some(key), true) = (key, cacheable) {
         lock(cache).put(key, view.clone());
     }
     Ok(view)
 }
 
 fn model_view_blocking(path: &Path) -> Result<ModelView, ModelError> {
-    let cache = CACHE.get_or_init(|| Mutex::new(ViewCache::new(CACHE_SIZE)));
-    cached_view(path, cache, |open| {
-        let mesh = open.parse()?;
+    let cache = CACHE.get_or_init(new_cache);
+    cached_view(path, cache, open_model, |open| {
+        let (mesh, unchanged) = open.parse_checked()?;
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        Ok(build_view(&name, &mesh))
+        Ok((build_view(&name, &mesh), unchanged))
     })
 }
 
@@ -174,28 +180,135 @@ mod tests {
         assert_eq!(c.get(&key("a")).unwrap().name, "new");
     }
 
+    fn build(open: OpenModel) -> Result<(ModelView, bool), ModelError> {
+        let (mesh, unchanged) = open.parse_checked()?;
+        Ok((build_view("m.stl", &mesh), unchanged))
+    }
+
+    fn write_and_stamp(p: &Path, bytes: &[u8], t: SystemTime) {
+        std::fs::write(p, bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    /// `cached_view` with a build counter.
+    fn run(p: &Path, cache: &Mutex<ViewCache>, builds: &Cell<u32>) -> ModelView {
+        cached_view(p, cache, open_model, |o| {
+            builds.set(builds.get() + 1);
+            build(o)
+        })
+        .unwrap()
+    }
+
     #[test]
     fn unchanged_file_is_not_rebuilt_but_a_changed_one_is() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("cube.stl");
         std::fs::write(&p, cube_stl()).unwrap();
-        let cache = Mutex::new(ViewCache::new(CACHE_SIZE));
+        let cache = new_cache();
         let builds = Cell::new(0);
-        let build = |open: OpenModel| {
-            builds.set(builds.get() + 1);
-            Ok(build_view("cube.stl", &open.parse()?))
-        };
-        let a = cached_view(&p, &cache, build).unwrap();
-        let b = cached_view(&p, &cache, build).unwrap();
+        let a = run(&p, &cache, &builds);
+        let b = run(&p, &cache, &builds);
         assert_eq!(builds.get(), 1, "second call must come from the cache");
         assert_eq!(a, b);
 
         let mut tris = cube_tris();
         tris.extend(cube_tris());
         std::fs::write(&p, binary_stl(&tris)).unwrap();
-        let c = cached_view(&p, &cache, build).unwrap();
+        let c = run(&p, &cache, &builds);
         assert_eq!(builds.get(), 2);
         assert_eq!(c.triangle_count, 24);
+    }
+
+    #[test]
+    fn same_length_rewrite_with_a_newer_mtime_is_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("cube.stl");
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        write_and_stamp(&p, &cube_stl(), t);
+        let cache = new_cache();
+        let builds = Cell::new(0);
+        run(&p, &cache, &builds);
+        // Same triangle count, so the same length; the cube is twice as big.
+        let big: Vec<_> = cube_tris()
+            .into_iter()
+            .map(|t| t.map(|v| v.map(|x| x * 2.0)))
+            .collect();
+        let bytes = binary_stl(&big);
+        assert_eq!(bytes.len(), cube_stl().len());
+        write_and_stamp(&p, &bytes, t + Duration::from_secs(2));
+        let v = run(&p, &cache, &builds);
+        assert_eq!(builds.get(), 2, "the mtime is part of the key");
+        assert_eq!(v.bounds_max, [2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn two_files_with_the_same_length_and_mtime_do_not_share_an_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let (a, b) = (dir.path().join("a.stl"), dir.path().join("b.stl"));
+        write_and_stamp(&a, &cube_stl(), t);
+        write_and_stamp(&b, &cube_stl(), t);
+        let cache = new_cache();
+        let builds = Cell::new(0);
+        run(&a, &cache, &builds);
+        run(&b, &cache, &builds);
+        assert_eq!(builds.get(), 2, "the path is part of the key");
+        run(&a, &cache, &builds);
+        run(&b, &cache, &builds);
+        assert_eq!(builds.get(), 2);
+    }
+
+    #[test]
+    fn a_file_with_no_modified_time_is_neither_looked_up_nor_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("cube.stl");
+        std::fs::write(&p, cube_stl()).unwrap();
+        let cache = new_cache();
+        let builds = Cell::new(0);
+        let no_mtime = |p: &Path| {
+            let mut o = open_model(p)?;
+            o.modified = None;
+            Ok(o)
+        };
+        for _ in 0..2 {
+            cached_view(&p, &cache, no_mtime, |o| {
+                builds.set(builds.get() + 1);
+                build(o)
+            })
+            .unwrap();
+        }
+        assert_eq!(builds.get(), 2);
+        assert!(lock(&cache).entries.is_empty());
+    }
+
+    #[test]
+    fn a_file_rewritten_while_being_read_is_returned_but_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("cube.stl");
+        std::fs::write(&p, cube_stl()).unwrap();
+        let cache = new_cache();
+        let builds = Cell::new(0);
+        let mut tris = cube_tris();
+        tris.extend(cube_tris());
+        let v = cached_view(&p, &cache, open_model, |o| {
+            builds.set(builds.get() + 1);
+            // Rewritten between open and read.
+            std::fs::write(&p, binary_stl(&tris)).unwrap();
+            build(o)
+        })
+        .unwrap();
+        assert_eq!(v.triangle_count, 24);
+        assert!(lock(&cache).entries.is_empty());
+        // The next call sees the new file and caches it.
+        run(&p, &cache, &builds);
+        run(&p, &cache, &builds);
+        assert_eq!(builds.get(), 2);
+        assert_eq!(lock(&cache).entries.len(), 1);
     }
 
     #[test]
@@ -203,11 +316,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("cube.stl");
         std::fs::write(&p, cube_stl()).unwrap();
-        let cache = Mutex::new(ViewCache::new(CACHE_SIZE));
-        let r = cached_view(&p, &cache, |_| Err(ModelError::Truncated));
+        let cache = new_cache();
+        let r = cached_view(&p, &cache, open_model, |_| Err(ModelError::Truncated));
         assert_eq!(r, Err(ModelError::Truncated));
         assert!(lock(&cache).entries.is_empty());
-        assert!(cached_view(&p, &cache, |o| Ok(build_view("c", &o.parse()?))).is_ok());
+        assert!(cached_view(&p, &cache, open_model, build).is_ok());
+    }
+
+    #[test]
+    fn the_global_cache_is_built_with_the_cache_size() {
+        assert_eq!(CACHE_SIZE, 4);
+        assert_eq!(lock(&new_cache()).cap, CACHE_SIZE);
     }
 
     #[test]

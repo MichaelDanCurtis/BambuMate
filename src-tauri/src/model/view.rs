@@ -59,9 +59,10 @@ fn mb_ceil(bytes: u64) -> u64 {
 }
 
 /// A model file opened for reading: the extension and size are checked and
-/// nothing has been read yet. Everything about the file (size, modified
-/// time, bytes) comes from this one handle, so a cache key taken from it
-/// always describes the bytes that `parse` reads.
+/// nothing has been read yet. Its size and modified time come from this one
+/// handle. The handle is not a snapshot, though: the file can be rewritten
+/// before `parse_checked` reads it, which is why that reports whether the
+/// file still matched `len` and `modified` afterwards.
 #[derive(Debug)]
 pub struct OpenModel {
     file: std::fs::File,
@@ -118,15 +119,29 @@ impl OpenModel {
     /// Read the file (never more than the limit, even if it has grown since
     /// it was opened) and parse it.
     pub fn parse(self) -> Result<Mesh, ModelError> {
+        self.parse_checked().map(|(mesh, _)| mesh)
+    }
+
+    /// Like [`parse`](Self::parse), also saying whether the file still had
+    /// the `len` and `modified` recorded at open, both by the bytes read and
+    /// by a fresh look at the handle afterwards. When it didn't, the mesh is
+    /// still right for what was read, but `len` and `modified` no longer
+    /// describe it, so it must not be cached under them.
+    pub fn parse_checked(self) -> Result<(Mesh, bool), ModelError> {
         use std::io::Read;
         let mut bytes = Vec::new();
-        self.file
+        (&self.file)
             .take(self.limit.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|e| ModelError::Io(e.to_string()))?;
         if bytes.len() as u64 > self.limit {
             return Err(ModelError::FileTooLarge(mb_ceil(bytes.len() as u64)));
         }
+        let unchanged = bytes.len() as u64 == self.len
+            && self
+                .file
+                .metadata()
+                .is_ok_and(|m| m.len() == self.len && m.modified().ok() == self.modified);
         let mesh = if self.is_stl {
             parse_stl(&bytes)?
         } else {
@@ -135,7 +150,7 @@ impl OpenModel {
         if mesh.bounds().is_none() {
             return Err(ModelError::Empty);
         }
-        Ok(mesh)
+        Ok((mesh, unchanged))
     }
 }
 
@@ -262,5 +277,35 @@ mod tests {
         let d = dir.path().join("d.stl");
         std::fs::create_dir(&d).unwrap();
         assert!(matches!(open_model(&d), Err(ModelError::Io(_))));
+    }
+
+    #[test]
+    fn parse_checked_reports_whether_the_file_changed_since_opening() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.stl");
+        std::fs::write(&p, cube_stl()).unwrap();
+        assert!(open_model(&p).unwrap().parse_checked().unwrap().1);
+
+        // Rewritten with a different length.
+        let open = open_model(&p).unwrap();
+        let mut tris = crate::model::stl::tests_support::cube_tris();
+        tris.extend(crate::model::stl::tests_support::cube_tris());
+        std::fs::write(&p, crate::model::stl::tests_support::binary_stl(&tris)).unwrap();
+        let (mesh, unchanged) = open.parse_checked().unwrap();
+        assert_eq!(mesh.triangles.len(), 24);
+        assert!(!unchanged);
+
+        // Same length, newer modified time.
+        std::fs::write(&p, cube_stl()).unwrap();
+        let open = open_model(&p).unwrap();
+        let later = open.modified.unwrap() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(!open.parse_checked().unwrap().1);
     }
 }
