@@ -4,11 +4,17 @@
 use super::mesh::{edge_groups, face_normals, has_normal, sorted_sides, tri_area, Mesh, Vec3};
 use serde::Serialize;
 
+/// How far past the spec's -0.7071 a face's normal z must be to overhang.
+/// A true 45° face has an f32 normal z of about -0.70710683, just below
+/// -0.7071, so without this every 45° chamfer would be reported as
+/// "steeper than 45°". 0.002 is about 0.16°.
+pub const OVERHANG_MARGIN: f32 = 0.002;
 /// A face is an overhang when its normal's z is below this: more than 45
-/// degrees past vertical, facing down.
+/// degrees past vertical, facing down (with [`OVERHANG_MARGIN`] so exactly
+/// 45° is not).
 // The spec's 0.7071, kept as written rather than 1/sqrt(2).
 #[allow(clippy::approx_constant)]
-pub const OVERHANG_MAX_NZ: f32 = -0.7071;
+pub const OVERHANG_MAX_NZ: f32 = -0.7071 - OVERHANG_MARGIN;
 /// Faces with every vertex within this many mm of the bed are resting on it,
 /// not overhanging it, and count towards bed contact.
 pub const BED_ZONE_MM: f32 = 0.3;
@@ -134,6 +140,18 @@ fn overhang_regions(mesh: &Mesh, normals: &[Vec3], min_z: f32) -> Vec<(f64, Vec3
     regions
 }
 
+/// A ratio for a message: one decimal under 10, so 5.4 doesn't read as the
+/// 5:1 threshold, and none from 10 up.
+fn ratio_text(ratio: f32) -> String {
+    // Rounded first, so 9.96 becomes "10" rather than "10.0".
+    let tenths = (ratio * 10.0).round() / 10.0;
+    if tenths < 10.0 {
+        format!("{tenths:.1}")
+    } else {
+        format!("{ratio:.0}")
+    }
+}
+
 /// Where the model may print badly, as pins: overhangs first, then bed
 /// contact, then tall and thin. An empty mesh has none. The model is taken as
 /// oriented in the file.
@@ -199,7 +217,10 @@ pub fn find_risks(mesh: &Mesh) -> Vec<Risk> {
             kind: RiskKind::TallThin,
             position: [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, hi[2]],
             value: ratio,
-            message: format!("Tall and thin · {ratio:.0}:1 — may wobble; slow down or add support"),
+            message: format!(
+                "Tall and thin · {}:1 — may wobble; slow down or add support",
+                ratio_text(ratio)
+            ),
         });
     }
     risks
@@ -405,14 +426,85 @@ mod tests {
     #[test]
     fn only_undersides_within_45_degrees_of_flat_overhang() {
         // The normal's z is -cos(angle from horizontal): a ceiling-like 30 or
-        // 40 degrees needs support; a wall-like 50 or 60 does not.
-        for (degrees, overhangs) in [(0.0, true), (30.0, true), (40.0, true)]
+        // 40 degrees needs support; a wall-like 50 or 60 does not. 44 from
+        // horizontal is a 46° overhang and is flagged; exactly 45 is not.
+        for (degrees, overhangs) in [(0.0, true), (30.0, true), (40.0, true), (44.0, true)]
             .into_iter()
-            .chain([(50.0, false), (60.0, false), (80.0, false)])
+            .chain([(45.0, false), (50.0, false), (60.0, false), (80.0, false)])
         {
             let found = of_kind(find_risks(&underside_at(degrees, 5.0)), RiskKind::Overhang);
             assert_eq!(!found.is_empty(), overhangs, "{degrees} degrees: {found:?}");
         }
+    }
+
+    #[test]
+    fn the_overhang_threshold_sits_just_past_45_degrees() {
+        // Pinned on both sides: an exact 45° face's f32 normal is not an
+        // overhang, a 45.5° one is.
+        let nz = |deg_from_horizontal: f32| -deg_from_horizontal.to_radians().cos();
+        assert!(nz(45.0) >= OVERHANG_MAX_NZ);
+        assert!(nz(44.5) < OVERHANG_MAX_NZ);
+        // A ramp rising exactly as far as it runs is 45°.
+        let mut w = Welder::default();
+        floor(&mut w);
+        ramp(&mut w, 10.0, 10.0, 10.0, 5.0);
+        assert!(of_kind(find_risks(&w.finish()), RiskKind::Overhang).is_empty());
+    }
+
+    /// A `size` x `size` x `height` block whose bottom edges are cut by a
+    /// 45° chamfer `c` mm high (elephant-foot compensation).
+    fn chamfered_block(size: f32, height: f32, c: f32) -> Mesh {
+        let ring = |inset: f32, z: f32| {
+            let (a, b) = (inset, size - inset);
+            [[a, a, z], [b, a, z], [b, b, z], [a, b, z]]
+        };
+        let (bottom, mid, top) = (ring(c, 0.0), ring(0.0, c), ring(0.0, height));
+        let mut w = Welder::default();
+        w.push_triangle(bottom[0], bottom[2], bottom[1]);
+        w.push_triangle(bottom[0], bottom[3], bottom[2]);
+        w.push_triangle(top[0], top[1], top[2]);
+        w.push_triangle(top[0], top[2], top[3]);
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            for (lo, hi) in [(&bottom, &mid), (&mid, &top)] {
+                w.push_triangle(lo[i], lo[j], hi[j]);
+                w.push_triangle(lo[i], hi[j], hi[i]);
+            }
+        }
+        w.finish()
+    }
+
+    #[test]
+    fn a_45_degree_bottom_chamfer_is_not_an_overhang() {
+        // The chamfer faces rise 0.6 mm, past the bed band, at exactly 45°.
+        let risks = find_risks(&chamfered_block(40.0, 10.0, 0.6));
+        assert!(risks.is_empty(), "{risks:?}");
+    }
+
+    #[test]
+    fn ratios_show_a_decimal_only_under_ten() {
+        assert_eq!(ratio_text(5.4), "5.4");
+        assert_eq!(ratio_text(5.1), "5.1");
+        assert_eq!(ratio_text(9.94), "9.9");
+        assert_eq!(ratio_text(9.96), "10");
+        assert_eq!(ratio_text(10.0), "10");
+        assert_eq!(ratio_text(12.6), "13");
+    }
+
+    #[test]
+    fn a_5_4_to_1_tower_reads_5_4() {
+        let m = boxes(&[([0., 0., 0.], [10., 10., 54.])]);
+        let tall = of_kind(find_risks(&m), RiskKind::TallThin);
+        assert!(
+            tall[0].message.starts_with("Tall and thin · 5.4:1"),
+            "{tall:?}"
+        );
+        let m = boxes(&[([0., 0., 0.], [10., 10., 123.])]);
+        let tall = of_kind(find_risks(&m), RiskKind::TallThin);
+        assert!(
+            tall[0].message.starts_with("Tall and thin · 12:1"),
+            "{tall:?}"
+        );
     }
 
     #[test]
@@ -541,7 +633,11 @@ mod tests {
         assert_eq!(tall.len(), 1);
         assert!((tall[0].value - 5.1).abs() < 1e-4);
         assert_eq!(tall[0].position, [5., 5., 51.]);
-        assert!(tall[0].message.starts_with("Tall and thin · 5:1"));
+        assert!(
+            tall[0].message.starts_with("Tall and thin · 5.1:1"),
+            "{}",
+            tall[0].message
+        );
         // A 3:1 part is not.
         assert!(tower(10., 10., 30.).is_empty());
     }
