@@ -7,6 +7,7 @@ mod printer;
 mod routes;
 mod slicer;
 mod theme;
+mod viewport;
 
 use app::App;
 
