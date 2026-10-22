@@ -1,0 +1,124 @@
+/* Model viewport (spec 2026-10-22 §2): a 3D view of a model file with its
+   geometry risks. Tokens only; the canvas colours come from the same tokens
+   at draw time (src/viewport/gl.rs). */
+
+.vp {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-md);
+    min-width: 0;
+}
+
+.vp-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--nd-space-sm) var(--nd-space-md);
+}
+
+.vp-name {
+    color: var(--nd-text-primary);
+    overflow-wrap: anywhere;
+}
+
+.vp-meta {
+    font-variant-numeric: tabular-nums;
+}
+
+.vp-modes {
+    display: flex;
+    gap: var(--nd-space-sm);
+}
+
+/* .nd-tab is styled for links; these are buttons. */
+.vp-mode {
+    background-color: transparent;
+    cursor: pointer;
+}
+
+.vp-mode[aria-pressed="true"] {
+    background-color: var(--nd-text-display);
+    border-color: var(--nd-text-display);
+    color: var(--nd-black);
+}
+
+/* Pins near the edge are clipped to the canvas. */
+.vp-stage {
+    position: relative;
+    overflow: hidden;
+}
+
+.vp-canvas {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    border: 1px solid var(--nd-border);
+    border-radius: var(--nd-radius-card);
+    background: var(--nd-black);
+    cursor: grab;
+    /* Drags orbit the model rather than scroll the page. */
+    touch-action: none;
+}
+
+.vp-canvas:active {
+    cursor: grabbing;
+}
+
+/* Drawn inside the edge: the stage clips anything outside it. */
+.vp-canvas:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: -1px;
+}
+
+.vp-pin {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background-color: var(--nd-accent);
+    color: var(--nd-black);
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    line-height: 22px;
+    text-align: center;
+    cursor: pointer;
+}
+
+.vp-pin[aria-pressed="true"] {
+    background-color: var(--nd-signal);
+}
+
+.vp-pin:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+.vp-risks {
+    list-style: none;
+}
+
+.vp-risk {
+    display: grid;
+    grid-template-columns: auto auto 1fr;
+    align-items: baseline;
+    gap: var(--nd-space-md);
+    padding: var(--nd-space-sm) 0;
+    border-bottom: 1px solid var(--nd-border);
+}
+
+.vp-risk-num {
+    font-size: 11px;
+    color: var(--nd-text-secondary);
+}
+
+.vp-risk[data-selected] .vp-risk-num {
+    color: var(--nd-signal);
+}
+
+.vp-risk-msg {
+    color: var(--nd-text-primary);
+}
