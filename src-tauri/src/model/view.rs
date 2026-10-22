@@ -53,10 +53,35 @@ pub fn build_view(name: &str, mesh: &Mesh) -> ModelView {
     }
 }
 
-/// Read and parse a `.stl` or `.3mf` file. The extension is checked first
-/// (case-insensitively; `.gcode.3mf` is a sliced file, not a model), then the
-/// size, before any bytes are read.
-pub fn load_model(path: &Path) -> Result<Mesh, ModelError> {
+/// Megabytes, rounded up, for messages.
+fn mb_ceil(bytes: u64) -> u64 {
+    bytes.div_ceil(1024 * 1024)
+}
+
+/// A model file opened for reading: the extension and size are checked and
+/// nothing has been read yet. Everything about the file (size, modified
+/// time, bytes) comes from this one handle, so a cache key taken from it
+/// always describes the bytes that `parse` reads.
+#[derive(Debug)]
+pub struct OpenModel {
+    file: std::fs::File,
+    is_stl: bool,
+    limit: u64,
+    /// Length from the open handle's metadata.
+    pub len: u64,
+    /// Modified time from the open handle; `None` when the platform can't say.
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// Open `path` for reading as a model, with the standard size limit.
+pub fn open_model(path: &Path) -> Result<OpenModel, ModelError> {
+    open_model_with_limit(path, MAX_FILE_BYTES)
+}
+
+/// Check the extension (case-insensitive; `.gcode.3mf` is a sliced file,
+/// not a model), open the file once, and refuse anything that isn't a
+/// regular file no larger than `limit` bytes.
+pub fn open_model_with_limit(path: &Path, limit: u64) -> Result<OpenModel, ModelError> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
@@ -66,22 +91,57 @@ pub fn load_model(path: &Path) -> Result<Mesh, ModelError> {
     if !is_stl && !is_3mf {
         return Err(ModelError::NotAModel);
     }
-    let len = std::fs::metadata(path)
-        .map_err(|e| ModelError::Io(e.to_string()))?
-        .len();
-    if len > MAX_FILE_BYTES {
-        return Err(ModelError::FileTooLarge(len / (1024 * 1024)));
+    let io = |e: std::io::Error| ModelError::Io(e.to_string());
+    // Checked before opening because opening a FIFO would block. The handle
+    // is checked again below.
+    if !std::fs::metadata(path).map_err(io)?.is_file() {
+        return Err(ModelError::Io("not a regular file".into()));
     }
-    let bytes = std::fs::read(path).map_err(|e| ModelError::Io(e.to_string()))?;
-    let mesh = if is_stl {
-        parse_stl(&bytes)?
-    } else {
-        parse_3mf(&bytes)?
-    };
-    if mesh.bounds().is_none() {
-        return Err(ModelError::Empty);
+    let file = std::fs::File::open(path).map_err(io)?;
+    let meta = file.metadata().map_err(io)?;
+    if !meta.is_file() {
+        return Err(ModelError::Io("not a regular file".into()));
     }
-    Ok(mesh)
+    if meta.len() > limit {
+        return Err(ModelError::FileTooLarge(mb_ceil(meta.len())));
+    }
+    Ok(OpenModel {
+        file,
+        is_stl,
+        limit,
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
+}
+
+impl OpenModel {
+    /// Read the file (never more than the limit, even if it has grown since
+    /// it was opened) and parse it.
+    pub fn parse(self) -> Result<Mesh, ModelError> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        self.file
+            .take(self.limit.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|e| ModelError::Io(e.to_string()))?;
+        if bytes.len() as u64 > self.limit {
+            return Err(ModelError::FileTooLarge(mb_ceil(bytes.len() as u64)));
+        }
+        let mesh = if self.is_stl {
+            parse_stl(&bytes)?
+        } else {
+            parse_3mf(&bytes)?
+        };
+        if mesh.bounds().is_none() {
+            return Err(ModelError::Empty);
+        }
+        Ok(mesh)
+    }
+}
+
+/// Read and parse a `.stl` or `.3mf` file.
+pub fn load_model(path: &Path) -> Result<Mesh, ModelError> {
+    open_model(path)?.parse()
 }
 
 #[cfg(test)]
@@ -167,5 +227,40 @@ mod tests {
         let p = dir.path().join("empty.stl");
         std::fs::write(&p, b"").unwrap();
         assert!(load_model(&p).is_err());
+    }
+
+    #[test]
+    fn file_over_the_limit_is_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.stl");
+        std::fs::write(&p, vec![0u8; 3 * 1024 * 1024 + 1]).unwrap();
+        // 3 MiB + 1 byte rounds up to 4 MB.
+        assert_eq!(
+            open_model_with_limit(&p, 3 * 1024 * 1024).unwrap_err(),
+            ModelError::FileTooLarge(4)
+        );
+        assert!(open_model_with_limit(&p, 4 * 1024 * 1024).is_ok());
+    }
+
+    #[test]
+    fn file_that_grows_after_opening_is_still_bounded() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("grow.stl");
+        std::fs::write(&p, cube_stl()).unwrap();
+        let open = open_model_with_limit(&p, 1024 * 1024).unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(&vec![0u8; 2 * 1024 * 1024]).unwrap();
+        drop(f);
+        // The read stops one byte past the limit, so 1 MiB + 1 rounds up to 2.
+        assert_eq!(open.parse().unwrap_err(), ModelError::FileTooLarge(2));
+    }
+
+    #[test]
+    fn a_directory_named_like_a_model_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join("d.stl");
+        std::fs::create_dir(&d).unwrap();
+        assert!(matches!(open_model(&d), Err(ModelError::Io(_))));
     }
 }
