@@ -1179,6 +1179,29 @@ async function driveApp(browserType, engine, baseUrl) {
       if ((await page.locator(".sl-drop.sl-drop-over").count()) !== 0) throw new Error("rotating lit the drop zone");
       await page.mouse.up();
       if ((await canvas.getAttribute("data-yaw")) === yaw0) throw new Error("dragging did not rotate");
+      // A release we never hear about (a system gesture, a switch away) must
+      // not leave the view turning: a move with no button held ends the
+      // drag, and so does losing pointer capture.
+      const synthetic = (steps) => canvas.evaluate((c, steps) => {
+        const r = c.getBoundingClientRect();
+        for (const [type, dx, buttons] of steps) {
+          c.dispatchEvent(new PointerEvent(type, {
+            pointerId: 7, isPrimary: true, bubbles: true, button: 0, buttons,
+            clientX: r.x + r.width / 2 + dx, clientY: r.y + r.height / 2,
+          }));
+        }
+      }, steps);
+      const settle = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      // The same synthetic events with the button held do turn the view.
+      const yawHeld = await canvas.getAttribute("data-yaw");
+      await synthetic([["pointerdown", 0, 1], ["pointermove", 60, 1], ["pointerup", 60, 0]]);
+      await page.waitForFunction((y) => document.querySelector(".slice-page .vp-canvas").getAttribute("data-yaw") !== y, yawHeld, { timeout: 5000 });
+      for (const [what, end] of [["a move with no button", ["pointermove", 5, 0]], ["lost capture", ["lostpointercapture", 0, 1]]]) {
+        const yawA = await canvas.getAttribute("data-yaw");
+        await synthetic([["pointerdown", 0, 1], end, ["pointermove", 60, 1], ["pointermove", 90, 1]]);
+        await settle();
+        if ((await canvas.getAttribute("data-yaw")) !== yawA) throw new Error(`the view kept turning after ${what}`);
+      }
     }
     await page.click('.slice-page .vp-mode:has-text("Dots")');
     if ((await callsOf("slicer_pick_model")).length !== picks) throw new Error("the view opened the file picker");

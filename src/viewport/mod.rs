@@ -134,6 +134,22 @@ pub fn wheel_factor(delta_y: f64, delta_mode: u32) -> f32 {
     (px.clamp(-WHEEL_MAX_PX, WHEEL_MAX_PX) as f32 * WHEEL_ZOOM).exp()
 }
 
+/// The pointer dragging the view and its last position.
+pub type Drag = Option<(i32, i32, i32)>;
+
+/// A `pointermove` during `drag`: the drag afterwards, and how far to turn.
+/// `buttons` is the DOM's bitmask. A move with the primary button up ends
+/// the drag, so a release that never reached us as a `pointerup` (a system
+/// gesture, a switch away) can't leave the model spinning under the cursor.
+pub fn drag_move(drag: Drag, id: i32, buttons: u16, x: i32, y: i32) -> (Drag, Option<(i32, i32)>) {
+    match drag {
+        Some((d, ..)) if d != id => (drag, None),
+        Some(_) if buttons & 1 == 0 => (None, None),
+        Some((_, ox, oy)) => (Some((id, x, y)), Some((x - ox, y - oy))),
+        None => (None, None),
+    }
+}
+
 /// A projected pin, kept only if it lands on the `w` × `h` canvas.
 pub fn visible_pin(p: Option<(f32, f32)>, w: f32, h: f32) -> Option<(f32, f32)> {
     p.filter(|&(x, y)| (0.0..=w).contains(&x) && (0.0..=h).contains(&y))
@@ -323,7 +339,7 @@ struct Ctx {
     gl_failed: RwSignal<Option<GlProblem>>,
     canvas: NodeRef<html::Canvas>,
     /// The pointer dragging the view and its last position.
-    drag: StoredValue<Option<(i32, i32, i32)>>,
+    drag: StoredValue<Drag>,
 }
 
 /// A 3D view of the model at `path`, with its geometry risks. Renders nothing
@@ -444,16 +460,23 @@ fn loaded_view(model: Arc<Loaded>, cx: Ctx, hide_name: bool) -> impl IntoView {
             .try_set_value(Some((e.pointer_id(), e.client_x(), e.client_y())));
     };
     let on_pointermove = move |e: web_sys::PointerEvent| {
-        let Some(Some((id, x, y))) = cx.drag.try_get_value() else {
+        let Some(drag) = cx.drag.try_get_value() else {
             return;
         };
-        if id != e.pointer_id() {
-            return;
+        let (next, delta) = drag_move(
+            drag,
+            e.pointer_id(),
+            e.buttons(),
+            e.client_x(),
+            e.client_y(),
+        );
+        if next != drag {
+            cx.drag.try_set_value(next);
         }
-        let (nx, ny) = (e.client_x(), e.client_y());
-        cx.drag.try_set_value(Some((id, nx, ny)));
-        // Dragging right turns the model right; dragging down tips it toward you.
-        turn(-((nx - x) as f32) * DRAG_TURN, (ny - y) as f32 * DRAG_TURN);
+        if let Some((dx, dy)) = delta {
+            // Dragging right turns the model right; dragging down tips it toward you.
+            turn(-(dx as f32) * DRAG_TURN, dy as f32 * DRAG_TURN);
+        }
     };
     let on_pointerup = move |e: web_sys::PointerEvent| {
         if matches!(cx.drag.try_get_value(), Some(Some((id, ..))) if id == e.pointer_id()) {
@@ -514,6 +537,7 @@ fn loaded_view(model: Arc<Loaded>, cx: Ctx, hide_name: bool) -> impl IntoView {
                 on:pointermove=on_pointermove
                 on:pointerup=on_pointerup
                 on:pointercancel=on_pointerup
+                on:lostpointercapture=on_pointerup
                 on:wheel=on_wheel
                 on:dblclick=move |_| refit()
                 on:keydown=on_keydown>
@@ -671,6 +695,32 @@ mod tests {
         assert_eq!(wheel_factor(f64::NAN, 0), 1.0);
         // One huge event is capped rather than ignored.
         assert!((wheel_factor(1e12, 0) - 1f32.exp()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_drag_turns_by_the_distance_moved() {
+        let drag = Some((1, 100, 100));
+        assert_eq!(
+            drag_move(drag, 1, 1, 140, 90),
+            (Some((1, 140, 90)), Some((40, -10)))
+        );
+        // Another pointer leaves the drag alone.
+        assert_eq!(drag_move(drag, 2, 1, 0, 0), (drag, None));
+        // No drag, no turn.
+        assert_eq!(drag_move(None, 1, 1, 0, 0), (None, None));
+    }
+
+    #[test]
+    fn a_move_with_the_button_up_ends_the_drag() {
+        let drag = Some((1, 100, 100));
+        // The release was missed: buttons is 0 (or only the right button).
+        assert_eq!(drag_move(drag, 1, 0, 140, 90), (None, None));
+        assert_eq!(drag_move(drag, 1, 2, 140, 90), (None, None));
+        // Primary plus another button still drags.
+        assert_eq!(
+            drag_move(drag, 1, 3, 101, 100),
+            (Some((1, 101, 100)), Some((1, 0)))
+        );
     }
 
     #[test]
