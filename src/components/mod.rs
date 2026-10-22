@@ -1,5 +1,4 @@
 pub mod api_key_form;
-pub mod branding;
 pub mod change_preview;
 pub mod defect_report;
 pub mod diagnostics_panel;

@@ -2052,7 +2052,7 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "navigate to About", async () => {
     await goTo("/settings/about");
     await page.waitForSelector(".about-page", { timeout: 15000 });
-    const version = (await page.locator(".about-version-value").first().innerText()).trim();
+    const version = (await page.locator(".about-rows .nd-stat-row-value").first().innerText()).trim();
     if (!version.includes("1.3.0")) throw new Error(`version reads "${version}"`);
     return version;
   });
@@ -2061,6 +2061,7 @@ async function driveApp(browserType, engine, baseUrl) {
   // user pressing anything.
   await step(run, page, "update state reports up to date", async () => {
     await page.waitForSelector(".about-up-to-date", { timeout: 20000 });
+    await page.screenshot({ path: `flow-${engine}-about.png`, fullPage: false });
     return (await page.locator(".about-up-to-date").first().innerText()).replace(/\s+/g, " ").trim();
   });
 
