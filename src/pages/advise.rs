@@ -7,6 +7,18 @@
 //! answer to an earlier one is dropped. Changing the inputs while an answer
 //! is on its way drops that answer too, so it can't overwrite the newer
 //! chips or model.
+//!
+//! The description is read only when it is new (`last_read`): pressing
+//! Advise again after editing the chips scores those chips.
+//!
+//! The results' status line is a polite live region that is always in the
+//! page: the loading line, the AI-failed line, `NOTHING_FITS`, and a
+//! visually hidden summary of the answer. Focus stays on Advise, which is
+//! `aria-disabled` rather than `disabled` while it runs so focus is never
+//! dropped to the body: the summary is announced, the panel's headings are
+//! there to jump to, and the usual next step, refining a chip and pressing
+//! Advise again, is right beside it. Moving focus into the results would cut
+//! the announcement short and send that loop back up the page.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_query_map;
@@ -14,14 +26,15 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::advisor::bridge;
 use crate::advisor::format::{
-    detail_notes, excluded_reasons, geometry_reordered, hero_detail, model_line, rank_pill,
-    reason_value, ruled_out_heading, status_tag, toggle_need, AI_FAILED, AI_OFF, BEFORE_ADVISING,
-    CATALOG_EMPTY, GEOMETRY_ORDER, NOTHING_FITS, ORDER_RULE, READING,
+    detail_notes, excluded_reasons, geometry_reordered, hero_detail, hero_tone, model_line,
+    rank_pill, reason_value, result_summary, ruled_out_heading, should_interpret, status_tag,
+    toggle_need, AI_FAILED, AI_OFF, BEFORE_ADVISING, BUY_FAILED, CATALOG_EMPTY, GEOMETRY_ORDER,
+    NOTHING_FITS, ORDER_RULE, READING,
 };
 use crate::advisor::types::{Advice, MaterialFit, Need, Product, ALL_NEEDS};
 use crate::advisor::PendingCatalogPick;
 use crate::commands;
-use crate::components::patterns::{Hero, StatRow, StateKind, StateText, Tone};
+use crate::components::patterns::{state_text, Hero, StatRow, StateKind, StateText};
 use crate::pages::slice::file_name;
 use crate::slicer::state::newest_source;
 use crate::slicer::SlicerShared;
@@ -44,6 +57,8 @@ pub fn AdvisePage() -> impl IntoView {
     // `None` until get_ai_capabilities answers.
     let ai_ready = RwSignal::new(None::<bool>);
     let description = RwSignal::new(String::new());
+    // The description as last read into chips; read again only once it changes.
+    let last_read = RwSignal::new(None::<String>);
     let needs = RwSignal::new(Vec::<Need>::new());
     let model = RwSignal::new(
         query
@@ -59,6 +74,7 @@ pub fn AdvisePage() -> impl IntoView {
     let ai_failed = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let request = RwSignal::new(0u32);
+    let pick_button = NodeRef::<leptos::html::Button>::new();
 
     spawn_local(async move {
         let text = commands::get_ai_capabilities()
@@ -117,10 +133,17 @@ pub fn AdvisePage() -> impl IntoView {
         });
     };
 
-    // With a description (and AI), read it first and fill the chips; then score.
+    // With a new description (and AI), read it first and fill the chips;
+    // then score. Otherwise score the chips as they are.
     let run = move |_| {
+        // `aria-disabled` does not stop clicks.
+        if phase.get_untracked() != Phase::Idle {
+            return;
+        }
         let text = description.get_untracked().trim().to_string();
-        let use_ai = ai_ready.get_untracked() == Some(true) && !text.is_empty();
+        let use_ai = last_read.with_untracked(|l| {
+            should_interpret(ai_ready.get_untracked() == Some(true), &text, l.as_deref())
+        });
         let chosen = needs.get_untracked();
         let path = model.get_untracked();
         request.update(|r| *r = r.wrapping_add(1));
@@ -144,6 +167,7 @@ pub fn AdvisePage() -> impl IntoView {
                     Ok(found) => {
                         chosen = found.clone();
                         needs.try_set(found);
+                        last_read.try_set(Some(text));
                     }
                     Err(_) => {
                         ai_failed.try_set(true);
@@ -228,14 +252,25 @@ pub fn AdvisePage() -> impl IntoView {
                                 "Use last sliced model"
                             </button>
                         })}
-                        <button type="button" class="btn btn-secondary adv-pick-model" on:click=choose_model>
+                        <button
+                            type="button"
+                            class="btn btn-secondary adv-pick-model"
+                            node_ref=pick_button
+                            on:click=choose_model
+                        >
                             "Choose model…"
                         </button>
                         <Show when=move || model.with(Option::is_some)>
                             <button
                                 type="button"
                                 class="btn btn-ghost btn-sm adv-model-clear"
-                                on:click=move |_| set_model(None)
+                                on:click=move |_| {
+                                    set_model(None);
+                                    // Clear goes with the model: keep focus in the row.
+                                    if let Some(b) = pick_button.get_untracked() {
+                                        let _ = b.focus();
+                                    }
+                                }
                             >
                                 "Clear"
                             </button>
@@ -252,7 +287,7 @@ pub fn AdvisePage() -> impl IntoView {
                     <button
                         type="button"
                         class="btn btn-primary adv-run"
-                        disabled=move || phase.get() != Phase::Idle
+                        aria-disabled=move || (phase.get() != Phase::Idle).to_string()
                         on:click=run
                     >
                         "Advise"
@@ -260,12 +295,39 @@ pub fn AdvisePage() -> impl IntoView {
                 </div>
             </section>
 
-            {move || (phase.get() == Phase::Interpreting)
-                .then(|| view! { <StateText kind=StateKind::Loading message=READING /> })}
-            {move || ai_failed.get().then(|| view! { <p class="adv-ai-error" role="alert">{AI_FAILED}</p> })}
             {move || error.get().map(|e| view! { <StateText kind=StateKind::Error message=e /> })}
+            {move || {
+                advice
+                    .with(|a| a.as_ref().and_then(|a| a.printer_line.clone()))
+                    .map(|l| view! { <p class="adv-printer-line">{l}</p> })
+            }}
 
-            // Two closures, so a phase change never rebuilds the results.
+            // Always in the page, so screen readers hear what changes in it.
+            // Plain `nd-state` lines, as a `StateText` would nest a second
+            // live region inside this one.
+            <div class="adv-status" role="status" aria-live="polite">
+                {move || match phase.get() {
+                    Phase::Interpreting => Some(state_text(StateKind::Loading, Some(READING))),
+                    Phase::Scoring => Some(state_text(StateKind::Loading, None)),
+                    Phase::Idle => None,
+                }
+                .map(|t| view! { <p class="nd-state" data-kind="loading">{t}</p> })}
+                {move || ai_failed.get().then(|| view! { <p class="adv-ai-error">{AI_FAILED}</p> })}
+                {move || (phase.get() == Phase::Idle).then(|| advice.with(|a| a.as_ref().map(|a| {
+                    if a.fits.is_empty() {
+                        view! {
+                            <p class="nd-state" data-kind="empty">
+                                {state_text(StateKind::Empty, Some(NOTHING_FITS))}
+                            </p>
+                        }
+                        .into_any()
+                    } else {
+                        view! { <p class="nd-visually-hidden">{result_summary(a)}</p> }.into_any()
+                    }
+                })))}
+            </div>
+
+            // Its own closure, so a phase change never rebuilds the results.
             {move || advice.get().map(|a| view! { <Results advice=a selected=selected pick=pick /> })}
             {move || (advice.with(Option::is_none) && phase.get() == Phase::Idle)
                 .then(|| view! { <StateText kind=StateKind::Empty message=BEFORE_ADVISING /> })}
@@ -274,14 +336,14 @@ pub fn AdvisePage() -> impl IntoView {
 }
 
 /// The hero, the rank pills, the selected material's reasons and products,
-/// and "Ruled out". With nothing that fits, `NOTHING_FITS` stands where the
-/// hero would be and "Ruled out" opens, as it is then the whole answer.
+/// and "Ruled out". With nothing that fits, the status line above says
+/// `NOTHING_FITS` where the hero would be, and "Ruled out" opens, as it is
+/// then the whole answer.
 #[component]
 fn Results(advice: Advice, selected: RwSignal<usize>, pick: PendingCatalogPick) -> impl IntoView {
     let Advice {
         fits,
         ruled_out,
-        printer_line,
         catalog_empty,
         ..
     } = advice;
@@ -302,9 +364,9 @@ fn Results(advice: Advice, selected: RwSignal<usize>, pick: PendingCatalogPick) 
         })
     };
 
-    let answer = match top {
-        Some(top) => view! {
-            <Hero label="Best fit" value=top.name.clone() detail=hero_detail(&top) tone=Tone::Signal />
+    let answer = top.map(|top| {
+        view! {
+            <Hero label="Best fit" value=top.name.clone() detail=hero_detail(&top) tone=hero_tone(&top) />
             <div class="adv-ranks" role="group" aria-label="Show reasons for">
                 {ranks.into_iter().map(|(i, text)| view! {
                     <button
@@ -320,13 +382,10 @@ fn Results(advice: Advice, selected: RwSignal<usize>, pick: PendingCatalogPick) 
             {reordered.then(|| view! { <p class="adv-order-note">{GEOMETRY_ORDER}</p> })}
             {move || current().map(|fit| view! { <FitDetail fit=fit pick=pick catalog_empty=catalog_empty /> })}
         }
-        .into_any(),
-        None => view! { <StateText kind=StateKind::Empty message=NOTHING_FITS /> }.into_any(),
-    };
+    });
 
     view! {
         <div class="adv-results">
-            {printer_line.map(|l| view! { <p class="adv-printer-line">{l}</p> })}
             {answer}
             {(!ruled_out.is_empty()).then(|| view! {
                 <details class="adv-excluded" open=nothing_fits>
@@ -389,16 +448,18 @@ fn products_table(
         return view! { <StateText kind=StateKind::Empty message=message /> }.into_any();
     }
     view! {
-        <table class="adv-products">
-            <thead>
-                <tr>
-                    <th scope="col">"Product"</th>
-                    <th scope="col">"Brand"</th>
-                    <th scope="col">"Status"</th>
-                    <th scope="col"><span class="nd-visually-hidden">"Actions"</span></th>
+        // The roles are explicit: at phone width the rows are laid out as
+        // flex boxes, which drops the implicit table roles in WebKit.
+        <table class="adv-products" role="table" aria-label=format!("{material} products")>
+            <thead role="rowgroup">
+                <tr role="row">
+                    <th scope="col" role="columnheader">"Product"</th>
+                    <th scope="col" role="columnheader">"Brand"</th>
+                    <th scope="col" role="columnheader">"Status"</th>
+                    <th scope="col" role="columnheader"><span class="nd-visually-hidden">"Actions"</span></th>
                 </tr>
             </thead>
-            <tbody>{products.into_iter().map(|p| product_row(p, pick)).collect_view()}</tbody>
+            <tbody role="rowgroup">{products.into_iter().map(|p| product_row(p, pick)).collect_view()}</tbody>
         </table>
     }
     .into_any()
@@ -406,9 +467,15 @@ fn products_table(
 
 /// "Generate profile" is a link to Search: the router follows it after this
 /// click has handed over the entry. Nothing is written until Search's own
-/// Install. A spool with no catalog entry, or no shop, offers neither.
+/// Install. A click the router leaves to the browser (a modifier or another
+/// button) hands nothing over, so no pick is left waiting. A spool with no
+/// catalog entry, or no shop, offers neither.
 fn product_row(p: Product, pick: PendingCatalogPick) -> impl IntoView {
     let tag = status_tag(&p);
+    let label = format!("{} {}", p.brand, p.name);
+    let generate_label = format!("Generate profile for {label}");
+    let buy_label = format!("Where to buy {label}");
+    let buy_failed = RwSignal::new(false);
     let Product {
         name,
         brand,
@@ -419,16 +486,23 @@ fn product_row(p: Product, pick: PendingCatalogPick) -> impl IntoView {
     } = p;
     view! {
         <tr class="adv-product" data-status=status.key()>
-            <td class="adv-product-name">{name}</td>
-            <td class="adv-product-brand">{brand}</td>
-            <td class="adv-product-status">{tag.map(|t| view! { <span class="adv-tag">{t}</span> })}</td>
-            <td>
+            <th scope="row" role="rowheader" class="adv-product-name">{name}</th>
+            <td role="cell" class="adv-product-brand">{brand}</td>
+            <td role="cell" class="adv-product-status">{tag.map(|t| view! { <span class="adv-tag">{t}</span> })}</td>
+            <td role="cell">
                 <div class="adv-product-actions">
                     {entry.map(|e| view! {
                         <a
                             class="btn btn-secondary btn-sm adv-generate"
                             href="/filament"
-                            on:click=move |_| pick.0.set(Some(e.clone()))
+                            aria-label=generate_label.clone()
+                            on:click=move |ev| {
+                                let plain = ev.button() == 0
+                                    && !(ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key());
+                                if plain {
+                                    pick.0.set(Some(e.clone()));
+                                }
+                            }
                         >
                             "Generate profile"
                         </a>
@@ -437,10 +511,15 @@ fn product_row(p: Product, pick: PendingCatalogPick) -> impl IntoView {
                         <button
                             type="button"
                             class="btn btn-ghost btn-sm adv-buy"
+                            aria-label=buy_label.clone()
                             on:click=move |_| {
                                 let url = url.clone();
+                                buy_failed.set(false);
                                 spawn_local(async move {
-                                    let _ = commands::open_external_url(&url).await;
+                                    if let Err(e) = commands::open_external_url(&url).await {
+                                        web_sys::console::warn_1(&format!("open_external_url: {e}").into());
+                                        buy_failed.try_set(true);
+                                    }
                                 });
                             }
                         >
@@ -448,6 +527,7 @@ fn product_row(p: Product, pick: PendingCatalogPick) -> impl IntoView {
                         </button>
                     })}
                 </div>
+                {move || buy_failed.get().then(|| view! { <p class="adv-buy-error" role="alert">{BUY_FAILED}</p> })}
             </td>
         </tr>
     }

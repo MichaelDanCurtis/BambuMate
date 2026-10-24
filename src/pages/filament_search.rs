@@ -248,17 +248,19 @@ pub fn FilamentSearchPage() -> impl IntoView {
 
         // Fetch full specs from catalog entry
         set_is_fetching.set(true);
+        // The page can be gone when the fetch returns (Advise's hand-off runs
+        // this on mount), so the writes after the await are `try_set`.
         spawn_local(async move {
             match commands::fetch_filament_from_catalog(&entry).await {
                 Ok(specs) => {
-                    set_current_specs.set(Some(specs));
-                    set_fetch_error.set(None);
+                    set_current_specs.try_set(Some(specs));
+                    set_fetch_error.try_set(None);
                 }
                 Err(e) => {
-                    set_fetch_error.set(Some(e));
+                    set_fetch_error.try_set(Some(e));
                 }
             }
-            set_is_fetching.set(false);
+            set_is_fetching.try_set(false);
         });
     };
 

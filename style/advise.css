@@ -79,9 +79,32 @@
     font-size: 13px;
 }
 
-.adv-ai-error {
+.adv-ai-error,
+.adv-buy-error {
     margin: 0;
     color: var(--nd-warning);
+}
+
+.adv-buy-error {
+    margin-top: var(--nd-space-xs);
+    font-size: 13px;
+    text-align: right;
+}
+
+/* The status line is always in the page (it is a live region), often
+   holding only the visually hidden summary. It cancels its own gap in the
+   page's column, and each line it shows puts one back. */
+.adv-status {
+    margin-top: calc(-1 * var(--nd-space-lg));
+}
+
+.adv-status > :not(.nd-visually-hidden) {
+    margin-top: var(--nd-space-lg);
+}
+
+.adv-run[aria-disabled="true"] {
+    opacity: 0.4;
+    cursor: not-allowed;
 }
 
 .adv-model-name {
@@ -102,7 +125,7 @@
     border-collapse: collapse;
 }
 
-.adv-products th {
+.adv-products thead th {
     padding: var(--nd-space-xs) var(--nd-space-sm);
     border-bottom: 1px solid var(--nd-border-visible);
     text-align: left;
@@ -114,8 +137,11 @@
     color: var(--nd-text-secondary);
 }
 
-.adv-products td {
+.adv-products td,
+.adv-products tbody th {
     padding: var(--nd-space-sm);
+    text-align: left;
+    font-weight: 400;
     border-bottom: 1px solid var(--nd-border);
     color: var(--nd-text-primary);
 }
@@ -187,7 +213,8 @@
         border-bottom: 1px solid var(--nd-border);
     }
 
-    .adv-products td {
+    .adv-products td,
+    .adv-products tbody th {
         padding: 0;
         border-bottom: 0;
     }
@@ -206,5 +233,9 @@
 
     .adv-product-actions {
         justify-content: flex-start;
+    }
+
+    .adv-buy-error {
+        text-align: left;
     }
 }

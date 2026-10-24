@@ -2,7 +2,10 @@
 
 use std::fmt::Write as _;
 
-use super::types::{Excluded, MaterialFit, Need, NeedReason, Product, ProductStatus, Verdict};
+use super::types::{
+    Advice, Excluded, MaterialFit, Need, NeedReason, Product, ProductStatus, Verdict,
+};
+use crate::components::patterns::Tone;
 use crate::viewport::types::{ModelView, RiskKind};
 
 pub const ORDER_RULE: &str = "Loaded in your AMS first, then your preferred brands, then the rest A–Z. Products are never ranked on price, rating or commission.";
@@ -14,6 +17,8 @@ pub const READING: &str = "Reading your description";
 /// `score::NOTHING_FITS`.
 pub const NOTHING_FITS: &str = "Nothing on this printer meets all of that.";
 pub const CATALOG_EMPTY: &str = "The filament catalog is empty. Refresh it on the Search tab.";
+/// Under a product whose "Where to buy" link the system would not open.
+pub const BUY_FAILED: &str = "Couldn't open that link in your browser.";
 /// Under the rank pills when the model's geometry changed the order.
 pub const GEOMETRY_ORDER: &str = "Order also weighs this model's size and shape.";
 
@@ -80,6 +85,38 @@ pub fn excluded_reasons(e: &Excluded) -> String {
     e.reasons.join("; ")
 }
 
+/// Whether Advise reads the description before scoring: only with AI, only
+/// for a non-empty text, and only when it differs from the text last read.
+/// Otherwise the chips as they are now are the needs, so an edit to them
+/// survives the next press.
+pub fn should_interpret(ai: bool, text: &str, last_read: Option<&str>) -> bool {
+    let text = text.trim();
+    ai && !text.is_empty() && last_read.map(str::trim) != Some(text)
+}
+
+/// The hero is signal-coloured only when the best fit misses no need.
+/// Colour marks an event, not a default.
+pub fn hero_tone(fit: &MaterialFit) -> Tone {
+    if fit.reasons.iter().any(|r| r.verdict == Verdict::NotMet) {
+        Tone::Neutral
+    } else {
+        Tone::Signal
+    }
+}
+
+/// What the results' live region announces once an answer arrives.
+pub fn result_summary(advice: &Advice) -> String {
+    let Some((top, rest)) = advice.fits.split_first() else {
+        return NOTHING_FITS.to_string();
+    };
+    let mut out = format!("Best fit {}, fit {}%.", top.name, top.fit_pct);
+    if !rest.is_empty() {
+        let names: Vec<&str> = rest.iter().map(|f| f.name.as_str()).collect();
+        let _ = write!(out, " Also {}.", names.join(", "));
+    }
+    out
+}
+
 /// A ruled-out list's heading, with how many it holds.
 pub fn ruled_out_heading(count: usize) -> String {
     format!("Ruled out ({count})")
@@ -91,7 +128,11 @@ pub fn rank_pill(index: usize, name: &str) -> String {
 }
 
 /// The backend's material keys in its table order, the tie-break order
-/// when two materials fit the same.
+/// when two materials fit the same. A copy of the declaration order of
+/// `MaterialId` in src-tauri/src/advisor/materials.rs (whose test
+/// `every_material_is_listed_once_in_id_order` pins the table to it): the
+/// backend sends neither the order nor the ranking points, and the two
+/// crates share no code, so keep this in step by hand.
 const MATERIAL_ORDER: &[&str] = &[
     "pla", "pla_plus", "pla_cf", "petg", "pet_cf", "abs", "asa", "tpu", "pa", "pa_cf", "pc",
 ];
@@ -183,8 +224,9 @@ pub fn advise_href(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::advisor::types::{
-        Excluded, MaterialFit, Need::*, NeedReason, Product, ProductStatus, Verdict,
+        Advice, Excluded, MaterialFit, Need::*, NeedReason, Product, ProductStatus, Verdict,
     };
+    use crate::components::patterns::Tone;
 
     fn reason(need: Need, verdict: Verdict, detail: &str) -> NeedReason {
         NeedReason {
@@ -373,6 +415,76 @@ mod tests {
             ]
         );
         assert!(detail_notes(&fit(50, vec![])).is_empty());
+    }
+
+    #[test]
+    fn advise_reads_the_description_only_when_it_is_new() {
+        // First press with a description and AI: read it.
+        assert!(should_interpret(true, "bike rack bracket", None));
+        // The same text again (spaces aside): score the chips as they are.
+        assert!(!should_interpret(
+            true,
+            "  bike rack bracket ",
+            Some("bike rack bracket")
+        ));
+        // An edited description is read again.
+        assert!(should_interpret(
+            true,
+            "bike rack bracket, outdoors",
+            Some("bike rack bracket")
+        ));
+        // No text, or no AI: never.
+        assert!(!should_interpret(true, "   ", None));
+        assert!(!should_interpret(false, "bike rack bracket", None));
+    }
+
+    #[test]
+    fn the_hero_is_signal_only_with_no_unmet_need() {
+        let all_met = fit(
+            100,
+            vec![
+                reason(Strong, Verdict::Met, "3/3"),
+                reason(OutdoorUv, Verdict::Partly, "2/3"),
+            ],
+        );
+        assert_eq!(hero_tone(&all_met), Tone::Signal);
+        let one_missed = fit(
+            56,
+            vec![
+                reason(Strong, Verdict::Met, "3/3"),
+                reason(Flexible, Verdict::NotMet, "0/3"),
+            ],
+        );
+        assert_eq!(hero_tone(&one_missed), Tone::Neutral);
+    }
+
+    #[test]
+    fn the_result_summary_names_the_picks() {
+        let advice = |fits: Vec<MaterialFit>| Advice {
+            needs: vec![],
+            fits,
+            ruled_out: vec![],
+            printer_line: None,
+            model_error: None,
+            catalog_empty: false,
+        };
+        let named = |name: &str, pct: u8| MaterialFit {
+            name: name.into(),
+            ..fit(pct, vec![])
+        };
+        assert_eq!(result_summary(&advice(vec![])), NOTHING_FITS);
+        assert_eq!(
+            result_summary(&advice(vec![named("ASA", 56)])),
+            "Best fit ASA, fit 56%."
+        );
+        assert_eq!(
+            result_summary(&advice(vec![
+                named("ASA", 56),
+                named("PETG", 44),
+                named("PC", 56)
+            ])),
+            "Best fit ASA, fit 56%. Also PETG, PC."
+        );
     }
 
     #[test]
