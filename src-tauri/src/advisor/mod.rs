@@ -2,6 +2,7 @@
 //! products, to print a part with. Scoring is offline and deterministic;
 //! AI only turns a description into needs.
 
+pub mod interpret;
 pub mod materials;
 pub mod needs;
 pub mod products;
