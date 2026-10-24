@@ -1,0 +1,338 @@
+//! Pure formatting for Filament → Advise, tested on the host.
+
+use std::fmt::Write as _;
+
+use super::types::{Excluded, MaterialFit, Need, NeedReason, Product, ProductStatus, Verdict};
+use crate::viewport::types::{ModelView, RiskKind};
+
+pub const ORDER_RULE: &str = "Loaded in your AMS first, then your preferred brands, then the rest A–Z. Products are never ranked on price, rating or commission.";
+pub const AI_FAILED: &str = "Couldn't read the description; pick the needs below.";
+pub const AI_OFF: &str = "AI isn't set up, so pick what the part needs below.";
+pub const BEFORE_ADVISING: &str = "Describe the part or pick what it needs";
+pub const READING: &str = "Reading your description";
+/// Shown when `fits` is empty. The same text as the backend's
+/// `score::NOTHING_FITS`.
+pub const NOTHING_FITS: &str = "Nothing on this printer meets all of that.";
+pub const CATALOG_EMPTY: &str = "The filament catalog is empty. Refresh it on the Search tab.";
+
+/// Toggle one chip. The heat options are one choice: picking one clears
+/// the others.
+pub fn toggle_need(current: &[Need], need: Need) -> Vec<Need> {
+    if current.contains(&need) {
+        return current.iter().copied().filter(|n| *n != need).collect();
+    }
+    let mut out: Vec<Need> = current
+        .iter()
+        .copied()
+        .filter(|n| !(need.is_heat() && n.is_heat()))
+        .collect();
+    out.push(need);
+    out.sort();
+    out
+}
+
+/// Toggle a preferred brand, ignoring case.
+pub fn toggle_brand(current: &[String], brand: &str) -> Vec<String> {
+    if current.iter().any(|b| b.eq_ignore_ascii_case(brand)) {
+        current
+            .iter()
+            .filter(|b| !b.eq_ignore_ascii_case(brand))
+            .cloned()
+            .collect()
+    } else {
+        let mut out = current.to_vec();
+        out.push(brand.to_string());
+        out
+    }
+}
+
+pub fn verdict_mark(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Met => "✓",
+        Verdict::Partly => "~",
+        Verdict::NotMet => "✗",
+    }
+}
+
+/// A reason row's value: `✓ 3/3`.
+pub fn reason_value(r: &NeedReason) -> String {
+    format!("{} {}", verdict_mark(r.verdict), r.detail)
+}
+
+/// `Fit 100% · ✓ Heat ≥80 °C · ✓ Outdoor/UV`: the fit and up to three met needs.
+pub fn hero_detail(fit: &MaterialFit) -> String {
+    let mut out = format!("Fit {}%", fit.fit_pct);
+    for r in fit
+        .reasons
+        .iter()
+        .filter(|r| r.verdict == Verdict::Met)
+        .take(3)
+    {
+        let _ = write!(out, " · ✓ {}", r.need.label());
+    }
+    out
+}
+
+/// A ruled-out material's reasons on one line.
+pub fn excluded_reasons(e: &Excluded) -> String {
+    e.reasons.join("; ")
+}
+
+pub fn rank_label(index: usize) -> String {
+    match index {
+        0 => "1st".into(),
+        1 => "2nd".into(),
+        2 => "3rd".into(),
+        n => format!("{}th", n + 1),
+    }
+}
+
+pub fn status_tag(p: &Product) -> Option<String> {
+    match p.status {
+        ProductStatus::Loaded => Some(match &p.slot {
+            Some(slot) => format!("Loaded in {slot}"),
+            None => "Loaded".to_string(),
+        }),
+        ProductStatus::Preferred => Some("Preferred".to_string()),
+        ProductStatus::Catalog => None,
+    }
+}
+
+/// One decimal under 10 (`6.0`), whole above (`12`), as the risk list does.
+fn ratio(v: f32) -> String {
+    if v < 10.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.0}")
+    }
+}
+
+/// `10 × 10 mm · Overhang 64 mm² · Tall and thin 6.0:1`: the footprint, the
+/// overhang area summed over its regions, then the other risks.
+pub fn model_line(view: &ModelView) -> String {
+    let size = |i: usize| (view.bounds_max[i] - view.bounds_min[i]).max(0.0);
+    let mut parts = vec![format!("{:.0} × {:.0} mm", size(0), size(1))];
+    let overhangs: Vec<f32> = view
+        .risks
+        .iter()
+        .filter(|r| r.kind == RiskKind::Overhang)
+        .map(|r| r.value)
+        .collect();
+    if !overhangs.is_empty() {
+        parts.push(format!("Overhang {:.0} mm²", overhangs.iter().sum::<f32>()));
+    }
+    for r in &view.risks {
+        match r.kind {
+            RiskKind::SmallBedContact => {
+                parts.push(format!("Small bed contact {:.0} mm²", r.value))
+            }
+            RiskKind::TallThin => parts.push(format!("Tall and thin {}:1", ratio(r.value))),
+            RiskKind::Overhang => {}
+        }
+    }
+    parts.join(" · ")
+}
+
+/// The Advise route with `model` set, as Slice's "Suggest filament" links it.
+pub fn advise_href(path: &str) -> String {
+    let mut out = String::from("/filament/advise?model=");
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::advisor::types::{
+        Excluded, MaterialFit, Need::*, NeedReason, Product, ProductStatus, Verdict,
+    };
+
+    fn reason(need: Need, verdict: Verdict, detail: &str) -> NeedReason {
+        NeedReason {
+            need,
+            verdict,
+            detail: detail.into(),
+        }
+    }
+    fn fit(pct: u8, reasons: Vec<NeedReason>) -> MaterialFit {
+        MaterialFit {
+            material: "pa_cf".into(),
+            name: "PA-CF".into(),
+            total: 5,
+            fit_pct: pct,
+            reasons,
+            printer_notes: vec![],
+            geometry_notes: vec![],
+            material_notes: vec![],
+            products: vec![],
+        }
+    }
+    fn product(status: ProductStatus, slot: Option<&str>) -> Product {
+        Product {
+            name: "ASA".into(),
+            brand: "Bambu Lab".into(),
+            status,
+            slot: slot.map(str::to_string),
+            buy_url: None,
+            entry: None,
+        }
+    }
+
+    #[test]
+    fn the_hero_detail_gives_the_fit_and_the_ticks() {
+        let f = fit(
+            83,
+            vec![
+                reason(Heat80, Verdict::Met, "heat deflection ≈120 °C"),
+                reason(OutdoorUv, Verdict::Partly, "2/3"),
+            ],
+        );
+        assert_eq!(hero_detail(&f), "Fit 83% · ✓ Heat ≥80 °C");
+        let both = fit(
+            100,
+            vec![
+                reason(Heat80, Verdict::Met, "x"),
+                reason(OutdoorUv, Verdict::Met, "3/3"),
+            ],
+        );
+        assert_eq!(
+            hero_detail(&both),
+            "Fit 100% · ✓ Heat ≥80 °C · ✓ Outdoor/UV"
+        );
+        assert_eq!(
+            hero_detail(&fit(0, vec![reason(Flexible, Verdict::NotMet, "0/3")])),
+            "Fit 0%"
+        );
+    }
+
+    #[test]
+    fn reasons_read_as_a_mark_and_a_detail() {
+        assert_eq!(
+            reason_value(&reason(OutdoorUv, Verdict::Met, "3/3")),
+            "✓ 3/3"
+        );
+        assert_eq!(
+            reason_value(&reason(OutdoorUv, Verdict::Partly, "2/3")),
+            "~ 2/3"
+        );
+        assert_eq!(
+            reason_value(&reason(Flexible, Verdict::NotMet, "0/3")),
+            "✗ 0/3"
+        );
+    }
+
+    #[test]
+    fn heat_chips_exclude_each_other() {
+        let n = toggle_need(&[], Strong);
+        assert_eq!(n, [Strong]);
+        let n = toggle_need(&toggle_need(&n, Heat60), Heat100);
+        assert_eq!(n, [Strong, Heat100]);
+        assert_eq!(toggle_need(&n, Heat100), [Strong]);
+        assert_eq!(toggle_need(&[OutdoorUv], Heat80), [Heat80, OutdoorUv]);
+    }
+
+    #[test]
+    fn brands_toggle_ignoring_case() {
+        let b = toggle_brand(&[], "Polymaker");
+        assert_eq!(b, ["Polymaker"]);
+        assert!(toggle_brand(&b, "polymaker").is_empty());
+    }
+
+    #[test]
+    fn status_tags_name_the_slot() {
+        assert_eq!(
+            status_tag(&product(ProductStatus::Loaded, Some("A2"))).as_deref(),
+            Some("Loaded in A2")
+        );
+        assert_eq!(
+            status_tag(&product(ProductStatus::Preferred, None)).as_deref(),
+            Some("Preferred")
+        );
+        assert_eq!(status_tag(&product(ProductStatus::Catalog, None)), None);
+    }
+
+    #[test]
+    fn ruled_out_reasons_join_with_semicolons() {
+        let e = |reasons: &[&str]| Excluded {
+            material: "pc".into(),
+            name: "PC".into(),
+            reasons: reasons.iter().map(|r| r.to_string()).collect(),
+        };
+        assert_eq!(
+            excluded_reasons(&e(&[
+                "Needs an enclosed printer; the A1 is open.",
+                "Softens around 110 °C"
+            ])),
+            "Needs an enclosed printer; the A1 is open.; Softens around 110 °C"
+        );
+        assert_eq!(
+            excluded_reasons(&e(&["Softens around 55 °C"])),
+            "Softens around 55 °C"
+        );
+        assert_eq!(excluded_reasons(&e(&[])), "");
+    }
+
+    #[test]
+    fn ranks_are_ordinals() {
+        assert_eq!([0, 1, 2, 3].map(rank_label), ["1st", "2nd", "3rd", "4th"]);
+    }
+
+    #[test]
+    fn the_model_line_shows_the_footprint_and_the_risks() {
+        let view: ModelView = serde_json::from_str(
+            r#"{"name":"cube.stl","triangle_count":12,"bounds_min":[0,0,0],"bounds_max":[10,10,10],
+                "dots":"","dot_normals":"","edges":"",
+                "risks":[{"kind":"overhang","position":[0,0,0],"value":40,"message":"m"},
+                         {"kind":"overhang","position":[0,0,0],"value":24,"message":"m"},
+                         {"kind":"tall_thin","position":[0,0,0],"value":6,"message":"m"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            model_line(&view),
+            "10 × 10 mm · Overhang 64 mm² · Tall and thin 6.0:1"
+        );
+        let wide: ModelView = serde_json::from_str(
+            r#"{"name":"plate.stl","triangle_count":12,"bounds_min":[0,0,0],"bounds_max":[200,120,2],
+                "dots":"","dot_normals":"","edges":"",
+                "risks":[{"kind":"small_bed_contact","position":[0,0,0],"value":3.4,"message":"m"},
+                         {"kind":"tall_thin","position":[0,0,0],"value":12,"message":"m"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            model_line(&wide),
+            "200 × 120 mm · Small bed contact 3 mm² · Tall and thin 12:1"
+        );
+    }
+
+    #[test]
+    fn advise_links_encode_the_path() {
+        assert_eq!(
+            advise_href("/Users/me/My Parts/bracket #2.stl"),
+            "/filament/advise?model=%2FUsers%2Fme%2FMy%20Parts%2Fbracket%20%232.stl"
+        );
+        assert_eq!(
+            advise_href("C:\\Parts\\é.3mf"),
+            "/filament/advise?model=C%3A%5CParts%5C%C3%A9.3mf"
+        );
+    }
+
+    #[test]
+    fn the_copy_matches_the_spec() {
+        assert_eq!(NOTHING_FITS, "Nothing on this printer meets all of that.");
+        assert_eq!(BEFORE_ADVISING, "Describe the part or pick what it needs");
+        assert_eq!(READING, "Reading your description");
+        assert_eq!(
+            AI_FAILED,
+            "Couldn't read the description; pick the needs below."
+        );
+        assert!(ORDER_RULE.starts_with(
+            "Loaded in your AMS first, then your preferred brands, then the rest A–Z."
+        ));
+    }
+}

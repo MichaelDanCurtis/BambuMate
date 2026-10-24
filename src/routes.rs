@@ -4,7 +4,11 @@
 /// A tab inside a hub: its label and its route.
 pub type Tab = (&'static str, &'static str);
 
-pub const FILAMENT_TABS: &[Tab] = &[("Search", "/filament"), ("Batch", "/filament/batch")];
+pub const FILAMENT_TABS: &[Tab] = &[
+    ("Advise", "/filament/advise"),
+    ("Search", "/filament"),
+    ("Batch", "/filament/batch"),
+];
 
 pub const PROFILES_TABS: &[Tab] = &[("Library", "/profiles"), ("Compare", "/profiles/compare")];
 
@@ -39,6 +43,7 @@ pub const PAGE_ROUTES: &[&str] = &[
     "/",
     "/printer",
     "/filament",
+    "/filament/advise",
     "/filament/batch",
     "/profiles",
     "/profiles/compare",
@@ -75,17 +80,26 @@ mod tests {
     }
 
     #[test]
-    fn every_tab_is_served_and_the_first_tab_is_the_hub_itself() {
+    fn every_tab_is_served_and_the_hub_itself_is_a_tab() {
         for (hub, tabs) in [
             ("/filament", FILAMENT_TABS),
             ("/profiles", PROFILES_TABS),
             ("/settings", SETTINGS_TABS),
         ] {
-            assert_eq!(tabs[0].1, hub);
+            assert!(
+                tabs.iter().any(|(_, href)| *href == hub),
+                "{hub} has no tab"
+            );
             for (_, href) in tabs {
                 assert!(PAGE_ROUTES.contains(href), "{href} is not served");
                 assert!(href.starts_with(hub), "{href} is not under {hub}");
             }
         }
+    }
+
+    #[test]
+    fn filament_tabs_read_advise_search_batch() {
+        let labels: Vec<&str> = FILAMENT_TABS.iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels, ["Advise", "Search", "Batch"]);
     }
 }
