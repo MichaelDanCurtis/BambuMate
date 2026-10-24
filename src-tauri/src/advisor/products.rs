@@ -46,37 +46,67 @@ fn tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// A fibre code at the end of a word, glued or not, with any digits after it
+/// ignored: `CF`, `CF20`, `20CF`, `PA6CF`, `PA12GF30`. Returns the word
+/// before the code (empty for a bare code) and the code.
+fn split_fibre_code(token: &str) -> Option<(&str, &'static str)> {
+    let s = token.trim_end_matches(|c: char| c.is_ascii_digit());
+    ["GF", "CF"]
+        .into_iter()
+        .find_map(|code| s.strip_suffix(code).map(|pre| (pre, code)))
+}
+
 /// The material a product's text describes, or `None` for one the advisor
 /// has no row for (support, glass fibre, PVA, PCTG, PCL, HIPS, CF blends of
 /// ABS, ASA, TPU and PC).
 ///
 /// Matching is on whole words, never substrings: "PCTG", "PCL" and
 /// "Panchroma" are not PC or PA, "PETG Platinum" is PETG, and the carbon in
-/// "Polycarbonate" is not carbon fibre.
+/// "Polycarbonate" is not carbon fibre. Fibre codes glued onto a material
+/// ("PA6CF", "PLACF", "PA12GF30") count as a code plus that material.
 pub fn classify(text: &str) -> Option<MaterialId> {
-    let toks = tokens(text);
-    let has = |w: &str| toks.iter().any(|t| t == w);
+    let mut words: Vec<String> = Vec::new();
+    let (mut gf, mut cf_code) = (false, false);
+    for t in tokens(text) {
+        match split_fibre_code(&t) {
+            Some((pre, code)) => {
+                gf |= code == "GF";
+                cf_code |= code == "CF";
+                if !pre.is_empty() {
+                    words.push(pre.to_string());
+                }
+            }
+            None => words.push(t),
+        }
+    }
+    let has = |w: &str| words.iter().any(|t| t == w);
     let digits_after = |t: &str, prefix: &str| {
         t.strip_prefix(prefix)
             .is_some_and(|r| r.chars().all(|c| c.is_ascii_digit()))
     };
-    if has("SUPPORT") || has("GLASS") || has("PCTG") || toks.iter().any(|t| digits_after(t, "GF")) {
+    if gf || has("SUPPORT") || has("GLASS") || has("PCTG") {
         return None;
     }
-    let carbon_fibre = toks
+    let carbon_fibre = words
         .windows(2)
         .any(|w| w[0] == "CARBON" && matches!(w[1].as_str(), "FIBER" | "FIBRE"))
         || has("CARBONFIBER")
         || has("CARBONFIBRE")
-        || has("CARBONX");
-    let cf = carbon_fibre || toks.iter().any(|t| digits_after(t, "CF"));
+        || has("CARBONX")
+        || has("NYLONX");
+    let cf = carbon_fibre || cf_code;
 
     if has("TPU") || has("TPE") {
         return (!cf).then_some(MaterialId::Tpu);
     }
     if has("PLA") {
+        // "Pro" only upgrades PLA when it sits next to it ("PLA Pro").
+        let pro = words
+            .windows(2)
+            .any(|w| (w[0] == "PLA" && w[1] == "PRO") || (w[0] == "PRO" && w[1] == "PLA"));
         let plus = text.to_ascii_uppercase().contains("PLA+")
-            || ["PLUS", "PRO", "TOUGH"].iter().any(|k| has(k));
+            || pro
+            || ["PLUS", "TOUGH"].iter().any(|k| has(k));
         return Some(if cf {
             MaterialId::PlaCf
         } else if plus {
@@ -101,7 +131,12 @@ pub fn classify(text: &str) -> Option<MaterialId> {
     if has("ABS") {
         return (!cf).then_some(MaterialId::Abs);
     }
-    if has("NYLON") || has("PAHT") || has("PA") || toks.iter().any(|t| digits_after(t, "PA")) {
+    if has("NYLON")
+        || has("NYLONX")
+        || has("PAHT")
+        || has("PA")
+        || words.iter().any(|t| digits_after(t, "PA"))
+    {
         return Some(if cf { MaterialId::PaCf } else { MaterialId::Pa });
     }
     None
@@ -394,6 +429,20 @@ mod tests {
             ("TPU for AMS", Some(Tpu)),
             ("Support for PLA", None),
             ("HIPS", None),
+            ("Fibrex Pa12gf30", None),
+            ("PA12GF30", None),
+            ("PLA 20CF", Some(PlaCf)),
+            ("PA6CF", Some(PaCf)),
+            ("PLACF", Some(PlaCf)),
+            ("PETGCF", Some(PetCf)),
+            ("PA12CF10", Some(PaCf)),
+            ("PA-CF20", Some(PaCf)),
+            ("NylonX", Some(PaCf)),
+            ("Nylon", Some(Pa)),
+            ("PLA Pro", Some(PlaPlus)),
+            ("Pro PLA", Some(PlaPlus)),
+            ("Pro Series PLA", Some(Pla)),
+            ("PLA Basic Pro Gold", Some(Pla)),
             ("", None),
         ];
         for (text, want) in cases {
