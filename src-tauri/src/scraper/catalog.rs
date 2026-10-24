@@ -270,14 +270,16 @@ impl FilamentCatalog {
             .map_err(|e| e.to_string())
     }
 
-    /// Every entry, ordered by brand then name. The advisor filters these by
-    /// material in Rust (`advisor::products::classify`).
+    /// Every entry, ordered by brand then name, at most 20,000 (the real
+    /// catalog has a few hundred). The advisor filters these by material in
+    /// Rust (`advisor::products::classify`).
     pub fn all(&self) -> Result<Vec<CatalogEntry>, String> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT brand, name, material, url_slug, full_url FROM catalog
-                 ORDER BY LOWER(TRIM(brand)), LOWER(name), id",
+                 ORDER BY LOWER(TRIM(brand)), LOWER(name), id
+                 LIMIT 20000",
             )
             .map_err(|e| format!("Failed to prepare catalog listing: {}", e))?;
         let entries = stmt
@@ -709,5 +711,29 @@ mod tests {
                 ("Sunlu".to_string(), "PLA".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn all_sorts_on_the_trimmed_brand_and_keeps_same_named_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = FilamentCatalog::new(&temp.path().join("catalog.db")).unwrap();
+        let e = |brand: &str, slug: &str| CatalogEntry {
+            brand: brand.to_string(),
+            name: "Same".to_string(),
+            material: "PLA".to_string(),
+            url_slug: slug.to_string(),
+            full_url: format!("https://example.com/{slug}"),
+        };
+        catalog
+            .refresh(&[e("Bravo", "b"), e("  alpha", "a2"), e("Alpha", "a1")])
+            .unwrap();
+        let got: Vec<String> = catalog
+            .all()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.url_slug)
+            .collect();
+        // Trimmed brand first; the same brand and name fall back to insertion order.
+        assert_eq!(got, vec!["a2", "a1", "b"]);
     }
 }

@@ -38,22 +38,45 @@ pub struct Product {
     pub entry: Option<CatalogEntry>,
 }
 
+/// Upper-cased alphanumeric words: "PA6-CF" is `PA6`, `CF`.
+fn tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_uppercase)
+        .collect()
+}
+
 /// The material a product's text describes, or `None` for one the advisor
-/// has no row for (support, glass fibre, PVA, PCTG, CF blends of ABS, ASA,
-/// TPU and PC).
+/// has no row for (support, glass fibre, PVA, PCTG, PCL, HIPS, CF blends of
+/// ABS, ASA, TPU and PC).
+///
+/// Matching is on whole words, never substrings: "PCTG", "PCL" and
+/// "Panchroma" are not PC or PA, "PETG Platinum" is PETG, and the carbon in
+/// "Polycarbonate" is not carbon fibre.
 pub fn classify(text: &str) -> Option<MaterialId> {
-    let t = text.to_ascii_uppercase();
-    if t.contains("SUPPORT") || t.contains("GF") || t.contains("GLASS") || t.contains("PCTG") {
+    let toks = tokens(text);
+    let has = |w: &str| toks.iter().any(|t| t == w);
+    let digits_after = |t: &str, prefix: &str| {
+        t.strip_prefix(prefix)
+            .is_some_and(|r| r.chars().all(|c| c.is_ascii_digit()))
+    };
+    if has("SUPPORT") || has("GLASS") || has("PCTG") || toks.iter().any(|t| digits_after(t, "GF")) {
         return None;
     }
-    let cf = t.contains("CF") || t.contains("CARBON");
-    if t.contains("TPU") || t.contains("TPE") {
+    let carbon_fibre = toks
+        .windows(2)
+        .any(|w| w[0] == "CARBON" && matches!(w[1].as_str(), "FIBER" | "FIBRE"))
+        || has("CARBONFIBER")
+        || has("CARBONFIBRE")
+        || has("CARBONX");
+    let cf = carbon_fibre || toks.iter().any(|t| digits_after(t, "CF"));
+
+    if has("TPU") || has("TPE") {
         return (!cf).then_some(MaterialId::Tpu);
     }
-    if t.contains("PLA") {
-        let plus = ["PLA+", "PLA PLUS", "PLA-PLUS", "PLA PRO", "TOUGH"]
-            .iter()
-            .any(|k| t.contains(k));
+    if has("PLA") {
+        let plus = text.to_ascii_uppercase().contains("PLA+")
+            || ["PLUS", "PRO", "TOUGH"].iter().any(|k| has(k));
         return Some(if cf {
             MaterialId::PlaCf
         } else if plus {
@@ -62,23 +85,23 @@ pub fn classify(text: &str) -> Option<MaterialId> {
             MaterialId::Pla
         });
     }
-    if t.contains("PET") {
+    if has("PET") || has("PETG") {
         return Some(if cf {
             MaterialId::PetCf
         } else {
             MaterialId::Petg
         });
     }
-    if t.contains("ASA") {
+    if has("ASA") {
         return (!cf).then_some(MaterialId::Asa);
     }
-    if t.contains("PC") || t.contains("POLYCARBONATE") {
+    if has("PC") || has("POLYCARBONATE") {
         return (!cf).then_some(MaterialId::Pc);
     }
-    if t.contains("ABS") {
+    if has("ABS") {
         return (!cf).then_some(MaterialId::Abs);
     }
-    if t.contains("PA") || t.contains("NYLON") {
+    if has("NYLON") || has("PAHT") || has("PA") || toks.iter().any(|t| digits_after(t, "PA")) {
         return Some(if cf { MaterialId::PaCf } else { MaterialId::Pa });
     }
     None
@@ -99,8 +122,10 @@ pub fn material_of_tray(slot: &SlotView) -> Option<MaterialId> {
 }
 
 /// The link behind "Where to buy": in v1, the entry's own manufacturer or
-/// SpoolScout URL, unchanged, with no affiliate tag. Only http(s) links
-/// are offered.
+/// SpoolScout URL with no affiliate tag, normalised by the URL parser. Only
+/// plain `http(s)://host/...` links are offered: no credentials, no
+/// whitespace or control characters, and the scheme separator must be
+/// written out (the parser alone would accept `https:/x`).
 ///
 /// Affiliate rule, for later: when affiliate tagging is added, links must
 /// go through a redirect the user controls (never a third party's
@@ -108,24 +133,57 @@ pub fn material_of_tray(slot: &SlotView) -> Option<MaterialId> {
 /// never ranked by commission. Every buy link goes through this function so
 /// that can change here without touching the UI.
 pub fn buy_link(entry: &CatalogEntry) -> Option<String> {
-    let url = entry.full_url.trim();
-    let parsed = url::Url::parse(url).ok()?;
-    matches!(parsed.scheme(), "https" | "http").then(|| url.to_string())
+    let raw = entry.full_url.trim();
+    if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let lower = raw.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return None;
+    }
+    let parsed = url::Url::parse(raw).ok()?;
+    let ok = matches!(parsed.scheme(), "https" | "http")
+        && parsed.host_str().is_some_and(|h| !h.is_empty())
+        && parsed.username().is_empty()
+        && parsed.password().is_none();
+    ok.then(|| parsed.to_string())
 }
 
-/// Whether a catalog entry is the spool an AMS slot reports. RFID spools
-/// are Bambu's own.
-fn same_product(e: &CatalogEntry, name: &str, rfid: bool) -> bool {
-    let eq = |a: &str| a.trim().eq_ignore_ascii_case(name);
-    let named = eq(&e.name)
-        || eq(&format!("{} {}", e.material, e.name))
-        || eq(&format!("{} {}", e.brand, e.name));
-    named && (!rfid || e.brand.to_ascii_lowercase().contains("bambu"))
+/// Whether a catalog entry is the spool an AMS slot reports, going by the
+/// tray's own brand text. A Bambu RFID spool is Bambu's. Any other tray must
+/// name the entry's brand; a generic tray names none, so it matches nothing
+/// (it must never borrow another product's name or link).
+fn same_product(e: &CatalogEntry, sub_brands: &str, rfid: bool) -> bool {
+    let brand = e.brand.trim().to_lowercase();
+    let sub = sub_brands.trim().to_lowercase();
+    let rest = if rfid {
+        if !brand.contains("bambu") {
+            return false;
+        }
+        sub.clone()
+    } else {
+        if brand.is_empty() || !sub.contains(&brand) {
+            return false;
+        }
+        sub.replacen(&brand, "", 1).trim().to_string()
+    };
+    let name = e.name.trim().to_lowercase();
+    let material = e.material.trim().to_lowercase();
+    [sub.as_str(), rest.as_str()].iter().any(|t| {
+        !t.is_empty()
+            && (*t == name || *t == format!("{material} {name}") || *t == format!("{brand} {name}"))
+    })
 }
 
 /// Products for `material`: AMS trays whose material matches, then catalog
 /// entries from preferred brands, then the rest of the catalog's matches,
 /// A–Z by brand then name.
+///
+/// A loaded tray links to a catalog entry only when it names that entry's
+/// brand (Bambu RFID spools count as Bambu's). Otherwise it is listed under
+/// its own tray text with no brand, `buy_url` or `entry`. While the catalog
+/// has no Bambu Lab brand, Bambu RFID rows also come out without a
+/// `buy_url`, so callers must not assume one on a `Loaded` product.
 pub fn products_for(
     material: MaterialId,
     slots: &[SlotView],
@@ -152,7 +210,7 @@ pub fn products_for(
         let entry = matching
             .iter()
             .copied()
-            .find(|e| same_product(e, name, slot.rfid));
+            .find(|e| same_product(e, sub, slot.rfid));
         if let Some(e) = entry {
             used.push(e);
         }
@@ -171,6 +229,7 @@ pub fn products_for(
         });
     }
 
+    let preferred = normalize_brands(preferred);
     let is_preferred = |e: &CatalogEntry| {
         preferred
             .iter()
@@ -309,6 +368,33 @@ mod tests {
             ("PVA", None),
             ("PCTG", None),
             ("ABS-CF", None),
+            ("Polycarbonate", Some(Pc)),
+            ("PC Polycarbonate", Some(Pc)),
+            ("PCL", None),
+            ("Pcl", None),
+            ("PC-ABS", Some(Pc)),
+            ("PC-CF", None),
+            ("PolyCast", None),
+            ("Spectrum", None),
+            ("Panchroma", None),
+            ("Pastel", None),
+            ("PLA Sparkle", Some(Pla)),
+            ("Silk PLA", Some(Pla)),
+            ("PLA+", Some(PlaPlus)),
+            ("PLA Pro", Some(PlaPlus)),
+            ("PLA Carbon Fiber", Some(PlaCf)),
+            ("PETG HF", Some(Petg)),
+            ("PETG Platinum", Some(Petg)),
+            ("ABS Plain", Some(Abs)),
+            ("PA12", Some(Pa)),
+            ("PA12-CF", Some(PaCf)),
+            ("ABS-GF", None),
+            ("ASA-CF", None),
+            ("ASA Aero", Some(Asa)),
+            ("TPU for AMS", Some(Tpu)),
+            ("Support for PLA", None),
+            ("HIPS", None),
+            ("", None),
         ];
         for (text, want) in cases {
             assert_eq!(classify(text), want, "{text}");
@@ -395,6 +481,131 @@ mod tests {
             };
             assert_eq!(buy_link(&e), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn buy_links_are_normalised_and_trimmed() {
+        let e = entry("A", "PLA", "B");
+        let with = |u: &str| crate::scraper::catalog::CatalogEntry {
+            full_url: u.to_string(),
+            ..e.clone()
+        };
+        assert_eq!(
+            buy_link(&with("  HTTPS://Example.com/a?x=1 ")).as_deref(),
+            Some("https://example.com/a?x=1")
+        );
+        assert_eq!(
+            buy_link(&with("http://example.com")).as_deref(),
+            Some("http://example.com/")
+        );
+    }
+
+    #[test]
+    fn a_generic_tray_never_borrows_a_catalog_product() {
+        // The catalog has entries literally named after the material.
+        let catalog = vec![
+            entry("3d Fuel", "PETG", "PETG"),
+            entry("Elegoo", "PETG", "PETG"),
+        ];
+        let got = products_for(Petg, &[slot("A1", "PETG", "", false)], &catalog, &[]);
+        assert_eq!(got.len(), 3);
+        assert_eq!(
+            (got[0].status, got[0].slot.as_deref()),
+            (Loaded, Some("A1"))
+        );
+        assert_eq!((got[0].name.as_str(), got[0].brand.as_str()), ("PETG", ""));
+        assert_eq!((got[0].buy_url.clone(), got[0].entry.clone()), (None, None));
+        // Both catalog entries are still listed.
+        assert_eq!(got[1].brand, "3d Fuel");
+        assert_eq!(got[2].brand, "Elegoo");
+
+        // A named sub-brand that is not in the catalog also claims nothing.
+        let got = products_for(
+            Petg,
+            &[slot("A1", "PETG", "Hatchbox PETG", false)],
+            &catalog,
+            &[],
+        );
+        assert_eq!((got[0].brand.as_str(), got[0].entry.clone()), ("", None));
+        assert_eq!(got.len(), 3);
+    }
+
+    #[test]
+    fn a_tray_that_names_the_brand_links_to_it() {
+        let catalog = vec![
+            entry("Polymaker", "PLA", "PolyLite PLA"),
+            entry("Elegoo", "PLA", "PLA"),
+        ];
+        let got = products_for(
+            Pla,
+            &[slot("A1", "PLA", "Polymaker PolyLite PLA", false)],
+            &catalog,
+            &[],
+        );
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[0].status, got[0].brand.as_str()),
+            (Loaded, "Polymaker")
+        );
+        assert!(got[0].buy_url.is_some() && got[0].entry.is_some());
+        assert_eq!(got[1].brand, "Elegoo");
+    }
+
+    #[test]
+    fn a_blank_preferred_brand_matches_nothing() {
+        let catalog = vec![entry("", "PLA", "Mystery"), entry("Acme", "PLA", "Alpha")];
+        let got = products_for(Pla, &[], &catalog, &["".to_string(), "   ".to_string()]);
+        assert!(got.iter().all(|p| p.status == Catalog));
+    }
+
+    #[test]
+    fn preferred_brands_order_among_themselves_and_ignore_case() {
+        let catalog = vec![
+            entry("acme", "PLA", "b"),
+            entry("Zed", "PLA", "z"),
+            entry("Yarn", "PLA", "y"),
+            entry("Acme", "PLA", "a"),
+            entry("Mid", "PLA", "m"),
+        ];
+        let got = products_for(Pla, &[], &catalog, &["zed".to_string(), "YARN".to_string()]);
+        let order: Vec<(&str, ProductStatus)> =
+            got.iter().map(|p| (p.name.as_str(), p.status)).collect();
+        assert_eq!(
+            order,
+            vec![
+                ("y", Preferred),
+                ("z", Preferred),
+                ("a", Catalog),
+                ("b", Catalog),
+                ("m", Catalog)
+            ]
+        );
+    }
+
+    #[test]
+    fn two_slots_with_the_same_spool_are_both_listed_once_each() {
+        let catalog = vec![entry("Bambu Lab", "PLA", "Basic")];
+        let slots = [
+            slot("A1", "PLA", "PLA Basic", true),
+            slot("A2", "PLA", "PLA Basic", true),
+        ];
+        let got = products_for(Pla, &slots, &catalog, &[]);
+        let labels: Vec<_> = got.iter().map(|p| p.slot.as_deref()).collect();
+        assert_eq!(labels, vec![Some("A1"), Some("A2")]);
+        assert!(got.iter().all(|p| p.status == Loaded && p.entry.is_some()));
+    }
+
+    #[test]
+    fn blank_and_unknown_trays_are_skipped() {
+        let slots = [
+            slot("A1", "   ", "", false),
+            slot("A2", "Unknown", "", false),
+            slot("A3", "GENERIC", "", false),
+        ];
+        for s in &slots {
+            assert_eq!(material_of_tray(s), None, "{}", s.label);
+        }
+        assert!(products_for(Pla, &slots, &[], &[]).is_empty());
     }
 
     #[test]
