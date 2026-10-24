@@ -9,7 +9,7 @@ use crate::scraper::http_client::ScraperHttpClient;
 use crate::scraper::types::{FilamentSpecs, NozzleTuning};
 
 /// Get the configured AI provider from preferences, defaulting to "claude".
-fn get_ai_provider(app: &tauri::AppHandle) -> Result<String, String> {
+pub(crate) fn get_ai_provider(app: &tauri::AppHandle) -> Result<String, String> {
     let store = app.store("preferences.json").map_err(|e| {
         warn!("Failed to open preferences store: {}", e);
         e.to_string()
@@ -22,7 +22,7 @@ fn get_ai_provider(app: &tauri::AppHandle) -> Result<String, String> {
 }
 
 /// Returns `true` when AI is enabled for filament search (default), `false` for web-only mode.
-fn use_ai_for_filament(app: &tauri::AppHandle) -> bool {
+pub(crate) fn use_ai_for_filament(app: &tauri::AppHandle) -> bool {
     let store = match app.store("preferences.json").ok() {
         Some(s) => s,
         None => return true,
@@ -34,7 +34,7 @@ fn use_ai_for_filament(app: &tauri::AppHandle) -> bool {
 }
 
 /// Get the configured AI model from preferences, defaulting to "claude-sonnet-4-20250514".
-fn get_ai_model(app: &tauri::AppHandle) -> Result<String, String> {
+pub(crate) fn get_ai_model(app: &tauri::AppHandle) -> Result<String, String> {
     let store = app.store("preferences.json").map_err(|e| {
         warn!("Failed to open preferences store: {}", e);
         e.to_string()
@@ -49,7 +49,10 @@ fn get_ai_model(app: &tauri::AppHandle) -> Result<String, String> {
 /// Get the API key from the system keychain for the given provider.
 /// For the "local" provider, returns the configured local server URL
 /// (used by the extraction layer to connect to the server).
-fn get_api_key_for_provider(app: &tauri::AppHandle, provider: &str) -> Result<String, String> {
+pub(crate) fn get_api_key_for_provider(
+    app: &tauri::AppHandle,
+    provider: &str,
+) -> Result<String, String> {
     if provider == "local" {
         // Return the local server URL so the extraction layer knows where to connect
         let store = app.store("preferences.json").ok();
@@ -264,7 +267,7 @@ pub struct CatalogStatus {
 }
 
 /// Get the catalog database path.
-fn get_catalog_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+pub(crate) fn get_catalog_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let cache_dir = get_cache_dir(app)?;
     Ok(cache_dir.join("filament_catalog.db"))
 }

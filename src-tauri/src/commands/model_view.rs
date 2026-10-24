@@ -88,7 +88,7 @@ fn cached_view(
     Ok(view)
 }
 
-fn model_view_blocking(path: &Path) -> Result<ModelView, ModelError> {
+pub(crate) fn model_view_blocking(path: &Path) -> Result<ModelView, ModelError> {
     let cache = CACHE.get_or_init(new_cache);
     cached_view(path, cache, open_model, |open| {
         let (mesh, unchanged) = open.parse_checked()?;
