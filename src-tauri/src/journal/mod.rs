@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 pub mod store;
 pub mod types;
+pub mod watch;
 
 /// Emitted after every journal write.
 pub const CHANGED_EVENT: &str = "journal://changed";
