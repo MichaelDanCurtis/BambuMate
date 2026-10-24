@@ -391,10 +391,13 @@ impl JournalStore {
     }
 
     /// Saves the slice snapshot, and the plate thumbnail as a file when
-    /// there is one. A thumbnail that can't be written only loses the
-    /// thumbnail. An entry that isn't there (any more) gets [`GONE`] and no
-    /// thumbnail file: the row is checked before the file is written, and the
-    /// file is removed again if the row went away or the update failed.
+    /// there is one, replacing any snapshot and thumbnail saved before. A
+    /// thumbnail that can't be written only loses the thumbnail. An entry that isn't there (any more) gets
+    /// [`GONE`] and no thumbnail file.
+    ///
+    /// The new thumbnail is written to a temporary file in `thumbs/` and
+    /// renamed over the old one only once the row is updated, so a failed
+    /// update keeps the old snapshot and its thumbnail together.
     pub fn set_slice(
         &self,
         id: i64,
@@ -406,29 +409,9 @@ impl JournalStore {
             return Err(GONE.to_string());
         }
         let mut slice = slice.clone();
-        let mut thumbnail_written = None;
-        slice.has_thumbnail = match thumbnail_png {
-            Some(png) => {
-                let path = self.thumbnail_path(id);
-                let written = path
-                    .parent()
-                    .map(std::fs::create_dir_all)
-                    .transpose()
-                    .and_then(|_| std::fs::write(&path, png));
-                match written {
-                    Ok(()) => {
-                        thumbnail_written = Some(path);
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!("print journal: thumbnail not saved: {e}");
-                        false
-                    }
-                }
-            }
-            None => false,
-        };
-        let saved = serde_json::to_string(&slice)
+        let staged = thumbnail_png.and_then(|png| self.stage_thumbnail(png));
+        slice.has_thumbnail = staged.is_some();
+        let changed = serde_json::to_string(&slice)
             .map_err(save_err)
             .and_then(|json| {
                 self.conn
@@ -437,19 +420,70 @@ impl JournalStore {
                         params![id, json, now],
                     )
                     .map_err(save_err)
-            });
-        match saved {
-            Ok(changed) if changed > 0 => Ok(()),
-            outcome => {
-                if let Some(path) = thumbnail_written {
+            })?;
+        // A staged file that isn't kept is removed when it is dropped.
+        if changed == 0 {
+            return Err(GONE.to_string());
+        }
+        let path = self.thumbnail_path(id);
+        match staged {
+            None => remove_file_quietly(&path),
+            Some(file) => {
+                if let Err(e) = file.persist(&path) {
+                    tracing::warn!("print journal: thumbnail not saved: {}", e.error);
                     remove_file_quietly(&path);
-                }
-                match outcome {
-                    Ok(_) => Err(GONE.to_string()),
-                    Err(e) => Err(e),
+                    slice.has_thumbnail = false;
+                    if let Ok(json) = serde_json::to_string(&slice) {
+                        if let Err(e) = self.conn.execute(
+                            "UPDATE prints SET slice_json = ?2 WHERE id = ?1",
+                            params![id, json],
+                        ) {
+                            tracing::warn!("print journal: thumbnail flag not cleared: {e}");
+                        }
+                    }
                 }
             }
         }
+        Ok(())
+    }
+
+    /// `png` in a temporary file next to the thumbnails, or `None` when it
+    /// can't be written.
+    fn stage_thumbnail(&self, png: &[u8]) -> Option<tempfile::NamedTempFile> {
+        let dir = self.root.join("thumbs");
+        let staged = std::fs::create_dir_all(&dir)
+            .and_then(|()| tempfile::Builder::new().suffix(".tmp").tempfile_in(&dir))
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(png)?;
+                Ok(file)
+            });
+        match staged {
+            Ok(file) => Some(file),
+            Err(e) => {
+                tracing::warn!("print journal: thumbnail not saved: {e}");
+                None
+            }
+        }
+    }
+
+    /// Unlinks the entry's slice: its snapshot and its thumbnail file go.
+    /// `false` when it had none. An entry that isn't there (any more) gets
+    /// [`GONE`].
+    pub fn clear_slice(&self, id: i64, now: i64) -> Result<bool, String> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE prints SET slice_json = NULL, updated_at = ?2 \
+                 WHERE id = ?1 AND slice_json IS NOT NULL",
+                params![id, now],
+            )
+            .map_err(save_err)?;
+        if changed == 0 && !self.exists(id)? {
+            return Err(GONE.to_string());
+        }
+        remove_file_quietly(&self.thumbnail_path(id));
+        Ok(changed > 0)
     }
 
     /// Entries still printing, newest first.
@@ -1289,6 +1323,103 @@ mod tests {
             "a deleted entry gets no thumbnail"
         );
         assert!(!paths.root.join("thumbs").join(format!("{id}.png")).exists());
+    }
+
+    const THUMB: &[u8] = b"\x89PNG\r\n\x1a\nthumb";
+
+    /// No file is left in `thumbs/` but the entries' own thumbnails.
+    fn thumbs_dir(s: &JournalStore) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(s.root.join("thumbs"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn clearing_a_slice_removes_the_snapshot_and_the_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        let other = s.start(&new_print("b", "gear", 1), 1).unwrap();
+        s.set_slice(id, &slice(), Some(THUMB), 2).unwrap();
+        s.set_slice(other, &slice(), Some(THUMB), 2).unwrap();
+        assert!(s.clear_slice(id, 3).unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!((e.slice, e.updated_at), (None, 3));
+        assert!(!s.thumbnail_path(id).exists());
+        assert!(
+            s.thumbnail_path(other).exists(),
+            "only the entry's own thumbnail goes"
+        );
+        assert!(s.get(other).unwrap().unwrap().slice.is_some());
+        assert!(!s.clear_slice(id, 4).unwrap(), "nothing left to clear");
+        assert_eq!(s.get(id).unwrap().unwrap().updated_at, 3);
+        s.delete(id).unwrap();
+        assert_eq!(s.clear_slice(id, 5).err().as_deref(), Some(GONE));
+    }
+
+    #[test]
+    fn a_new_slice_replaces_the_old_snapshot_and_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        s.set_slice(id, &slice(), Some(THUMB), 2).unwrap();
+        let mut gear = slice();
+        gear.model_name = "gear.stl".into();
+        let gear_png = b"\x89PNG\r\n\x1a\ngear";
+        s.set_slice(id, &gear, Some(gear_png), 3).unwrap();
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.slice.as_ref().unwrap().model_name, "gear.stl");
+        assert!(e.slice.unwrap().has_thumbnail);
+        assert_eq!(std::fs::read(s.thumbnail_path(id)).unwrap(), gear_png);
+        assert_eq!(
+            thumbs_dir(&s),
+            vec![format!("{id}.png")],
+            "no temporary file"
+        );
+        // A slice without a thumbnail doesn't keep the old one.
+        s.set_slice(id, &slice(), None, 4).unwrap();
+        assert!(!s.get(id).unwrap().unwrap().slice.unwrap().has_thumbnail);
+        assert!(!s.thumbnail_path(id).exists());
+    }
+
+    #[test]
+    fn a_failed_slice_update_keeps_the_old_snapshot_and_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        s.set_slice(id, &slice(), Some(THUMB), 2).unwrap();
+        s.conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER refuse_slice BEFORE UPDATE OF slice_json ON prints \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let mut gear = slice();
+        gear.model_name = "gear.stl".into();
+        assert_eq!(
+            s.set_slice(id, &gear, Some(b"\x89PNG\r\n\x1a\ngear"), 3)
+                .err()
+                .as_deref(),
+            Some(SAVE_FAILED)
+        );
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.slice.as_ref().unwrap().model_name, "cube.stl");
+        assert!(e.slice.unwrap().has_thumbnail);
+        assert_eq!(
+            std::fs::read(s.thumbnail_path(id)).unwrap(),
+            THUMB,
+            "the old thumbnail stays with the old snapshot"
+        );
+        assert_eq!(
+            thumbs_dir(&s),
+            vec![format!("{id}.png")],
+            "no temporary file"
+        );
+        assert_eq!(s.clear_slice(id, 4).err().as_deref(), Some(SAVE_FAILED));
+        assert!(s.thumbnail_path(id).exists());
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use super::slice::{match_slice, snapshot};
 use super::store::{JournalStore, GONE};
-use super::types::{NewPrint, PrintEnd};
+use super::types::{NewPrint, PrintEnd, SliceSnapshot};
 use super::watch::{resume, JournalEvent, StartedPrint, WatchState};
 use super::{JournalPaths, CHANGED_EVENT};
 use crate::commands::slicer::{plate_thumbnail_bytes, MAX_THUMBNAIL_BYTES};
@@ -529,6 +529,9 @@ pub(crate) fn apply(
             let Some(id) = keys.remove(old) else {
                 return Ok(false);
             };
+            // What the entry was known as, to tell whether its slice still
+            // fits. Unread, the slice is matched again.
+            let before = store.get(id).ok().flatten();
             let renamed = match store.rekey(id, new, name, gcode_file.as_deref(), *plate, now) {
                 Ok(renamed) => renamed,
                 Err(e) => {
@@ -543,18 +546,33 @@ pub(crate) fn apply(
             }
             // The watcher follows the job by its new key from now on.
             keys.insert(new.clone(), id);
-            // A name that arrived late may now match a slice.
-            if store.get(id)?.is_some_and(|e| e.slice.is_none()) {
-                let started = StartedPrint {
-                    key: new.clone(),
-                    name: name.clone(),
-                    gcode_file: gcode_file.clone(),
-                    plate: *plate,
-                    printer_model: None,
-                    started_at: now,
-                    approx: false,
+            let Some(after) = store.get(id)? else {
+                return Ok(true);
+            };
+            let same_print = before.as_ref().is_some_and(|b| {
+                (&b.name, &b.gcode_file, b.plate) == (&after.name, &after.gcode_file, after.plate)
+            });
+            // A name that arrived late may now match a slice. A new name,
+            // file or plate means the slice linked under the old one (the
+            // previous job's name still showing at its start) may not be
+            // this print's: match again, and unlink when nothing matches.
+            if after.slice.is_none() || !same_print {
+                let found = slice_for(
+                    slices,
+                    &after.name,
+                    after.gcode_file.as_deref(),
+                    after.plate,
+                );
+                let linked = match found {
+                    Some((snap, thumbnail)) => {
+                        store.set_slice(id, &snap, thumbnail.as_deref(), now)
+                    }
+                    None if after.slice.is_some() => store.clear_slice(id, now).map(|_| ()),
+                    None => Ok(()),
                 };
-                link_slice(store, id, slices, &started, now);
+                if let Err(e) = linked {
+                    tracing::warn!("print journal: slice not relinked: {e}");
+                }
             }
             Ok(true)
         }
@@ -603,23 +621,32 @@ pub(crate) fn apply(
     }
 }
 
+/// The snapshot and plate thumbnail of the newest finished slice job that
+/// `name` or `gcode_file` matches.
+fn slice_for(
+    slices: &dyn SliceJobs,
+    name: &str,
+    gcode_file: Option<&str>,
+    plate: Option<u32>,
+) -> Option<(SliceSnapshot, Option<Vec<u8>>)> {
+    let jobs = slices.jobs();
+    let names: Vec<&str> = std::iter::once(name).chain(gcode_file).collect();
+    let job = match_slice(&jobs, &names)?;
+    let JobState::Done { result, .. } = &job.state else {
+        return None;
+    };
+    let snap = snapshot(job, result, plate)?;
+    let thumbnail = slices.thumbnail(job, snap.plate);
+    Some((snap, thumbnail))
+}
+
 /// Snapshots the newest matching slice job into entry `id`. A miss or a
 /// failure only loses the estimates.
 fn link_slice(store: &JournalStore, id: i64, slices: &dyn SliceJobs, s: &StartedPrint, now: i64) {
-    let jobs = slices.jobs();
-    let names: Vec<&str> = std::iter::once(s.name.as_str())
-        .chain(s.gcode_file.as_deref())
-        .collect();
-    let Some(job) = match_slice(&jobs, &names) else {
+    let Some((snap, thumbnail)) = slice_for(slices, &s.name, s.gcode_file.as_deref(), s.plate)
+    else {
         return;
     };
-    let JobState::Done { result, .. } = &job.state else {
-        return;
-    };
-    let Some(snap) = snapshot(job, result, s.plate) else {
-        return;
-    };
-    let thumbnail = slices.thumbnail(job, snap.plate);
     if let Err(e) = store.set_slice(id, &snap, thumbnail.as_deref(), now) {
         tracing::warn!("print journal: slice not linked: {e}");
     }
@@ -895,6 +922,126 @@ mod tests {
         let slice = s.get(id).unwrap().unwrap().slice.unwrap();
         assert_eq!((slice.plate, slice.time_seconds), (2, 801));
         assert!(slice.has_thumbnail);
+    }
+
+    /// Slice jobs whose thumbnails tell them apart: `PNG` and the job id.
+    struct ThumbPerJob(Vec<JobView>);
+
+    impl SliceJobs for ThumbPerJob {
+        fn jobs(&self) -> Vec<JobView> {
+            self.0.clone()
+        }
+        fn thumbnail(&self, job: &JobView, _plate: u32) -> Option<Vec<u8>> {
+            let mut png = PNG.to_vec();
+            png.extend(job.id.to_string().bytes());
+            Some(png)
+        }
+    }
+
+    /// Benchy is sliced and printed; the next job starts while the printer
+    /// still shows Benchy's name, and is then renamed to Gear. Returns the
+    /// second entry's id.
+    fn benchy_then_gear(s: &JournalStore, slices: &dyn SliceJobs) -> i64 {
+        let mut keys = HashMap::new();
+        apply(
+            s,
+            &mut keys,
+            slices,
+            &started("local:Benchy|f", "Benchy"),
+            1_000,
+        )
+        .unwrap();
+        let first = keys["local:Benchy|f"];
+        assert_eq!(
+            s.get(first).unwrap().unwrap().slice.unwrap().model_name,
+            "benchy.stl"
+        );
+        apply(s, &mut keys, slices, &ended("local:Benchy|f", 2_000), 2_000).unwrap();
+        apply(
+            s,
+            &mut keys,
+            slices,
+            &started("local:Benchy|g", "Benchy"),
+            3_000,
+        )
+        .unwrap();
+        let id = keys["local:Benchy|g"];
+        assert_eq!(
+            s.get(id).unwrap().unwrap().slice.unwrap().model_name,
+            "benchy.stl",
+            "linked under the stale name"
+        );
+        let rekeyed = JournalEvent::Rekeyed {
+            old: "local:Benchy|g".into(),
+            new: "local:Gear|g".into(),
+            name: "Gear".into(),
+            gcode_file: Some("/data/Metadata/plate_2.gcode".into()),
+            plate: Some(2),
+        };
+        assert!(apply(s, &mut keys, slices, &rekeyed, 3_100).unwrap());
+        assert_eq!(s.get(id).unwrap().unwrap().name, "Gear");
+        let benchy = s.get(first).unwrap().unwrap();
+        assert_eq!(benchy.slice.unwrap().model_name, "benchy.stl");
+        id
+    }
+
+    #[test]
+    fn a_print_renamed_from_the_last_jobs_name_takes_its_own_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(&dir);
+        let slices = ThumbPerJob(vec![
+            done_job(1, "benchy.stl", 800),
+            done_job(2, "gear.stl", 1_500),
+        ]);
+        let id = benchy_then_gear(&s, &slices);
+        let slice = s.get(id).unwrap().unwrap().slice.unwrap();
+        assert_eq!(slice.model_name, "gear.stl");
+        assert_eq!((slice.plate, slice.time_seconds), (2, 1_501));
+        assert!(slice.has_thumbnail);
+        let mut gear_png = PNG.to_vec();
+        gear_png.push(b'2');
+        assert_eq!(std::fs::read(s.thumbnail_path(id)).unwrap(), gear_png);
+    }
+
+    #[test]
+    fn a_print_renamed_from_the_last_jobs_name_to_an_unsliced_one_loses_the_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(&dir);
+        let slices = ThumbPerJob(vec![done_job(1, "benchy.stl", 800)]);
+        let id = benchy_then_gear(&s, &slices);
+        assert_eq!(s.get(id).unwrap().unwrap().slice, None);
+        assert!(!s.thumbnail_path(id).exists());
+    }
+
+    #[test]
+    fn a_rekey_that_keeps_the_name_keeps_the_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(&dir);
+        let slices = ThumbPerJob(vec![done_job(1, "benchy.stl", 800)]);
+        let mut keys = HashMap::new();
+        apply(
+            &s,
+            &mut keys,
+            &slices,
+            &started("local:Benchy|f", "Benchy"),
+            1_000,
+        )
+        .unwrap();
+        let id = keys["local:Benchy|f"];
+        let linked = s.get(id).unwrap().unwrap();
+        // Only the task id arrived: the same print, so the link stands.
+        let rekeyed = JournalEvent::Rekeyed {
+            old: "local:Benchy|f".into(),
+            new: "task:7".into(),
+            name: "Benchy".into(),
+            gcode_file: Some("/data/Metadata/plate_1.gcode".into()),
+            plate: Some(1),
+        };
+        let empty = ThumbPerJob(Vec::new());
+        assert!(apply(&s, &mut keys, &empty, &rekeyed, 1_100).unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.slice, linked.slice);
+        assert!(s.thumbnail_path(id).exists());
     }
 
     #[test]
