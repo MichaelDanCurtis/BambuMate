@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::advisor::PendingCatalogPick;
 use crate::commands::{
     self, BaseProfileMatch, CatalogEntry, CatalogMatch, CatalogStatus, FilamentSpecs,
     GenerateResult, InstallResult,
@@ -260,6 +261,15 @@ pub fn FilamentSearchPage() -> impl IntoView {
             set_is_fetching.set(false);
         });
     };
+
+    // "Generate profile" on Advise hands over a catalog entry: start the
+    // usual flow from it, as if it had been picked from the suggestions.
+    if let Some(entry) = use_context::<PendingCatalogPick>()
+        .and_then(|p| p.0.try_update(Option::take))
+        .flatten()
+    {
+        select_suggestion(entry);
+    }
 
     // Handle AI knowledge generation (asks AI directly without web scraping)
     let do_ai_generate = move || {

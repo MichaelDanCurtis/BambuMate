@@ -14,6 +14,8 @@ pub const READING: &str = "Reading your description";
 /// `score::NOTHING_FITS`.
 pub const NOTHING_FITS: &str = "Nothing on this printer meets all of that.";
 pub const CATALOG_EMPTY: &str = "The filament catalog is empty. Refresh it on the Search tab.";
+/// Under the rank pills when the model's geometry changed the order.
+pub const GEOMETRY_ORDER: &str = "Order also weighs this model's size and shape.";
 
 /// Toggle one chip. The heat options are one choice: picking one clears
 /// the others.
@@ -78,13 +80,44 @@ pub fn excluded_reasons(e: &Excluded) -> String {
     e.reasons.join("; ")
 }
 
-pub fn rank_label(index: usize) -> String {
-    match index {
-        0 => "1st".into(),
-        1 => "2nd".into(),
-        2 => "3rd".into(),
-        n => format!("{}th", n + 1),
-    }
+/// A ruled-out list's heading, with how many it holds.
+pub fn ruled_out_heading(count: usize) -> String {
+    format!("Ruled out ({count})")
+}
+
+/// A rank pill: `1 · PETG`.
+pub fn rank_pill(index: usize, name: &str) -> String {
+    format!("{} · {name}", index + 1)
+}
+
+/// The backend's material keys in its table order, the tie-break order
+/// when two materials fit the same.
+const MATERIAL_ORDER: &[&str] = &[
+    "pla", "pla_plus", "pla_cf", "petg", "pet_cf", "abs", "asa", "tpu", "pa", "pa_cf", "pc",
+];
+
+/// Whether the shown order differs from the order by fit alone (the
+/// needs-only `total`, ties in the table's order). Only a model's geometry
+/// moves a material, so the page then says the order weighs it.
+pub fn geometry_reordered(fits: &[MaterialFit]) -> bool {
+    let place = |key: &str| MATERIAL_ORDER.iter().position(|m| *m == key);
+    fits.windows(2).any(|pair| {
+        let (a, b) = (&pair[0], &pair[1]);
+        a.total < b.total
+            || (a.total == b.total
+                && matches!((place(&a.material), place(&b.material)), (Some(x), Some(y)) if x > y))
+    })
+}
+
+/// A material's notes in its panel: the printer's, then the model's
+/// geometry, then the material's own.
+pub fn detail_notes(fit: &MaterialFit) -> Vec<String> {
+    fit.printer_notes
+        .iter()
+        .chain(&fit.geometry_notes)
+        .chain(&fit.material_notes)
+        .cloned()
+        .collect()
 }
 
 pub fn status_tag(p: &Product) -> Option<String> {
@@ -279,8 +312,73 @@ mod tests {
     }
 
     #[test]
-    fn ranks_are_ordinals() {
-        assert_eq!([0, 1, 2, 3].map(rank_label), ["1st", "2nd", "3rd", "4th"]);
+    fn rank_pills_number_the_material() {
+        assert_eq!(rank_pill(0, "PETG"), "1 · PETG");
+        assert_eq!(rank_pill(2, "PLA"), "3 · PLA");
+    }
+
+    fn ranked(material: &str, total: u32) -> MaterialFit {
+        MaterialFit {
+            material: material.into(),
+            total,
+            fit_pct: (total * 100 / 6) as u8,
+            ..fit(0, vec![])
+        }
+    }
+
+    #[test]
+    fn the_order_note_shows_only_when_geometry_moved_a_material() {
+        // By fit, ties in the table's order: as the backend ranks without a model.
+        assert!(!geometry_reordered(&[
+            ranked("asa", 6),
+            ranked("pla", 4),
+            ranked("abs", 4)
+        ]));
+        assert!(!geometry_reordered(&[
+            ranked("pla", 4),
+            ranked("abs", 4),
+            ranked("pc", 4)
+        ]));
+        assert!(!geometry_reordered(&[]));
+        assert!(!geometry_reordered(&[ranked("tpu", 3)]));
+        // A lower fit ranked above a higher one.
+        assert!(geometry_reordered(&[ranked("petg", 3), ranked("abs", 5)]));
+        // An equal fit out of the table's order: ABS comes before PC.
+        assert!(geometry_reordered(&[ranked("pc", 4), ranked("abs", 4)]));
+        assert!(geometry_reordered(&[
+            ranked("asa", 6),
+            ranked("pa_cf", 4),
+            ranked("pla_plus", 4)
+        ]));
+        assert_eq!(
+            GEOMETRY_ORDER,
+            "Order also weighs this model's size and shape."
+        );
+    }
+
+    #[test]
+    fn a_panel_lists_printer_then_geometry_then_material_notes() {
+        let f = MaterialFit {
+            printer_notes: vec!["Needs a hardened nozzle".into()],
+            geometry_notes: vec!["Supports likely, whatever the material".into()],
+            material_notes: vec!["Dry it first".into()],
+            ..fit(50, vec![])
+        };
+        assert_eq!(
+            detail_notes(&f),
+            [
+                "Needs a hardened nozzle",
+                "Supports likely, whatever the material",
+                "Dry it first"
+            ]
+        );
+        assert!(detail_notes(&fit(50, vec![])).is_empty());
+    }
+
+    #[test]
+    fn the_ruled_out_heading_counts_them() {
+        assert_eq!(ruled_out_heading(3), "Ruled out (3)");
+        assert_eq!(ruled_out_heading(1), "Ruled out (1)");
     }
 
     #[test]
