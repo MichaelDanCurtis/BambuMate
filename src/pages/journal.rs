@@ -347,7 +347,8 @@ pub fn JournalPage() -> impl IntoView {
     // list doesn't show is dropped then.
     Effect::new(move |_| {
         let listed = ids.get();
-        let loaded = entries.with(Option::is_some);
+        // Only a list that loaded: a failed load leaves the reveal for the next.
+        let loaded = entries.with(|r| matches!(r, Some(Ok(_))));
         let Reveal::Done(target) = reveal(pending_reveal.get(), loaded, &listed) else {
             return;
         };

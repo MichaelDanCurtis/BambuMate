@@ -2549,6 +2549,34 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForFunction(() => document.querySelector('.journal-page .jr-row[data-entry="1"] .jr-verdict-value')?.textContent === "Failed", null, { timeout: 5000 });
   });
 
+  await step(run, page, "a click waiting behind a save still goes out after the row closes", async () => {
+    const before = await countOf("journal_update");
+    const settled = await settledCount("journal_update");
+    const rated = { ...JOURNAL_FAILED, tags: ["warping", "stringing"] };
+    const seq = [{ __hold: "jr-close", answer: { ...rated, verdict: "good" } }, { ...rated, verdict: "failed" }];
+    const verdictPressed = () =>
+      page.locator(`${journalDetail(1)} .jr-verdict[aria-pressed="true"]`).evaluateAll((bs) => bs.map((b) => b.dataset.verdict).join("|"));
+    await withFixtures({ journal_update: { __sequence: seq } }, async () => {
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="good"]`);
+      await pastCalls("journal_update", before);
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="failed"]`);
+      await collapse(1);
+      // Opened again while Good is still out: it shows the click, and a
+      // click now doesn't start a second save.
+      await expand(1);
+      if ((await verdictPressed()) !== "failed") throw new Error(`reopened on ${await verdictPressed()}`);
+      if ((await countOf("journal_update")) !== before + 1) throw new Error("a second save went out for the entry");
+      await collapse(1);
+      await page.evaluate(() => window.__release("jr-close"));
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_update", settled + 2], { timeout: 5000 });
+    });
+    const sent = (await callsOf("journal_update")).slice(before).map((c) => JSON.stringify(c.args.update));
+    if (sent.join("|") !== '{"verdict":"good"}|{"verdict":"failed"}') throw new Error(`sent ${sent.join("|")}`);
+    await expand(1);
+    if ((await verdictPressed()) !== "failed") throw new Error(`reopened on ${await verdictPressed()}`);
+    await page.waitForFunction(() => document.querySelector('.journal-page .jr-row[data-entry="1"] .jr-verdict-value')?.textContent === "Failed", null, { timeout: 5000 });
+  });
+
   await step(run, page, "notes save when the box loses focus, not while typing, and not unchanged", async () => {
     const text = "Lifted at the front corner. Try a brim.";
     const notes = `${journalDetail(1)} .jr-notes-field`;
@@ -2598,6 +2626,8 @@ async function driveApp(browserType, engine, baseUrl) {
       await pastCalls("journal_update", before);
       await expand(1);
       if ((await page.locator(box).inputValue()) !== old) throw new Error("the reopened box doesn't show the list's notes");
+      // The user is back in the box when the answer and the reload land.
+      await page.focus(box);
       await page.evaluate(() => window.__release("jr-notes-late"));
       await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length > n, ["journal_update", settled], { timeout: 5000 });
     });
@@ -2605,11 +2635,17 @@ async function driveApp(browserType, engine, baseUrl) {
     const saved = FIXTURES.journal_list.map((e) => (e.id === 1 ? { ...e, notes: "Use a brim." } : e));
     await withFixtures({ journal_list: saved }, async () => {
       const lists = await countOf("journal_list");
+      const answered = await settledCount("journal_list");
       await journalEmit("journal://changed", null);
       await pastCalls("journal_list", lists);
-      await page.waitForFunction((b) => document.querySelector(b)?.value === "Use a brim.", box, { timeout: 5000 });
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length > n, ["journal_list", answered], { timeout: 5000 });
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await page.locator(box).inputValue()) !== old) throw new Error("the box changed under the user's cursor");
     });
+    // Leaving the box with nothing typed takes the newer notes, and saves nothing.
     const before = await countOf("journal_update");
+    await page.locator(box).blur();
+    await page.waitForFunction((b) => document.querySelector(b)?.value === "Use a brim.", box, { timeout: 5000 });
     await page.click(box);
     await page.locator(box).blur();
     for (let i = 0; i < 2; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));

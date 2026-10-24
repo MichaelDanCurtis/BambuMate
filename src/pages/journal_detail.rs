@@ -202,16 +202,6 @@ impl RatingSync {
         }
     }
 
-    /// The list changed: while nothing is out, show what it holds.
-    fn loaded(&mut self, stored: Rating) -> Option<Rating> {
-        if self.in_flight {
-            return None;
-        }
-        self.confirmed = stored.clone();
-        self.wanted = stored.clone();
-        Some(stored)
-    }
-
     /// A click chose `next`; returns the save to send now, if one may go.
     fn click(&mut self, next: Rating) -> Option<EntryUpdate> {
         self.wanted = next;
@@ -426,13 +416,17 @@ fn drain_uploads() {
     spawn_local(async move {
         while let Some((id, (file, entries))) = UPLOADS.with_borrow_mut(|u| u.uploads.next()) {
             show_upload(id, Status::Busy(ADDING));
-            let revision = next_revision();
             let answer = match read_file_as_base64(file).await {
-                Ok((_, data)) => bridge::add_photo(id, data).await,
+                Ok((_, data)) => {
+                    // Taken as the photo is sent, not while it is read: a
+                    // reload asked for during a long read is older.
+                    let revision = next_revision();
+                    bridge::add_photo(id, data).await.map(|e| (e, revision))
+                }
                 Err(_) => Err(NOT_AN_IMAGE.to_string()),
             };
             let result = match answer {
-                Ok(saved) => {
+                Ok((saved, revision)) => {
                     replace_entry(entries, saved, revision);
                     Ok(())
                 }
@@ -513,68 +507,119 @@ pub fn EntryDetail(id: i64, entries: Entries, open: RwSignal<Option<i64>>) -> im
     }
 }
 
-/// What a rating save needs once its answer is in.
-#[derive(Clone, Copy)]
-struct RatingSaves {
-    id: i64,
-    entries: Entries,
-    sync: StoredValue<RatingSync>,
-    shown: RwSignal<Rating>,
-    status: RwSignal<Status>,
+/// The rating saves of every entry, kept outside the detail: one save in
+/// flight per entry, and the follow-up for clicks made meanwhile goes out
+/// even if the detail closes. An entry is here only while a save is out, so
+/// the book doesn't grow; a detail that opens meanwhile shows what is wanted.
+#[derive(Debug, Default)]
+struct RatingBook {
+    syncs: HashMap<i64, RatingSync>,
 }
 
-impl RatingSaves {
-    fn send(self, update: EntryUpdate) {
-        spawn_local(async move {
-            let revision = next_revision();
-            let answer = bridge::update(self.id, &update)
-                .await
-                .map_err(|e| fixed_error(&e, SAVE_FAILED));
-            let rating = answer.as_ref().map(Rating::of).map_err(|e| *e);
-            let Some(answered) = self.sync.try_update_value(|s| s.answer(rating)) else {
-                return;
-            };
-            if let Ok(saved) = answer {
-                replace_entry(self.entries, saved, revision);
-            }
-            self.shown.try_set(answered.show);
-            if let Some(s) = answered.status {
-                self.status.try_set(s);
-            }
-            if let Some(next) = answered.send {
-                self.send(next);
-            }
-        });
+impl RatingBook {
+    /// What a detail opening on entry `id` shows: the wanted rating while a
+    /// save is out, else what the list holds.
+    fn opening(&self, id: i64, stored: Rating) -> Rating {
+        self.syncs.get(&id).map_or(stored, |s| s.wanted.clone())
+    }
+
+    /// The list changed. While a save is out it is ignored (the answer
+    /// settles it); else it is what to show.
+    fn loaded(&self, id: i64, stored: Rating) -> Option<Rating> {
+        (!self.syncs.contains_key(&id)).then_some(stored)
+    }
+
+    /// A click chose `next`; `stored` is the list's rating, used when no save
+    /// is out. Returns the save to send now, if one may go.
+    fn click(&mut self, id: i64, stored: Rating, next: Rating) -> Option<EntryUpdate> {
+        let sync = self
+            .syncs
+            .entry(id)
+            .or_insert_with(|| RatingSync::new(stored));
+        let send = sync.click(next);
+        if !sync.in_flight {
+            self.syncs.remove(&id);
+        }
+        send
+    }
+
+    /// The answer to entry `id`'s save in flight. The entry leaves the book
+    /// once nothing more goes out.
+    fn answer(&mut self, id: i64, result: Result<Rating, &'static str>) -> Option<Answered> {
+        let answered = self.syncs.get_mut(&id)?.answer(result);
+        if answered.send.is_none() {
+            self.syncs.remove(&id);
+        }
+        Some(answered)
     }
 }
 
+/// The pills and status line of an entry's open detail, if one is open.
+type RatingView = (RwSignal<Rating>, RwSignal<Status>);
+
+thread_local! {
+    static RATINGS: RefCell<RatingBook> = RefCell::new(RatingBook::default());
+    static RATING_VIEWS: RefCell<HashMap<i64, RatingView>> = RefCell::new(HashMap::new());
+}
+
+/// Sends entry `id`'s rating save, then the follow-up the answer asks for.
+/// Runs to the end whether or not a detail is open.
+fn send_rating(id: i64, entries: Entries, update: EntryUpdate) {
+    spawn_local(async move {
+        let revision = next_revision();
+        let answer = bridge::update(id, &update)
+            .await
+            .map_err(|e| fixed_error(&e, SAVE_FAILED));
+        let rating = answer.as_ref().map(Rating::of).map_err(|e| *e);
+        let Some(answered) = RATINGS.with_borrow_mut(|b| b.answer(id, rating)) else {
+            return;
+        };
+        if let Ok(saved) = answer {
+            replace_entry(entries, saved, revision);
+        }
+        if let Some((shown, status)) = RATING_VIEWS.with_borrow(|v| v.get(&id).copied()) {
+            shown.try_set(answered.show);
+            if let Some(s) = answered.status {
+                status.try_set(s);
+            }
+        }
+        if let Some(next) = answered.send {
+            send_rating(id, entries, next);
+        }
+    });
+}
+
 /// The verdict pills and the issue-tag chips. Each click shows at once and
-/// is saved, one save at a time (see [`RatingSync`]).
+/// is saved, one save at a time per entry (see [`RatingSync`], [`RatingBook`]).
 #[component]
 fn RatingControls(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl IntoView {
     let stored = Memo::new(move |_| entry.with(|e| e.as_ref().map(Rating::of).unwrap_or_default()));
-    let saves = RatingSaves {
-        id,
-        entries,
-        sync: StoredValue::new(RatingSync::new(stored.get_untracked())),
-        shown: RwSignal::new(stored.get_untracked()),
-        status: RwSignal::new(Status::Quiet),
-    };
-    let shown = saves.shown;
+    let shown = RwSignal::new(RATINGS.with_borrow(|b| b.opening(id, stored.get_untracked())));
+    let status = RwSignal::new(Status::Quiet);
+    RATING_VIEWS.with_borrow_mut(|v| v.insert(id, (shown, status)));
+    on_cleanup(move || {
+        RATING_VIEWS.with_borrow_mut(|v| {
+            if v.get(&id) == Some(&(shown, status)) {
+                v.remove(&id);
+            }
+        });
+    });
 
-    // The list changed (a reload, or a save's answer): follow it while idle.
+    // The list changed (a reload, or a save's answer): follow it while no
+    // save of this entry is out.
     Effect::new(move |_| {
         let now = stored.get();
-        if let Some(Some(show)) = saves.sync.try_update_value(|s| s.loaded(now)) {
+        if let Some(show) = RATINGS.with_borrow(|b| b.loaded(id, now)) {
             shown.try_set(show);
         }
     });
 
     let click = move |next: Rating| {
         shown.set(next.clone());
-        saves.status.set(Status::Quiet);
-        if let Some(Some(update)) = saves.sync.try_update_value(|s| s.click(next)) {
-            saves.send(update);
+        status.set(Status::Quiet);
+        let update = RATINGS.with_borrow_mut(|b| b.click(id, stored.get_untracked(), next));
+        if let Some(update) = update {
+            send_rating(id, entries, update);
         }
     };
 
@@ -611,7 +656,7 @@ fn RatingControls(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) ->
             <div class="jr-verdicts" role="group" aria-labelledby=verdict_label>{verdicts}</div>
             <h2 class="nd-label" id=issues_label.clone()>"Issues"</h2>
             <div class="jr-tags" role="group" aria-labelledby=issues_label>{tags}</div>
-            <StatusLine status=saves.status />
+            <StatusLine status=status />
         </section>
     }
 }
@@ -645,6 +690,15 @@ fn Notes(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl Int
     let on_blur = move |_| {
         focused.set(false);
         let text = draft.get_untracked();
+        // Notes that arrived while the box was in use, and nothing typed:
+        // take them now, rather than keep showing (and later save over
+        // them) the older text.
+        let now = stored.get_untracked();
+        if let Some(Some(next)) = sync.try_update_value(|s| s.stored_changed(&now, &text, false)) {
+            draft.set(next.clone());
+            in_box.set(next);
+            return;
+        }
         let Some(generation) = sync.try_update_value(|s| s.blur(&text)).flatten() else {
             return;
         };
@@ -1117,11 +1171,6 @@ mod tests {
         let failed = rating(Some(Verdict::Failed), &[]);
         assert_eq!(s.click(good.clone()), Some(verdict(VerdictChoice::Good)));
         assert_eq!(s.click(failed.clone()), None);
-        assert_eq!(
-            s.loaded(rating(None, &[])),
-            None,
-            "a reload mid-save is ignored"
-        );
         // Good's answer arrives late: Failed goes out next, still shown.
         let a = s.answer(Ok(good));
         assert_eq!(a.show, failed);
@@ -1199,10 +1248,54 @@ mod tests {
         s.click(rating(None, &["stringing", "bogus"]));
         let a = s.answer(Ok(rating(None, &["stringing"])));
         assert_eq!(a.show, rating(None, &["stringing"]));
+        assert_eq!(a.send, None);
+    }
+
+    #[test]
+    fn the_book_keeps_one_save_per_entry_across_a_closed_detail() {
+        let usable = rating(Some(Verdict::Usable), &[]);
+        let good = rating(Some(Verdict::Good), &[]);
+        let failed = rating(Some(Verdict::Failed), &[]);
+        let mut b = RatingBook::default();
+        assert_eq!(b.opening(1, usable.clone()), usable);
         assert_eq!(
-            s.loaded(rating(None, &["stringing"])),
-            Some(rating(None, &["stringing"]))
+            b.click(1, usable.clone(), good.clone()),
+            Some(verdict(VerdictChoice::Good))
         );
+        assert_eq!(b.click(1, usable.clone(), failed.clone()), None);
+        // The detail closes and opens again before Good answers: it shows
+        // Failed, not the list's Usable, and a reload doesn't move it.
+        assert_eq!(b.opening(1, usable.clone()), failed);
+        assert_eq!(b.loaded(1, usable.clone()), None);
+        // Another entry is its own: its click goes out at once.
+        assert!(b.click(2, usable.clone(), good.clone()).is_some());
+        // Good's answer sends the waiting Failed; Failed's answer settles.
+        let a = b.answer(1, Ok(good)).unwrap();
+        assert_eq!(a.send, Some(verdict(VerdictChoice::Failed)));
+        let a = b.answer(1, Ok(failed.clone())).unwrap();
+        assert_eq!((a.show, a.send), (failed.clone(), None));
+        // Settled entries leave the book.
+        assert!(!b.syncs.contains_key(&1));
+        assert_eq!(b.loaded(1, failed.clone()), Some(failed));
+        assert_eq!(b.answer(1, Err(SAVE_FAILED)), None, "nothing out for 1");
+        b.answer(2, Err(SAVE_FAILED));
+        assert!(b.syncs.is_empty());
+        // A click back to what is stored sends nothing and leaves nothing.
+        assert_eq!(b.click(3, usable.clone(), usable), None);
+        assert!(b.syncs.is_empty());
+    }
+
+    #[test]
+    fn notes_that_arrived_while_the_box_was_in_use_are_taken_on_blur() {
+        let mut n = NotesSync::new("Lifted.".into());
+        // The reload lands while the box is focused: skipped then.
+        assert_eq!(n.stored_changed("Use a brim.", "Lifted.", true), None);
+        // On blur with nothing typed, the box takes them, and saves nothing.
+        assert_eq!(
+            n.stored_changed("Use a brim.", "Lifted.", false),
+            Some("Use a brim.".to_string())
+        );
+        assert_eq!(n.blur("Use a brim."), None);
     }
 
     #[test]
