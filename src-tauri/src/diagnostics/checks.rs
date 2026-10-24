@@ -421,7 +421,15 @@ fn check_app_data_writable() -> CheckOutcome {
             "Grant BambuMate write access to its application support directory.",
         );
     }
-    let probe = dir.join(".bambumate-doctor-probe");
+    // One probe file per call: the doctor can run on several threads (the
+    // platform tests do), and on Windows writing a file another thread is
+    // deleting fails with "Access is denied".
+    static PROBES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let probe = dir.join(format!(
+        ".bambumate-doctor-probe-{}-{n}",
+        std::process::id()
+    ));
     match std::fs::write(&probe, b"probe") {
         Ok(()) => {
             let _ = std::fs::remove_file(&probe);
