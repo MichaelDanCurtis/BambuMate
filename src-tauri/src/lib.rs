@@ -263,6 +263,8 @@ pub fn run() {
                     service.attach_journal(recorder, watch);
                 }
                 if let Some(config) = printer::settings::load_config(app.handle()) {
+                    // Also when it can't connect yet (no access code).
+                    service.follow_journal_printer(&config.serial);
                     match printer::settings::get_access_code(&config.serial) {
                         Ok(Some(code)) => {
                             if let Err(e) = service.start(config, code) {

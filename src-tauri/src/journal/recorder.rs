@@ -25,6 +25,8 @@ use crate::slicer::jobs::{JobState, JobView, SlicerService};
 
 /// How long a journal that couldn't be opened is left before trying again.
 const REOPEN_AFTER: Duration = Duration::from_secs(60);
+/// How long a failed end waits for its retry when no batch comes first.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
 
 /// Told after the journal changed.
 pub trait JournalNotify: Send + Sync + 'static {
@@ -97,10 +99,13 @@ impl Recorder {
         notify: Arc<dyn JournalNotify>,
         reopen_after: Duration,
     ) -> (Self, WatchState) {
+        // Open entries that couldn't be read are dealt with once they can.
+        let mut unread = false;
         let (store, open) = match JournalStore::open(&paths) {
             Ok(store) => {
                 let open = store.open_entries().unwrap_or_else(|e| {
                     tracing::warn!("print journal: open prints not read: {e}");
+                    unread = true;
                     Vec::new()
                 });
                 (Some(store), open)
@@ -129,7 +134,7 @@ impl Recorder {
             retry_at: unavailable.then(|| Instant::now() + reopen_after),
             reopen_after,
             unavailable,
-            startup_pending: unavailable,
+            startup_pending: unavailable || unread,
             retry_ends: Vec::new(),
         };
         let spawned = std::thread::Builder::new()
@@ -207,8 +212,8 @@ struct Writer {
     reopen_after: Duration,
     /// The last open failed (and was logged).
     unavailable: bool,
-    /// The journal couldn't be opened at start, so the entries earlier
-    /// sessions left open haven't been dealt with yet.
+    /// The journal couldn't be opened (or its open entries read) at start,
+    /// so the entries earlier sessions left open haven't been dealt with.
     startup_pending: bool,
     /// Ends that failed once; tried again with the next batch, then given up.
     retry_ends: Vec<(i64, PrintEnd)>,
@@ -217,13 +222,64 @@ struct Writer {
 impl Writer {
     fn run(mut self, stale: &[i64], rx: mpsc::Receiver<Vec<JournalEvent>>) {
         self.guarded(|w| w.close_stale(stale));
-        while let Ok(mut batch) = rx.recv() {
-            // A burst is written as one batch, with one change event.
-            while let Ok(more) = rx.try_recv() {
-                batch.extend(more);
+        loop {
+            // With work pending (an end to retry, entries to close once the
+            // journal opens), don't wait for a batch that may not come:
+            // after an end the printer usually goes quiet.
+            let next = match self.pending_wait() {
+                Some(wait) => match rx.recv_timeout(wait) {
+                    Ok(batch) => Some(batch),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                },
+                None => match rx.recv() {
+                    Ok(batch) => Some(batch),
+                    Err(_) => break,
+                },
+            };
+            match next {
+                Some(mut batch) => {
+                    // A burst is written as one batch, with one change event.
+                    while let Ok(more) = rx.try_recv() {
+                        batch.extend(more);
+                    }
+                    self.guarded(|w| w.write(&batch));
+                }
+                None => self.guarded(|w| w.catch_up()),
             }
-            self.guarded(|w| w.write(&batch));
         }
+        // The sender is gone (app exit): a last try at what is pending.
+        self.guarded(|w| w.catch_up());
+    }
+
+    /// How long to wait for a batch before doing pending work anyway;
+    /// `None` when nothing is pending.
+    fn pending_wait(&self) -> Option<Duration> {
+        if !self.retry_ends.is_empty() {
+            Some(self.reopen_after.min(RETRY_AFTER))
+        } else if self.startup_pending {
+            Some(self.reopen_after)
+        } else {
+            None
+        }
+    }
+
+    /// The pending work, without a batch.
+    fn catch_up(&mut self) {
+        if self.ensure_store() && self.pending_writes() {
+            self.notify.changed();
+        }
+    }
+
+    /// Closes what earlier sessions left open (once the journal opens
+    /// late) and retries failed ends; `true` if any entry changed. The
+    /// store must be open.
+    fn pending_writes(&mut self) -> bool {
+        let mut wrote = false;
+        if std::mem::take(&mut self.startup_pending) {
+            wrote |= self.close_left_open();
+        }
+        wrote | self.retry_failed_ends()
     }
 
     /// Runs `f`; a panic in it is logged and costs only its writes. The
@@ -343,11 +399,7 @@ impl Writer {
             }
             return;
         }
-        let mut wrote = false;
-        if std::mem::take(&mut self.startup_pending) {
-            wrote |= self.close_left_open();
-        }
-        wrote |= self.retry_failed_ends();
+        let mut wrote = self.pending_writes();
         let Some(store) = self.store.as_ref() else {
             return;
         };
@@ -1269,5 +1321,48 @@ mod tests {
         assert!(recorder.finish(Duration::from_secs(2)));
         let e = JournalStore::open(&paths).unwrap().last().unwrap().unwrap();
         assert_eq!((e.outcome, e.ended_at), (Outcome::Finished, Some(77)));
+    }
+
+    #[test]
+    fn a_failed_finish_is_retried_without_another_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let changes = Arc::new(CountChanges::default());
+        let (recorder, _) = Recorder::start_with(
+            paths.clone(),
+            Arc::new(NoSlices),
+            changes.clone(),
+            Duration::from_millis(500),
+        );
+        recorder.record(vec![started("k", "Benchy")]);
+        wait_until(|| changes.count() >= 1);
+        refuse_ends(&paths);
+        recorder.record(vec![ended("k", 99)]);
+        std::thread::sleep(Duration::from_millis(150));
+        allow_ends(&paths);
+        // The printer goes quiet after a finish: no batch brings the retry.
+        let s = JournalStore::open(&paths).unwrap();
+        wait_until(|| s.open_entries().unwrap().is_empty());
+        let e = s.last().unwrap().unwrap();
+        assert_eq!((e.outcome, e.ended_at), (Outcome::Finished, Some(99)));
+        wait_until(|| changes.count() >= 2);
+    }
+
+    #[test]
+    fn the_exit_flush_retries_a_failed_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let changes = Arc::new(CountChanges::default());
+        // The default wait: the retry would come seconds later, not before exit.
+        let (recorder, _) = Recorder::start(paths.clone(), Arc::new(NoSlices), changes.clone());
+        recorder.record(vec![started("k", "Benchy")]);
+        wait_until(|| changes.count() >= 1);
+        refuse_ends(&paths);
+        recorder.record(vec![ended("k", 99)]);
+        std::thread::sleep(Duration::from_millis(150));
+        allow_ends(&paths);
+        assert!(recorder.finish(Duration::from_secs(2)));
+        let e = JournalStore::open(&paths).unwrap().last().unwrap().unwrap();
+        assert_eq!((e.outcome, e.ended_at), (Outcome::Finished, Some(99)));
     }
 }

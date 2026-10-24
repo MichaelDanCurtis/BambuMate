@@ -214,6 +214,13 @@ impl JournalLink {
         self.serial = Some(serial.to_string());
     }
 
+    /// No printer any more: its job is recorded as unknown, and the next
+    /// printer configured starts from nothing.
+    fn forget_printer(&mut self) {
+        self.close_job();
+        self.serial = None;
+    }
+
     /// Records the open job as unknown (no end time) and starts the
     /// watcher from nothing, with no calibration memory either.
     fn close_job(&mut self) {
@@ -511,14 +518,13 @@ impl PrinterService {
     /// Disconnects and forgets the printer's live state. The client gets
     /// `STOP_GRACE` in the background to send its MQTT DISCONNECT.
     pub fn stop(&self) {
-        self.stop_inner(None);
+        self.stop_inner(None, false);
     }
 
     /// `stop` for a printer that is removed: its open print can't be
     /// watched any more, so the journal records it as unknown.
     pub fn remove(&self) {
-        self.stop();
-        self.close_journal_job();
+        self.stop_inner(None, true);
     }
 
     /// No printer is configured (it was removed, or none is set up at app
@@ -526,8 +532,16 @@ impl PrinterService {
     /// the next printer configured starts from nothing.
     pub fn close_journal_job(&self) {
         if let Some(link) = self.inner.live.lock().unwrap().journal.as_mut() {
-            link.close_job();
-            link.serial = None;
+            link.forget_printer();
+        }
+    }
+
+    /// The journal follows printer `serial`, configured but not started
+    /// (no access code yet), so a later switch to another printer closes
+    /// the print it resumed.
+    pub fn follow_journal_printer(&self, serial: &str) {
+        if let Some(link) = self.inner.live.lock().unwrap().journal.as_mut() {
+            link.follow(serial);
         }
     }
 
@@ -536,7 +550,7 @@ impl PrinterService {
     /// process ends. Call it outside the async runtime.
     pub fn shutdown(&self) {
         let (done, finished) = oneshot::channel();
-        self.stop_inner(Some(done));
+        self.stop_inner(Some(done), false);
         // Queued journal writes land before the process ends, while the
         // client sends its DISCONNECT in the background.
         let journal = self.inner.live.lock().unwrap().journal.take();
@@ -548,11 +562,19 @@ impl PrinterService {
         });
     }
 
-    fn stop_inner(&self, done: Option<oneshot::Sender<()>>) {
+    /// Stops the client. `removed`: the printer is gone, so the journal's
+    /// print is closed too, in the same lock section, so no `configure`
+    /// can land between the two.
+    fn stop_inner(&self, done: Option<oneshot::Sender<()>>, removed: bool) {
         let generation = {
             let mut live = self.inner.live.lock().unwrap();
             let generation = live.generation + 1;
             live.reset(generation);
+            if removed {
+                if let Some(link) = live.journal.as_mut() {
+                    link.forget_printer();
+                }
+            }
             generation
         };
         self.send(Command {
@@ -2194,5 +2216,39 @@ mod tests {
         report(&svc, generation, FINISH);
         wait_for(|| last_entry(&paths).is_some()).await;
         assert_eq!(last_entry(&paths).unwrap().outcome, Outcome::Finished);
+    }
+
+    #[tokio::test]
+    async fn a_printer_without_an_access_code_is_followed_for_a_later_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        JournalStore::open(&paths)
+            .unwrap()
+            .start(
+                &crate::journal::types::NewPrint {
+                    job_key: "local:Benchy|".into(),
+                    name: "Benchy".into(),
+                    gcode_file: None,
+                    plate: None,
+                    printer_model: None,
+                    started_at: 10,
+                    start_approx: false,
+                },
+                10,
+            )
+            .unwrap();
+        let (svc, _rec) = service(&dir);
+        with_journal(&svc, &dir);
+        // As at app start with no access code: configured, not started.
+        svc.follow_journal_printer(SERIAL);
+        svc.follow_journal_printer(SERIAL);
+        assert!(
+            entries(&paths)[0].outcome == Outcome::Printing,
+            "same printer"
+        );
+        svc.configure_for_test(config_for("0948SV000000012"));
+        wait_for(|| last_entry(&paths).is_some()).await;
+        let e = last_entry(&paths).unwrap();
+        assert_eq!((e.outcome, e.ended_at), (Outcome::Unknown, None));
     }
 }
