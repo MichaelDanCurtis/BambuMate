@@ -33,6 +33,7 @@ const ROUTES = [
   "/",
   "/printer",
   "/filament",
+  "/filament/advise",
   "/filament/batch",
   "/profiles",
   "/profiles/compare",
@@ -44,6 +45,7 @@ const ROUTES = [
 ];
 // A tab route is reached through its hub: the hub's rail link, then the tab.
 const HUB_OF = {
+  "/filament/advise": "/filament",
   "/filament/batch": "/filament",
   "/profiles/compare": "/profiles",
   "/settings/health": "/settings",
