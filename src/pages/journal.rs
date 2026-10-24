@@ -21,7 +21,7 @@ use crate::journal::format::{
     PRINTING_NOW,
 };
 use crate::journal::types::{FilterKind, JournalFilter, MonthSummary, Outcome, PrintEntry};
-use crate::journal::JournalShared;
+use crate::journal::{next_revision, JournalShared};
 use crate::pages::journal_detail::EntryDetail;
 use crate::printer::types::{swatch_color, untrusted_text};
 use crate::printer::PrinterShared;
@@ -37,20 +37,35 @@ pub(crate) fn find_entry(entries: Entries, id: i64) -> Option<PrintEntry> {
     })
 }
 
-/// Puts a saved entry in place of its copy in the list, unless the list
-/// already holds a newer one (a reload that overtook the save). Safe after
+/// Puts a saved entry in place of its copy in the list. `revision` is the
+/// one [`next_revision`] gave the request that saved it: a copy from a
+/// request made later (a reload that overtook the save) is kept. Safe after
 /// unmount.
-pub(crate) fn replace_entry(entries: Entries, entry: PrintEntry) {
+pub(crate) fn replace_entry(entries: Entries, mut entry: PrintEntry, revision: u64) {
+    entry.revision = revision;
     entries.try_update(|r| {
         if let Some(Ok(list)) = r {
             if let Some(slot) = list
                 .iter_mut()
-                .find(|e| e.id == entry.id && e.updated_at <= entry.updated_at)
+                .find(|e| e.id == entry.id && e.revision < revision)
             {
                 *slot = entry;
             }
         }
     });
+}
+
+/// Marks every entry of a list answer with the revision of its request.
+fn stamped(
+    list: Result<Vec<PrintEntry>, String>,
+    revision: u64,
+) -> Result<Vec<PrintEntry>, String> {
+    list.map(|mut l| {
+        for e in &mut l {
+            e.revision = revision;
+        }
+        l
+    })
 }
 
 /// Drops a deleted entry from the list. Safe after unmount.
@@ -60,6 +75,22 @@ pub(crate) fn remove_entry(entries: Entries, id: i64) {
             list.retain(|e| e.id != id);
         }
     });
+}
+
+/// What a pending reveal of a linked entry does once the list is in.
+#[derive(Debug, PartialEq, Eq)]
+enum Reveal {
+    /// Nothing pending, or the list hasn't answered yet.
+    Wait,
+    /// The reveal is used up; scroll to this row if the list shows it.
+    Done(Option<i64>),
+}
+
+fn reveal(pending: Option<i64>, loaded: bool, listed: &[i64]) -> Reveal {
+    match pending {
+        Some(id) if loaded => Reveal::Done(listed.contains(&id).then_some(id)),
+        _ => Reveal::Wait,
+    }
 }
 
 /// The entry `?entry=<id>` names.
@@ -246,7 +277,9 @@ pub fn JournalPage() -> impl IntoView {
     let linked = Memo::new(move |_| query.with(|q| linked_entry(q.get("entry").as_deref())));
     let open = RwSignal::new(linked.get_untracked());
     // The linked entry still to bring into view, once the list has loaded.
-    let reveal = StoredValue::new(linked.get_untracked());
+    // Used up when it scrolls (or the list doesn't show it), so it never
+    // fires on a later reload.
+    let pending_reveal = RwSignal::new(linked.get_untracked());
     let thumbs = Thumbs::new();
     // Each load takes the next number; only the newest load's answer lands.
     let load_gen = StoredValue::new(0u64);
@@ -260,12 +293,13 @@ pub fn JournalPage() -> impl IntoView {
         };
         let generation = load_gen.get_value().wrapping_add(1);
         load_gen.set_value(generation);
+        let revision = next_revision();
         spawn_local(async move {
             let list = bridge::list(&filter).await;
             if load_gen.try_get_value() != Some(generation) {
                 return;
             }
-            entries.try_set(Some(list));
+            entries.try_set(Some(stamped(list, revision)));
             now.try_set(js_sys::Date::now());
         });
     });
@@ -304,24 +338,23 @@ pub fn JournalPage() -> impl IntoView {
         if first.is_some() {
             if let Some(id) = id {
                 open.set(Some(id));
-                reveal.set_value(Some(id));
+                pending_reveal.set(Some(id));
             }
         }
     });
-    // Brings the linked row into view once its row is listed. A link to an
-    // entry the list doesn't show is dropped with the first answer.
+    // Brings the linked row into view: at once when a link is followed on
+    // this page, else when the list first answers. A link to an entry the
+    // list doesn't show is dropped then.
     Effect::new(move |_| {
         let listed = ids.get();
-        if entries.with(Option::is_none) {
-            return;
-        }
-        let Some(id) = reveal.get_value() else {
+        let loaded = entries.with(Option::is_some);
+        let Reveal::Done(target) = reveal(pending_reveal.get(), loaded, &listed) else {
             return;
         };
-        reveal.set_value(None);
-        if !listed.contains(&id) {
+        pending_reveal.set(None);
+        let Some(id) = target else {
             return;
-        }
+        };
         request_animation_frame(move || {
             let row = web_sys::window().and_then(|w| w.document()).and_then(|d| {
                 d.query_selector(&format!(".journal-page .jr-row[data-entry=\"{id}\"]"))
@@ -661,30 +694,46 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_entry_is_revealed_once_the_list_is_in_and_only_once() {
+        assert_eq!(reveal(Some(4), false, &[]), Reveal::Wait);
+        assert_eq!(reveal(Some(4), true, &[2, 4]), Reveal::Done(Some(4)));
+        // Not listed (filtered out, or still printing): used up, no scroll.
+        assert_eq!(reveal(Some(9), true, &[2, 4]), Reveal::Done(None));
+        assert_eq!(reveal(None, true, &[2, 4]), Reveal::Wait);
+    }
+
+    #[test]
     fn a_saved_entry_replaces_its_copy_unless_the_list_has_a_newer_one() {
         let owner = Owner::new();
         owner.with(|| {
-            let stamped = |id, notes: &str, updated_at| PrintEntry {
+            let noted = |id, notes: &str| PrintEntry {
                 notes: notes.into(),
-                updated_at,
                 ..at(id, Outcome::Finished)
             };
-            let entries: Entries =
-                RwSignal::new(Some(Ok(vec![stamped(1, "old", 10), stamped(2, "", 10)])));
-            replace_entry(entries, stamped(1, "saved", 11));
-            assert_eq!(find_entry(entries, 1).unwrap().notes, "saved");
-            // An answer older than what a reload brought changes nothing.
-            replace_entry(entries, stamped(1, "stale", 9));
-            assert_eq!(find_entry(entries, 1).unwrap().notes, "saved");
+            let save = next_revision();
+            let load = next_revision();
+            assert!(load > save);
+            // Same second, so `updated_at` couldn't tell them apart.
+            let entries: Entries = RwSignal::new(Some(stamped(
+                Ok(vec![noted(1, "reloaded"), noted(2, "")]),
+                load,
+            )));
+            // The save was asked for before the reload: the reload is newer.
+            replace_entry(entries, noted(1, "stale"), save);
+            assert_eq!(find_entry(entries, 1).unwrap().notes, "reloaded");
+            let later = next_revision();
+            replace_entry(entries, noted(1, "saved"), later);
+            let e = find_entry(entries, 1).unwrap();
+            assert_eq!((e.notes.as_str(), e.revision), ("saved", later));
             // An entry the list doesn't hold isn't added.
-            replace_entry(entries, stamped(7, "x", 20));
+            replace_entry(entries, noted(7, "x"), next_revision());
             assert_eq!(find_entry(entries, 7), None);
             remove_entry(entries, 1);
             assert_eq!(find_entry(entries, 1), None);
             assert!(find_entry(entries, 2).is_some());
             // After unmount both are no-ops rather than panics.
             entries.dispose();
-            replace_entry(entries, stamped(2, "late", 30));
+            replace_entry(entries, noted(2, "late"), next_revision());
             remove_entry(entries, 2);
         });
     }

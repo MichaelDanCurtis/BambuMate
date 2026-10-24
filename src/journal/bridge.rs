@@ -15,6 +15,10 @@ extern "C" {
 
 async fn call<A: Serialize, R: DeserializeOwned>(cmd: &str, args: &A) -> Result<R, String> {
     let args = serde_wasm_bindgen::to_value(args).map_err(|e| e.to_string())?;
+    call_with(cmd, args).await
+}
+
+async fn call_with<R: DeserializeOwned>(cmd: &str, args: JsValue) -> Result<R, String> {
     let out = tauri_invoke(cmd, args)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| format!("{cmd} failed")))?;
@@ -70,8 +74,12 @@ pub async fn update(id: i64, update: &EntryUpdate) -> Result<PrintEntry, String>
     call("journal_update", &UpdateArgs { id, update }).await
 }
 
+/// The base64 is copied into the JS argument and dropped before the
+/// await, so up to 33 MB isn't held in wasm memory for the whole round trip.
 pub async fn add_photo(id: i64, data_base64: String) -> Result<PrintEntry, String> {
-    call("journal_add_photo", &AddPhotoArgs { id, data_base64 }).await
+    let args = serde_wasm_bindgen::to_value(&AddPhotoArgs { id, data_base64 })
+        .map_err(|e| e.to_string())?;
+    call_with("journal_add_photo", args).await
 }
 
 pub async fn remove_photo(id: i64, photo_id: i64) -> Result<PrintEntry, String> {

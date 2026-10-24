@@ -107,6 +107,10 @@ pub struct PrintEntry {
     pub photos: Vec<Photo>,
     pub analyses: Vec<i64>,
     pub updated_at: i64,
+    /// Page-only: the [`next_revision`](crate::journal::next_revision) of
+    /// the request this copy came from. Not sent by the backend.
+    #[serde(skip)]
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]

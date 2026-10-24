@@ -6,7 +6,19 @@ pub mod bridge;
 pub mod format;
 pub mod types;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use leptos::prelude::*;
+
+static REVISION: AtomicU64 = AtomicU64::new(0);
+
+/// A number that rises with every journal request the page makes, taken
+/// when the request is sent. A list copy made from a later request is the
+/// newer one, whatever order the answers arrive in; the backend's
+/// `updated_at` is whole seconds and can't tell them apart.
+pub fn next_revision() -> u64 {
+    REVISION.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 /// Bumped on every `journal://changed`. The Journal page and Home track it.
 #[derive(Clone, Copy)]

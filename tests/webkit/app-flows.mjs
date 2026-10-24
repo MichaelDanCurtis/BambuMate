@@ -2522,27 +2522,31 @@ async function driveApp(browserType, engine, baseUrl) {
     });
   });
 
-  await step(run, page, "rapid tag clicks settle on the newest save, shown and stored agreeing", async () => {
+  await step(run, page, "rating saves go out one at a time and the last click is what is stored", async () => {
     const before = await countOf("journal_update");
     const settled = await settledCount("journal_update");
-    const first = { ...JOURNAL_FAILED, verdict: "usable", tags: ["warping", "stringing", "layer_adhesion"] };
-    const second = { ...first, tags: [...first.tags, "elephants_foot"] };
-    const seq = [{ __hold: "jr-a", answer: first }, { __hold: "jr-b", answer: second }];
+    const rated = { ...JOURNAL_FAILED, tags: ["warping", "stringing"] };
+    // Good's answer is held back; Failed, clicked meanwhile, waits for it.
+    const seq = [{ __hold: "jr-good", answer: { ...rated, verdict: "good" } }, { ...rated, verdict: "failed" }];
+    const verdictPressed = () =>
+      page.locator(`${journalDetail(1)} .jr-verdict[aria-pressed="true"]`).evaluateAll((bs) => bs.map((b) => b.dataset.verdict).join("|"));
     await withFixtures({ journal_update: { __sequence: seq } }, async () => {
-      await page.click(`${journalDetail(1)} .jr-tag[data-tag="layer_adhesion"]`);
-      await page.click(`${journalDetail(1)} .jr-tag[data-tag="elephants_foot"]`);
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="good"]`);
+      await pastCalls("journal_update", before);
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="failed"]`);
+      if ((await verdictPressed()) !== "failed") throw new Error(`shown at once: ${await verdictPressed()}`);
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await countOf("journal_update")) !== before + 1) throw new Error("a second save went out while the first was out");
+      await page.evaluate(() => window.__release("jr-good"));
       await pastCalls("journal_update", before + 1);
-      if ((await pressedTags(1)) !== "stringing|warping|layer_adhesion|elephants_foot") throw new Error(`shown at once: ${await pressedTags(1)}`);
-      // The newest answer arrives first; the older one arrives late and changes nothing.
-      await page.evaluate(() => window.__release("jr-b"));
-      await statusIs(`${journalDetail(1)} .jr-rate`, "[SAVED]");
-      await page.evaluate(() => window.__release("jr-a"));
       await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_update", settled + 2], { timeout: 5000 });
-      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      await statusIs(`${journalDetail(1)} .jr-rate`, "[SAVED]");
     });
-    const sent = (await callsOf("journal_update")).slice(before).map((c) => c.args.update.tags.join(","));
-    if (sent.join("|") !== "warping,stringing,layer_adhesion|warping,stringing,layer_adhesion,elephants_foot") throw new Error(`sent ${sent.join("|")}`);
-    if ((await pressedTags(1)) !== "stringing|warping|layer_adhesion|elephants_foot") throw new Error(`settled on ${await pressedTags(1)}`);
+    const sent = (await callsOf("journal_update")).slice(before).map((c) => JSON.stringify(c.args.update));
+    if (sent.join("|") !== '{"verdict":"good"}|{"verdict":"failed"}') throw new Error(`sent ${sent.join("|")}`);
+    // What the last answer stored is what the pills and the row show.
+    if ((await verdictPressed()) !== "failed") throw new Error(`settled on ${await verdictPressed()}`);
+    await page.waitForFunction(() => document.querySelector('.journal-page .jr-row[data-entry="1"] .jr-verdict-value')?.textContent === "Failed", null, { timeout: 5000 });
   });
 
   await step(run, page, "notes save when the box loses focus, not while typing, and not unchanged", async () => {
@@ -2578,24 +2582,38 @@ async function driveApp(browserType, engine, baseUrl) {
     });
   });
 
-  await step(run, page, "a note saved after its entry closed changes nothing on the next one", async () => {
+  await step(run, page, "a reopened notes box follows newer notes and never saves stale text over them", async () => {
     const box = `${journalDetail(1)} .jr-notes`;
+    // What the list holds from the notes step (its last save failed).
+    const old = "Lifted at the front corner. Try a brim.";
     const settled = await settledCount("journal_update");
-    const late = { __hold: "jr-notes-late", answer: { ...JOURNAL_FAILED, notes: "late" } };
+    const late = { __hold: "jr-notes-late", answer: { ...JOURNAL_FAILED, notes: "Use a brim." } };
     await withFixtures({ journal_update: late }, async () => {
       const before = await countOf("journal_update");
-      await page.fill(box, "late");
-      // Opening entry 2 takes focus from the box, which sends the save.
-      await page.click(`${journalRow(2)} .jr-row-main`);
-      await page.waitForSelector(journalDetail(2), { timeout: 5000 });
+      await page.fill(box, "Use a brim.");
+      // Closing the row takes focus from the box, which sends the save; the
+      // row opens again before the answer.
+      await page.click(`${journalRow(1)} .jr-row-main`);
+      await page.waitForSelector(journalDetail(1), { state: "detached", timeout: 5000 });
       await pastCalls("journal_update", before);
+      await expand(1);
+      if ((await page.locator(box).inputValue()) !== old) throw new Error("the reopened box doesn't show the list's notes");
       await page.evaluate(() => window.__release("jr-notes-late"));
       await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length > n, ["journal_update", settled], { timeout: 5000 });
-      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
     });
-    const status = await page.locator(`${journalDetail(2)} .jr-status`).allTextContents();
-    if (status.some((s) => s !== "")) throw new Error(`entry 2 shows "${status.join("|")}"`);
-    if ((await page.locator(`${journalDetail(2)} .jr-notes`).inputValue()) !== "") throw new Error("entry 2's notes changed");
+    // The backend says it changed; the reload brings the saved notes.
+    const saved = FIXTURES.journal_list.map((e) => (e.id === 1 ? { ...e, notes: "Use a brim." } : e));
+    await withFixtures({ journal_list: saved }, async () => {
+      const lists = await countOf("journal_list");
+      await journalEmit("journal://changed", null);
+      await pastCalls("journal_list", lists);
+      await page.waitForFunction((b) => document.querySelector(b)?.value === "Use a brim.", box, { timeout: 5000 });
+    });
+    const before = await countOf("journal_update");
+    await page.click(box);
+    await page.locator(box).blur();
+    for (let i = 0; i < 2; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+    if ((await countOf("journal_update")) !== before) throw new Error("leaving the followed box saved again");
   });
 
   await step(run, page, "a photo can be added by picking or dropping it, one upload at a time", async () => {
@@ -2628,6 +2646,30 @@ async function driveApp(browserType, engine, baseUrl) {
       await statusIs(`${journalDetail(2)} .jr-photos`, "");
       if (await page.locator(`${journalDetail(2)} .jr-photos.jr-drop-over`).count()) throw new Error("the drop outline stayed");
     });
+    // Each photo and its Remove are named apart.
+    await page.waitForFunction(() => document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo img').length === 2, null, { timeout: 5000 });
+    const alts = await page.locator(`${journalDetail(2)} .jr-photo img`).evaluateAll((is) => is.map((i) => i.alt));
+    if (!/^Photo 1 of 2, added \d+ \w{3} \d{4}$/.test(alts[0]) || !alts[1].startsWith("Photo 2 of 2, added ")) throw new Error(`alts: ${alts.join("|")}`);
+    const removes = await page.locator(`${journalDetail(2)} .jr-photo-remove`).evaluateAll((bs) => bs.map((b) => b.getAttribute("aria-label")));
+    if (removes.join("|") !== "Remove photo 1|Remove photo 2") throw new Error(`remove labels: ${removes.join("|")}`);
+  });
+
+  await step(run, page, "photos queued before the detail closes still go up, one at a time", async () => {
+    const two = { ...JOURNAL_FINISHED, photos: [...JOURNAL_FINISHED.photos, { id: 8, file_name: "9a1e.jpg", added_at: 0 }] };
+    await withFixtures({ journal_add_photo: { __sequence: [{ __hold: "jr-photo-close", answer: two }, two] } }, async () => {
+      const sent = await countOf("journal_add_photo");
+      const done = await settledCount("journal_add_photo");
+      const file = { name: "a.png", type: "image/png", base64: pngBase64 };
+      await dropFiles(`${journalDetail(2)} .jr-photos`, [file, { ...file, name: "b.png" }]);
+      await pastCalls("journal_add_photo", sent);
+      await collapse(2);
+      await page.evaluate(() => window.__release("jr-photo-close"));
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_add_photo", done + 2], { timeout: 5000 });
+      if ((await countOf("journal_add_photo")) !== sent + 2) throw new Error(`${(await countOf("journal_add_photo")) - sent} photos went up, not 2`);
+    });
+    await expand(2);
+    await page.waitForFunction(() => document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo').length === 2, null, { timeout: 5000 });
+    await statusIs(`${journalDetail(2)} .jr-photos`, "");
   });
 
   await step(run, page, "a photo over 25 MB, or a file that isn't one, is refused before it is sent", async () => {
@@ -2667,12 +2709,24 @@ async function driveApp(browserType, engine, baseUrl) {
       await statusIs(`${journalDetail(2)} .jr-photos`, `[ERROR: ${SAVE_FAILED}]`);
       if ((await page.locator(`${journalDetail(2)} .jr-photo`).count()) !== 2) throw new Error("a photo went though its removal failed");
     });
+    const placeholder = await page.locator(`${journalDetail(2)} .jr-photo-missing`).first().getAttribute("aria-label");
+    if (!placeholder?.startsWith("Photo 1 of 2, added ")) throw new Error(`the placeholder is named "${placeholder}"`);
     const before = await countOf("journal_remove_photo");
-    await page.locator(`${journalDetail(2)} .jr-photo-remove`).first().click();
-    await pastCalls("journal_remove_photo", before);
-    const args = (await callsOf("journal_remove_photo")).at(-1).args;
-    if (args.id !== 2 || args.photoId !== 7) throw new Error(JSON.stringify(args));
+    const left = { ...JOURNAL_FINISHED, photos: [{ id: 8, file_name: "9a1e.jpg", added_at: 0 }] };
+    await withFixtures({ journal_remove_photo: left }, async () => {
+      await page.locator(`${journalDetail(2)} .jr-photo-remove`).first().click();
+      await pastCalls("journal_remove_photo", before);
+      const args = (await callsOf("journal_remove_photo")).at(-1).args;
+      if (args.id !== 2 || args.photoId !== 7) throw new Error(JSON.stringify(args));
+      // Focus goes to the next photo's Remove.
+      await page.waitForFunction(() => document.activeElement?.closest('.jr-photo[data-photo="8"]') && document.activeElement.classList.contains("jr-photo-remove"), null, { timeout: 5000 });
+    });
+    if ((await page.locator(`${journalDetail(2)} .jr-photo-remove`).getAttribute("aria-label")) !== "Remove photo 1") throw new Error("the remaining photo isn't renumbered");
+    await page.locator(`${journalDetail(2)} .jr-photo-remove`).click();
+    await pastCalls("journal_remove_photo", before + 1);
     await page.waitForFunction(() => document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo').length === 0, null, { timeout: 5000 });
+    // The last photo gone, focus goes to Add photo.
+    await page.waitForFunction(() => document.activeElement?.classList.contains("jr-photo-add"), null, { timeout: 5000 });
   });
 
   await step(run, page, "Analyze a photo links to Analyze with the entry", async () => {
@@ -2705,6 +2759,7 @@ async function driveApp(browserType, engine, baseUrl) {
         { timeout: 5000 }
       );
       if (await page.locator(`${journalDetail(1)} .jr-confirm`).count()) throw new Error("the confirmation stayed after a failed delete");
+      await page.waitForFunction(() => document.activeElement?.classList.contains("jr-delete"), null, { timeout: 5000 });
     });
     const failed = await countOf("journal_delete");
     await page.click(`${journalDetail(1)} .jr-delete`);
@@ -2734,6 +2789,29 @@ async function driveApp(browserType, engine, baseUrl) {
         { timeout: 5000 }
       );
       if ((await page.locator(`${journalRow(139)} .jr-row-main`).getAttribute("aria-expanded")) !== "true") throw new Error("the linked row isn't marked open");
+      // A link followed while the journal is open scrolls there at once.
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+      await goTo("/printer/journal?entry=110", "/printer/journal");
+      await page.waitForSelector(journalDetail(110), { timeout: 5000 });
+      await page.waitForFunction(
+        () => {
+          const row = document.querySelector('.journal-page .jr-row[data-entry="110"]').getBoundingClientRect();
+          const view = document.querySelector(".content").getBoundingClientRect();
+          return row.top >= view.top - 1 && row.top < view.bottom;
+        },
+        null,
+        { timeout: 5000 }
+      );
+      // The reveal is used up: a later reload doesn't scroll again.
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+      const lists = await countOf("journal_list");
+      const answered = await settledCount("journal_list");
+      await journalEmit("journal://changed", null);
+      await pastCalls("journal_list", lists);
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length > n, ["journal_list", answered], { timeout: 5000 });
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      const top = await page.evaluate(() => document.querySelector(".content").scrollTop);
+      if (top !== 0) throw new Error(`a reload scrolled the journal to ${top}`);
     });
     await page.click('nav.sidebar a[href="/"]');
     await goTo("/printer/journal?entry=2", "/printer/journal");
