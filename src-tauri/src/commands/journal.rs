@@ -5,8 +5,8 @@
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::journal::photos::{self, image_data_url};
-use crate::journal::store::{month_bounds, JournalStore, GONE, READ_FAILED};
+use crate::journal::photos::{self, image_data_url, image_data_url_within};
+use crate::journal::store::{month_bounds, JournalStore, GONE, PHOTO_FAILED, READ_FAILED};
 use crate::journal::types::{EntryUpdate, JournalFilter, MonthSummary, PrintEntry};
 use crate::journal::{JournalPaths, CHANGED_EVENT};
 
@@ -24,19 +24,29 @@ fn paths(app: &AppHandle) -> Result<JournalPaths, String> {
         })
 }
 
-/// Runs `f` against the journal on a blocking thread.
+/// Runs `f` against the journal on a blocking thread. A task that panics
+/// gives `on_panic`.
+async fn run_blocking<T, F>(paths: JournalPaths, on_panic: &'static str, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&JournalStore) -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || f(&JournalStore::open(&paths)?))
+        .await
+        .map_err(|e| {
+            tracing::warn!("print journal task failed: {e}");
+            on_panic.to_string()
+        })?
+}
+
+/// [`run_blocking`] on the app's journal; a panic reads as the journal
+/// not being readable.
 async fn with_store<T, F>(app: &AppHandle, f: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&JournalStore) -> Result<T, String> + Send + 'static,
 {
-    let paths = paths(app)?;
-    tauri::async_runtime::spawn_blocking(move || f(&JournalStore::open(&paths)?))
-        .await
-        .map_err(|e| {
-            tracing::warn!("print journal task failed: {e}");
-            READ_FAILED.to_string()
-        })?
+    run_blocking(paths(app)?, READ_FAILED, f).await
 }
 
 fn changed(app: &AppHandle) {
@@ -71,15 +81,31 @@ fn add_photo_to(
     store.get(id)?.ok_or_else(|| GONE.to_string())
 }
 
+/// Removes the photo and returns the entry. A photo that isn't this entry's
+/// (or is already gone) is an error, so the page doesn't take a no-op for
+/// a removal.
+fn remove_photo_from(
+    store: &JournalStore,
+    id: i64,
+    photo_id: i64,
+    now: i64,
+) -> Result<PrintEntry, String> {
+    if !store.remove_photo(id, photo_id, now)? {
+        return Err(GONE.to_string());
+    }
+    store.get(id)?.ok_or_else(|| GONE.to_string())
+}
+
 /// A photo of the entry, or its plate thumbnail without `photo_id`, as a
 /// `data:` URL. The path comes only from the store's own ids.
 fn image_for(store: &JournalStore, id: i64, photo_id: Option<i64>) -> Result<String, String> {
-    let path = match photo_id {
-        Some(photo) => store.photo_path(id, photo)?,
-        None => Some(store.thumbnail_path(id)),
+    let url = match photo_id {
+        Some(photo) => store
+            .photo_path(id, photo)?
+            .and_then(|p| image_data_url(&p)),
+        None => image_data_url_within(&store.thumbnail_path(id), photos::MAX_THUMBNAIL_READ_BYTES),
     };
-    path.and_then(|p| image_data_url(&p))
-        .ok_or_else(|| PHOTO_UNAVAILABLE.to_string())
+    url.ok_or_else(|| PHOTO_UNAVAILABLE.to_string())
 }
 
 #[tauri::command]
@@ -119,7 +145,12 @@ pub async fn journal_add_photo(
     id: i64,
     data_base64: String,
 ) -> Result<PrintEntry, String> {
-    let entry = with_store(&app, move |s| add_photo_to(s, id, data_base64, now())).await?;
+    // A decoder that panics on a bad file is a photo that couldn't be saved,
+    // not an unreadable journal.
+    let entry = run_blocking(paths(&app)?, PHOTO_FAILED, move |s| {
+        add_photo_to(s, id, data_base64, now())
+    })
+    .await?;
     changed(&app);
     Ok(entry)
 }
@@ -130,11 +161,7 @@ pub async fn journal_remove_photo(
     id: i64,
     photo_id: i64,
 ) -> Result<PrintEntry, String> {
-    let entry = with_store(&app, move |s| {
-        s.remove_photo(id, photo_id, now())?;
-        s.get(id)?.ok_or_else(|| GONE.to_string())
-    })
-    .await?;
+    let entry = with_store(&app, move |s| remove_photo_from(s, id, photo_id, now())).await?;
     changed(&app);
     Ok(entry)
 }
@@ -218,6 +245,12 @@ mod tests {
             .write_to(&mut out, ImageFormat::Png)
             .unwrap();
         base64::engine::general_purpose::STANDARD.encode(out.into_inner())
+    }
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(png_b64(width, height))
+            .unwrap()
     }
 
     #[test]
@@ -344,5 +377,82 @@ mod tests {
         assert_eq!(s.link_analysis(99, 7, 300), Err(GONE.to_string()));
         s.link_analysis(id, 7, 300).unwrap();
         assert_eq!(s.get(id).unwrap().unwrap().analyses, vec![7]);
+    }
+
+    #[test]
+    fn removing_a_photo_that_is_not_the_entrys_is_an_error_and_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let a = start(&s, "a");
+        let b = start(&s, "b");
+        let photo = add_photo_to(&s, a, png_b64(10, 10), 200).unwrap().photos[0].id;
+        assert_eq!(remove_photo_from(&s, b, photo, 300), Err(GONE.to_string()));
+        assert_eq!(remove_photo_from(&s, a, 999, 300), Err(GONE.to_string()));
+        assert_eq!(s.get(a).unwrap().unwrap().photos.len(), 1);
+        let entry = remove_photo_from(&s, a, photo, 300).unwrap();
+        assert!(entry.photos.is_empty());
+        // Removing it a second time is an error too.
+        assert_eq!(remove_photo_from(&s, a, photo, 400), Err(GONE.to_string()));
+    }
+
+    #[test]
+    fn a_poisoned_file_name_in_the_database_never_leaves_the_photo_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = start(&s, "a");
+        // A valid JPEG outside the photo folder, where a traversal would land.
+        let outside = dir.path().join("print-journal").join("secret.jpg");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, photos::prepare_photo(&png_bytes(8, 8)).unwrap()).unwrap();
+        let absolute = outside.to_string_lossy().to_string();
+        let db = rusqlite::Connection::open(dir.path().join("print_journal.db")).unwrap();
+        let mut ids = Vec::new();
+        for name in [
+            "../../secret.jpg",
+            "..",
+            "a/b.jpg",
+            "..\\secret.jpg",
+            absolute.as_str(),
+        ] {
+            db.execute(
+                "INSERT INTO print_photos (print_id, file_name, added_at) VALUES (?1, ?2, 1)",
+                rusqlite::params![id, name],
+            )
+            .unwrap();
+            ids.push(db.last_insert_rowid());
+        }
+        for photo in ids {
+            assert_eq!(
+                image_for(&s, id, Some(photo)),
+                Err(PHOTO_UNAVAILABLE.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn a_panic_in_the_blocking_task_gives_the_sentence_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let out: Result<(), String> =
+            tauri::async_runtime::block_on(run_blocking(paths.clone(), PHOTO_FAILED, |_| {
+                panic!("a decoder panicked")
+            }));
+        assert_eq!(out, Err("The photo couldn't be saved.".to_string()));
+        let out: Result<(), String> =
+            tauri::async_runtime::block_on(run_blocking(paths, READ_FAILED, |_| panic!("again")));
+        assert_eq!(out, Err("The print journal couldn't be read.".to_string()));
+    }
+
+    #[test]
+    fn an_oversized_thumbnail_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = start(&s, "a");
+        let thumb = s.thumbnail_path(id);
+        std::fs::create_dir_all(thumb.parent().unwrap()).unwrap();
+        let mut big = png_bytes(4, 4);
+        big.resize(photos::MAX_THUMBNAIL_READ_BYTES as usize + 1, 0);
+        std::fs::write(&thumb, big).unwrap();
+        assert_eq!(image_for(&s, id, None), Err(PHOTO_UNAVAILABLE.to_string()));
     }
 }
