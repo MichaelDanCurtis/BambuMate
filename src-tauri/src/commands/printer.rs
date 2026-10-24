@@ -203,7 +203,7 @@ pub async fn printer_remove(
 ) -> Result<(), String> {
     let service = service.inner().clone();
     blocking(move || {
-        service.stop();
+        service.remove();
         let previous = settings::load_config(&app);
         // Also removes the stored printer's code, best effort, even when the
         // stored settings are no longer valid.

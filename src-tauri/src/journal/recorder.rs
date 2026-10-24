@@ -2,19 +2,21 @@
 //! order, so a slow or failing database never holds up the printer
 //! connection or the async runtime. `Recorder::record` only queues.
 //!
-//! A write that fails is logged and dropped. A journal that can't be opened
-//! is logged once; its events are dropped (the open is retried now and
-//! then) and the printer carries on. After every batch that changed what
-//! the page shows, `journal://changed` goes out.
+//! A write that fails is logged and dropped; a failed end is retried once,
+//! with the next batch. An entry deleted while open is let go. A journal
+//! that can't be opened is logged once; its events are dropped (the open is
+//! retried now and then) and the printer carries on. After every batch that
+//! changed what the page shows, `journal://changed` goes out.
 
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::slice::{match_slice, snapshot};
-use super::store::JournalStore;
+use super::store::{JournalStore, GONE};
 use super::types::{NewPrint, PrintEnd};
 use super::watch::{resume, JournalEvent, StartedPrint, WatchState};
 use super::{JournalPaths, CHANGED_EVENT};
@@ -70,6 +72,9 @@ pub struct Recorder {
     tx: mpsc::Sender<Vec<JournalEvent>>,
     /// Set once the writer is gone, so that is logged once.
     stopped: AtomicBool,
+    /// Disconnects when the writer thread ends.
+    done: mpsc::Receiver<()>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Recorder {
@@ -81,6 +86,16 @@ impl Recorder {
         paths: JournalPaths,
         slices: Arc<dyn SliceJobs>,
         notify: Arc<dyn JournalNotify>,
+    ) -> (Self, WatchState) {
+        Self::start_with(paths, slices, notify, REOPEN_AFTER)
+    }
+
+    /// `start`, retrying a journal that can't be opened after `reopen_after`.
+    pub(crate) fn start_with(
+        paths: JournalPaths,
+        slices: Arc<dyn SliceJobs>,
+        notify: Arc<dyn JournalNotify>,
+        reopen_after: Duration,
     ) -> (Self, WatchState) {
         let (store, open) = match JournalStore::open(&paths) {
             Ok(store) => {
@@ -103,6 +118,7 @@ impl Recorder {
             }
         }
         let (tx, rx) = mpsc::channel::<Vec<JournalEvent>>();
+        let (done_tx, done) = mpsc::channel::<()>();
         let unavailable = store.is_none();
         let writer = Writer {
             paths,
@@ -110,18 +126,37 @@ impl Recorder {
             notify,
             keys,
             store,
-            retry_at: unavailable.then(|| Instant::now() + REOPEN_AFTER),
+            retry_at: unavailable.then(|| Instant::now() + reopen_after),
+            reopen_after,
             unavailable,
+            startup_pending: unavailable,
+            retry_ends: Vec::new(),
         };
         let spawned = std::thread::Builder::new()
             .name("print-journal".into())
-            .spawn(move || writer.run(&stale, rx));
+            .spawn(move || {
+                // Dropped however the thread ends: `finish` waits on it.
+                let _done = done_tx;
+                writer.run(&stale, rx);
+            });
         let stopped = AtomicBool::new(false);
-        if let Err(e) = spawned {
-            tracing::warn!("print journal writer did not start; prints aren't recorded: {e}");
-            stopped.store(true, Ordering::Relaxed);
-        }
-        (Self { tx, stopped }, watch)
+        let thread = match spawned {
+            Ok(thread) => Some(thread),
+            Err(e) => {
+                tracing::warn!("print journal writer did not start; prints aren't recorded: {e}");
+                stopped.store(true, Ordering::Relaxed);
+                None
+            }
+        };
+        (
+            Self {
+                tx,
+                stopped,
+                done,
+                thread,
+            },
+            watch,
+        )
     }
 
     /// Queues `events` for the writer. Never blocks.
@@ -131,6 +166,31 @@ impl Recorder {
         }
         if self.tx.send(events).is_err() && !self.stopped.swap(true, Ordering::Relaxed) {
             tracing::warn!("print journal writer stopped; prints aren't recorded");
+        }
+    }
+
+    /// At app exit: no more events; waits up to `timeout` for the writer to
+    /// write what is queued and end. `false` when it didn't in time (its
+    /// writes are then lost with the process).
+    pub fn finish(self, timeout: Duration) -> bool {
+        let Recorder {
+            tx, done, thread, ..
+        } = self;
+        drop(tx);
+        match done.recv_timeout(timeout) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Some(thread) = thread {
+                    let _ = thread.join();
+                }
+                true
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                tracing::warn!(
+                    "print journal: writes still queued after {} ms at exit",
+                    timeout.as_millis()
+                );
+                false
+            }
         }
     }
 }
@@ -144,8 +204,14 @@ struct Writer {
     store: Option<JournalStore>,
     /// When a journal that couldn't be opened is tried again.
     retry_at: Option<Instant>,
+    reopen_after: Duration,
     /// The last open failed (and was logged).
     unavailable: bool,
+    /// The journal couldn't be opened at start, so the entries earlier
+    /// sessions left open haven't been dealt with yet.
+    startup_pending: bool,
+    /// Ends that failed once; tried again with the next batch, then given up.
+    retry_ends: Vec<(i64, PrintEnd)>,
 }
 
 impl Writer {
@@ -169,7 +235,7 @@ impl Writer {
         }
     }
 
-    /// Opens the journal if it isn't open, at most once per `REOPEN_AFTER`
+    /// Opens the journal if it isn't open, at most once per `reopen_after`
     /// after a failure. Only the first failure in a row is a warning.
     fn ensure_store(&mut self) -> bool {
         if self.store.is_some() {
@@ -195,29 +261,78 @@ impl Writer {
                     tracing::warn!("print journal unavailable; prints aren't recorded: {e}");
                 }
                 self.unavailable = true;
-                self.retry_at = Some(Instant::now() + REOPEN_AFTER);
+                self.retry_at = Some(Instant::now() + self.reopen_after);
                 false
             }
         }
+    }
+
+    /// Closes entries as unknown, with no end time; `true` if any closed.
+    /// One that fails is tried again with the next batch.
+    fn close_unknown(&mut self, ids: &[i64]) -> bool {
+        let Some(store) = self.store.as_ref() else {
+            return false;
+        };
+        let mut wrote = false;
+        for &id in ids {
+            match store.end(id, &PrintEnd::unknown(), now()) {
+                Ok(w) => wrote |= w,
+                Err(e) if e == GONE => {}
+                Err(e) => {
+                    tracing::warn!("print journal: entry {id} not closed, will retry: {e}");
+                    self.retry_ends.push((id, PrintEnd::unknown()));
+                }
+            }
+        }
+        wrote
     }
 
     fn close_stale(&mut self, ids: &[i64]) {
         if ids.is_empty() || !self.ensure_store() {
             return;
         }
-        let Some(store) = self.store.as_ref() else {
-            return;
-        };
-        let mut wrote = false;
-        for id in ids {
-            match store.end(*id, &PrintEnd::unknown(), now()) {
-                Ok(w) => wrote |= w,
-                Err(e) => tracing::warn!("print journal: entry {id} not closed: {e}"),
-            }
-        }
-        if wrote {
+        if self.close_unknown(ids) {
             self.notify.changed();
         }
+    }
+
+    /// The start-up step for a journal that opened only on a retry: every
+    /// entry still open was left by an earlier session (the watcher started
+    /// from nothing, so none is resumed), and is closed as unknown. A print
+    /// already running when the journal came up isn't recovered: its
+    /// `Started` was dropped, so it isn't recorded.
+    fn close_left_open(&mut self) -> bool {
+        let Some(store) = self.store.as_ref() else {
+            return false;
+        };
+        let open = match store.open_entries() {
+            Ok(open) => open,
+            Err(e) => {
+                tracing::warn!("print journal: open prints not read: {e}");
+                return false;
+            }
+        };
+        let left: Vec<i64> = open
+            .iter()
+            .map(|e| e.id)
+            .filter(|id| !self.keys.values().any(|k| k == id))
+            .collect();
+        self.close_unknown(&left)
+    }
+
+    /// Tries each end that failed last time once more.
+    fn retry_failed_ends(&mut self) -> bool {
+        let Some(store) = self.store.as_ref() else {
+            return false;
+        };
+        let mut wrote = false;
+        for (id, end) in std::mem::take(&mut self.retry_ends) {
+            match store.end(id, &end, now()) {
+                Ok(w) => wrote |= w,
+                Err(e) => tracing::warn!("print journal: entry {id} not closed; given up: {e}"),
+            }
+        }
+        wrote
     }
 
     fn write(&mut self, batch: &[JournalEvent]) {
@@ -228,14 +343,28 @@ impl Writer {
             }
             return;
         }
+        let mut wrote = false;
+        if std::mem::take(&mut self.startup_pending) {
+            wrote |= self.close_left_open();
+        }
+        wrote |= self.retry_failed_ends();
         let Some(store) = self.store.as_ref() else {
             return;
         };
-        let mut wrote = false;
         for event in batch {
             match apply(store, &mut self.keys, self.slices.as_ref(), event, now()) {
                 Ok(w) => wrote |= w,
-                Err(e) => tracing::warn!("print journal: {e}"),
+                Err(Failed { message, end: None }) if message == GONE => {
+                    tracing::info!(
+                        "print journal: an open entry was deleted; its print isn't recorded"
+                    );
+                }
+                Err(Failed { message, end }) => {
+                    tracing::warn!("print journal: {message}");
+                    if let Some(end) = end {
+                        self.retry_ends.push(end);
+                    }
+                }
             }
         }
         if wrote {
@@ -266,6 +395,44 @@ pub(crate) fn forget(keys: &mut HashMap<String, i64>, event: &JournalEvent) {
     }
 }
 
+/// A write `apply` couldn't make.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Failed {
+    pub(crate) message: String,
+    /// An end that didn't save: the entry and how it ended, to try again.
+    pub(crate) end: Option<(i64, PrintEnd)>,
+}
+
+impl From<String> for Failed {
+    fn from(message: String) -> Self {
+        Failed { message, end: None }
+    }
+}
+
+/// `result`, letting go of `key` when its entry isn't in the journal any
+/// more (deleted from the page while open): later events for it are no-ops.
+fn or_gone<T>(
+    result: Result<T, String>,
+    keys: &mut HashMap<String, i64>,
+    key: &str,
+) -> Result<T, Failed> {
+    result.map_err(|e| {
+        if e == GONE {
+            keys.remove(key);
+        }
+        Failed::from(e)
+    })
+}
+
+/// Ends entry `id`. A failure other than the entry having gone carries the
+/// end, to try once more.
+fn end_entry(store: &JournalStore, id: i64, end: PrintEnd, now: i64) -> Result<bool, Failed> {
+    store.end(id, &end, now).map_err(|message| Failed {
+        end: (message != GONE).then_some((id, end)),
+        message,
+    })
+}
+
 /// Applies one event. `Ok(true)` when it changed what the page shows;
 /// `Ok(false)` when it changed nothing (an event for a job that isn't open,
 /// a tray already recorded, an open job started again) or only the stored
@@ -278,7 +445,7 @@ pub(crate) fn apply(
     slices: &dyn SliceJobs,
     event: &JournalEvent,
     now: i64,
-) -> Result<bool, String> {
+) -> Result<bool, Failed> {
     match event {
         JournalEvent::Started(s) => {
             if keys.contains_key(&s.key) {
@@ -310,13 +477,22 @@ pub(crate) fn apply(
             let Some(id) = keys.remove(old) else {
                 return Ok(false);
             };
-            // The watcher follows the job by its new key from now on,
-            // whether or not the row could be renamed.
+            let renamed = match store.rekey(id, new, name, gcode_file.as_deref(), *plate, now) {
+                Ok(renamed) => renamed,
+                Err(e) => {
+                    // Still the open entry: follow the job by its new key.
+                    keys.insert(new.clone(), id);
+                    return Err(e.into());
+                }
+            };
+            if !renamed {
+                // Deleted, or closed: nothing is open for the job any more.
+                return Ok(false);
+            }
+            // The watcher follows the job by its new key from now on.
             keys.insert(new.clone(), id);
-            let renamed = store.rekey(id, new, name, gcode_file.as_deref(), *plate, now)?;
             // A name that arrived late may now match a slice.
-            let unlinked = renamed && store.get(id)?.is_some_and(|e| e.slice.is_none());
-            if unlinked {
+            if store.get(id)?.is_some_and(|e| e.slice.is_none()) {
                 let started = StartedPrint {
                     key: new.clone(),
                     name: name.clone(),
@@ -328,21 +504,26 @@ pub(crate) fn apply(
                 };
                 link_slice(store, id, slices, &started, now);
             }
-            Ok(renamed)
+            Ok(true)
         }
         JournalEvent::Progress {
             key,
             percent,
             layer,
-        } => match keys.get(key) {
+        } => {
+            let Some(&id) = keys.get(key) else {
+                return Ok(false);
+            };
             // Kept for telling a resumed run from a reprint; not shown.
-            Some(&id) => store.set_progress(id, *percent, *layer).map(|()| false),
-            None => Ok(false),
-        },
-        JournalEvent::TrayUsed { key, tray } => match keys.get(key) {
-            Some(&id) => store.add_tray(id, tray, now),
-            None => Ok(false),
-        },
+            let stored = store.set_progress(id, *percent, *layer);
+            or_gone(stored, keys, key).map(|()| false)
+        }
+        JournalEvent::TrayUsed { key, tray } => {
+            let Some(&id) = keys.get(key) else {
+                return Ok(false);
+            };
+            or_gone(store.add_tray(id, tray, now), keys, key)
+        }
         JournalEvent::Ended {
             key,
             outcome,
@@ -350,9 +531,10 @@ pub(crate) fn apply(
             error_code,
             hms,
         } => match keys.remove(key) {
-            Some(id) => store.end(
+            Some(id) => end_entry(
+                store,
                 id,
-                &PrintEnd {
+                PrintEnd {
                     outcome: *outcome,
                     ended_at: Some(*ended_at),
                     error_code: *error_code,
@@ -363,7 +545,7 @@ pub(crate) fn apply(
             None => Ok(false),
         },
         JournalEvent::Lost { key } => match keys.remove(key) {
-            Some(id) => store.end(id, &PrintEnd::unknown(), now),
+            Some(id) => end_entry(store, id, PrintEnd::unknown(), now),
             None => Ok(false),
         },
     }
@@ -872,5 +1054,220 @@ mod tests {
         assert_eq!(keys, HashMap::from([("b".to_string(), 1)]));
         forget(&mut keys, &lost("b"));
         assert!(keys.is_empty(), "a reprint after it opens a new entry");
+    }
+
+    fn writer(paths: &JournalPaths, keys: HashMap<String, i64>) -> (Writer, Arc<CountChanges>) {
+        let changes = Arc::new(CountChanges::default());
+        let w = Writer {
+            paths: paths.clone(),
+            slices: Arc::new(NoSlices),
+            notify: changes.clone(),
+            keys,
+            store: Some(JournalStore::open(paths).unwrap()),
+            retry_at: None,
+            reopen_after: REOPEN_AFTER,
+            unavailable: false,
+            startup_pending: false,
+            retry_ends: Vec::new(),
+        };
+        (w, changes)
+    }
+
+    /// Makes every end fail until `allow_ends`.
+    fn refuse_ends(paths: &JournalPaths) {
+        rusqlite::Connection::open(&paths.db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse_ends BEFORE UPDATE OF outcome ON prints \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+    }
+
+    fn allow_ends(paths: &JournalPaths) {
+        rusqlite::Connection::open(&paths.db)
+            .unwrap()
+            .execute_batch("DROP TRIGGER refuse_ends;")
+            .unwrap();
+    }
+
+    #[test]
+    fn an_entry_deleted_while_open_is_let_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(&dir);
+        let mut keys = HashMap::new();
+        for key in ["a", "b", "c"] {
+            apply(&s, &mut keys, &NoSlices, &started(key, key), 1_000).unwrap();
+            assert!(s.delete(keys[key]).unwrap());
+        }
+        let gone = Err(Failed::from(GONE.to_string()));
+        assert_eq!(
+            apply(&s, &mut keys, &NoSlices, &progress("a", 5, None), 1_001),
+            gone
+        );
+        assert_eq!(
+            apply(&s, &mut keys, &NoSlices, &tray_used("b"), 1_001),
+            gone
+        );
+        let rekeyed = JournalEvent::Rekeyed {
+            old: "c".into(),
+            new: "d".into(),
+            name: "D".into(),
+            gcode_file: None,
+            plate: None,
+        };
+        assert_eq!(apply(&s, &mut keys, &NoSlices, &rekeyed, 1_001), Ok(false));
+        assert!(keys.is_empty(), "nothing open is followed any more");
+        // So later events are quiet no-ops.
+        for event in [
+            progress("a", 6, None),
+            tray_used("b"),
+            tray_used("d"),
+            lost("d"),
+        ] {
+            assert_eq!(apply(&s, &mut keys, &NoSlices, &event, 1_002), Ok(false));
+        }
+    }
+
+    #[test]
+    fn a_failed_end_is_retried_once_with_the_next_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let id = JournalStore::open(&paths)
+            .unwrap()
+            .start(&new_print("k", 10), 10)
+            .unwrap();
+        let (mut w, changes) = writer(&paths, HashMap::from([("k".to_string(), id)]));
+        refuse_ends(&paths);
+        w.write(&[ended("k", 99)]);
+        assert_eq!(changes.count(), 0);
+        assert_eq!(w.retry_ends.len(), 1);
+        allow_ends(&paths);
+        w.write(&[progress("other", 1, None)]);
+        let e = JournalStore::open(&paths)
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!((e.outcome, e.ended_at), (Outcome::Finished, Some(99)));
+        assert_eq!(changes.count(), 1);
+        assert!(w.retry_ends.is_empty());
+    }
+
+    #[test]
+    fn a_failed_end_is_given_up_after_one_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let id = JournalStore::open(&paths)
+            .unwrap()
+            .start(&new_print("k", 10), 10)
+            .unwrap();
+        let (mut w, _) = writer(&paths, HashMap::from([("k".to_string(), id)]));
+        refuse_ends(&paths);
+        w.write(&[lost("k")]);
+        w.write(&[progress("other", 1, None)]);
+        assert!(w.retry_ends.is_empty(), "one retry only");
+        allow_ends(&paths);
+        w.write(&[progress("other", 2, None)]);
+        let e = JournalStore::open(&paths)
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            e.outcome,
+            Outcome::Printing,
+            "given up; the next start closes it"
+        );
+    }
+
+    #[test]
+    fn a_panicking_batch_costs_only_its_own_writes() {
+        struct PanicOnce(AtomicBool);
+        impl SliceJobs for PanicOnce {
+            fn jobs(&self) -> Vec<JobView> {
+                if !self.0.swap(true, Ordering::SeqCst) {
+                    panic!("slice jobs unreadable (test)");
+                }
+                Vec::new()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let changes = Arc::new(CountChanges::default());
+        let slices = Arc::new(PanicOnce(AtomicBool::new(false)));
+        let (recorder, _) = Recorder::start(paths.clone(), slices, changes.clone());
+        // The entry is written, then linking its slice panics.
+        recorder.record(vec![started("a", "A")]);
+        let s = JournalStore::open(&paths).unwrap();
+        wait_until(|| s.open_entries().unwrap().len() == 1);
+        recorder.record(vec![started("b", "B"), ended("a", 50)]);
+        wait_until(|| changes.count() >= 1);
+        let all = s.list(&Default::default()).unwrap();
+        assert_eq!(all.len(), 2);
+        let a = all.iter().find(|e| e.job_key == "a").unwrap();
+        assert_eq!(a.outcome, Outcome::Finished, "the writer kept its keys");
+        assert_eq!(s.open_entries().unwrap()[0].job_key, "b");
+    }
+
+    #[test]
+    fn a_journal_that_opens_late_closes_what_earlier_sessions_left_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        JournalStore::open(&paths)
+            .unwrap()
+            .start(&new_print("earlier", 10), 10)
+            .unwrap();
+        // A journal this build can't open, for now.
+        let raw = rusqlite::Connection::open(&paths.db).unwrap();
+        raw.pragma_update(None, "user_version", 2).unwrap();
+        let changes = Arc::new(CountChanges::default());
+        let (recorder, watch) = Recorder::start_with(
+            paths.clone(),
+            Arc::new(NoSlices),
+            changes.clone(),
+            Duration::from_millis(20),
+        );
+        assert_eq!(watch, WatchState::default(), "nothing could be resumed");
+        recorder.record(vec![started("while-down", "Dropped")]);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(changes.count(), 0);
+        raw.pragma_update(None, "user_version", 1).unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        recorder.record(vec![started("now", "Now")]);
+        wait_until(|| changes.count() >= 1);
+        let s = JournalStore::open(&paths).unwrap();
+        let earlier = s.get(1).unwrap().unwrap();
+        assert_eq!(
+            (earlier.outcome, earlier.ended_at),
+            (Outcome::Unknown, None)
+        );
+        let open = s.open_entries().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].job_key, "now");
+        assert_eq!(
+            s.list(&Default::default()).unwrap().len(),
+            2,
+            "the print that started while it was down isn't recovered"
+        );
+    }
+
+    #[test]
+    fn finish_writes_what_is_queued_before_returning() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let (recorder, _) = Recorder::start(
+            paths.clone(),
+            Arc::new(NoSlices),
+            Arc::new(CountChanges::default()),
+        );
+        recorder.record(vec![started("k", "Benchy")]);
+        for percent in 1..=50 {
+            recorder.record(vec![progress("k", percent, None)]);
+        }
+        recorder.record(vec![ended("k", 77)]);
+        assert!(recorder.finish(Duration::from_secs(2)));
+        let e = JournalStore::open(&paths).unwrap().last().unwrap().unwrap();
+        assert_eq!((e.outcome, e.ended_at), (Outcome::Finished, Some(77)));
     }
 }

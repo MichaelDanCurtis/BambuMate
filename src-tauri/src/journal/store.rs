@@ -333,9 +333,13 @@ impl JournalStore {
         Ok(())
     }
 
-    /// Records a tray once; `false` when it was already recorded.
+    /// Records a tray once; `false` when it was already recorded. An entry
+    /// that isn't there (any more) gets [`GONE`].
     pub fn add_tray(&self, id: i64, tray: &TrayUse, now: i64) -> Result<bool, String> {
         let tx = self.conn.unchecked_transaction().map_err(save_err)?;
+        if !self.exists(id)? {
+            return Err(GONE.to_string());
+        }
         let added = tx
             .execute(
                 "INSERT OR IGNORE INTO print_trays \
@@ -1346,10 +1350,12 @@ mod tests {
                 "{table} keeps only the other entry's rows"
             );
         }
-        assert!(
-            s.add_tray(id, &tray(0, 1, "A2", "PLA", ""), 4).is_err(),
+        assert_eq!(
+            s.add_tray(id, &tray(0, 1, "A2", "PLA", ""), 4),
+            Err(GONE.to_string()),
             "no orphan rows"
         );
+        assert_eq!(count(&paths, "print_trays"), 1);
     }
 
     #[test]

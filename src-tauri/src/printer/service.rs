@@ -54,6 +54,8 @@ const EMIT_INTERVAL: Duration = Duration::from_millis(500);
 const STOP_GRACE: Duration = Duration::from_secs(1);
 /// The longest wait before restarting a client that ended on its own.
 const RESTART_MAX: Duration = Duration::from_secs(60);
+/// How long app exit waits for the print journal's queued writes.
+const JOURNAL_FLUSH: Duration = Duration::from_secs(2);
 /// How often a Test connection against the running printer re-reads the
 /// live connection while it waits for a result.
 const LIVE_TEST_POLL: Duration = Duration::from_millis(100);
@@ -186,6 +188,8 @@ impl ConnKey {
 struct JournalLink {
     recorder: Recorder,
     watch: WatchState,
+    /// The printer the watcher follows; `None` until one is configured.
+    serial: Option<String>,
 }
 
 impl JournalLink {
@@ -193,6 +197,31 @@ impl JournalLink {
     /// an end isn't watched.
     fn unwatch(&mut self) {
         self.watch = unwatched(&self.watch);
+    }
+
+    /// Follows printer `serial` from now on. The same printer (a
+    /// reconnect, a stop and start, a settings edit) keeps its job, now
+    /// unwatched. Another printer can't report on the old one's job, so
+    /// that job is recorded as unknown and nothing carries over.
+    fn follow(&mut self, serial: &str) {
+        let other = self
+            .serial
+            .as_deref()
+            .is_some_and(|s| !s.trim().eq_ignore_ascii_case(serial.trim()));
+        if other {
+            self.close_job();
+        }
+        self.serial = Some(serial.to_string());
+    }
+
+    /// Records the open job as unknown (no end time) and starts the
+    /// watcher from nothing, with no calibration memory either.
+    fn close_job(&mut self) {
+        if let Some(job) = self.watch.job.take() {
+            self.recorder
+                .record(vec![JournalEvent::Lost { key: job.key }]);
+        }
+        self.watch = WatchState::default();
     }
 }
 
@@ -213,8 +242,8 @@ struct Live {
     /// Bumped on every start and stop, so a stopped client's late events
     /// are ignored.
     generation: u64,
-    /// `None` until `attach_journal`. Kept across `reset`: the job it
-    /// follows is still open whichever printer connects next.
+    /// `None` until `attach_journal`. Kept across `reset`; `configure`
+    /// closes its job when another printer is configured.
     journal: Option<JournalLink>,
 }
 
@@ -464,6 +493,9 @@ impl PrinterService {
                     &self.inner.hms_url,
                 )));
             }
+            if let Some(link) = live.journal.as_mut() {
+                link.follow(&config.serial);
+            }
             live.config = Some(config);
             live.key = key;
             live.set_connection(ConnectionState::Connecting);
@@ -482,12 +514,35 @@ impl PrinterService {
         self.stop_inner(None);
     }
 
+    /// `stop` for a printer that is removed: its open print can't be
+    /// watched any more, so the journal records it as unknown.
+    pub fn remove(&self) {
+        self.stop();
+        self.close_journal_job();
+    }
+
+    /// No printer is configured (it was removed, or none is set up at app
+    /// start): the print the journal follows is recorded as unknown, and
+    /// the next printer configured starts from nothing.
+    pub fn close_journal_job(&self) {
+        if let Some(link) = self.inner.live.lock().unwrap().journal.as_mut() {
+            link.close_job();
+            link.serial = None;
+        }
+    }
+
     /// `stop` for app exit: waits for the DISCONNECT (at most `STOP_GRACE`,
     /// plus a margin), so the printer frees the connection slot before the
     /// process ends. Call it outside the async runtime.
     pub fn shutdown(&self) {
         let (done, finished) = oneshot::channel();
         self.stop_inner(Some(done));
+        // Queued journal writes land before the process ends, while the
+        // client sends its DISCONNECT in the background.
+        let journal = self.inner.live.lock().unwrap().journal.take();
+        if let Some(link) = journal {
+            link.recorder.finish(JOURNAL_FLUSH);
+        }
         tauri::async_runtime::block_on(async {
             let _ = tokio::time::timeout(STOP_GRACE * 2, finished).await;
         });
@@ -735,7 +790,11 @@ impl PrinterService {
 
     /// Records prints in the journal from now on. Call once, before `start`.
     pub fn attach_journal(&self, recorder: Recorder, watch: WatchState) {
-        self.inner.live.lock().unwrap().journal = Some(JournalLink { recorder, watch });
+        self.inner.live.lock().unwrap().journal = Some(JournalLink {
+            recorder,
+            watch,
+            serial: None,
+        });
     }
 
     fn mark_dirty(&self) {
@@ -1995,5 +2054,145 @@ mod tests {
             Some("FINISH")
         );
         assert!(!JournalPaths::in_dir(dir.path()).db.exists());
+    }
+
+    const IDLE: &str =
+        r#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","mc_percent":0}}"#;
+
+    #[tokio::test]
+    async fn a_switch_to_another_printer_never_continues_the_old_print() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = with_journal(&svc, &dir);
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| entries(&paths).len() == 1).await;
+        // Printer B prints the same plate: in LAN mode, the same key.
+        let generation = svc.configure_for_test(config_for("0948SV000000010"));
+        report(&svc, generation, H2D_FULL);
+        report(&svc, generation, FINISH);
+        wait_for(|| entries(&paths).len() == 2 && last_entry(&paths).is_some()).await;
+        wait_for(|| {
+            entries(&paths)
+                .iter()
+                .all(|e| e.outcome != Outcome::Printing)
+        })
+        .await;
+        let all = entries(&paths);
+        let (b, a) = (&all[0], &all[1]);
+        assert!(a.id < b.id);
+        assert_eq!((a.outcome, a.ended_at), (Outcome::Unknown, None), "A's");
+        assert_eq!(b.outcome, Outcome::Finished, "B's own entry");
+    }
+
+    #[tokio::test]
+    async fn the_next_printer_idle_leaves_the_old_print_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = with_journal(&svc, &dir);
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        let generation = svc.configure_for_test(config_for("0948SV000000011"));
+        report(&svc, generation, IDLE);
+        wait_for(|| last_entry(&paths).is_some()).await;
+        let all = entries(&paths);
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].outcome, all[0].ended_at), (Outcome::Unknown, None));
+    }
+
+    #[tokio::test]
+    async fn removing_the_printer_closes_its_print_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = with_journal(&svc, &dir);
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        svc.remove();
+        wait_for(|| last_entry(&paths).is_some()).await;
+        assert_eq!(last_entry(&paths).unwrap().outcome, Outcome::Unknown);
+        // The same printer set up again starts a new entry for its print.
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| entries(&paths).len() == 2).await;
+    }
+
+    #[tokio::test]
+    async fn with_no_printer_at_start_a_print_left_open_is_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        JournalStore::open(&paths)
+            .unwrap()
+            .start(
+                &crate::journal::types::NewPrint {
+                    job_key: "local:Benchy|".into(),
+                    name: "Benchy".into(),
+                    gcode_file: None,
+                    plate: None,
+                    printer_model: None,
+                    started_at: 10,
+                    start_approx: false,
+                },
+                10,
+            )
+            .unwrap();
+        let (svc, _rec) = service(&dir);
+        with_journal(&svc, &dir);
+        svc.close_journal_job();
+        wait_for(|| last_entry(&paths).is_some()).await;
+        let e = last_entry(&paths).unwrap();
+        assert_eq!((e.outcome, e.ended_at), (Outcome::Unknown, None));
+    }
+
+    #[tokio::test]
+    async fn shutdown_writes_the_journal_s_queued_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = with_journal(&svc, &dir);
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        report(&svc, generation, FINISH);
+        let exiting = svc.clone();
+        std::thread::spawn(move || exiting.shutdown())
+            .join()
+            .unwrap();
+        // No waiting: shutdown returned only once the writer had finished.
+        assert_eq!(last_entry(&paths).unwrap().outcome, Outcome::Finished);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_journal_never_holds_up_reports() {
+        /// Slice jobs that can't be read until the test says so.
+        struct Stalled(Mutex<std::sync::mpsc::Receiver<()>>);
+        impl crate::journal::recorder::SliceJobs for Stalled {
+            fn jobs(&self) -> Vec<crate::slicer::jobs::JobView> {
+                let _ = self.0.lock().unwrap().recv();
+                Vec::new()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = JournalPaths::in_dir(dir.path());
+        let (release, stalled) = std::sync::mpsc::channel();
+        let (recorder, watch) = JournalRecorder::start(
+            paths.clone(),
+            Arc::new(Stalled(Mutex::new(stalled))),
+            Arc::new(CountChanges::default()),
+        );
+        svc.attach_journal(recorder, watch);
+        let generation = svc.configure_for_test(config());
+        let started = std::time::Instant::now();
+        report(&svc, generation, H2D_FULL);
+        for _ in 0..500 {
+            report(&svc, generation, H2D_DELTA_PROGRESS);
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "reports wait for nothing: {:?}",
+            started.elapsed()
+        );
+        release.send(()).unwrap();
+        report(&svc, generation, FINISH);
+        wait_for(|| last_entry(&paths).is_some()).await;
+        assert_eq!(last_entry(&paths).unwrap().outcome, Outcome::Finished);
     }
 }

@@ -272,6 +272,9 @@ pub fn run() {
                         Ok(None) => tracing::info!("printer configured without an access code"),
                         Err(e) => tracing::warn!("printer access code unavailable: {e}"),
                     }
+                } else {
+                    // No printer to report on a print left open: unknown.
+                    service.close_journal_job();
                 }
                 app.manage(service);
             }
