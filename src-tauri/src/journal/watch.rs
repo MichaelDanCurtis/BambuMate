@@ -27,6 +27,10 @@ use crate::printer::state::{HmsCode, PrinterState, TrayRef};
 /// `gcode_state`s of a job that hasn't ended.
 pub const ACTIVE: &[&str] = &["PREPARE", "SLICING", "RUNNING", "PAUSE"];
 
+/// How much later than a resumed entry's stored start a progress-implied
+/// start may be before the job is taken for a new run (15 minutes).
+const REPRINT_GAP_SECS: i64 = 15 * 60;
+
 /// A progress that falls by more than this many points is a new run.
 const RESTART_DROP: u32 = 5;
 
@@ -51,7 +55,7 @@ pub struct WatchedJob {
     /// False after an app start or a disconnect, until the printer reports
     /// the job active again. An end seen before then wasn't watched.
     pub confirmed: bool,
-    /// When the entry started; `None` for an entry resumed from disk.
+    /// When the entry started (its stored start, for a resumed entry).
     pub started_at: Option<i64>,
     /// `None` until the job has been RUNNING or PAUSE.
     pub progress: Option<Progress>,
@@ -205,9 +209,9 @@ fn merge_progress(old: Option<Progress>, report: &PrinterState, state: &str) -> 
 /// A fresh active report that shows the job has begun again: its progress
 /// or layer fell back, or it is back in PREPARE or SLICING after printing.
 /// A reprint the app didn't see end has the same key as the old run.
-fn restarted(job: &WatchedJob, report: &PrinterState, state: &str) -> bool {
+fn restarted(job: &WatchedJob, report: &PrinterState, state: &str, now: i64) -> bool {
     let Some(last) = job.progress else {
-        return false;
+        return resumed_reprint(job, report, state, now);
     };
     if matches!(state, "PREPARE" | "SLICING") {
         return true;
@@ -224,6 +228,26 @@ fn restarted(job: &WatchedJob, report: &PrinterState, state: &str) -> bool {
         (Some(old), Some(new)) if old >= 1 && new < old
     );
     percent_fell || layer_fell
+}
+
+/// A job resumed from disk has no progress to compare with, only its stored
+/// start. On its first fresh printing report, the start implied by the
+/// progress and remaining time is compared with it: one more than
+/// `REPRINT_GAP_SECS` later is a new run of the same file, begun while the
+/// app was closed. Without a progress and a remaining time nothing is
+/// guessed, and the job is taken as the same one.
+fn resumed_reprint(job: &WatchedJob, report: &PrinterState, state: &str, now: i64) -> bool {
+    let (false, Some(stored), true) = (job.confirmed, job.started_at, is_printing_stage(state))
+    else {
+        return false;
+    };
+    let (Some(percent), Some(_)) = (
+        report.mc_percent.filter(|p| *p > 0),
+        report.mc_remaining_time,
+    ) else {
+        return false;
+    };
+    now - elapsed_secs(percent, report.mc_remaining_time) > stored + REPRINT_GAP_SECS
 }
 
 /// Records the current tray once, when it holds filament. Only a job
@@ -385,7 +409,7 @@ fn active(
     // while it was being watched and hasn't ended) and not a fresh run.
     if let Some(mut job) = prev.job.clone() {
         let same = job.key == key || job.confirmed;
-        if same && !restarted(&job, report, state) {
+        if same && !restarted(&job, report, state, now) {
             if job.key != key {
                 rekey(&mut job, key, report, events);
             }
@@ -427,7 +451,7 @@ pub fn resume(open: &[OpenEntry]) -> (WatchState, Vec<i64>) {
                 key: newest.job_key.clone(),
                 trays: Vec::new(),
                 confirmed: false,
-                started_at: None,
+                started_at: Some(newest.started_at),
                 progress: None,
             }),
         },
@@ -495,6 +519,14 @@ mod tests {
             }],
             tray_now: Some(1),
             ..Default::default()
+        }
+    }
+
+    fn open_entry(id: i64, job_key: String, started_at: i64) -> OpenEntry {
+        OpenEntry {
+            id,
+            job_key,
+            started_at,
         }
     }
 
@@ -667,10 +699,7 @@ mod tests {
 
     #[test]
     fn a_restart_while_printing_resumes_the_open_entry() {
-        let (watch, stale) = resume(&[OpenEntry {
-            id: 7,
-            job_key: benchy_key(),
-        }]);
+        let (watch, stale) = resume(&[open_entry(7, benchy_key(), T0 - 2_400)]);
         assert!(stale.is_empty());
         assert!(!watch.job.as_ref().unwrap().confirmed);
         let (_, events) = run(watch, &[report("RUNNING", 40), report("FINISH", 100)]);
@@ -679,10 +708,7 @@ mod tests {
 
     #[test]
     fn older_open_entries_are_closed_at_start() {
-        let open = |id, key: &str| OpenEntry {
-            id,
-            job_key: key.into(),
-        };
+        let open = |id, key: &str| open_entry(id, key.into(), T0);
         let (watch, stale) = resume(&[open(1, "a"), open(3, "c"), open(2, "b")]);
         assert_eq!(watch.job.unwrap().key, "c");
         assert_eq!(stale, vec![2, 1]);
@@ -691,10 +717,7 @@ mod tests {
 
     #[test]
     fn a_job_that_ended_while_the_app_was_closed_is_unknown() {
-        let (watch, _) = resume(&[OpenEntry {
-            id: 7,
-            job_key: benchy_key(),
-        }]);
+        let (watch, _) = resume(&[open_entry(7, benchy_key(), T0 - 2_400)]);
         let (_, events) = run(watch.clone(), &[report("FINISH", 100)]);
         assert_eq!(events, vec![JournalEvent::Lost { key: benchy_key() }]);
         let (_, events) = run(watch.clone(), &[report("IDLE", 0)]);
@@ -1347,5 +1370,67 @@ mod tests {
             panic!("{events:?}")
         };
         assert_eq!(hms.len(), 2, "every active code, related or not");
+    }
+
+    #[test]
+    fn a_resumed_job_with_consistent_progress_is_the_same_entry() {
+        // 40 % with 60 min left: 40 min done, so the print began at T0 - 2400.
+        let stored = T0 - 2_400 - 300; // within the 15 minute allowance
+        let (watch, _) = resume(&[open_entry(7, benchy_key(), stored)]);
+        assert_eq!(watch.job.as_ref().unwrap().started_at, Some(stored));
+        let (watch, events) = obs(&watch, &report("RUNNING", 40), T0);
+        assert_eq!(kinds(&events), ["tray"], "no new entry");
+        assert!(watch.job.as_ref().unwrap().confirmed);
+        // Later progress is compared with the last seen, not the stored start.
+        let (_, events) = obs(&watch, &report("RUNNING", 41), T0 + 60);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_reprint_made_while_the_app_was_closed_is_a_new_entry() {
+        // The stored print began an hour and a half ago; the same file is now
+        // at 5 % with 57 min left, three minutes in.
+        let (watch, _) = resume(&[open_entry(7, benchy_key(), T0 - 5_400)]);
+        let mut again = report("RUNNING", 5);
+        again.mc_remaining_time = Some(57);
+        let (watch, events) = obs(&watch, &again, T0);
+        assert_eq!(kinds(&events), ["lost", "started", "tray"]);
+        assert_eq!(events[0], JournalEvent::Lost { key: benchy_key() });
+        let JournalEvent::Started(s) = &events[1] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(s.key, benchy_key());
+        assert!(s.approx && s.started_at > T0 - 5_400 + 900, "{s:?}");
+        let job = watch.job.unwrap();
+        assert_eq!(job.started_at, Some(s.started_at), "the new entry's start");
+        assert!(job.confirmed);
+    }
+
+    #[test]
+    fn a_resumed_job_with_no_usable_progress_is_not_guessed_at() {
+        let stored = T0 - 5_400;
+        for (percent, remaining) in [(0, Some(60)), (5, None)] {
+            let (watch, _) = resume(&[open_entry(7, benchy_key(), stored)]);
+            let mut r = report("RUNNING", percent);
+            r.mc_remaining_time = remaining;
+            let (watch, events) = obs(&watch, &r, T0);
+            assert_eq!(kinds(&events), ["tray"], "{percent} {remaining:?}");
+            assert_eq!(watch.job.unwrap().started_at, Some(stored));
+        }
+        // A job in PREPARE has no progress to compare either.
+        let (watch, _) = resume(&[open_entry(7, benchy_key(), stored)]);
+        let (_, events) = obs(&watch, &report("PREPARE", 0), T0);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_resumed_end_is_never_before_the_stored_start() {
+        let (watch, _) = resume(&[open_entry(7, benchy_key(), T0 + 500)]);
+        let (watch, _) = obs(&watch, &report("RUNNING", 0), T0 + 100);
+        let (_, events) = obs(&watch, &report("FINISH", 100), T0 + 200);
+        assert!(
+            matches!(&events[..], [JournalEvent::Ended { ended_at, .. }] if *ended_at == T0 + 500),
+            "{events:?}"
+        );
     }
 }

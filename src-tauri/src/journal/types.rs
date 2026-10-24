@@ -196,6 +196,8 @@ impl PrintEnd {
 pub struct OpenEntry {
     pub id: i64,
     pub job_key: String,
+    /// Unix seconds; back-dated when the start was approximate.
+    pub started_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

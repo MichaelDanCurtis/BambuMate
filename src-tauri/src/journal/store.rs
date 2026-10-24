@@ -408,13 +408,14 @@ impl JournalStore {
     pub fn open_entries(&self) -> Result<Vec<OpenEntry>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, job_key FROM prints WHERE outcome = 'printing' ORDER BY id DESC")
+            .prepare("SELECT id, job_key, started_at FROM prints WHERE outcome = 'printing' ORDER BY id DESC")
             .map_err(read_err)?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(OpenEntry {
                     id: r.get(0)?,
                     job_key: r.get(1)?,
+                    started_at: r.get(2)?,
                 })
             })
             .map_err(read_err)?;
@@ -833,7 +834,8 @@ mod tests {
             s.open_entries().unwrap(),
             vec![OpenEntry {
                 id,
-                job_key: "local:cube|f".into()
+                job_key: "local:cube|f".into(),
+                started_at: 1_000,
             }]
         );
         let e = s.get(id).unwrap().unwrap();
