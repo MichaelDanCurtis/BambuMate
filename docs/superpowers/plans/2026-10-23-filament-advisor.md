@@ -21,6 +21,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-23-filament-advisor-design.md`
 
+> **Amendment after Task 2 (user ruling, 2026-10-23).** This governs over the code blocks below.
+> - `Scored.ruled_out` replaces `not_on_printer`. The list is shown as "Ruled out".
+> - `Excluded.reasons: Vec<String>` replaces `reason: String`. The order is enclosure, nozzle, heat. Heat is a hard requirement, and its reason is "Softens around {hdt} °C".
+> - `score::NOTHING_FITS` = "Nothing on this printer meets all of that." The page shows it when `fits` is empty.
+> - No 0% picks: a material whose needs-only score (`needs_points`) is 0 isn't shown. The displayed `total` and `fit_pct` come from the needs alone. Geometry only reorders (through the unclamped `MaterialFit.points`) and adds notes; it never hides a material or changes its displayed fit.
+> - Later tasks join `reasons` with "; " for display, and carry `reasons` (not `reason`) through `Advice` and the frontend types.
+
 ## Global Constraints
 
 Every task's requirements include this section.
@@ -50,7 +57,7 @@ Every task's requirements include this section.
 - **Open printers:** A1, A1 mini and P1P.
 - An unknown model is assumed enclosed, and the page says so.
 - **Hardened nozzle.** When connected, this comes from the nozzle type. When unknown, abrasive materials get a "needs a hardened nozzle" note instead of being filtered out.
-- A material that fails a hard constraint goes into "Not on this printer" with its reason. It is never dropped silently.
+- A material that fails a hard constraint goes into "Ruled out" with its reason. It is never dropped silently.
 
 **Geometry**
 - A footprint over 150 mm on either side, or a small-bed-contact risk, lowers the score of materials prone to warping.
@@ -59,7 +66,7 @@ Every task's requirements include this section.
 
 **Scoring and products**
 - Scoring is deterministic, and ties break in the fixed material order.
-- Results are the top 3 materials plus the "Not on this printer" list.
+- Results are the top 3 materials plus the "Ruled out" list.
 - **Product order:**
   1. AMS trays whose material matches, marked "Loaded in A2" and so on.
   2. Catalog entries from preferred brands.
@@ -492,7 +499,7 @@ git commit -m "feat(advisor): material table"
   - `#[derive(Debug, Clone, PartialEq, Eq, Serialize)] pub struct NeedReason { pub need: Need, pub verdict: Verdict, pub detail: String }`
   - `#[derive(Debug, Clone, PartialEq, Eq, Serialize)] pub struct MaterialFit { pub material: MaterialId, pub name: String, pub total: u32, pub fit_pct: u8, pub reasons: Vec<NeedReason>, pub printer_notes: Vec<String>, pub geometry_notes: Vec<String>, pub material_notes: Vec<String> }`
   - `#[derive(Debug, Clone, PartialEq, Eq, Serialize)] pub struct Excluded { pub material: MaterialId, pub name: String, pub reason: String }`
-  - `#[derive(Debug, Clone, PartialEq, Eq)] pub struct Scored { pub fits: Vec<MaterialFit>, pub not_on_printer: Vec<Excluded> }`
+  - `#[derive(Debug, Clone, PartialEq, Eq)] pub struct Scored { pub fits: Vec<MaterialFit>, pub ruled_out: Vec<Excluded> }`
   - `pub fn fit_for(m: &Material, needs: &[Need], printer: &PrinterFacts, geometry: Option<&Geometry>) -> Result<MaterialFit, Excluded>`
   - `pub fn score(needs: &[Need], printer: &PrinterFacts, geometry: Option<&Geometry>) -> Scored`
   - `pub fn printer_line(printer: &PrinterFacts, configured: bool) -> Option<String>`
@@ -698,7 +705,7 @@ mod tests {
         s.fits.iter().map(|f| f.material).collect()
     }
     fn excluded(s: &Scored) -> Vec<MaterialId> {
-        s.not_on_printer.iter().map(|e| e.material).collect()
+        s.ruled_out.iter().map(|e| e.material).collect()
     }
     fn flat(w: f32, d: f32) -> Geometry {
         Geometry { footprint_mm: [w, d], height_mm: 10.0, overhang: false, small_bed_contact: false, tall_thin: false }
@@ -708,7 +715,7 @@ mod tests {
     fn outdoor_and_heat_80_is_asa_on_an_enclosed_printer() {
         let s = score(&[Need::OutdoorUv, Need::Heat80], &enclosed(), None);
         assert_eq!(ids(&s), [Asa, PaCf, PetCf]);
-        assert!(s.not_on_printer.is_empty());
+        assert!(s.ruled_out.is_empty());
         let asa = &s.fits[0];
         assert_eq!(asa.total, 6);
         assert_eq!(asa.fit_pct, 100);
@@ -722,7 +729,7 @@ mod tests {
     fn on_an_a1_asa_is_not_on_this_printer() {
         let s = score(&[Need::OutdoorUv, Need::Heat80], &a1(), None);
         assert_eq!(excluded(&s), [Abs, Asa, Pa, PaCf, Pc]);
-        let asa = s.not_on_printer.iter().find(|e| e.material == Asa).unwrap();
+        let asa = s.ruled_out.iter().find(|e| e.material == Asa).unwrap();
         assert_eq!(asa.reason, "Needs an enclosed printer; the A1 is open.");
         assert_eq!(ids(&s), [PetCf, Petg, Tpu]);
     }
@@ -758,14 +765,14 @@ mod tests {
     fn an_unknown_nozzle_notes_cf_materials_without_filtering_them() {
         let s = score(&[Need::Stiff], &PrinterFacts::unknown(), None);
         assert_eq!(ids(&s), [PlaCf, PetCf, PaCf]);
-        assert!(s.not_on_printer.is_empty());
+        assert!(s.ruled_out.is_empty());
         for f in &s.fits {
             assert!(f.printer_notes.contains(&HARDENED_NOTE.to_string()), "{f:?}");
         }
         let stainless = PrinterFacts { nozzle: NozzleKind::NotHardened, ..PrinterFacts::unknown() };
         let s = score(&[Need::Stiff], &stainless, None);
         assert_eq!(excluded(&s), [PlaCf, PetCf, PaCf]);
-        assert!(s.not_on_printer[0].reason.contains("hardened nozzle"));
+        assert!(s.ruled_out[0].reason.contains("hardened nozzle"));
         assert_eq!(ids(&s), [Pla, PlaPlus, Abs]);
     }
 
@@ -1087,7 +1094,7 @@ pub struct Excluded {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scored {
     pub fits: Vec<MaterialFit>,
-    pub not_on_printer: Vec<Excluded>,
+    pub ruled_out: Vec<Excluded>,
 }
 
 fn verdict(points: u8) -> Verdict {
@@ -1226,17 +1233,17 @@ pub fn fit_for(
 /// The top `TOP_N` fits, plus every material that fails a hard constraint.
 pub fn score(needs: &[Need], printer: &PrinterFacts, geometry: Option<&Geometry>) -> Scored {
     let mut fits = Vec::new();
-    let mut not_on_printer = Vec::new();
+    let mut ruled_out = Vec::new();
     for m in MATERIALS {
         match fit_for(m, needs, printer, geometry) {
             Ok(fit) => fits.push(fit),
-            Err(e) => not_on_printer.push(e),
+            Err(e) => ruled_out.push(e),
         }
     }
     // A stable sort: equal totals keep the table's order.
     fits.sort_by(|a, b| b.total.cmp(&a.total));
     fits.truncate(TOP_N);
-    Scored { fits, not_on_printer }
+    Scored { fits, ruled_out }
 }
 
 /// The page's one line about the printer, when it is assuming something.
@@ -2093,7 +2100,7 @@ git commit -m "feat(advisor): interpret descriptions through one complete_json d
   - `model_view_blocking(&Path) -> Result<ModelView, ModelError>`.
 - Produces (`advisor::advice`):
   - `#[derive(Debug, Clone, PartialEq, Serialize)] pub struct AdvisedFit { #[serde(flatten)] pub fit: MaterialFit, pub products: Vec<Product> }`
-  - `#[derive(Debug, Clone, PartialEq, Serialize)] pub struct Advice { pub needs: Vec<Need>, pub fits: Vec<AdvisedFit>, pub not_on_printer: Vec<Excluded>, pub printer_line: Option<String>, pub model_error: Option<String>, pub catalog_empty: bool }`
+  - `#[derive(Debug, Clone, PartialEq, Serialize)] pub struct Advice { pub needs: Vec<Need>, pub fits: Vec<AdvisedFit>, pub ruled_out: Vec<Excluded>, pub printer_line: Option<String>, pub model_error: Option<String>, pub catalog_empty: bool }`
   - `pub struct AdviceInput<'a> { pub needs: &'a [Need], pub view: &'a PrinterView, pub geometry: Result<Option<Geometry>, String>, pub catalog: &'a [CatalogEntry], pub preferred: &'a [String] }`
   - `pub fn build_advice(input: AdviceInput<'_>) -> Advice`
 - Produces (Tauri commands, `commands::advisor`):
@@ -2102,7 +2109,7 @@ git commit -m "feat(advisor): interpret descriptions through one complete_json d
   - `advise(app: AppHandle, service: State<'_, PrinterService>, needs: Vec<Need>, model_path: Option<String>) -> Result<Advice, String>`. The frontend sends `{ needs, modelPath }`.
   - `get_preferred_brands(app: AppHandle) -> Result<Vec<String>, String>`
   - `set_preferred_brands(app: AppHandle, brands: Vec<String>) -> Result<Vec<String>, String>`. It returns the normalised list.
-- The JSON shape the frontend reads: `{ needs: ["heat_80", …], fits: [{ material: "asa", name, total, fit_pct, reasons: [{ need, verdict: "met"|"partly"|"not_met", detail }], printer_notes, geometry_notes, material_notes, products: [{ name, brand, status: "loaded"|"preferred"|"catalog", slot, buy_url, entry }] }], not_on_printer: [{ material, name, reason }], printer_line, model_error, catalog_empty }`.
+- The JSON shape the frontend reads: `{ needs: ["heat_80", …], fits: [{ material: "asa", name, total, fit_pct, reasons: [{ need, verdict: "met"|"partly"|"not_met", detail }], printer_notes, geometry_notes, material_notes, products: [{ name, brand, status: "loaded"|"preferred"|"catalog", slot, buy_url, entry }] }], ruled_out: [{ material, name, reason }], printer_line, model_error, catalog_empty }`.
 
 - [ ] **Step 1: Write the failing `advice.rs` tests**
 
@@ -2187,7 +2194,7 @@ mod tests {
     fn on_an_a1_with_a_stainless_nozzle_the_rest_is_not_on_this_printer() {
         let view = view_with("A1", "stainless_steel", vec![]);
         let a = build_advice(input(&[Need::OutdoorUv, Need::Heat80], &view, &[]));
-        let excluded: Vec<MaterialId> = a.not_on_printer.iter().map(|e| e.material).collect();
+        let excluded: Vec<MaterialId> = a.ruled_out.iter().map(|e| e.material).collect();
         use crate::advisor::materials::MaterialId::*;
         assert_eq!(excluded, [PlaCf, PetCf, Abs, Asa, Pa, PaCf, Pc]);
         let fits: Vec<MaterialId> = a.fits.iter().map(|f| f.fit.material).collect();
@@ -2239,7 +2246,7 @@ pub struct Advice {
     /// What was scored: tidied, with easy print when nothing was chosen.
     pub needs: Vec<Need>,
     pub fits: Vec<AdvisedFit>,
-    pub not_on_printer: Vec<Excluded>,
+    pub ruled_out: Vec<Excluded>,
     pub printer_line: Option<String>,
     /// Why the model couldn't be read; the advice was scored without geometry.
     pub model_error: Option<String>,
@@ -2273,7 +2280,7 @@ pub fn build_advice(input: AdviceInput<'_>) -> Advice {
     Advice {
         needs: with_default(input.needs),
         fits,
-        not_on_printer: scored.not_on_printer,
+        ruled_out: scored.ruled_out,
         printer_line: printer_line(&facts, input.view.configured),
         model_error,
         catalog_empty: input.catalog.is_empty(),
@@ -2455,7 +2462,7 @@ git commit -m "feat(advisor): advise and advise_interpret commands"
   - `Product { name, brand, status, slot: Option<String>, buy_url: Option<String>, entry: Option<CatalogEntry> }`
   - `MaterialFit { material: String, name, total: u32, fit_pct: u8, reasons, printer_notes, geometry_notes, material_notes, products }`
   - `Excluded { material: String, name, reason }`
-  - `Advice { needs, fits, not_on_printer, printer_line, model_error, catalog_empty }`
+  - `Advice { needs, fits, ruled_out, printer_line, model_error, catalog_empty }`
 - Produces (`crate::advisor::bridge`):
   - `pub async fn advise_interpret(text: &str) -> Result<Vec<Need>, String>`
   - `pub async fn advise(needs: &[Need], model_path: Option<&str>) -> Result<Advice, String>`
@@ -2629,14 +2636,14 @@ mod tests {
                              "buy_url":"https://www.spoolscout.com/data-sheets/polymaker/asa-asa",
                              "entry":{"brand":"Polymaker","name":"ASA","material":"ASA","url_slug":"asa-asa",
                                       "full_url":"https://www.spoolscout.com/data-sheets/polymaker/asa-asa"}}]}],
-            "not_on_printer":[{"material":"pc","name":"PC","reason":"Needs an enclosed printer; the A1 is open."}],
+            "ruled_out":[{"material":"pc","name":"PC","reason":"Needs an enclosed printer; the A1 is open."}],
             "printer_line":null,"model_error":null,"catalog_empty":false}"#;
         let a: Advice = serde_json::from_str(json).unwrap();
         assert_eq!(a.needs, [Need::Heat80, Need::OutdoorUv]);
         assert_eq!(a.fits[0].reasons[1].verdict, Verdict::NotMet);
         assert_eq!(a.fits[0].products[0].status, ProductStatus::Loaded);
         assert_eq!(a.fits[0].products[1].entry.as_ref().unwrap().brand, "Polymaker");
-        assert_eq!(a.not_on_printer[0].material, "pc");
+        assert_eq!(a.ruled_out[0].material, "pc");
         assert_eq!(ProductStatus::Preferred.key(), "preferred");
     }
 }
@@ -2798,7 +2805,7 @@ pub struct Excluded {
 pub struct Advice {
     pub needs: Vec<Need>,
     pub fits: Vec<MaterialFit>,
-    pub not_on_printer: Vec<Excluded>,
+    pub ruled_out: Vec<Excluded>,
     pub printer_line: Option<String>,
     pub model_error: Option<String>,
     pub catalog_empty: bool,
@@ -3386,10 +3393,10 @@ pub fn AdvisePage() -> impl IntoView {
 }
 
 /// The hero, the rank picker, the selected material's reasons and
-/// products, and "Not on this printer".
+/// products, and "Ruled out".
 #[component]
 fn Results(advice: Advice, selected: RwSignal<usize>, pick: PendingCatalogPick) -> impl IntoView {
-    let Advice { fits, not_on_printer, printer_line, catalog_empty, .. } = advice;
+    let Advice { fits, ruled_out, printer_line, catalog_empty, .. } = advice;
     let Some(top) = fits.first().cloned() else {
         return view! { <StateText kind=StateKind::Empty message="No material fits this printer" /> }
             .into_any();
@@ -3403,7 +3410,7 @@ fn Results(advice: Advice, selected: RwSignal<usize>, pick: PendingCatalogPick) 
     let current = move || {
         fits.with_value(|f| f.get(selected.get()).cloned().or_else(|| f.first().cloned()))
     };
-    let excluded_count = not_on_printer.len();
+    let excluded_count = ruled_out.len();
 
     view! {
         <div class="adv-results">
@@ -3423,9 +3430,9 @@ fn Results(advice: Advice, selected: RwSignal<usize>, pick: PendingCatalogPick) 
             {move || current().map(|fit| view! { <FitDetail fit=fit pick=pick catalog_empty=catalog_empty /> })}
             {(excluded_count > 0).then(|| view! {
                 <details class="adv-excluded">
-                    <summary>{format!("Not on this printer ({excluded_count})")}</summary>
+                    <summary>{format!("Ruled out ({excluded_count})")}</summary>
                     <ul class="adv-excluded-list">
-                        {not_on_printer.into_iter().map(|e| view! {
+                        {ruled_out.into_iter().map(|e| view! {
                             <li>
                                 <span class="adv-excluded-name">{e.name}</span>
                                 " "
@@ -3974,7 +3981,7 @@ export const ADVICE = {
       products: [],
     },
   ],
-  not_on_printer: [],
+  ruled_out: [],
   printer_line: null,
   model_error: null,
   catalog_empty: false,
@@ -4184,7 +4191,7 @@ Don't add the PNG screenshots that the runs write into `tests/webkit/`.
 
 **Interfaces**
 - **Shapes that differ from the spec:**
-  - `score` returns `Scored { fits, not_on_printer }`;
+  - `score` returns `Scored { fits, ruled_out }`;
   - `interpret` takes `Option<&AiConfig>`;
   - `complete_json` also takes provider, model and key.
 - **Extra fields:**

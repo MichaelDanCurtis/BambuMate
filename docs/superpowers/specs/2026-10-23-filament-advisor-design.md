@@ -61,7 +61,8 @@ Every pick comes with reasons, and from there it's one click to a generated prof
 **Hard constraints from the printer:**
 - **Enclosure.** Whether the printer is enclosed comes from its model. H2C, H2D, H2S, X1, X1C, X1E, P1S and P2S are enclosed; A1, A1 mini and P1P are open. An unknown model is assumed enclosed, and the page says so.
 - **Hardened nozzle.** When connected, this comes from the nozzle type. When unknown, abrasive materials get a "needs a hardened nozzle" note instead of being filtered out.
-- **Failing a constraint.** A material that fails a hard constraint goes into "Not on this printer" with its reason. It is never dropped silently.
+- **Failing a constraint.** A material that fails a hard constraint goes into "Ruled out" with all its reasons. It is never dropped silently.
+- **Heat is a hard requirement** (user ruling, 2026-10-23). A material that softens below the chosen heat level is ruled out with the reason "Softens around {HDT} °C".
 
 **Geometry**, when a model is loaded, from `model_view`:
 
@@ -74,7 +75,10 @@ Every pick comes with reasons, and from there it's one click to a generated prof
 **Scoring** (`score.rs`): `score(needs, printer, geometry) -> Vec<MaterialFit>`.
 - It is deterministic, and ties break in a fixed material order.
 - Each fit carries the total, a per-need reason (met, partly or not met), the printer notes and the geometry notes.
-- Results are the top 3 materials plus the "Not on this printer" list.
+- Results are the top 3 materials plus the "Ruled out" list.
+- **No 0% picks.** A material whose needs-only score is 0 isn't shown. Geometry lowers a material's rank and adds a note, but never hides it.
+- **Ranking** uses the full score, before it is clamped for display.
+- **Nothing fits.** When nothing is left, the page says "Nothing on this printer meets all of that." and the Ruled out list explains why.
 
 **Interpretation** (`interpret.rs`):
 - `interpret(text) -> Option<Needs>`, via a generic `complete_json(prompt, schema)` helper pulled out of `scraper/extraction.rs`. Only the existing call path is refactored.
@@ -124,7 +128,7 @@ Each product has a `buy_link` (the plain URL for now) and enough to start profil
 - One line above the table states the ordering rule.
 - "Generate profile" reuses the Search page's existing flow: catalog entry, then specs, then generate, then install.
 
-**Not on this printer.** A collapsed list of materials that fail a hard constraint, each with its reason.
+**Ruled out.** A collapsed list of materials that fail a hard constraint (printer or heat), each with its reasons.
 
 **Settings → General** gets a "Preferred brands" picker, filled from the catalog's brands.
 
@@ -158,7 +162,7 @@ Each product has a `buy_link` (the plain URL for now) and enough to start profil
   - CF materials are abrasive;
   - TPU is flexible.
 - **Scoring:**
-  - "outdoor + heat ≥80" ranks ASA first on an enclosed printer, and lists it under "Not on this printer" on an A1;
+  - "outdoor + heat ≥80" ranks ASA first on an enclosed printer, and lists it under "Ruled out" on an A1;
   - "flexible" gives TPU;
   - a large footprint lowers the score of ABS;
   - an unknown nozzle adds a note to CF materials and does not filter them out;
