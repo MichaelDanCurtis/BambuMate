@@ -268,6 +268,8 @@ pub struct PrinterState {
     pub gcode_file: Option<String>,
     /// `plate_idx`, when the printer reports it (0 means it doesn't).
     pub plate_idx: Option<u32>,
+    /// `print_type`: `"system"` for the printer's own calibration jobs.
+    pub print_type: Option<String>,
     pub mc_percent: Option<u32>,
     /// `mc_remaining_time`, in minutes.
     pub mc_remaining_time: Option<u32>,
@@ -513,6 +515,7 @@ impl PrinterState {
             job_id: id_field(p, "job_id"),
             gcode_file: str_field(p, "gcode_file"),
             plate_idx: p.get("plate_idx").and_then(num_u32),
+            print_type: str_field(p, "print_type"),
             mc_percent: p.get("mc_percent").and_then(num_u32),
             mc_remaining_time: p.get("mc_remaining_time").and_then(num_u32),
             layer_num: p.get("layer_num").and_then(num_u32),
@@ -1091,6 +1094,16 @@ mod tests {
         let round: PrinterState =
             serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
         assert_eq!(round, full);
+    }
+
+    #[test]
+    fn print_type_parses_and_survives_a_diff_without_it() {
+        let system = delta(r#""print_type":"system""#);
+        let s = state_after(&[H2D_FULL, &system]);
+        assert_eq!(s.print_type.as_deref(), Some("system"));
+        let s = state_after(&[H2D_FULL, &system, H2D_DELTA_PROGRESS]);
+        assert_eq!(s.print_type.as_deref(), Some("system"), "kept by the merge");
+        assert_eq!(state_after(&[H2D_FULL]).print_type, None);
     }
 
     #[test]
