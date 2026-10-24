@@ -527,8 +527,8 @@ fn RowSummary(
 
 /// The plate thumbnail of the linked slice, in a fixed box. It is asked for
 /// only once the row comes near the visible list (see [`Thumbs`]), so the
-/// list never waits for it; a missing or unreadable file reads "Photo
-/// unavailable".
+/// list never waits for it; a missing or unreadable file, or one the
+/// browser can't decode, reads "Photo unavailable".
 #[component]
 fn RowThumb(id: i64, thumbs: Thumbs) -> impl IntoView {
     let cached = thumbs.loaded.with_value(|l| l.get(&id).cloned());
@@ -568,12 +568,17 @@ fn RowThumb(id: i64, thumbs: Thumbs) -> impl IntoView {
         });
     });
 
+    // The browser couldn't decode what the backend sent.
+    let broken = RwSignal::new(false);
+
     view! {
         <span class="jr-thumb" node_ref=node data-thumb-for=id.to_string()>
-            {move || match src.get() {
-                Some(Ok(s)) => view! { <img src=s alt="" /> }.into_any(),
-                Some(Err(())) => view! { <span class="jr-thumb-missing">{PHOTO_UNAVAILABLE}</span> }.into_any(),
-                None => ().into_any(),
+            {move || match (src.get(), broken.get()) {
+                (Some(Ok(s)), false) => {
+                    view! { <img src=s alt="" on:error=move |_| broken.set(true) /> }.into_any()
+                }
+                (None, _) => ().into_any(),
+                _ => view! { <span class="jr-thumb-missing">{PHOTO_UNAVAILABLE}</span> }.into_any(),
             }}
         </span>
     }

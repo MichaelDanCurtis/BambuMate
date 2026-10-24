@@ -2361,20 +2361,23 @@ async function driveApp(browserType, engine, baseUrl) {
     await rowsRead(ALL_ROWS);
   });
 
-  await step(run, page, "a thumbnail that can't be read says so", async () => {
-    await withFixtures({ journal_image: { __reject: "Photo unavailable" } }, async () => {
-      await page.click('.nd-tabs a[href="/printer"]');
-      await page.waitForSelector(".printer-page", { timeout: 15000 });
-      await page.click('.nd-tabs a[href="/printer/journal"]');
-      await page.waitForFunction(
-        () => document.querySelector('.journal-page .jr-row[data-entry="2"] .jr-thumb')?.textContent === "Photo unavailable",
-        null,
-        { timeout: 5000 }
-      );
-      if (await page.locator(`${journalRow(2)} .jr-thumb img`).count()) throw new Error("an image beside the placeholder");
-      const box = await page.locator(`${journalRow(2)} .jr-thumb`).boundingBox();
-      if (Math.round(box.width) !== 56 || Math.round(box.height) !== 56) throw new Error(`the placeholder is ${box.width}x${box.height}`);
-    });
+  await step(run, page, "a thumbnail that can't be read, or can't be decoded, says so", async () => {
+    // The backend refuses it, or sends a PNG cut off after its signature.
+    for (const unreadable of [{ __reject: "Photo unavailable" }, "data:image/png;base64,iVBORw0KGgo="]) {
+      await withFixtures({ journal_image: unreadable }, async () => {
+        await page.click('.nd-tabs a[href="/printer"]');
+        await page.waitForSelector(".printer-page", { timeout: 15000 });
+        await page.click('.nd-tabs a[href="/printer/journal"]');
+        await page.waitForFunction(
+          () => document.querySelector('.journal-page .jr-row[data-entry="2"] .jr-thumb')?.textContent === "Photo unavailable",
+          null,
+          { timeout: 5000 }
+        );
+        if (await page.locator(`${journalRow(2)} .jr-thumb img`).count()) throw new Error("an image beside the placeholder");
+        const box = await page.locator(`${journalRow(2)} .jr-thumb`).boundingBox();
+        if (Math.round(box.width) !== 56 || Math.round(box.height) !== 56) throw new Error(`the placeholder is ${box.width}x${box.height}`);
+      });
+    }
   });
 
   await step(run, page, "thumbnails load only as their rows come near the visible list", async () => {
