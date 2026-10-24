@@ -10,6 +10,7 @@ use crate::agent::drawer::{AgentDrawer, AgentEvents, AgentRefresh, AgentShared};
 use crate::commands::{self, FeatureFlags, UpdateInfo};
 use crate::components::patterns::{StateKind, StateText};
 use crate::components::sidebar::Sidebar;
+use crate::journal::{JournalEvents, JournalShared};
 use crate::pages::about::AboutPage;
 use crate::pages::advise::AdvisePage;
 use crate::pages::batch_generate::BatchGeneratePage;
@@ -90,6 +91,7 @@ pub fn App() -> impl IntoView {
     provide_context(AgentRefresh(RwSignal::new(0)));
     provide_context(AgentShared::default());
     provide_context(PrinterShared::new());
+    provide_context(JournalShared::new());
     provide_context(SlicerShared::default());
     provide_context(PendingCatalogPick::new());
 
@@ -155,6 +157,7 @@ pub fn App() -> impl IntoView {
             // Mounted once, outside the Shows below: its listeners can't be removed.
             <AgentEvents />
             <PrinterEvents />
+            <JournalEvents />
             <SlicerEvents />
 
             // Show wizard overlay if setup is not complete

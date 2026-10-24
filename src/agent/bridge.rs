@@ -188,3 +188,51 @@ pub fn listen<T: DeserializeOwned + 'static>(event: &'static str, mut on: impl F
         closure.forget();
     });
 }
+
+/// Like [`listen`], but for a component that can unmount: the Tauri listener
+/// is removed when the current reactive owner is cleaned up.
+///
+/// Registering takes an await, so the owner may be gone before it finishes.
+/// The handle is then kept with `try_update_value`, which finds nothing to
+/// write to, and the listener is removed straight away instead.
+pub fn listen_scoped<T: DeserializeOwned + 'static>(
+    event: &'static str,
+    mut on: impl FnMut(T) + 'static,
+) {
+    use leptos::prelude::*;
+
+    let unlisten = StoredValue::<Option<js_sys::Function>, LocalStorage>::new_local(None);
+    let closure = Closure::<dyn FnMut(JsValue)>::new(move |msg: JsValue| {
+        let payload =
+            js_sys::Reflect::get(&msg, &JsValue::from_str("payload")).unwrap_or(JsValue::NULL);
+        match serde_wasm_bindgen::from_value::<T>(payload) {
+            Ok(v) => on(v),
+            Err(e) => web_sys::console::warn_1(&format!("{event}: {e}").into()),
+        }
+    });
+    wasm_bindgen_futures::spawn_local(async move {
+        let result = tauri_listen(event, &closure).await;
+        // JS may still deliver an event already in flight after the listener
+        // is removed, so the closure is leaked rather than dropped.
+        closure.forget();
+        match result {
+            Ok(handle) => {
+                let Ok(handle) = handle.dyn_into::<js_sys::Function>() else {
+                    return;
+                };
+                if unlisten
+                    .try_update_value(|slot| *slot = Some(handle.clone()))
+                    .is_none()
+                {
+                    let _ = handle.call0(&JsValue::NULL);
+                }
+            }
+            Err(e) => web_sys::console::warn_1(&e),
+        }
+    });
+    on_cleanup(move || {
+        if let Some(Some(handle)) = unlisten.try_update_value(|slot| slot.take()) {
+            let _ = handle.call0(&JsValue::NULL);
+        }
+    });
+}
