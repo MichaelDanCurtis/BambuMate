@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS prints (
     tags_json TEXT NOT NULL DEFAULT '[]',
     notes TEXT NOT NULL DEFAULT '',
     slice_json TEXT,
+    last_percent INTEGER,
+    last_layer INTEGER,
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_prints_started ON prints(started_at DESC);
@@ -289,6 +291,22 @@ impl JournalStore {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Remembers how far an open print had got, so a restart can tell the
+    /// same run from a reprint. Not a user edit: `updated_at` is untouched.
+    pub fn set_progress(&self, id: i64, percent: u32, layer: u32) -> Result<(), String> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE prints SET last_percent = ?2, last_layer = ?3 WHERE id = ?1",
+                params![id, percent, layer],
+            )
+            .map_err(save_err)?;
+        if changed == 0 {
+            return Err(GONE.to_string());
+        }
+        Ok(())
+    }
+
     /// Records a tray once; `false` when it was already recorded.
     pub fn add_tray(&self, id: i64, tray: &TrayUse, now: i64) -> Result<bool, String> {
         let tx = self.conn.unchecked_transaction().map_err(save_err)?;
@@ -408,7 +426,7 @@ impl JournalStore {
     pub fn open_entries(&self) -> Result<Vec<OpenEntry>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, job_key, started_at FROM prints WHERE outcome = 'printing' ORDER BY id DESC")
+            .prepare("SELECT id, job_key, started_at, last_percent, last_layer FROM prints WHERE outcome = 'printing' ORDER BY id DESC")
             .map_err(read_err)?;
         let rows = stmt
             .query_map([], |r| {
@@ -416,6 +434,8 @@ impl JournalStore {
                     id: r.get(0)?,
                     job_key: r.get(1)?,
                     started_at: r.get(2)?,
+                    last_percent: r.get(3)?,
+                    last_layer: r.get(4)?,
                 })
             })
             .map_err(read_err)?;
@@ -824,6 +844,45 @@ mod tests {
     }
 
     #[test]
+    fn progress_is_kept_on_the_open_entry_without_touching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s
+            .start(&new_print("local:cube|f", "cube", 1_000), 1_000)
+            .unwrap();
+        let before = s.get(id).unwrap().unwrap().updated_at;
+        s.set_progress(id, 42, 120).unwrap();
+        s.set_progress(id, 43, 125).unwrap();
+        let open_now = s.open_entries().unwrap();
+        assert_eq!(
+            (open_now[0].last_percent, open_now[0].last_layer),
+            (Some(43), Some(125))
+        );
+        assert_eq!(
+            s.get(id).unwrap().unwrap().updated_at,
+            before,
+            "not an edit"
+        );
+        assert_eq!(
+            s.set_progress(id + 99, 1, 1),
+            Err("That print isn't in the journal any more.".to_string())
+        );
+        // A closed entry is no longer open, whatever progress it kept.
+        s.end(
+            id,
+            &PrintEnd {
+                outcome: Outcome::Finished,
+                ended_at: Some(2_000),
+                error_code: None,
+                hms: Vec::new(),
+            },
+            2_000,
+        )
+        .unwrap();
+        assert!(s.open_entries().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_print_is_recorded_from_start_to_end() {
         let dir = tempfile::tempdir().unwrap();
         let s = open(&dir);
@@ -836,6 +895,8 @@ mod tests {
                 id,
                 job_key: "local:cube|f".into(),
                 started_at: 1_000,
+                last_percent: None,
+                last_layer: None,
             }]
         );
         let e = s.get(id).unwrap().unwrap();

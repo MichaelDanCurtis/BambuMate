@@ -27,10 +27,6 @@ use crate::printer::state::{HmsCode, PrinterState, TrayRef};
 /// `gcode_state`s of a job that hasn't ended.
 pub const ACTIVE: &[&str] = &["PREPARE", "SLICING", "RUNNING", "PAUSE"];
 
-/// How much later than a resumed entry's stored start a progress-implied
-/// start may be before the job is taken for a new run (15 minutes).
-const REPRINT_GAP_SECS: i64 = 15 * 60;
-
 /// A progress that falls by more than this many points is a new run.
 const RESTART_DROP: u32 = 5;
 
@@ -38,6 +34,20 @@ const RESTART_DROP: u32 = 5;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WatchState {
     pub job: Option<WatchedJob>,
+    /// Key of the last job seen as a printer calibration (`print_type`
+    /// "system"). Only that key is skipped: the merged `print_type` can
+    /// still say "system" while a real print starts.
+    pub system_key: Option<String>,
+}
+
+impl WatchState {
+    /// No job open, calibration memory kept.
+    fn cleared(&self) -> WatchState {
+        WatchState {
+            job: None,
+            system_key: self.system_key.clone(),
+        }
+    }
 }
 
 /// Progress last seen while the job was RUNNING or PAUSE.
@@ -57,7 +67,8 @@ pub struct WatchedJob {
     pub confirmed: bool,
     /// When the entry started (its stored start, for a resumed entry).
     pub started_at: Option<i64>,
-    /// `None` until the job has been RUNNING or PAUSE.
+    /// Last progress seen while RUNNING or PAUSE, or stored on the entry
+    /// (for a resumed one). `None`: nothing known, so nothing is guessed.
     pub progress: Option<Progress>,
 }
 
@@ -87,6 +98,14 @@ pub enum JournalEvent {
         name: String,
         gcode_file: Option<String>,
         plate: Option<u32>,
+    },
+    /// The open entry `key` has got further: store it with `set_progress`
+    /// so a restart can tell this run from a reprint. Emitted for a
+    /// confirmed job when the percent rises or the layer changes.
+    Progress {
+        key: String,
+        percent: u32,
+        layer: u32,
     },
     TrayUsed {
         key: String,
@@ -160,12 +179,21 @@ fn display_name(report: &PrinterState) -> String {
         .unwrap_or_else(|| "Untitled print".to_string())
 }
 
-/// The printer's own calibration jobs aren't prints.
-fn is_system(report: &PrinterState) -> bool {
-    report
+/// The printer's own calibration jobs aren't prints. A report is one when
+/// its key is the last calibration's, when its file is one of the printer's
+/// own (`/usr/etc/print/`), or when `print_type` says "system" and no
+/// calibration has been seen yet. A different key with a stale merged
+/// `print_type` of "system" is a real print.
+fn is_system(prev: &WatchState, report: &PrinterState, key: &str) -> bool {
+    let typed = report
         .print_type
         .as_deref()
-        .is_some_and(|t| t.trim().eq_ignore_ascii_case("system"))
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("system"));
+    let own_file = report
+        .gcode_file
+        .as_deref()
+        .is_some_and(|f| f.trim_start().starts_with("/usr/etc/print/"));
+    prev.system_key.as_deref() == Some(key) || own_file || (typed && prev.system_key.is_none())
 }
 
 /// RUNNING and PAUSE: the part of a job whose progress is the print's.
@@ -206,15 +234,20 @@ fn merge_progress(old: Option<Progress>, report: &PrinterState, state: &str) -> 
     })
 }
 
-/// A fresh active report that shows the job has begun again: its progress
-/// or layer fell back, or it is back in PREPARE or SLICING after printing.
-/// A reprint the app didn't see end has the same key as the old run.
-fn restarted(job: &WatchedJob, report: &PrinterState, state: &str, now: i64) -> bool {
+/// A fresh active report that shows the job has begun again, against the
+/// last known progress (seen live, or stored on a resumed entry): the
+/// percent fell by more than `RESTART_DROP`, the layer fell, or the job is
+/// back in PREPARE or SLICING after it had progressed. A reprint the app
+/// didn't see end has the same key as the old run. With no known progress
+/// nothing is guessed.
+// A layer drop counts even when the percent rose (print-by-object might
+// restart layers; unconfirmed).
+fn restarted(job: &WatchedJob, report: &PrinterState, state: &str) -> bool {
     let Some(last) = job.progress else {
-        return resumed_reprint(job, report, state, now);
+        return false;
     };
     if matches!(state, "PREPARE" | "SLICING") {
-        return true;
+        return last.percent.unwrap_or(0) > 0 || last.layer.unwrap_or(0) > 0;
     }
     if !is_printing_stage(state) {
         return false;
@@ -230,29 +263,34 @@ fn restarted(job: &WatchedJob, report: &PrinterState, state: &str, now: i64) -> 
     percent_fell || layer_fell
 }
 
-/// A job resumed from disk has no progress to compare with, only its stored
-/// start. On its first fresh printing report, the start implied by the
-/// progress and remaining time is compared with it: one more than
-/// `REPRINT_GAP_SECS` later is a new run of the same file, begun while the
-/// app was closed. Without a progress and a remaining time nothing is
-/// guessed, and the job is taken as the same one.
-fn resumed_reprint(job: &WatchedJob, report: &PrinterState, state: &str, now: i64) -> bool {
-    let (false, Some(stored), true) = (job.confirmed, job.started_at, is_printing_stage(state))
-    else {
-        return false;
-    };
-    let (Some(percent), Some(_)) = (
-        report.mc_percent.filter(|p| *p > 0),
-        report.mc_remaining_time,
-    ) else {
-        return false;
-    };
-    now - elapsed_secs(percent, report.mc_remaining_time) > stored + REPRINT_GAP_SECS
+/// Follows the progress of a confirmed job and reports when it moved.
+fn advance(
+    job: &mut WatchedJob,
+    report: &PrinterState,
+    state: &str,
+    events: &mut Vec<JournalEvent>,
+) {
+    let new = merge_progress(job.progress, report, state);
+    if let Some(n) = new {
+        let old = job.progress.unwrap_or_default();
+        let rose = n.percent.unwrap_or(0) > old.percent.unwrap_or(0);
+        let layer_moved = n.layer.unwrap_or(0) != old.layer.unwrap_or(0);
+        if rose || layer_moved {
+            events.push(JournalEvent::Progress {
+                key: job.key.clone(),
+                percent: n.percent.unwrap_or(0),
+                layer: n.layer.unwrap_or(0),
+            });
+        }
+    }
+    job.progress = new;
 }
 
 /// Records the current tray once, when it holds filament. Only a job
 /// really printing counts (RUNNING, past layer 1): PREPARE and the first
 /// RUNNING stages still show whatever the last job left loaded.
+// The merged `layer_num` can still be the previous job's at the start of a
+// new one if its reset arrives late (unconfirmed push order).
 fn note_tray(
     mut job: WatchedJob,
     report: &PrinterState,
@@ -348,13 +386,13 @@ pub fn observe(
                     events.push(JournalEvent::Lost { key: job.key });
                 }
             }
-            (WatchState::default(), events)
+            (prev.cleared(), events)
         }
         "IDLE" => {
             if let Some(job) = prev.job.clone() {
                 events.push(JournalEvent::Lost { key: job.key });
             }
-            (WatchState::default(), events)
+            (prev.cleared(), events)
         }
         _ => (prev.clone(), events),
     }
@@ -370,17 +408,15 @@ fn carry(prev: &WatchState, report: &PrinterState, events: &mut Vec<JournalEvent
     let Some(state) = report.gcode_state.as_deref().filter(|s| ACTIVE.contains(s)) else {
         return prev.clone();
     };
-    if is_system(report) {
-        return prev.clone();
-    }
     if let Some(key) = job_key(report) {
         if key != job.key {
             rekey(&mut job, key, report, events);
         }
     }
-    job.progress = merge_progress(job.progress, report, state);
+    advance(&mut job, report, state, events);
     WatchState {
         job: Some(note_tray(job, report, state, events)),
+        system_key: prev.system_key.clone(),
     }
 }
 
@@ -392,47 +428,53 @@ fn active(
     now: i64,
     events: &mut Vec<JournalEvent>,
 ) -> WatchState {
-    if is_system(report) {
+    let Some(key) = job_key(report) else {
+        return prev.clone();
+    };
+    if is_system(prev, report, &key) {
         // Not journalled. A job left open (unwatched) is gone.
         if let Some(old) = &prev.job {
             events.push(JournalEvent::Lost {
                 key: old.key.clone(),
             });
         }
-        return WatchState::default();
+        return WatchState {
+            job: None,
+            system_key: Some(key),
+        };
     }
-    let Some(key) = job_key(report) else {
-        return prev.clone();
-    };
 
     // The same job continues when it is the one open (same key, or any key
     // while it was being watched and hasn't ended) and not a fresh run.
     if let Some(mut job) = prev.job.clone() {
         let same = job.key == key || job.confirmed;
-        if same && !restarted(&job, report, state, now) {
+        if same && !restarted(&job, report, state) {
             if job.key != key {
                 rekey(&mut job, key, report, events);
             }
             job.confirmed = true;
-            job.progress = merge_progress(job.progress, report, state);
+            advance(&mut job, report, state, events);
             return WatchState {
                 job: Some(note_tray(job, report, state, events)),
+                system_key: prev.system_key.clone(),
             };
         }
         events.push(JournalEvent::Lost { key: job.key });
     }
 
     let print = started(report, &key, state, now);
-    let job = WatchedJob {
+    let mut job = WatchedJob {
         key,
         trays: Vec::new(),
         confirmed: true,
         started_at: Some(print.started_at),
-        progress: merge_progress(None, report, state),
+        progress: None,
     };
     events.push(JournalEvent::Started(print));
+    advance(&mut job, report, state, events);
     WatchState {
         job: Some(note_tray(job, report, state, events)),
+        system_key: prev.system_key.clone(),
     }
 }
 
@@ -445,6 +487,10 @@ pub fn resume(open: &[OpenEntry]) -> (WatchState, Vec<i64>) {
     let Some((newest, older)) = newest_first.split_first() else {
         return (WatchState::default(), Vec::new());
     };
+    let stored = Progress {
+        percent: newest.last_percent,
+        layer: newest.last_layer,
+    };
     (
         WatchState {
             job: Some(WatchedJob {
@@ -452,8 +498,9 @@ pub fn resume(open: &[OpenEntry]) -> (WatchState, Vec<i64>) {
                 trays: Vec::new(),
                 confirmed: false,
                 started_at: Some(newest.started_at),
-                progress: None,
+                progress: (stored != Progress::default()).then_some(stored),
             }),
+            system_key: None,
         },
         older.iter().map(|e| e.id).collect(),
     )
@@ -467,6 +514,7 @@ pub fn unwatched(prev: &WatchState) -> WatchState {
             confirmed: false,
             ..job
         }),
+        system_key: prev.system_key.clone(),
     }
 }
 
@@ -527,6 +575,17 @@ mod tests {
             id,
             job_key,
             started_at,
+            last_percent: None,
+            last_layer: None,
+        }
+    }
+
+    /// An open entry with the progress the store kept for it.
+    fn open_at(id: i64, job_key: String, started_at: i64, percent: u32, layer: u32) -> OpenEntry {
+        OpenEntry {
+            last_percent: Some(percent),
+            last_layer: Some(layer),
+            ..open_entry(id, job_key, started_at)
         }
     }
 
@@ -541,7 +600,21 @@ mod tests {
     }
 
     /// Observes `r` as a push that carried its own `gcode_state`.
+    /// Progress events are tested on their own; the other tests read past them.
+    fn without_progress(events: Vec<JournalEvent>) -> Vec<JournalEvent> {
+        events
+            .into_iter()
+            .filter(|e| !matches!(e, JournalEvent::Progress { .. }))
+            .collect()
+    }
+
     fn obs(prev: &WatchState, r: &PrinterState, now: i64) -> (WatchState, Vec<JournalEvent>) {
+        let (next, events) = obs_all(prev, r, now);
+        (next, without_progress(events))
+    }
+
+    /// Like `obs`, progress events included.
+    fn obs_all(prev: &WatchState, r: &PrinterState, now: i64) -> (WatchState, Vec<JournalEvent>) {
         observe(prev, r, r.gcode_state.as_deref(), now)
     }
 
@@ -560,7 +633,9 @@ mod tests {
     fn kinds(events: &[JournalEvent]) -> Vec<&'static str> {
         events
             .iter()
+            .filter(|e| !matches!(e, JournalEvent::Progress { .. }))
             .map(|e| match e {
+                JournalEvent::Progress { .. } => "progress",
                 JournalEvent::Started(_) => "started",
                 JournalEvent::Rekeyed { .. } => "rekeyed",
                 JournalEvent::TrayUsed { .. } => "tray",
@@ -671,7 +746,11 @@ mod tests {
         let (first, _) = obs(&WatchState::default(), &state_after(&[H2D_FULL]), T0);
         let merged = state_after(&[H2D_FULL, H2D_DELTA_PROGRESS]);
         let (after_diff, events) = observe(&first, &merged, None, T0 + 1);
-        assert!(events.is_empty());
+        assert_eq!(
+            kinds(&events),
+            Vec::<&str>::new(),
+            "only progress is followed: {events:?}"
+        );
         // Progress is followed; the job is the same one, still confirmed.
         let (a, b) = (
             first.job.as_ref().unwrap(),
@@ -993,10 +1072,12 @@ mod tests {
         let keys: Vec<&str> = s
             .events
             .iter()
-            .map(|e| match e {
-                JournalEvent::Started(p) => p.key.as_str(),
-                JournalEvent::TrayUsed { key, .. } | JournalEvent::Ended { key, .. } => key,
-                _ => "?",
+            .filter_map(|e| match e {
+                JournalEvent::Started(p) => Some(p.key.as_str()),
+                JournalEvent::TrayUsed { key, .. } | JournalEvent::Ended { key, .. } => {
+                    Some(key.as_str())
+                }
+                _ => None,
             })
             .collect();
         assert_eq!(keys, ["task:812"; 3]);
@@ -1239,7 +1320,7 @@ mod tests {
         p.insert("print_type".into(), json!("system"));
         let events = s.full(p, 100);
         assert_eq!(events, vec![JournalEvent::Lost { key: sim_key() }]);
-        assert_eq!(s.watch, WatchState::default());
+        assert_eq!(s.watch.job, None);
     }
 
     #[test]
@@ -1373,57 +1454,6 @@ mod tests {
     }
 
     #[test]
-    fn a_resumed_job_with_consistent_progress_is_the_same_entry() {
-        // 40 % with 60 min left: 40 min done, so the print began at T0 - 2400.
-        let stored = T0 - 2_400 - 300; // within the 15 minute allowance
-        let (watch, _) = resume(&[open_entry(7, benchy_key(), stored)]);
-        assert_eq!(watch.job.as_ref().unwrap().started_at, Some(stored));
-        let (watch, events) = obs(&watch, &report("RUNNING", 40), T0);
-        assert_eq!(kinds(&events), ["tray"], "no new entry");
-        assert!(watch.job.as_ref().unwrap().confirmed);
-        // Later progress is compared with the last seen, not the stored start.
-        let (_, events) = obs(&watch, &report("RUNNING", 41), T0 + 60);
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn a_reprint_made_while_the_app_was_closed_is_a_new_entry() {
-        // The stored print began an hour and a half ago; the same file is now
-        // at 5 % with 57 min left, three minutes in.
-        let (watch, _) = resume(&[open_entry(7, benchy_key(), T0 - 5_400)]);
-        let mut again = report("RUNNING", 5);
-        again.mc_remaining_time = Some(57);
-        let (watch, events) = obs(&watch, &again, T0);
-        assert_eq!(kinds(&events), ["lost", "started", "tray"]);
-        assert_eq!(events[0], JournalEvent::Lost { key: benchy_key() });
-        let JournalEvent::Started(s) = &events[1] else {
-            panic!("{events:?}")
-        };
-        assert_eq!(s.key, benchy_key());
-        assert!(s.approx && s.started_at > T0 - 5_400 + 900, "{s:?}");
-        let job = watch.job.unwrap();
-        assert_eq!(job.started_at, Some(s.started_at), "the new entry's start");
-        assert!(job.confirmed);
-    }
-
-    #[test]
-    fn a_resumed_job_with_no_usable_progress_is_not_guessed_at() {
-        let stored = T0 - 5_400;
-        for (percent, remaining) in [(0, Some(60)), (5, None)] {
-            let (watch, _) = resume(&[open_entry(7, benchy_key(), stored)]);
-            let mut r = report("RUNNING", percent);
-            r.mc_remaining_time = remaining;
-            let (watch, events) = obs(&watch, &r, T0);
-            assert_eq!(kinds(&events), ["tray"], "{percent} {remaining:?}");
-            assert_eq!(watch.job.unwrap().started_at, Some(stored));
-        }
-        // A job in PREPARE has no progress to compare either.
-        let (watch, _) = resume(&[open_entry(7, benchy_key(), stored)]);
-        let (_, events) = obs(&watch, &report("PREPARE", 0), T0);
-        assert!(events.is_empty());
-    }
-
-    #[test]
     fn a_resumed_end_is_never_before_the_stored_start() {
         let (watch, _) = resume(&[open_entry(7, benchy_key(), T0 + 500)]);
         let (watch, _) = obs(&watch, &report("RUNNING", 0), T0 + 100);
@@ -1432,5 +1462,289 @@ mod tests {
             matches!(&events[..], [JournalEvent::Ended { ended_at, .. }] if *ended_at == T0 + 500),
             "{events:?}"
         );
+    }
+
+    // Resuming and reconnecting: the entry's stored progress tells the same
+    // run from a reprint; time estimates are never used.
+
+    /// What the three physical-print variants of the old time rule looked
+    /// like: a slow estimate, a short pause, a long pause. All one entry.
+    #[test]
+    fn a_resumed_print_is_one_entry_whatever_the_estimate_or_pauses() {
+        // (stored percent, stored layer, now, state, percent, layer)
+        let cases = [
+            (48, 95, (13 + 132) * 60, "RUNNING", 50, 100), // 10 % slow estimate
+            (49, 98, (13 + 120 + 5) * 60, "RUNNING", 50, 100), // a 5 minute pause
+            (50, 100, (13 + 120) * 60, "RUNNING", 50, 100), // exact
+            (30, 60, 13 * 60 + 72 * 60 + 2 * 3600, "PAUSE", 30, 60), // a 2 h pause
+        ];
+        for (sp, sl, now, state, percent, layer) in cases {
+            let (watch, _) = resume(&[open_at(1, sim_key(), 0, sp, sl)]);
+            let mut s = Sim::from(watch);
+            s.full(
+                full(state, "Benchy", "0", "plate_1.gcode", percent, layer, "0"),
+                now,
+            );
+            assert!(
+                !s.events
+                    .iter()
+                    .any(|e| matches!(e, JournalEvent::Lost { .. } | JournalEvent::Started(_))),
+                "{state} {percent}: {:?}",
+                s.events
+            );
+            assert!(s.watch.job.as_ref().unwrap().confirmed);
+        }
+    }
+
+    #[test]
+    fn a_job_seen_in_prepare_then_disconnected_is_the_same_entry_when_it_returns_late() {
+        let mut s = Sim::new();
+        s.full(
+            full("PREPARE", "Benchy", "0", "plate_1.gcode", 0, 0, "255"),
+            0,
+        );
+        s.disconnect();
+        // Three hours on, at 70 %: no known progress to compare, so no guess.
+        s.full(
+            full("RUNNING", "Benchy", "0", "plate_1.gcode", 70, 140, "0"),
+            198 * 60,
+        );
+        assert_eq!(s.kinds(), ["started", "tray"]);
+    }
+
+    #[test]
+    fn a_reprint_made_while_closed_and_joined_in_prepare_is_a_new_entry() {
+        let (watch, _) = resume(&[open_at(1, sim_key(), 0, 90, 200)]);
+        let mut s = Sim::from(watch);
+        let t = 5 * 3600;
+        s.full(
+            full("PREPARE", "Benchy", "0", "plate_1.gcode", 0, 0, "2"),
+            t,
+        );
+        s.diff(json!({"gcode_state": "RUNNING"}), t + 120);
+        s.diff(
+            json!({"layer_num": 1, "mc_percent": 1, "ams": {"tray_now": "0"}}),
+            t + 700,
+        );
+        s.diff(json!({"mc_percent": 50}), t + 4000);
+        s.diff(json!({"gcode_state": "FINISH"}), t + 8000);
+        assert_eq!(s.kinds(), ["lost", "started", "tray", "ended"]);
+        assert_eq!(s.events[0], JournalEvent::Lost { key: sim_key() });
+        let JournalEvent::Started(p) = &s.events[1] else {
+            panic!("{:?}", s.events)
+        };
+        assert_eq!(
+            (p.started_at, p.approx),
+            (t, false),
+            "PREPARE is not approximate"
+        );
+        assert_eq!(tray_labels(&s.events), ["A1"], "not the leftover A3");
+    }
+
+    #[test]
+    fn a_resumed_job_is_checked_against_progress_whenever_a_fresh_report_has_some() {
+        // Joined in the warm-up at 0 %, below the stored 50 %: a new run.
+        let (watch, _) = resume(&[open_at(1, benchy_key(), 0, 50, 100)]);
+        let (_, events) = obs(&watch, &report("RUNNING", 0), T0);
+        assert_eq!(
+            kinds(&events),
+            ["lost", "started", "tray"],
+            "layer 1 after layer 100"
+        );
+        let mut warmup = report("RUNNING", 0);
+        warmup.layer_num = Some(0);
+        let (_, events) = obs(&watch, &warmup, T0);
+        assert_eq!(kinds(&events), ["lost", "started"]);
+
+        // A first report with no progress at all decides nothing...
+        let mut bare = report("RUNNING", 0);
+        bare.mc_percent = None;
+        bare.layer_num = None;
+        let (watch, events) = obs(&watch, &bare, T0);
+        assert!(
+            events.is_empty() && watch.job.as_ref().unwrap().confirmed,
+            "{events:?}"
+        );
+        // ...and a later fresh report with progress still applies the rule.
+        let mut early = report("RUNNING", 3);
+        early.layer_num = Some(4);
+        let (_, events) = obs(&watch, &early, T0 + 60);
+        assert_eq!(kinds(&events), ["lost", "started", "tray"]);
+
+        // With nothing stored, nothing is guessed, whenever it is joined.
+        let (watch, _) = resume(&[open_entry(1, benchy_key(), 0)]);
+        let (watch, events) = obs(&watch, &warmup, T0);
+        assert!(events.is_empty());
+        let (_, events) = obs(&watch, &report("PAUSE", 30), T0 + 3000);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_resumed_job_is_seeded_with_the_stored_progress() {
+        let (watch, _) = resume(&[open_at(1, benchy_key(), 0, 50, 100)]);
+        assert_eq!(
+            watch.job.unwrap().progress,
+            Some(Progress {
+                percent: Some(50),
+                layer: Some(100)
+            })
+        );
+        let (watch, _) = resume(&[open_entry(1, benchy_key(), 0)]);
+        assert_eq!(watch.job.unwrap().progress, None);
+    }
+
+    #[test]
+    fn progress_is_emitted_when_the_percent_rises_or_the_layer_changes() {
+        let mut r = report("RUNNING", 25);
+        r.layer_num = Some(40);
+        let (w, events) = obs_all(&WatchState::default(), &r, T0);
+        let progress = |events: &[JournalEvent]| -> Vec<(u32, u32)> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    JournalEvent::Progress {
+                        key,
+                        percent,
+                        layer,
+                    } => {
+                        assert_eq!(key, &benchy_key());
+                        Some((*percent, *layer))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(progress(&events), [(25, 40)], "the first sight counts");
+        let (w, events) = obs_all(&w, &r, T0 + 10);
+        assert!(progress(&events).is_empty(), "nothing moved");
+        r.mc_percent = Some(26);
+        let (w, events) = obs_all(&w, &r, T0 + 20);
+        assert_eq!(progress(&events), [(26, 40)]);
+        r.layer_num = Some(41);
+        let (w, events) = obs_all(&w, &r, T0 + 30);
+        assert_eq!(progress(&events), [(26, 41)]);
+        r.mc_percent = Some(24);
+        let (_, events) = obs_all(&w, &r, T0 + 40);
+        assert!(progress(&events).is_empty(), "a fall is not progress");
+
+        // PREPARE and a job at 0 % have none to report.
+        let (_, events) = obs_all(&WatchState::default(), &report("PREPARE", 0), T0);
+        assert!(progress(&events).is_empty());
+        let mut warmup = report("RUNNING", 0);
+        warmup.layer_num = Some(0);
+        let (_, events) = obs_all(&WatchState::default(), &warmup, T0);
+        assert!(progress(&events).is_empty());
+
+        // An unconfirmed job emits none (nothing fresh confirmed it).
+        let (watching, _) = run(WatchState::default(), &[report("RUNNING", 10)]);
+        let mut diff = report("RUNNING", 11);
+        diff.layer_num = Some(5);
+        let (_, events) = observe(&unwatched(&watching), &diff, None, T0 + 60);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn progress_follows_diffs_for_a_confirmed_job() {
+        let mut s = Sim::new();
+        s.full(
+            full("RUNNING", "Benchy", "0", "plate_1.gcode", 10, 5, "0"),
+            0,
+        );
+        s.diff(json!({"mc_percent": 11}), 10);
+        s.diff(json!({"layer_num": 6}), 20);
+        let moves: Vec<(u32, u32)> = s
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                JournalEvent::Progress { percent, layer, .. } => Some((*percent, *layer)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moves, [(10, 5), (11, 5), (11, 6)]);
+    }
+
+    // A calibration is skipped by its own key only: a real print that
+    // follows it is journalled even while the merged `print_type` is stale.
+
+    fn calibration(s: &mut Sim, t: i64) {
+        s.diff(
+            json!({"gcode_state": "PREPARE", "print_type": "system", "subtask_name": "",
+                "task_id": "0", "gcode_file": "/usr/etc/print/auto_cali_for_user.gcode",
+                "mc_percent": 0, "layer_num": 0}),
+            t,
+        );
+        s.diff(
+            json!({"gcode_state": "RUNNING", "layer_num": 1, "mc_percent": 10}),
+            t + 30,
+        );
+        s.diff(json!({"mc_percent": 100}), t + 300);
+        s.diff(json!({"gcode_state": "FINISH"}), t + 310);
+    }
+
+    fn real_print_after_calibration(s: &mut Sim) {
+        let prepare = json!({"gcode_state": "PREPARE", "subtask_name": "Benchy",
+            "gcode_file": "plate_1.gcode", "mc_percent": 0, "layer_num": 0});
+        s.diff(prepare, 400);
+        s.diff(
+            json!({"gcode_state": "RUNNING", "ams": {"tray_now": "0"}}),
+            500,
+        );
+    }
+
+    fn assert_the_real_print_alone(s: &Sim) {
+        assert_eq!(s.kinds(), ["started", "tray", "ended"], "{:?}", s.events);
+        let JournalEvent::Started(p) = &s.events[0] else {
+            panic!("{:?}", s.events)
+        };
+        assert_eq!(p.key, sim_key());
+    }
+
+    #[test]
+    fn cal1_a_real_print_whose_pushes_never_repeat_print_type_is_journalled() {
+        let mut s = Sim::new();
+        s.full(full("IDLE", "", "0", "", 0, 0, "255"), 0);
+        calibration(&mut s, 10);
+        assert!(s.events.is_empty(), "the calibration isn't journalled");
+        real_print_after_calibration(&mut s);
+        s.diff(json!({"layer_num": 1, "mc_percent": 1}), 900);
+        s.diff(json!({"gcode_state": "FINISH"}), 4000);
+        assert_the_real_print_alone(&s);
+    }
+
+    #[test]
+    fn cal4_a_print_type_that_only_changes_mid_print_does_not_lose_the_print() {
+        let mut s = Sim::new();
+        s.full(full("IDLE", "", "0", "", 0, 0, "255"), 0);
+        calibration(&mut s, 10);
+        real_print_after_calibration(&mut s);
+        s.diff(
+            json!({"print_type": "local", "layer_num": 1, "mc_percent": 1}),
+            900,
+        );
+        s.diff(json!({"mc_percent": 40}), 2000);
+        s.diff(json!({"gcode_state": "FINISH"}), 4000);
+        assert_the_real_print_alone(&s);
+    }
+
+    #[test]
+    fn cal5_a_full_push_mid_print_does_not_change_the_one_entry() {
+        let mut s = Sim::new();
+        s.full(full("IDLE", "", "0", "", 0, 0, "255"), 0);
+        calibration(&mut s, 10);
+        real_print_after_calibration(&mut s);
+        s.full(
+            full("RUNNING", "Benchy", "0", "plate_1.gcode", 40, 50, "0"),
+            2000,
+        );
+        s.diff(json!({"gcode_state": "FINISH"}), 4000);
+        assert_eq!(s.kinds(), ["started", "tray", "ended"], "{:?}", s.events);
+    }
+
+    #[test]
+    fn a_second_calibration_with_the_same_key_is_skipped_too() {
+        let mut s = Sim::new();
+        calibration(&mut s, 0);
+        calibration(&mut s, 1000);
+        assert!(s.events.is_empty(), "{:?}", s.events);
     }
 }

@@ -198,6 +198,9 @@ pub struct OpenEntry {
     pub job_key: String,
     /// Unix seconds; back-dated when the start was approximate.
     pub started_at: i64,
+    /// Progress last seen while it printed; `None` before any.
+    pub last_percent: Option<u32>,
+    pub last_layer: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
