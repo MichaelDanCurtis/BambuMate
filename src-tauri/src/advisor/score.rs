@@ -59,8 +59,10 @@ impl PrinterFacts {
         }
     }
 
-    /// The model from settings (or `get_version`), the nozzle from the last
-    /// known live state.
+    /// The model from settings (or `get_version`), the nozzle from the view's
+    /// live state. The view must be trusted: `build_advice` passes one whose
+    /// live state is present only while the printer is connected, so a stale
+    /// report never counts as the nozzle fitted now.
     pub fn from_view(view: &PrinterView) -> Self {
         let model = view
             .printer

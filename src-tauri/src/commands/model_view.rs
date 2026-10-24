@@ -106,7 +106,11 @@ pub async fn model_view(path: String) -> Result<ModelView, String> {
     tauri::async_runtime::spawn_blocking(move || model_view_blocking(Path::new(&path)))
         .await
         .map_err(|_| "The model couldn't be read.".to_string())?
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            // The OS detail stays in the log; the page gets a fixed sentence.
+            tracing::warn!("model_view: {e}");
+            e.user_message()
+        })
 }
 
 #[cfg(test)]
