@@ -244,8 +244,8 @@ pub struct NeedReason {
 pub struct MaterialFit {
     pub material: MaterialId,
     pub name: String,
-    /// The score before the display clamp: negative when warping outweighs
-    /// the fit. Ranking uses this. Not sent to the page.
+    /// The needs score plus geometry, before any clamp: negative when
+    /// warping outweighs the fit. Ranking uses this. Not sent to the page.
     #[serde(skip)]
     pub points: i32,
     /// The score from the needs alone, before geometry. A material with none
@@ -362,11 +362,11 @@ pub fn fit_for(
     }
     let mut reasons = Vec::new();
     let mut points: i32 = 0;
-    let mut max: i32 = 0;
+    let mut needs_max: i32 = 0;
     for need in &needs {
         if let Some((p, detail)) = need_points(m, *need) {
             points += i32::from(p);
-            max += 3;
+            needs_max += 3;
             reasons.push(NeedReason {
                 need: *need,
                 verdict: verdict(p),
@@ -399,7 +399,6 @@ pub fn fit_for(
         }
         if g.tall_thin {
             points += i32::from(m.props.stiffness);
-            max += 3;
             geometry_notes.push(format!(
                 "Tall and thin: stiffness {}/3 helps it stay straight.",
                 m.props.stiffness
@@ -418,9 +417,10 @@ pub fn fit_for(
         material_notes.push(FOOD_CAUTION.to_string());
     }
 
-    let total = points.max(0) as u32;
-    // `with_default` guarantees a scored need, so `max` is at least 3.
-    let fit_pct = (total * 100 / max.max(1) as u32).min(100) as u8;
+    // The fit shown comes from the needs alone; geometry only reorders.
+    let total = needs_points.max(0) as u32;
+    // `with_default` guarantees a scored need, so `needs_max` is at least 3.
+    let fit_pct = (total * 100 / needs_max.max(1) as u32).min(100) as u8;
     Ok(MaterialFit {
         material: m.id,
         name: m.name.to_string(),
@@ -552,25 +552,27 @@ mod tests {
         let plain = fit_for(abs, &needs, &enclosed(), None).unwrap();
         let large = fit_for(abs, &needs, &enclosed(), Some(&flat(200.0, 100.0))).unwrap();
         assert!(
-            large.total < plain.total,
+            large.points < plain.points,
             "{} vs {}",
-            large.total,
-            plain.total
+            large.points,
+            plain.points
         );
+        // The fit shown comes from the needs, so it does not move.
+        assert_eq!(large.total, plain.total);
         assert_eq!(
             large.geometry_notes[0],
             "Large footprint (200 × 100 mm): ABS may warp; a brim helps."
         );
         // 150 mm exactly is not over the limit.
         let edge = fit_for(abs, &needs, &enclosed(), Some(&flat(150.0, 150.0))).unwrap();
-        assert_eq!(edge.total, plain.total);
+        assert_eq!(edge.points, plain.points);
         // PLA doesn't warp, so it keeps its score.
         let pla = material(Pla);
         assert_eq!(
             fit_for(pla, &needs, &enclosed(), Some(&flat(200.0, 100.0)))
                 .unwrap()
-                .total,
-            fit_for(pla, &needs, &enclosed(), None).unwrap().total
+                .points,
+            fit_for(pla, &needs, &enclosed(), None).unwrap().points
         );
         // Small bed contact is treated the same way.
         let contact = Geometry {
@@ -580,8 +582,8 @@ mod tests {
         assert!(
             fit_for(abs, &needs, &enclosed(), Some(&contact))
                 .unwrap()
-                .total
-                < plain.total
+                .points
+                < plain.points
         );
     }
 
@@ -703,8 +705,10 @@ mod tests {
         // PA-CF first; PC, which meets heat, is shown below it with a warp note.
         assert_eq!(&ids(&s)[..2], [PaCf, Pc]);
         let pc = &s.fits[1];
-        assert_eq!(pc.total, 0);
-        assert_eq!(pc.fit_pct, 0);
+        // It meets the need, so it shows a full fit; geometry only reorders.
+        assert_eq!(pc.total, 3);
+        assert_eq!(pc.fit_pct, 100);
+        assert!(pc.points < s.fits[0].points);
         assert_eq!(pc.reasons[0].verdict, Verdict::Met);
         assert!(pc.geometry_notes[0].contains("PC may warp"));
         // Same needs, no geometry: the same materials are shown.
@@ -713,18 +717,42 @@ mod tests {
     }
 
     #[test]
-    fn a_fit_clamped_to_zero_by_geometry_is_still_shown() {
+    fn a_pick_that_meets_the_needs_never_shows_zero_percent() {
         let big = flat(200.0, 100.0);
         let s = score(&[Need::Heat100], &enclosed(), Some(&big));
-        let shown: Vec<_> = s.fits.iter().filter(|f| f.total == 0).collect();
-        assert!(!shown.is_empty());
-        for f in &shown {
-            assert!(f.needs_points > 0, "{f:?}");
+        assert!(!s.fits.is_empty());
+        for f in &s.fits {
+            assert!(f.needs_points > 0 && f.total > 0 && f.fit_pct > 0, "{f:?}");
         }
-        // But a material that fails the needs themselves is still not shown.
+        // A material that fails the needs themselves is still not shown.
         let s = score(&[Need::Flexible], &enclosed(), None);
         assert_eq!(ids(&s)[0], Tpu);
         assert!(!ids(&s).contains(&Pla));
+    }
+
+    #[test]
+    fn geometry_keeps_the_fit_but_lowers_the_rank() {
+        let needs = [Need::Heat100, Need::Strong];
+        let big = flat(200.0, 100.0);
+        let tall = Geometry {
+            tall_thin: true,
+            ..flat(10.0, 10.0)
+        };
+        for geometry in [big, tall] {
+            for id in [Abs, Pc, PaCf] {
+                let with = fit_for(material(id), &needs, &enclosed(), Some(&geometry)).unwrap();
+                let without = fit_for(material(id), &needs, &enclosed(), None).unwrap();
+                assert_eq!((with.total, with.fit_pct), (without.total, without.fit_pct));
+                assert_eq!(with.needs_points, without.points);
+            }
+        }
+        // Warping lowers the rank (points), never the displayed fit.
+        let pc_big = fit_for(material(Pc), &needs, &enclosed(), Some(&big)).unwrap();
+        let pc_plain = fit_for(material(Pc), &needs, &enclosed(), None).unwrap();
+        assert!(pc_big.points < pc_plain.points);
+        // And it can reorder the picks.
+        let order = |g: Option<&Geometry>| ids(&score(&needs, &enclosed(), g));
+        assert_ne!(order(Some(&big)), order(None));
     }
 
     #[test]
@@ -735,7 +763,7 @@ mod tests {
 
     #[test]
     fn ranking_uses_the_unclamped_points() {
-        // Same displayed total (0), different signed points: the sort sees both.
+        // Equal displayed fits can have different signed points: the sort sees both.
         let big = flat(200.0, 100.0);
         let pc = fit_for(
             material(Pc),
@@ -754,7 +782,8 @@ mod tests {
         assert!(pc.points > abs.points);
         let none = fit_for(material(Pa), &[Need::Heat100], &enclosed(), Some(&big)).unwrap();
         assert!(none.points < 0);
-        assert_eq!(none.total, 0);
+        // The fit shown is from the needs alone: 1/3 on heat.
+        assert_eq!(none.total, 1);
     }
 
     #[test]
@@ -867,7 +896,8 @@ mod tests {
         let cf = material(PlaCf);
         let with = fit_for(cf, &[Need::Flexible], &enclosed(), Some(&tall)).unwrap();
         let without = fit_for(cf, &[Need::Flexible], &enclosed(), None).unwrap();
-        assert!(with.total > without.total);
+        assert!(with.points > without.points);
+        assert_eq!(with.total, without.total);
         assert!(with.geometry_notes.contains(&OVERHANG_NOTE.to_string()));
         assert_eq!(OVERHANG_NOTE, "Supports likely, whatever the material");
     }
