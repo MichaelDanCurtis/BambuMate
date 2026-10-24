@@ -7,6 +7,7 @@ pub mod health;
 pub mod history;
 pub mod keychain;
 pub mod launcher;
+pub mod model_view;
 pub mod models;
 pub mod preset_sync;
 pub mod printer;

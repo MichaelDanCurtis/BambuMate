@@ -665,6 +665,47 @@ async function driveApp(browserType, engine, baseUrl) {
       return `${n - 1} profiles`;
     });
 
+    // The picker is the page's own control; the mock answers with SLICE_MODEL.
+    // No slice has run yet, so there is no "last sliced model" to offer.
+    const settledNow = (cmd) => page.evaluate((c) => window.__ipc.settled.filter((x) => x === c).length, cmd);
+    const toReady = async () => {
+      await page.click("text=Choose Different Photo");
+      await page.waitForSelector(".drop-zone", { timeout: 15000 });
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+    };
+
+    await step(run, page, "the ready state offers an optional model, picked and cleared", async () => {
+      await page.waitForSelector(".an-pick-model", { timeout: 5000 });
+      if ((await page.locator(".an-last-model").count()) !== 0) throw new Error("offered a last sliced model with no jobs");
+      if ((await page.locator(".an-model-name").count()) !== 0) throw new Error("a model is named before one is chosen");
+      await page.click(".an-pick-model");
+      await page.waitForSelector(".an-model-name", { timeout: 5000 });
+      const name = (await page.locator(".an-model-name").textContent()).trim();
+      if (name !== "cube.stl") throw new Error(`named "${name}"`);
+      await page.click(".an-model-clear");
+      await page.waitForFunction(() => !document.querySelector(".an-model-name"), null, { timeout: 5000 });
+      await page.click(".an-pick-model");
+      await page.waitForSelector(".an-model-name", { timeout: 5000 });
+    });
+
+    await step(run, page, "a model does not survive Reset, and a pick finishing after Reset is dropped", async () => {
+      await toReady();
+      if ((await page.locator(".an-model-name").count()) !== 0) throw new Error("the model came back after Reset");
+      const settled = await settledNow("slicer_pick_model");
+      await withFixtures({ slicer_pick_model: { __hold: "an-pick-back", answer: SLICE_MODEL } }, async () => {
+        await page.click(".an-pick-model");
+        await toReady();
+        await page.evaluate(() => window.__release("an-pick-back"));
+        await page.waitForFunction((k) => window.__ipc.settled.filter((x) => x === "slicer_pick_model").length > k, settled, { timeout: 5000 });
+        // One more round trip to the page: the app's continuation ran before it.
+        await page.evaluate(() => 0);
+      });
+      if ((await page.locator(".an-model-name").count()) !== 0) throw new Error("a late pick set the model after Reset");
+      await page.click(".an-pick-model");
+      await page.waitForSelector(".an-model-name", { timeout: 5000 });
+    });
+
     await step(run, page, "analysis runs and reports defects", async () => {
       await page.selectOption(".profile-select", { index: 1 });
       await page.click("text=Analyze Print");
@@ -688,6 +729,85 @@ async function driveApp(browserType, engine, baseUrl) {
         if (!text.includes(want)) throw new Error(`"${want}" missing from results`);
       }
       return "temperature and retraction shown";
+    });
+
+    await step(run, page, "the model's 3D view shows with its risks beside the analysis", async () => {
+      await page.waitForSelector(".analysis-results .an-model .vp", { timeout: 15000 });
+      await page.waitForSelector(".analysis-results .an-model .vp-risk", { timeout: 15000 });
+      const risks = await page.locator(".analysis-results .an-model .vp-risk").count();
+      if (risks !== 2) throw new Error(`${risks} risk rows`);
+      const asked = (await callsOf("model_view")).at(-1)?.args;
+      if (asked?.path !== SLICE_MODEL) throw new Error(`model_view asked for ${JSON.stringify(asked)}`);
+      const name = (await page.locator(".analysis-results .an-model .vp-name").textContent()).trim();
+      if (name !== "cube.stl") throw new Error(`the view names "${name}"`);
+      const geometry = await page.evaluate(() => {
+        const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+        const vp = document.querySelector(".an-model .vp");
+        const cs = getComputedStyle(vp);
+        const photo = box(".an-hero-row").bottom;
+        return {
+          below: box(".an-model").top >= photo - 1,
+          wrapper: box(".an-model").width,
+          view: box(".an-model .vp").width,
+          border: cs.borderTopWidth,
+          padding: cs.paddingTop,
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
+      });
+      if (!geometry.below) throw new Error("the model sits above the hero row");
+      if (geometry.view > geometry.wrapper + 1) throw new Error(`view ${geometry.view} wider than its section ${geometry.wrapper}`);
+      if (geometry.border !== "0px" || geometry.padding !== "0px") throw new Error(`the view is styled as a card: ${JSON.stringify(geometry)}`);
+      if (geometry.overflow > 0) throw new Error(`page overflows by ${geometry.overflow}px`);
+      const gl2 = await page.evaluate(() => !!document.createElement("canvas").getContext("webgl2"));
+      if (gl2 && (await page.locator(".analysis-results .an-model .vp-canvas").count()) !== 1) {
+        throw new Error("WebGL2 is available but there is no canvas");
+      }
+      return `${Math.round(geometry.view)}px wide, ${gl2 ? "webgl" : "fallback"}`;
+    });
+
+    await step(run, page, "Analyze Another Photo leaves no model behind", async () => {
+      await page.click("text=Analyze Another Photo");
+      await page.waitForSelector(".drop-zone", { timeout: 15000 });
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+      if ((await page.locator(".an-model-name").count()) !== 0) throw new Error("the model is still named");
+      await page.selectOption(".profile-select", { index: 1 });
+      await page.click("text=Analyze Print");
+      await page.waitForSelector(".analysis-results", { timeout: 30000 });
+      await page.waitForSelector(".analysis-results .defects-list", { timeout: 15000 });
+      if ((await page.locator(".an-model").count()) !== 0) throw new Error("a model section shows without a chosen model");
+    });
+
+    await step(run, page, "Use last sliced model picks the newest job's model", async () => {
+      const older = "/Users/runner/models/older.stl";
+      const newer = "/Users/runner/models/newer.stl";
+      const fb = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+      fb.on("pageerror", (e) => run.errors.push(`pageerror: ${e.message}`));
+      fb.on("console", (m) => { if (m.type() === "error") run.errors.push(`console.error: ${m.text()}`); });
+      try {
+        await fb.addInitScript(installTauriMock, {
+          ...FIXTURES,
+          slicer_jobs: [
+            sliceJob(1, { state: "cancelled" }, { source_path: older }),
+            sliceJob(2, { state: "queued", position: 0 }, { source_path: newer, model_name: "newer.stl" }),
+            sliceJob(3, { state: "cancelled" }, { source_path: "" }),
+          ],
+        });
+        await fb.goto(baseUrl, { waitUntil: "domcontentloaded" });
+        await fb.waitForSelector(".sidebar", { timeout: 45000 });
+        await fb.click('a[href="/analysis"]');
+        await fb.waitForSelector(".drop-zone", { timeout: 15000 });
+        await fb.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+        await fb.waitForSelector(".an-last-model", { timeout: 15000 });
+        await fb.click(".an-last-model");
+        await fb.waitForFunction(() => document.querySelector(".an-model-name")?.textContent.trim() === "newer.stl", null, { timeout: 5000 });
+        await fb.click("text=Analyze Print");
+        await fb.waitForSelector(".analysis-results .an-model .vp-risk", { timeout: 30000 });
+        const asked = await fb.evaluate(() => window.__ipc.calls.filter((c) => c.cmd === "model_view").at(-1)?.args.path);
+        if (asked !== newer) throw new Error(`model_view asked for ${asked}`);
+      } finally {
+        await fb.close();
+      }
     });
 
     // The apply dialog is the overlay whose full-screen positioning was the
@@ -988,6 +1108,174 @@ async function driveApp(browserType, engine, baseUrl) {
     const status = await page.locator(".sl-job-status").innerText();
     if (!status.startsWith("Queued")) throw new Error(`status ${status}`);
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_set_settings"), null, { timeout: 5000 });
+  });
+
+  // Whether this engine can give a WebGL2 context at all. When it can, the
+  // viewport must draw: a shader or link failure shows the "couldn't start"
+  // text, which no step here accepts.
+  const engineHasWebGl2 = await page.evaluate(() => !!document.createElement("canvas").getContext("webgl2"));
+
+  await step(run, page, "the model shows as a 3D view with its risks", async () => {
+    await page.waitForSelector(".slice-page .vp", { timeout: 15000 });
+    const risks = await page.locator(".slice-page .vp-risk").count();
+    if (risks !== 2) throw new Error(`${risks} risk rows`);
+    // WebKit drops list semantics from an unstyled <ol>; the role restores them.
+    if ((await page.locator(".slice-page .vp-risks").getAttribute("role")) !== "list") throw new Error("the risk list has no list role");
+    const asked = (await callsOf("model_view")).at(-1)?.args;
+    if (asked?.path !== SLICE_MODEL) throw new Error(`model_view asked for ${JSON.stringify(asked)}`);
+    if ((await page.locator(".slice-page .vp-name").count()) !== 0) throw new Error("the viewport repeats the file name");
+    const hasCanvas = (await page.locator(".slice-page .vp-canvas").count()) === 1;
+    const stateText = (await page.locator(".slice-page .vp .nd-state").allTextContents()).join(" | ");
+    if (engineHasWebGl2) {
+      if (!hasCanvas) throw new Error(`WebGL2 is available but there is no canvas: ${stateText}`);
+      if (stateText.includes("WebGL2") || stateText.includes("couldn't start")) throw new Error(stateText);
+      if (!(await page.locator(".slice-page .vp-canvas").evaluate((c) => c.width > 0 && c.height > 0))) throw new Error("the canvas has no backing store");
+      const box = await page.locator(".slice-page .vp-canvas").boundingBox();
+      const pins = page.locator(".slice-page .vp-pin");
+      if ((await pins.count()) !== 2) throw new Error(`${await pins.count()} pins`);
+      const centres = [];
+      for (let i = 0; i < 2; i++) {
+        const b = await pins.nth(i).boundingBox();
+        const c = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+        if (c.x < box.x || c.x > box.x + box.width || c.y < box.y || c.y > box.y + box.height) throw new Error(`pin ${i + 1} is off the canvas`);
+        centres.push(c);
+      }
+      if (Math.hypot(centres[0].x - centres[1].x, centres[0].y - centres[1].y) < 10) throw new Error("the two pins are in the same place");
+      // Each pin selects its own row, and aria-pressed follows.
+      for (const i of [1, 0]) {
+        await pins.nth(i).click();
+        if ((await page.locator(".slice-page .vp-risk[data-selected]").count()) !== 1) throw new Error(`pin ${i + 1} did not select exactly one row`);
+        if ((await page.locator(`.slice-page .vp-risk:nth-child(${i + 1})[data-selected]`).count()) !== 1) throw new Error(`pin ${i + 1} selected the wrong row`);
+        // The selected row says so to assistive tech, and shows it by more than colour.
+        if ((await page.locator('.slice-page .vp-risk[aria-current="true"]').count()) !== 1) throw new Error(`pin ${i + 1}: not exactly one aria-current row`);
+        if ((await page.locator(`.slice-page .vp-risk:nth-child(${i + 1})[aria-current="true"]`).count()) !== 1) throw new Error(`pin ${i + 1}: aria-current on the wrong row`);
+        const cue = (n) => page.locator(`.slice-page .vp-risk:nth-child(${n}) .vp-risk-num`).evaluate((el) => {
+          const s = getComputedStyle(el);
+          return `${s.fontWeight} ${s.textDecorationLine}`;
+        });
+        const [on, off] = [await cue(i + 1), await cue(2 - i)];
+        if (on !== "700 underline") throw new Error(`selected number is "${on}", not bold and underlined`);
+        if (off !== "400 none") throw new Error(`unselected number is "${off}"`);
+        for (const j of [0, 1]) {
+          const pressed = await pins.nth(j).getAttribute("aria-pressed");
+          if (pressed !== (j === i ? "true" : "false")) throw new Error(`pin ${j + 1} aria-pressed=${pressed} with pin ${i + 1} selected`);
+        }
+      }
+      // Keys turn the view: yaw moves, and a tilt moves a pin on screen.
+      const yaw0 = await page.locator(".slice-page .vp-canvas").getAttribute("data-yaw");
+      const pinStyle0 = await pins.nth(1).getAttribute("style");
+      await page.locator(".slice-page .vp-canvas").focus();
+      await page.keyboard.press("ArrowRight");
+      if ((await page.locator(".slice-page .vp-canvas").getAttribute("data-yaw")) === yaw0) throw new Error("arrow key did not rotate");
+      await page.waitForFunction((s0) => document.querySelectorAll(".slice-page .vp-pin")[1].getAttribute("style") !== s0, pinStyle0, { timeout: 5000 });
+    } else {
+      if (hasCanvas || !stateText.includes("WebGL2")) throw new Error(`no WebGL2 here, expected the fallback text: ${stateText}`);
+    }
+    await page.click('.slice-page .vp-mode:has-text("Wireframe")');
+    if ((await page.locator(".slice-page .vp").getAttribute("data-mode")) !== "wireframe") throw new Error("mode did not switch");
+    if ((await page.locator('.slice-page .vp-mode:has-text("Wireframe")').getAttribute("aria-pressed")) !== "true") throw new Error("Wireframe is not pressed");
+    if ((await page.locator('.slice-page .vp-mode:has-text("Dots")').getAttribute("aria-pressed")) !== "false") throw new Error("Dots is still pressed");
+    return engineHasWebGl2 ? "webgl" : "fallback";
+  });
+
+  await step(run, page, "the 3D view leaves the drop zone and the file picker alone", async () => {
+    const stage = page.locator(".slice-page .vp-canvas").or(page.locator(".slice-page .vp-stage")).first();
+    const canvas = page.locator(".slice-page .vp-canvas");
+    const picks = (await callsOf("slicer_pick_model")).length;
+    if (engineHasWebGl2) {
+      const box = await canvas.boundingBox();
+      const yaw0 = await canvas.getAttribute("data-yaw");
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2 + 10, { steps: 5 });
+      if ((await page.locator(".sl-drop.sl-drop-over").count()) !== 0) throw new Error("rotating lit the drop zone");
+      await page.mouse.up();
+      if ((await canvas.getAttribute("data-yaw")) === yaw0) throw new Error("dragging did not rotate");
+      // A release we never hear about (a system gesture, a switch away) must
+      // not leave the view turning: a move with no button held ends the
+      // drag, and so does losing pointer capture.
+      const synthetic = (steps) => canvas.evaluate((c, steps) => {
+        const r = c.getBoundingClientRect();
+        for (const [type, dx, buttons] of steps) {
+          c.dispatchEvent(new PointerEvent(type, {
+            pointerId: 7, isPrimary: true, bubbles: true, button: 0, buttons,
+            clientX: r.x + r.width / 2 + dx, clientY: r.y + r.height / 2,
+          }));
+        }
+      }, steps);
+      const settle = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      // The same synthetic events with the button held do turn the view.
+      const yawHeld = await canvas.getAttribute("data-yaw");
+      await synthetic([["pointerdown", 0, 1], ["pointermove", 60, 1], ["pointerup", 60, 0]]);
+      await page.waitForFunction((y) => document.querySelector(".slice-page .vp-canvas").getAttribute("data-yaw") !== y, yawHeld, { timeout: 5000 });
+      for (const [what, end] of [["a move with no button", ["pointermove", 5, 0]], ["lost capture", ["lostpointercapture", 0, 1]]]) {
+        const yawA = await canvas.getAttribute("data-yaw");
+        await synthetic([["pointerdown", 0, 1], end, ["pointermove", 60, 1], ["pointermove", 90, 1]]);
+        await settle();
+        if ((await canvas.getAttribute("data-yaw")) !== yawA) throw new Error(`the view kept turning after ${what}`);
+      }
+    }
+    await page.click('.slice-page .vp-mode:has-text("Dots")');
+    if ((await callsOf("slicer_pick_model")).length !== picks) throw new Error("the view opened the file picker");
+    // A file dragged over, then dropped on, the view still reaches the drop zone.
+    await stage.dispatchEvent("dragover");
+    if ((await page.locator(".sl-drop.sl-drop-over").count()) !== 1) throw new Error("dragover on the view did not light the drop zone");
+    await stage.dispatchEvent("dragleave");
+    if ((await page.locator(".sl-drop.sl-drop-over").count()) !== 0) throw new Error("dragleave did not clear the drop zone");
+    // The drop stages a different path; the viewport must ask for that one
+    // and replace its canvas.
+    const droppedPath = "/Users/runner/models/dropped.stl";
+    await withFixtures({ slicer_stage_model: droppedPath }, async () => {
+      await page.evaluate(() => document.querySelector(".slice-page .vp")?.setAttribute("data-before-drop", ""));
+      const staged = (await callsOf("slicer_stage_model")).length;
+      const dropped = await page.evaluateHandle(() => {
+        const dt = new DataTransfer();
+        dt.items.add(new File(["solid cube"], "dropped.stl", { type: "model/stl" }));
+        return dt;
+      });
+      await stage.dispatchEvent("drop", { dataTransfer: dropped });
+      if ((await callsOf("slicer_stage_model")).length !== staged + 1) {
+        await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "slicer_stage_model").length > n, staged, { timeout: 5000 });
+      }
+      await page.waitForFunction((p) => window.__ipc.calls.filter((c) => c.cmd === "model_view").at(-1)?.args.path === p, droppedPath, { timeout: 5000 });
+      // A fresh viewport, not the old one still on screen.
+      await page.waitForSelector(".slice-page .vp:not([data-before-drop]) .vp-risk", { timeout: 15000 });
+    });
+    // Back to the picked model for the steps that follow.
+    await page.click(".sl-browse");
+    await page.waitForFunction((p) => window.__ipc.calls.filter((c) => c.cmd === "model_view").at(-1)?.args.path === p, SLICE_MODEL, { timeout: 5000 });
+    await page.waitForSelector(".slice-page .vp-risk", { timeout: 15000 });
+    await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "cube.stl", null, { timeout: 5000 });
+  });
+
+  await step(run, page, "without WebGL2 the view says so and the risk list still works", async () => {
+    const fb = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    fb.on("pageerror", (e) => run.errors.push(`pageerror: ${e.message}`));
+    fb.on("console", (m) => { if (m.type() === "error") run.errors.push(`console.error: ${m.text()}`); });
+    try {
+      await fb.addInitScript(installTauriMock, FIXTURES);
+      await fb.addInitScript(() => {
+        const real = HTMLCanvasElement.prototype.getContext;
+        HTMLCanvasElement.prototype.getContext = function (kind, ...rest) {
+          return kind === "webgl2" ? null : real.call(this, kind, ...rest);
+        };
+      });
+      await fb.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await fb.waitForSelector(".sidebar", { timeout: 45000 });
+      await fb.click('a[href="/slice"]');
+      await fb.waitForSelector(".slice-page.nd", { timeout: 15000 });
+      await fb.click(".sl-browse");
+      await fb.waitForSelector(".slice-page .vp-risk", { timeout: 15000 });
+      await fb.waitForFunction(() => [...document.querySelectorAll(".slice-page .vp .nd-state")].some((e) => e.textContent.includes("3D preview needs WebGL2")), null, { timeout: 5000 });
+      if ((await fb.locator(".slice-page .vp-canvas").count()) !== 0) throw new Error("a canvas stayed");
+      if ((await fb.locator(".slice-page .vp-pin").count()) !== 0) throw new Error("pins without a canvas");
+      if ((await fb.locator(".slice-page .vp-risk").count()) !== 2) throw new Error("the risk list is gone");
+      await fb.click('.slice-page .vp-mode:has-text("Wireframe")');
+      if ((await fb.locator(".slice-page .vp").getAttribute("data-mode")) !== "wireframe") throw new Error("the mode toggle does not work");
+      if ((await fb.locator(".slice-page .vp .nd-state", { hasText: "couldn't start" }).count()) !== 0) throw new Error("said couldn't start");
+    } finally {
+      await fb.close();
+    }
   });
 
   await step(run, page, "progress shows and Cancel reaches the backend", async () => {

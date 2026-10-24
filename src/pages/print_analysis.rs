@@ -16,6 +16,10 @@ use crate::components::defect_report::DefectReportDisplay;
 use crate::components::history_panel::HistoryPanel;
 use crate::components::patterns::{Hero, PageHeader, StateKind, StateText};
 use crate::pages::analysis_view::{analysis_detail, quality_tone, quality_word};
+use crate::pages::slice::file_name;
+use crate::slicer::state::newest_source;
+use crate::slicer::SlicerShared;
+use crate::viewport::ModelViewport;
 
 /// Request payload for print analysis.
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +103,14 @@ pub fn PrintAnalysisPage() -> impl IntoView {
     let (image_preview, set_image_preview) = signal::<Option<String>>(None);
     let (material_override, set_material_override) = signal::<Option<String>>(None);
     let (profile_path, set_profile_path) = signal::<Option<String>>(None);
+    // The optional model whose 3D view and geometry risks sit beside the
+    // analysis. `model_gen` counts resets, so a file picked in a dialog that
+    // was still open when the page was reset is dropped.
+    let model = RwSignal::new(None::<String>);
+    let model_gen = RwSignal::new(0u32);
+    let jobs = expect_context::<SlicerShared>().jobs;
+    let last_model = Memo::new(move |_| jobs.with(|js| newest_source(js).map(str::to_string)));
+    let has_model = Memo::new(move |_| model.with(Option::is_some));
     // Profile list for dropdown
     let (profiles, set_profiles) = signal::<Vec<commands::ProfileInfo>>(Vec::new());
     let (profiles_loading, set_profiles_loading) = signal(true);
@@ -142,8 +154,21 @@ pub fn PrintAnalysisPage() -> impl IntoView {
         }
     };
 
+    let on_pick_model = move |_| {
+        let started = model_gen.get_untracked();
+        spawn_local(async move {
+            if let Ok(Some(p)) = crate::slicer::bridge::pick_model().await {
+                if model_gen.try_get_untracked() == Some(started) {
+                    model.try_set(Some(p));
+                }
+            }
+        });
+    };
+
     // Reset to try another image
     let on_reset = move |_| {
+        model_gen.update(|g| *g = g.wrapping_add(1));
+        model.set(None);
         set_state.set(AnalysisState::Idle);
         set_image_preview.set(None);
         set_show_apply_dialog.set(false);
@@ -247,6 +272,32 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                 <p class="input-hint">"Select a profile to enable Apply and track refinement history."</p>
                             </div>
 
+                            <div class="an-model-pick">
+                                <p class="nd-label">"Model (optional)"</p>
+                                <div class="an-model-actions">
+                                    <button class="btn btn-secondary an-pick-model" on:click=on_pick_model>
+                                        "Choose model…"
+                                    </button>
+                                    {move || last_model.get().map(|path| view! {
+                                        <button
+                                            class="btn btn-secondary an-last-model"
+                                            on:click=move |_| model.set(Some(path.clone()))
+                                        >
+                                            "Use last sliced model"
+                                        </button>
+                                    })}
+                                </div>
+                                {move || model.get().map(|path| view! {
+                                    <div class="an-model-chosen">
+                                        <span class="an-model-name" title=path.clone()>{file_name(&path)}</span>
+                                        <button class="btn btn-ghost btn-sm an-model-clear" on:click=move |_| model.set(None)>
+                                            "Clear"
+                                        </button>
+                                    </div>
+                                })}
+                                <p class="input-hint">"Shows the model in 3D next to the results, with where it may be hard to print."</p>
+                            </div>
+
                             <div class="action-buttons">
                                 <button class="btn btn-primary" on:click=on_analyze>
                                     "Analyze Print"
@@ -285,6 +336,13 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                         <img src=src class="preview-image an-photo" alt="Analyzed print" />
                                     })}
                                 </div>
+
+                                {move || has_model.get().then(|| view! {
+                                    <section class="an-model">
+                                        <h2 class="nd-label">"Model"</h2>
+                                        <ModelViewport path=Signal::derive(move || model.get()) />
+                                    </section>
+                                })}
 
                                 // Show apply success/error message
                                 {move || apply_message.get().map(|msg| {

@@ -4,7 +4,7 @@
 .slice-page { display: grid; gap: var(--nd-space-lg); max-width: 1040px; }
 /* The grid gap already spaces the header from what follows. */
 .slice-page .nd-page-header { margin-bottom: 0; }
-.slice-page section {
+.slice-page > section {
     border: 1px solid var(--nd-border-visible);
     background: var(--nd-surface);
     padding: var(--nd-space-md);
@@ -41,6 +41,9 @@
 }
 .sl-drop-over { border-color: var(--nd-interactive); }
 .sl-model { margin: 0; font-family: var(--nd-font-mono); color: var(--nd-text-display); }
+/* The viewport sits in the drop zone's centred grid. Its canvas is 4:3, so
+   the width is capped to keep the drop zone from growing taller than a screen. */
+.sl-drop .vp { width: min(100%, 28rem); text-align: left; }
 .sl-drop-actions { display: flex; flex-wrap: wrap; gap: var(--nd-space-sm); align-items: center; }
 
 .sl-presets,

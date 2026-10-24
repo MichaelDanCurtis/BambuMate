@@ -6,6 +6,7 @@ mod commands;
 pub mod diagnostics;
 pub mod history;
 pub mod mapper;
+pub mod model;
 pub mod model_catalog;
 pub mod printer;
 mod process_command;
@@ -97,6 +98,7 @@ pub fn run() {
             commands::slicer::slicer_open_in_bambu_studio,
             commands::slicer::slicer_clear_cache,
             commands::slicer::slicer_pick_model,
+            commands::model_view::model_view,
             commands::slicer::slicer_stage_model,
             commands::slicer::slicer_model_exists,
             commands::stl_bridge::set_stl_watch_dir,
