@@ -30,8 +30,11 @@ const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
 const JPEG_QUALITY: u8 = 85;
 /// Largest stored photo `image_data_url` reads: the upload cap and a margin.
 const MAX_PHOTO_READ_BYTES: u64 = MAX_PHOTO_BYTES as u64 + 1024 * 1024;
-/// Largest plate thumbnail read (a small PNG from the slice's cache).
-pub const MAX_THUMBNAIL_READ_BYTES: u64 = 2 * 1024 * 1024;
+/// Largest plate thumbnail the journal keeps, and so the largest it reads
+/// back. Bambu Studio's plate thumbnails are 512 px PNGs of a few hundred
+/// KB at most. A larger one is refused when the slice is linked, so a
+/// saved thumbnail can always be shown.
+pub const MAX_THUMBNAIL_BYTES: u64 = 2 * 1024 * 1024;
 
 /// One photo is prepared at a time: a decode can take hundreds of MB, and
 /// the page may send several photos together.

@@ -12,6 +12,7 @@ use std::time::Duration;
 use chrono::{DateTime, Datelike, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
+use super::photos::MAX_THUMBNAIL_BYTES;
 use super::types::{
     EntryUpdate, FilterKind, JournalFilter, MonthSummary, NewPrint, OpenEntry, Outcome, Photo,
     PrintEnd, PrintEntry, SliceSnapshot, TrayUse, Verdict,
@@ -392,7 +393,9 @@ impl JournalStore {
 
     /// Saves the slice snapshot, and the plate thumbnail as a file when
     /// there is one, replacing any snapshot and thumbnail saved before. A
-    /// thumbnail that can't be written only loses the thumbnail. An entry that isn't there (any more) gets
+    /// thumbnail that can't be written, or is over
+    /// [`MAX_THUMBNAIL_BYTES`](super::photos::MAX_THUMBNAIL_BYTES), only
+    /// loses the thumbnail. An entry that isn't there (any more) gets
     /// [`GONE`] and no thumbnail file.
     ///
     /// The new thumbnail is written to a temporary file in `thumbs/` and
@@ -448,8 +451,15 @@ impl JournalStore {
     }
 
     /// `png` in a temporary file next to the thumbnails, or `None` when it
-    /// can't be written.
+    /// is too large or can't be written.
     fn stage_thumbnail(&self, png: &[u8]) -> Option<tempfile::NamedTempFile> {
+        if png.len() as u64 > MAX_THUMBNAIL_BYTES {
+            tracing::warn!(
+                "print journal: thumbnail not saved: {} bytes is over the limit",
+                png.len()
+            );
+            return None;
+        }
         let dir = self.root.join("thumbs");
         let staged = std::fs::create_dir_all(&dir)
             .and_then(|()| tempfile::Builder::new().suffix(".tmp").tempfile_in(&dir))
@@ -1420,6 +1430,26 @@ mod tests {
         );
         assert_eq!(s.clear_slice(id, 4).err().as_deref(), Some(SAVE_FAILED));
         assert!(s.thumbnail_path(id).exists());
+    }
+
+    #[test]
+    fn a_thumbnail_over_the_limit_is_refused_when_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        let mut big = THUMB.to_vec();
+        big.resize(MAX_THUMBNAIL_BYTES as usize + 1, 0);
+        s.set_slice(id, &slice(), Some(&big), 2).unwrap();
+        let e = s.get(id).unwrap().unwrap();
+        assert!(!e.slice.unwrap().has_thumbnail, "the estimates are kept");
+        assert!(!s.thumbnail_path(id).exists());
+        big.truncate(MAX_THUMBNAIL_BYTES as usize);
+        s.set_slice(id, &slice(), Some(&big), 3).unwrap();
+        assert!(s.get(id).unwrap().unwrap().slice.unwrap().has_thumbnail);
+        assert_eq!(
+            std::fs::metadata(s.thumbnail_path(id)).unwrap().len(),
+            MAX_THUMBNAIL_BYTES
+        );
     }
 
     #[test]

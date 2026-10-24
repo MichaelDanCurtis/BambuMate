@@ -103,7 +103,7 @@ fn image_for(store: &JournalStore, id: i64, photo_id: Option<i64>) -> Result<Str
         Some(photo) => store
             .photo_path(id, photo)?
             .and_then(|p| image_data_url(&p)),
-        None => image_data_url_within(&store.thumbnail_path(id), photos::MAX_THUMBNAIL_READ_BYTES),
+        None => image_data_url_within(&store.thumbnail_path(id), photos::MAX_THUMBNAIL_BYTES),
     };
     url.ok_or_else(|| PHOTO_UNAVAILABLE.to_string())
 }
@@ -217,7 +217,7 @@ mod tests {
     use image::{DynamicImage, ImageFormat};
 
     use super::*;
-    use crate::journal::types::NewPrint;
+    use crate::journal::types::{NewPrint, SliceSnapshot};
 
     fn open(dir: &tempfile::TempDir) -> JournalStore {
         JournalStore::open(&JournalPaths::in_dir(dir.path())).unwrap()
@@ -444,6 +444,38 @@ mod tests {
     }
 
     #[test]
+    fn a_thumbnail_the_journal_saves_can_be_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = start(&s, "a");
+        let slice = SliceSnapshot {
+            model_name: "cube.stl".into(),
+            model_path: "/m/cube.stl".into(),
+            printer: String::new(),
+            process: String::new(),
+            filament: String::new(),
+            plate: 1,
+            time_seconds: 1,
+            weight_g: 1.0,
+            filaments: Vec::new(),
+            has_thumbnail: false,
+        };
+        let mut largest = png_bytes(4, 4);
+        largest.resize(photos::MAX_THUMBNAIL_BYTES as usize, 0);
+        s.set_slice(id, &slice, Some(&largest), 2).unwrap();
+        assert!(s.get(id).unwrap().unwrap().slice.unwrap().has_thumbnail);
+        assert!(image_for(&s, id, None)
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        largest.push(0);
+        s.set_slice(id, &slice, Some(&largest), 3).unwrap();
+        assert!(
+            !s.get(id).unwrap().unwrap().slice.unwrap().has_thumbnail,
+            "one too large isn't saved to fail later"
+        );
+    }
+
+    #[test]
     fn an_oversized_thumbnail_is_unavailable() {
         let dir = tempfile::tempdir().unwrap();
         let s = open(&dir);
@@ -451,7 +483,7 @@ mod tests {
         let thumb = s.thumbnail_path(id);
         std::fs::create_dir_all(thumb.parent().unwrap()).unwrap();
         let mut big = png_bytes(4, 4);
-        big.resize(photos::MAX_THUMBNAIL_READ_BYTES as usize + 1, 0);
+        big.resize(photos::MAX_THUMBNAIL_BYTES as usize + 1, 0);
         std::fs::write(&thumb, big).unwrap();
         assert_eq!(image_for(&s, id, None), Err(PHOTO_UNAVAILABLE.to_string()));
     }

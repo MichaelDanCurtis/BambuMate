@@ -15,12 +15,13 @@ use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use super::photos::MAX_THUMBNAIL_BYTES;
 use super::slice::{match_slice, snapshot};
 use super::store::{JournalStore, GONE};
 use super::types::{NewPrint, PrintEnd, SliceSnapshot};
 use super::watch::{resume, JournalEvent, StartedPrint, WatchState};
 use super::{JournalPaths, CHANGED_EVENT};
-use crate::commands::slicer::{plate_thumbnail_bytes, MAX_THUMBNAIL_BYTES};
+use crate::commands::slicer::plate_thumbnail_bytes;
 use crate::slicer::jobs::{JobState, JobView, SlicerService};
 
 /// How long a journal that couldn't be opened is left before trying again.
@@ -46,7 +47,8 @@ impl JournalNotify for TauriNotify {
 /// This session's slice jobs, oldest first.
 pub trait SliceJobs: Send + Sync + 'static {
     fn jobs(&self) -> Vec<JobView>;
-    /// The plate's PNG thumbnail from the job's cache folder.
+    /// The plate's PNG thumbnail from the job's cache folder, up to the
+    /// size the journal keeps.
     fn thumbnail(&self, job: &JobView, plate: u32) -> Option<Vec<u8>> {
         plate_thumbnail_bytes(job, plate, MAX_THUMBNAIL_BYTES)
             .ok()
