@@ -97,10 +97,6 @@ pub async fn month_summary() -> Result<MonthSummary, String> {
     call("journal_month_summary", &NoArgs {}).await
 }
 
-#[expect(
-    dead_code,
-    reason = "Home's last print (plan Task 10) is its first user"
-)]
 pub async fn last() -> Result<Option<PrintEntry>, String> {
     call("journal_last", &NoArgs {}).await
 }

@@ -7,9 +7,6 @@ use crate::journal::types::{
 use crate::pages::home_state::format_ago;
 use crate::printer::types::{format_remaining, untrusted_text};
 
-// Items the later journal tasks consume carry `expect(dead_code)`, so the
-// lint flags the attribute once its consumer lands and it can go. The tests
-// use them too, so the expectation applies outside tests only.
 pub const PRINTING_NOW: &str = "Printing now";
 pub const UNWATCHED: &str = "Ended while BambuMate wasn't watching";
 pub const APPROXIMATE: &str = " (approximate)";
@@ -17,13 +14,6 @@ pub const SLICE_ESTIMATE: &str = "Slice estimate";
 pub const EMPTY_JOURNAL: &str = "Prints appear here as your printer runs them";
 pub const NO_MATCH: &str = "No prints match";
 pub const NO_PRINTER: &str = "The journal fills in by itself once a printer is set up.";
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Home's last print (plan Task 10) is its first user"
-    )
-)]
 pub const RATE_LAST: &str = "Rate your last print";
 pub const DELETE_CONFIRM: &str = "Delete this entry and its photos?";
 /// In place of a photo or thumbnail whose file is missing or unreadable.
@@ -316,13 +306,6 @@ pub fn analyze_href(id: i64) -> String {
 }
 
 /// Home's "Rate your last print": a finished print with no verdict.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Home's last print (plan Task 10) is its first user"
-    )
-)]
 pub fn rate_href(e: &PrintEntry) -> Option<String> {
     (e.outcome == Outcome::Finished && e.verdict.is_none()).then(|| entry_href(e.id))
 }

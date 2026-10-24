@@ -139,3 +139,14 @@
 .hm-sync-warn {
     color: var(--nd-warning);
 }
+
+/* A quiet link under the idle hero's actions. */
+.hm-rate {
+    align-self: flex-start;
+    font-size: 13px;
+    color: var(--nd-text-secondary);
+}
+
+.hm-rate:hover {
+    color: var(--nd-text-primary);
+}

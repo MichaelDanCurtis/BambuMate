@@ -2,7 +2,8 @@
 //! can be tested without a browser (spec 2026-10-17 §3).
 
 use crate::commands::GeneratedPreset;
-use crate::printer::last_print::LastPrint;
+use crate::journal::format::{duration_text, UNWATCHED};
+use crate::journal::types::{Outcome, PrintEntry};
 use crate::printer::types::{
     format_remaining, untrusted_text, ConnectionState, ErrorView, PrinterView,
 };
@@ -245,21 +246,32 @@ pub fn format_ago(now_ms: f64, then_ms: f64) -> String {
     }
 }
 
-/// `Last print finished 3h ago · Benchy · 1 h 58 m`; empty with no print.
-pub fn last_print_detail(p: Option<&LastPrint>, now_ms: f64) -> String {
+/// `Last print finished 3h ago · Benchy · 1 h 58 m`, `Last print failed 3h
+/// ago · Benchy`, or, when the end wasn't seen, `Last print · Benchy ·
+/// Ended while BambuMate wasn't watching`. Empty with no print.
+pub fn last_print_detail(p: Option<&PrintEntry>, now_ms: f64) -> String {
     let Some(p) = p else {
         return String::new();
     };
-    join(&[
-        format!(
-            "Last print finished {}",
-            format_ago(now_ms, p.finished_at_ms)
-        ),
-        untrusted_text(&p.name, FILE_MAX),
-        p.duration_ms
-            .map(|d| format_remaining((d / 60_000.0).round() as u32))
-            .unwrap_or_default(),
-    ])
+    let name = untrusted_text(&p.name, FILE_MAX);
+    match (p.outcome, p.ended_at) {
+        (Outcome::Finished, Some(end)) => join(&[
+            format!(
+                "Last print finished {}",
+                format_ago(now_ms, end as f64 * 1000.0)
+            ),
+            name,
+            duration_text(p).unwrap_or_default(),
+        ]),
+        (Outcome::Failed, Some(end)) => join(&[
+            format!(
+                "Last print failed {}",
+                format_ago(now_ms, end as f64 * 1000.0)
+            ),
+            name,
+        ]),
+        _ => join(&["Last print".into(), name, UNWATCHED.into()]),
+    }
 }
 
 /// `Recent · Polymaker PETG Red · 2d ago`; `None` without a name or a date,
@@ -578,22 +590,43 @@ mod tests {
     #[test]
     fn last_print_line() {
         let now = 10_000_000_000.0;
-        let p = LastPrint {
+        let end = (now / 1000.0) as i64 - 3 * 3_600;
+        let p = PrintEntry {
+            id: 2,
             name: "Benchy".into(),
-            finished_at_ms: now - 3.0 * 3_600_000.0,
-            duration_ms: Some(118.0 * 60_000.0),
+            started_at: end - 118 * 60,
+            ended_at: Some(end),
+            outcome: Outcome::Finished,
+            ..Default::default()
         };
         assert_eq!(
             last_print_detail(Some(&p), now),
             "Last print finished 3h ago · Benchy · 1 h 58 m"
         );
-        let unknown = LastPrint {
-            duration_ms: None,
+        let approx = PrintEntry {
+            start_approx: true,
+            ..p.clone()
+        };
+        assert_eq!(
+            last_print_detail(Some(&approx), now),
+            "Last print finished 3h ago · Benchy · 1 h 58 m (approximate)"
+        );
+        let failed = PrintEntry {
+            outcome: Outcome::Failed,
+            ..p.clone()
+        };
+        assert_eq!(
+            last_print_detail(Some(&failed), now),
+            "Last print failed 3h ago · Benchy"
+        );
+        let unwatched = PrintEntry {
+            outcome: Outcome::Unknown,
+            ended_at: None,
             ..p
         };
         assert_eq!(
-            last_print_detail(Some(&unknown), now),
-            "Last print finished 3h ago · Benchy"
+            last_print_detail(Some(&unwatched), now),
+            "Last print · Benchy · Ended while BambuMate wasn't watching"
         );
         assert_eq!(last_print_detail(None, now), "");
     }

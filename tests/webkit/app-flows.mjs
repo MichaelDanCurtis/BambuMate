@@ -4271,13 +4271,35 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".pr-picker", { state: "detached", timeout: 5000 });
   });
 
-  await step(run, page, "home is ready after a print finishes", async () => {
+  await step(run, page, "home is ready after a print finishes and offers to rate it", async () => {
+    const ended = { ...JOURNAL_FINISHED, ended_at: Math.floor(Date.now() / 1000) };
+    await withFixtures({ journal_last: ended }, async () => {
+      await emitEvent("printer://state", FINISHED);
+      await emitEvent("journal://changed", null);
+      await homeMode("idle");
+      const number = await homeText(".home-page .nd-hero-number");
+      if (number !== "READY") throw new Error(`hero number "${number}"`);
+      await page.waitForFunction(
+        (n) => document.querySelector(".home-page .nd-hero")?.textContent.includes(`Last print finished just now · ${n}`),
+        JOURNAL_FINISHED.name,
+        { timeout: 5000 }
+      );
+      const rate = page.locator(".home-page .hm-rate");
+      if ((await rate.innerText()).trim() !== "Rate your last print") throw new Error("no rate link");
+      if ((await rate.getAttribute("href")) !== "/printer/journal?entry=2") throw new Error("rate link goes elsewhere");
+    });
+    await withFixtures({ journal_last: { ...JOURNAL_FINISHED, verdict: "good" } }, async () => {
+      await emitEvent("journal://changed", null);
+      await page.waitForSelector(".home-page .hm-rate", { state: "detached", timeout: 5000 });
+    });
+    await emitEvent("journal://changed", null);
+    await page.waitForSelector(".home-page .hm-rate", { timeout: 5000 });
+    await page.click(".home-page .hm-rate");
+    await page.waitForSelector('.journal-page .jr-row[data-entry="2"] .jr-detail', { timeout: 15000 });
+    // Home re-reads the printer on mount; the event puts the finished print back.
+    await page.click('nav.sidebar a[href="/"]');
     await emitEvent("printer://state", FINISHED);
     await homeMode("idle");
-    const number = await homeText(".home-page .nd-hero-number");
-    if (number !== "READY") throw new Error(`hero number "${number}"`);
-    const hero = await homeText(".home-page .nd-hero");
-    if (!hero.includes("Last print finished just now · T-pose - slim H2D dual AMS riser")) throw new Error(hero);
   });
 
   await step(run, page, "home never shows a stale percentage after a disconnect", async () => {
