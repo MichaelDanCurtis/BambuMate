@@ -65,16 +65,10 @@ fn geometry_for(
         None => Ok(None),
         Some(p) => load(Path::new(p))
             .map(|v| Some(Geometry::from_view(&v)))
-            .map_err(|e| plain_model_error(&e)),
-    }
-}
-
-/// A fixed sentence for why a model couldn't be read. `Io` wraps OS error
-/// text, which varies by platform, so it never reaches the page.
-fn plain_model_error(e: &ModelError) -> String {
-    match e {
-        ModelError::Io(_) => "The model file couldn't be read.".to_string(),
-        other => other.to_string(),
+            .map_err(|e| {
+                warn!("advisor: model unreadable: {e}");
+                e.user_message()
+            }),
     }
 }
 
@@ -178,14 +172,10 @@ mod tests {
         });
         assert_eq!(got, Err("The model file couldn't be read.".to_string()));
         // The other kinds are already fixed sentences.
-        assert_eq!(
-            plain_model_error(&ModelError::NotAModel),
-            "This file isn't an STL or 3MF."
-        );
-        assert_eq!(
-            plain_model_error(&ModelError::Archive("The 3MF is damaged.")),
-            "The 3MF is damaged."
-        );
+        let got = geometry_for(Some("/x/a.3mf"), |_| {
+            Err(ModelError::Archive("The 3MF is damaged."))
+        });
+        assert_eq!(got, Err("The 3MF is damaged.".to_string()));
     }
 
     #[test]
