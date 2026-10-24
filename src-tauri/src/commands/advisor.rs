@@ -166,12 +166,13 @@ fn persist_brands(store: &impl BrandStore, value: serde_json::Value) -> Result<(
 /// Store the brands (normalised) and return what was stored.
 #[tauri::command]
 pub fn set_preferred_brands(app: AppHandle, brands: Vec<String>) -> Result<Vec<String>, String> {
-    let store = app.store(STORE).map_err(|e| e.to_string())?;
-    let (value, stored) = stored_brands(&brands);
-    persist_brands(store.as_ref(), value).map_err(|e| {
+    let failed = |e: &dyn std::fmt::Display| {
         warn!("preferred brands not saved: {e}");
         "Couldn't save your preferred brands.".to_string()
-    })?;
+    };
+    let store = app.store(STORE).map_err(|e| failed(&e))?;
+    let (value, stored) = stored_brands(&brands);
+    persist_brands(store.as_ref(), value).map_err(|e| failed(&e))?;
     Ok(stored)
 }
 
