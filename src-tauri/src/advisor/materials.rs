@@ -340,4 +340,49 @@ mod tests {
             );
         }
     }
+
+    /// Every material's pinned values: id, hdt_c, needs_drying, warp,
+    /// needs_enclosure, abrasive, serde name. Changing any table value
+    /// must change this list on purpose.
+    #[test]
+    fn every_material_pins_its_values() {
+        #[rustfmt::skip]
+        let expected: [(MaterialId, u16, bool, u8, bool, bool, &str); 11] = [
+            (MaterialId::Pla,     55,  false, 0, false, false, "pla"),
+            (MaterialId::PlaPlus, 58,  false, 0, false, false, "pla_plus"),
+            (MaterialId::PlaCf,   60,  false, 0, false, true,  "pla_cf"),
+            (MaterialId::Petg,    70,  true,  1, false, false, "petg"),
+            (MaterialId::PetCf,   80,  true,  1, false, true,  "pet_cf"),
+            (MaterialId::Abs,     95,  false, 3, true,  false, "abs"),
+            (MaterialId::Asa,     95,  false, 2, true,  false, "asa"),
+            (MaterialId::Tpu,     60,  true,  0, false, false, "tpu"),
+            (MaterialId::Pa,      90,  true,  3, true,  false, "pa"),
+            (MaterialId::PaCf,    120, true,  2, true,  true,  "pa_cf"),
+            (MaterialId::Pc,      115, true,  3, true,  false, "pc"),
+        ];
+        assert_eq!(expected.len(), MATERIALS.len());
+        for (id, hdt, drying, warp, enclosure, abrasive, serde_name) in expected {
+            let m = material(id);
+            assert_eq!(m.hdt_c, hdt, "{} hdt_c", m.name);
+            assert_eq!(m.needs_drying, drying, "{} needs_drying", m.name);
+            assert_eq!(m.warp, warp, "{} warp", m.name);
+            assert_eq!(m.needs_enclosure, enclosure, "{} needs_enclosure", m.name);
+            assert_eq!(m.abrasive, abrasive, "{} abrasive", m.name);
+            let json = serde_json::to_string(&id).expect("serialise");
+            assert_eq!(json, format!("\"{serde_name}\""), "{} serde name", m.name);
+            let back: MaterialId = serde_json::from_str(&json).expect("deserialise");
+            assert_eq!(back, id, "{} serde round trip", m.name);
+        }
+    }
+
+    #[test]
+    fn heavy_warpers_are_enclosed() {
+        for m in MATERIALS.iter().filter(|m| m.warp >= 2) {
+            assert!(
+                m.needs_enclosure,
+                "{} warps {} but is not enclosed",
+                m.name, m.warp
+            );
+        }
+    }
 }
