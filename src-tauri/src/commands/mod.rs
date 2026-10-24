@@ -6,6 +6,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod health;
 pub mod history;
+pub mod journal;
 pub mod keychain;
 pub mod launcher;
 pub mod model_view;

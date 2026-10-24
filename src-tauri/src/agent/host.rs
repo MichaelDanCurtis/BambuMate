@@ -209,6 +209,7 @@ impl ToolHost for TauriToolHost {
             image_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             profile_path,
             material_type: None,
+            journal_id: None,
         };
         to_json(crate::commands::analyzer::analyze_print(self.app.clone(), request).await)
     }

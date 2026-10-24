@@ -138,6 +138,15 @@ pub fn run() {
             commands::printer::printer_view,
             commands::printer::printer_assign_slot,
             commands::printer::printer_clear_slot,
+            commands::journal::journal_list,
+            commands::journal::journal_get,
+            commands::journal::journal_update,
+            commands::journal::journal_add_photo,
+            commands::journal::journal_remove_photo,
+            commands::journal::journal_delete,
+            commands::journal::journal_month_summary,
+            commands::journal::journal_last,
+            commands::journal::journal_image,
         ])
         .setup(|app| {
             // Apply the user-configured Bambu Studio config folder before any

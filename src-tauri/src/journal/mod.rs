@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod photos;
 pub mod recorder;
 pub mod slice;
 pub mod store;
