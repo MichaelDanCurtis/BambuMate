@@ -19,7 +19,7 @@ use super::http_client::ScraperHttpClient;
 const CATALOG_TTL_DAYS: i64 = 7;
 
 /// A single filament entry in the catalog.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CatalogEntry {
     pub brand: String,
     pub name: String,
@@ -265,6 +265,32 @@ impl FilamentCatalog {
             })
             .map_err(|e| format!("Brand query failed: {}", e))?;
 
+        entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Every entry, ordered by brand then name. The advisor filters these by
+    /// material in Rust (`advisor::products::classify`).
+    pub fn all(&self) -> Result<Vec<CatalogEntry>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT brand, name, material, url_slug, full_url FROM catalog
+                 ORDER BY LOWER(TRIM(brand)), LOWER(name), id",
+            )
+            .map_err(|e| format!("Failed to prepare catalog listing: {}", e))?;
+        let entries = stmt
+            .query_map([], |row| {
+                Ok(CatalogEntry {
+                    brand: row.get(0)?,
+                    name: row.get(1)?,
+                    material: row.get(2)?,
+                    url_slug: row.get(3)?,
+                    full_url: row.get(4)?,
+                })
+            })
+            .map_err(|e| format!("Catalog listing failed: {}", e))?;
         entries
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())
@@ -652,5 +678,36 @@ mod tests {
             )
             .unwrap();
         assert!(!ts.is_empty());
+    }
+
+    #[test]
+    fn all_lists_every_entry_by_brand_then_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = FilamentCatalog::new(&temp.path().join("catalog.db")).unwrap();
+        assert!(catalog.all().unwrap().is_empty());
+        let e = |brand: &str, name: &str| CatalogEntry {
+            brand: brand.to_string(),
+            name: name.to_string(),
+            material: "PLA".to_string(),
+            url_slug: format!("{}-{}", brand, name).to_lowercase(),
+            full_url: format!("https://example.com/{}/{}", brand, name),
+        };
+        catalog
+            .refresh(&[e("Sunlu", "PLA"), e("acme", "Zeta"), e("Acme", "Alpha")])
+            .unwrap();
+        let got: Vec<(String, String)> = catalog
+            .all()
+            .unwrap()
+            .into_iter()
+            .map(|x| (x.brand, x.name))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Acme".to_string(), "Alpha".to_string()),
+                ("acme".to_string(), "Zeta".to_string()),
+                ("Sunlu".to_string(), "PLA".to_string()),
+            ]
+        );
     }
 }

@@ -4,4 +4,5 @@
 
 pub mod materials;
 pub mod needs;
+pub mod products;
 pub mod score;
