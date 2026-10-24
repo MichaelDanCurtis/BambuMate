@@ -26,6 +26,7 @@
 > - `Excluded.reasons: Vec<String>` replaces `reason: String`. The order is enclosure, nozzle, heat. Heat is a hard requirement, and its reason is "Softens around {hdt} °C".
 > - `score::NOTHING_FITS` = "Nothing on this printer meets all of that." The page shows it when `fits` is empty.
 > - No 0% picks: a material whose needs-only score (`needs_points`) is 0 isn't shown. The displayed `total` and `fit_pct` come from the needs alone. Geometry only reorders (through the unclamped `MaterialFit.points`) and adds notes; it never hides a material or changes its displayed fit.
+> - Heat is strict: `hdt < threshold` rules a material out. Heat is Met or ruled out, never Partly.
 > - Later tasks join `reasons` with "; " for display, and carry `reasons` (not `reason`) through `Advice` and the frontend types.
 
 ## Global Constraints
@@ -2109,7 +2110,7 @@ git commit -m "feat(advisor): interpret descriptions through one complete_json d
   - `advise(app: AppHandle, service: State<'_, PrinterService>, needs: Vec<Need>, model_path: Option<String>) -> Result<Advice, String>`. The frontend sends `{ needs, modelPath }`.
   - `get_preferred_brands(app: AppHandle) -> Result<Vec<String>, String>`
   - `set_preferred_brands(app: AppHandle, brands: Vec<String>) -> Result<Vec<String>, String>`. It returns the normalised list.
-- The JSON shape the frontend reads: `{ needs: ["heat_80", …], fits: [{ material: "asa", name, total, fit_pct, reasons: [{ need, verdict: "met"|"partly"|"not_met", detail }], printer_notes, geometry_notes, material_notes, products: [{ name, brand, status: "loaded"|"preferred"|"catalog", slot, buy_url, entry }] }], ruled_out: [{ material, name, reason }], printer_line, model_error, catalog_empty }`.
+- The JSON shape the frontend reads: `{ needs: ["heat_80", …], fits: [{ material: "asa", name, total, fit_pct, reasons: [{ need, verdict: "met"|"partly"|"not_met", detail }], printer_notes, geometry_notes, material_notes, products: [{ name, brand, status: "loaded"|"preferred"|"catalog", slot, buy_url, entry }] }], ruled_out: [{ material, name, reasons }], printer_line, model_error, catalog_empty }`.
 
 - [ ] **Step 1: Write the failing `advice.rs` tests**
 

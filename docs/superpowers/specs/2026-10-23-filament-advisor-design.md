@@ -62,7 +62,7 @@ Every pick comes with reasons, and from there it's one click to a generated prof
 - **Enclosure.** Whether the printer is enclosed comes from its model. H2C, H2D, H2S, X1, X1C, X1E, P1S and P2S are enclosed; A1, A1 mini and P1P are open. An unknown model is assumed enclosed, and the page says so.
 - **Hardened nozzle.** When connected, this comes from the nozzle type. When unknown, abrasive materials get a "needs a hardened nozzle" note instead of being filtered out.
 - **Failing a constraint.** A material that fails a hard constraint goes into "Ruled out" with all its reasons. It is never dropped silently.
-- **Heat is a hard requirement** (user ruling, 2026-10-23). A material that softens below the chosen heat level is ruled out with the reason "Softens around {HDT} °C".
+- **Heat is a hard requirement** (user ruling, 2026-10-23). A material that softens below the chosen heat level is ruled out with the reason "Softens around {HDT} °C". Heat is strict: any HDT below the threshold rules a material out, with no tolerance.
 
 **Geometry**, when a model is loaded, from `model_view`:
 
