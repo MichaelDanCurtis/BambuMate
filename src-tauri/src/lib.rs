@@ -6,6 +6,7 @@ pub mod analyzer;
 mod commands;
 pub mod diagnostics;
 pub mod history;
+pub mod journal;
 pub mod mapper;
 pub mod model;
 pub mod model_catalog;
