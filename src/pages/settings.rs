@@ -5,6 +5,7 @@ use crate::app::FeatureFlagsContext;
 use crate::commands::{self, ModelInfo};
 use crate::components::api_key_form::ApiKeyForm;
 use crate::components::health_hero::HealthHero;
+use crate::components::preferred_brands::PreferredBrands;
 use crate::components::printer_settings::PrinterSettings;
 use crate::components::slicer_settings::SlicerSettingsSection;
 use crate::theme::ThemeContext;
@@ -440,6 +441,8 @@ pub fn SettingsPage() -> impl IntoView {
                     })}
                 </div>
             </section>
+
+            <PreferredBrands />
 
             <section class="settings-section">
                 <h2 class="nd-label settings-section-title">"Appearance"</h2>

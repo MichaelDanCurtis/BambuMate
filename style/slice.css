@@ -142,3 +142,23 @@
     display: inline-flex;
     gap: 0.4rem;
 }
+
+/* A text button beside the 3D view: opens Filament → Advise with this model. */
+.sl-suggest {
+    align-self: flex-start;
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-interactive);
+    text-decoration: none;
+}
+
+.sl-suggest:hover {
+    text-decoration: underline;
+}
+
+.sl-suggest:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}

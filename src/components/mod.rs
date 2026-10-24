@@ -7,6 +7,7 @@ pub mod health_hero;
 pub mod history_panel;
 pub mod icons;
 pub mod patterns;
+pub mod preferred_brands;
 pub mod preset_sync_panel;
 pub mod printer_settings;
 pub mod profile_preview;

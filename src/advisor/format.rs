@@ -532,6 +532,52 @@ mod tests {
         );
     }
 
+    /// Percent-decode the way the router's query reader does, to prove the
+    /// link round-trips.
+    fn decode(s: &str) -> String {
+        let b = s.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' {
+                out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).unwrap());
+                i += 3;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn advise_links_survive_reserved_characters() {
+        for path in [
+            "/a b/c&d=e.stl",
+            "/p#1/100%.stl",
+            "/q?x=1/%41.3mf",
+            "/plus+sign/a;b,c.stl",
+            "/Users/me/Parts & Bits/100% #1.stl",
+        ] {
+            let href = advise_href(path);
+            let query = href.strip_prefix("/filament/advise?model=").unwrap();
+            // Nothing that could end or split the query value stays raw.
+            assert!(
+                !query.contains(['&', '#', '?', ' ', '+', '=', ';', ',', '/']),
+                "{query}"
+            );
+            assert_eq!(decode(query), path);
+        }
+        assert_eq!(
+            advise_href("/a b/c&d=e.stl"),
+            "/filament/advise?model=%2Fa%20b%2Fc%26d%3De.stl"
+        );
+        assert_eq!(
+            advise_href("/p#1/100%.stl"),
+            "/filament/advise?model=%2Fp%231%2F100%25.stl"
+        );
+    }
+
     #[test]
     fn the_copy_matches_the_spec() {
         assert_eq!(NOTHING_FITS, "Nothing on this printer meets all of that.");

@@ -411,6 +411,47 @@ async function driveApp(browserType, engine, baseUrl) {
     if (h3s !== 0) throw new Error(`${h3s} section h3s left unstyled`);
   });
 
+  await step(run, page, "Settings lists the catalog's brands and saves a toggle inline", async () => {
+    await page.waitForSelector(".preferred-brands .pb-brand", { timeout: 15000 });
+    const labels = await page.locator(".preferred-brands .pb-brand").allTextContents();
+    if (labels.join("|") !== "Bambu Lab|Polymaker|Prusament") throw new Error(`brands ${labels.join("|")}`);
+    const pressed = await page.locator(".preferred-brands .pb-brand[aria-pressed='true']").count();
+    if (pressed !== 0) throw new Error(`${pressed} brands pressed before any choice`);
+    if ((await page.locator(".preferred-brands .pb-saved").count()) !== 0) throw new Error("[SAVED] shown before a save");
+    const before = (await callsOf("set_preferred_brands")).length;
+    await withFixtures({ set_preferred_brands: ["Polymaker"] }, async () => {
+      await page.click(".preferred-brands .pb-brand:has-text('Polymaker')");
+      await page.waitForSelector(".preferred-brands .pb-saved", { timeout: 5000 });
+    });
+    const calls = await callsOf("set_preferred_brands");
+    if (calls.length !== before + 1) throw new Error(`${calls.length - before} saves for one toggle`);
+    if (JSON.stringify(calls.at(-1).args) !== JSON.stringify({ brands: ["Polymaker"] })) throw new Error(JSON.stringify(calls.at(-1).args));
+    const text = (await page.locator(".preferred-brands .pb-saved").innerText()).trim();
+    if (text !== "[SAVED]") throw new Error(`saved line reads "${text}"`);
+    const on = await page.locator(".preferred-brands .pb-brand[aria-pressed='true']").allTextContents();
+    if (on.join("|") !== "Polymaker") throw new Error(`pressed ${on.join("|")}`);
+    if ((await page.locator(".toast, [role='alert']").filter({ hasText: /saved/i }).count()) !== 0) throw new Error("a toast announced the save");
+    // Toggling it back off saves the empty list.
+    await withFixtures({ set_preferred_brands: [] }, async () => {
+      await page.click(".preferred-brands .pb-brand:has-text('Polymaker')");
+      await page.waitForFunction(() => document.querySelectorAll(".preferred-brands .pb-brand[aria-pressed='true']").length === 0, null, { timeout: 5000 });
+    });
+    if (JSON.stringify((await callsOf("set_preferred_brands")).at(-1).args) !== JSON.stringify({ brands: [] })) throw new Error("the un-toggle did not save []");
+  });
+
+  await step(run, page, "a failed save shows an inline error, not [SAVED]", async () => {
+    await withFixtures({ set_preferred_brands: { __reject: "disk full" } }, async () => {
+      await page.click(".preferred-brands .pb-brand:has-text('Prusament')");
+      await page.waitForSelector(".preferred-brands .nd-state[data-kind='error']", { timeout: 5000 });
+    });
+    if ((await page.locator(".preferred-brands .pb-saved").count()) !== 0) throw new Error("[SAVED] beside an error");
+    // Put the picker back for later steps: toggle Prusament off again.
+    await withFixtures({ set_preferred_brands: [] }, async () => {
+      await page.click(".preferred-brands .pb-brand:has-text('Prusament')");
+      await page.waitForSelector(".preferred-brands .nd-state[data-kind='error']", { state: "detached", timeout: 5000 });
+    });
+  });
+
   // -- filament search and selection ---------------------------------------
   await step(run, page, "navigate to Create Profile", async () => {
     await page.click('a[href="/filament"]');
@@ -1108,6 +1149,18 @@ async function driveApp(browserType, engine, baseUrl) {
     const status = await page.locator(".sl-job-status").innerText();
     if (!status.startsWith("Queued")) throw new Error(`status ${status}`);
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_set_settings"), null, { timeout: 5000 });
+  });
+
+  await step(run, page, "a chosen model offers a Suggest filament link to Advise", async () => {
+    const link = page.locator("a.sl-suggest");
+    if ((await link.count()) !== 1) throw new Error(`${await link.count()} Suggest filament links`);
+    const href = await link.getAttribute("href");
+    const want = `/filament/advise?model=${encodeURIComponent(SLICE_MODEL)}`;
+    if (href !== want) throw new Error(`href ${href}, wanted ${want}`);
+    if ((await link.innerText()).trim().toLowerCase() !== "suggest filament") throw new Error(`text ${await link.innerText()}`);
+    // A real anchor with an href: keyboard-focusable and middle-clickable.
+    const tag = await link.evaluate((el) => `${el.tagName}${el.tabIndex}`);
+    if (tag !== "A0") throw new Error(`link is ${tag}`);
   });
 
   // Whether this engine can give a WebGL2 context at all. When it can, the

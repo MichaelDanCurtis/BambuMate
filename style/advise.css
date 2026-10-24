@@ -53,6 +53,11 @@
     gap: var(--nd-space-sm);
 }
 
+/* The inline confirmation under the picker: colour marks the event. */
+.pb-saved {
+    color: var(--nd-success);
+}
+
 /* .nd-tab is styled for links; these are buttons. */
 .adv-chip,
 .adv-rank,

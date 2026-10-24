@@ -573,6 +573,9 @@ export const FIXTURES = {
 
   // -- batch generate (/batch) --
   list_catalog_brands: ["Bambu Lab", "Polymaker", "Prusament"],
+  // -- preferred brands (Settings → General) --
+  get_preferred_brands: [],
+  set_preferred_brands: [],
   // One failure among the successes on purpose: it exercises the .row-fail
   // branch and the error-hint span, which the all-success path never renders.
   batch_generate_brand: {
