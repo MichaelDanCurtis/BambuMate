@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod advisor;
 pub mod agent;
 pub mod analyzer;
 mod commands;
