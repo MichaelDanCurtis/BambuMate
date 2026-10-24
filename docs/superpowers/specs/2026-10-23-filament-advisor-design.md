@@ -59,7 +59,7 @@ Every pick comes with reasons, and from there it's one click to a generated prof
 - **The base `MaterialType`** each material maps to, for profile generation.
 
 **Hard constraints from the printer:**
-- **Enclosure.** Whether the printer is enclosed comes from its model. H2C, H2D, X1, X1C, X1E, P1S and P2S are enclosed; A1 and A1 mini are open. An unknown model is assumed enclosed, and the page says so.
+- **Enclosure.** Whether the printer is enclosed comes from its model. H2C, H2D, H2S, X1, X1C, X1E, P1S and P2S are enclosed; A1, A1 mini and P1P are open. An unknown model is assumed enclosed, and the page says so.
 - **Hardened nozzle.** When connected, this comes from the nozzle type. When unknown, abrasive materials get a "needs a hardened nozzle" note instead of being filtered out.
 - **Failing a constraint.** A material that fails a hard constraint goes into "Not on this printer" with its reason. It is never dropped silently.
 
@@ -99,7 +99,7 @@ Each product has a `buy_link` (the plain URL for now) and enough to start profil
 
 ### 2. The Advise page (Filament → Advise)
 
-**Header.** `PageHeader` "Advise".
+**Header.** The Filament hub's own header, with Advise as the current tab. A second `PageHeader` would add a second `<h1>`.
 
 **Input band:**
 - **Description field.** "What is the part for?" is shown only when AI is configured. Otherwise a one-line note says AI isn't set up.
@@ -115,7 +115,7 @@ Each product has a `buy_link` (the plain URL for now) and enough to start profil
 **Hero.**
 - The top material is shown as a large Doto word.
 - The detail line gives the fit and the main ticks.
-- Ranks 2 and 3 appear as `HeroStats`. Selecting a rank switches the panel below.
+- A row of rank pills ("1 · PETG", "2 · ASA", "3 · PLA") sits under the hero, with `aria-pressed`. Selecting a rank switches the panel below. The page keeps one hero, so there is no `HeroStats`.
 
 **Reasons.** A `StatRow` list for the selected material, with one row per need marked ✓, ~ or ✗. The printer and geometry notes follow.
 

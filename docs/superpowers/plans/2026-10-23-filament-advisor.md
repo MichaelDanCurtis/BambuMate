@@ -46,8 +46,8 @@ Every task's requirements include this section.
 - Approximate heat deflection temperatures: PLA 55, PLA+ 58, PLA-CF 60, PETG 70, PET-CF 80, ABS 95, ASA 95, TPU 60, PA 90, PA-CF 120, PC 115 (°C). These are general guidance values, not per-product data.
 
 **Printer**
-- **Enclosed printers:** H2C, H2D, X1, X1C, X1E, P1S and P2S.
-- **Open printers:** A1 and A1 mini.
+- **Enclosed printers:** H2C, H2D, H2S, X1, X1C, X1E, P1S and P2S.
+- **Open printers:** A1, A1 mini and P1P.
 - An unknown model is assumed enclosed, and the page says so.
 - **Hardened nozzle.** When connected, this comes from the nozzle type. When unknown, abrasive materials get a "needs a hardened nozzle" note instead of being filtered out.
 - A material that fails a hard constraint goes into "Not on this printer" with its reason. It is never dropped silently.
@@ -808,13 +808,13 @@ mod tests {
 
     #[test]
     fn printer_models_map_to_enclosures() {
-        for m in ["H2C", "H2D", "H2D Pro", "X1", "X1C", "X1 Carbon", "X1E", "P1S", "P2S", "C12", "O1D"] {
+        for m in ["H2C", "H2D", "H2D Pro", "H2S", "X1", "X1C", "X1 Carbon", "X1E", "P1S", "P2S", "C12", "O1D"] {
             assert_eq!(enclosure_for_model(m), Enclosure::Enclosed, "{m}");
         }
-        for m in ["A1", "A1 mini", "a1 MINI", "N2S", "N1"] {
+        for m in ["A1", "A1 mini", "a1 MINI", "N2S", "N1", "P1P"] {
             assert_eq!(enclosure_for_model(m), Enclosure::Open, "{m}");
         }
-        for m in ["P1P", "", "Ender 3"] {
+        for m in ["", "Ender 3"] {
             assert_eq!(enclosure_for_model(m), Enclosure::Unknown, "{m}");
         }
     }
@@ -837,10 +837,10 @@ mod tests {
         assert_eq!(printer_line(&PrinterFacts::unknown(), false).as_deref(), Some(NO_PRINTER_LINE));
         assert_eq!(printer_line(&enclosed(), true), None);
         assert_eq!(printer_line(&a1(), true), None);
-        let p1p = PrinterFacts { model: Some("P1P".into()), ..PrinterFacts::unknown() };
+        let other = PrinterFacts { model: Some("Ender 3".into()), ..PrinterFacts::unknown() };
         assert_eq!(
-            printer_line(&p1p, true).as_deref(),
-            Some("BambuMate doesn't know whether the P1P is enclosed; assuming it is.")
+            printer_line(&other, true).as_deref(),
+            Some("BambuMate doesn't know whether the Ender 3 is enclosed; assuming it is.")
         );
     }
 
@@ -898,8 +898,8 @@ use crate::printer::state::Nozzle;
 pub const TOP_N: usize = 3;
 /// A footprint over this on either side lowers warp-prone materials.
 pub const LARGE_FOOTPRINT_MM: f32 = 150.0;
-pub const ENCLOSED_MODELS: &[&str] = &["H2C", "H2D", "X1", "X1C", "X1E", "P1S", "P2S"];
-pub const OPEN_MODELS: &[&str] = &["A1", "A1 mini"];
+pub const ENCLOSED_MODELS: &[&str] = &["H2C", "H2D", "H2S", "X1", "X1C", "X1E", "P1S", "P2S"];
+pub const OPEN_MODELS: &[&str] = &["A1", "A1 mini", "P1P"];
 pub const OVERHANG_NOTE: &str = "Supports likely, whatever the material";
 pub const FOOD_CAUTION: &str = "Food contact: BambuMate never calls a material food safe. Check the maker's own food-contact statement, and remember that printed layer lines can trap bacteria.";
 pub const NO_PRINTER_LINE: &str = "Assuming an enclosed printer; nozzle unknown.";
@@ -3134,7 +3134,7 @@ git commit -m "feat(advise): frontend types, bridge and the Advise tab"
   - `crate::slicer::state::newest_source(&[JobView]) -> Option<&str>` and `SlicerShared { jobs }`;
   - `crate::viewport::types::load_view(&str) -> Result<ModelView, String>`;
   - `crate::pages::slice::file_name(&str) -> String`;
-  - the patterns `Hero`, `HeroStats`, `StatRow`, `StateText`, `StateKind` and `Tone`.
+  - the patterns `Hero`, `StatRow`, `StateText`, `StateKind` and `Tone`.
 - Produces: the finished `AdvisePage`. These selectors are used by Task 9:
   - `.advise-page`, `.adv-description`, `.adv-ai-off`, `.adv-chip[aria-pressed]`, `.adv-run`;
   - `.adv-model-name`, `.adv-model-line`, `.adv-last-model`, `.adv-pick-model`, `.adv-model-clear`;
@@ -3166,7 +3166,7 @@ use crate::advisor::format::{
 use crate::advisor::types::{Advice, MaterialFit, Need, Product, ALL_NEEDS};
 use crate::advisor::PendingCatalogPick;
 use crate::commands;
-use crate::components::patterns::{Hero, HeroStats, StatRow, StateKind, StateText, Tone};
+use crate::components::patterns::{Hero, StatRow, StateKind, StateText, Tone};
 use crate::pages::slice::file_name;
 use crate::slicer::state::newest_source;
 use crate::slicer::SlicerShared;
@@ -3394,12 +3394,6 @@ fn Results(advice: Advice, selected: RwSignal<usize>, pick: PendingCatalogPick) 
         return view! { <StateText kind=StateKind::Empty message="No material fits this printer" /> }
             .into_any();
     };
-    let others: Vec<(String, String)> = fits
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(i, f)| (rank_label(i), f.name.clone()))
-        .collect();
     let ranks: Vec<(usize, String)> = fits
         .iter()
         .enumerate()
@@ -3416,7 +3410,6 @@ fn Results(advice: Advice, selected: RwSignal<usize>, pick: PendingCatalogPick) 
             {printer_line.map(|l| view! { <p class="adv-printer-line">{l}</p> })}
             <div class="adv-hero-row">
                 <Hero label="Best fit" value=top.name.clone() detail=hero_detail(&top) tone=Tone::Signal />
-                {(!others.is_empty()).then(|| view! { <HeroStats label="Also fits" stats=others /> })}
             </div>
             <div class="adv-ranks" role="group" aria-label="Show reasons for">
                 {ranks.into_iter().map(|(i, text)| view! {
@@ -4187,7 +4180,7 @@ Don't add the PNG screenshots that the runs write into `tests/webkit/`.
 **Navigation and layout**
 - **Tab order.** Putting Advise first breaks the old "the first tab is the hub itself" route test. The test now checks that the hub's own route is one of its tabs. The rail's Filament link still opens Search at `/filament`.
 - **Header.** The page uses the hub's `PageHeader` rather than a second one, so the page keeps a single `<h1>`.
-- **Rank picker.** `HeroStats` is not selectable. Ranks 2 and 3 are shown in `HeroStats` beside the `Hero`, and a row of `aria-pressed` rank pills switches the panel below.
+- **Rank picker (controller ruling).** The page keeps one hero: the `Hero` shows the top material, and a row of `aria-pressed` rank pills ("1 · PETG", "2 · ASA", "3 · PLA") under it switches the panel below. No `HeroStats`, which would be a second hero.
 
 **Interfaces**
 - **Shapes that differ from the spec:**
@@ -4199,7 +4192,7 @@ Don't add the PNG screenshots that the runs write into `tests/webkit/`.
   - `Advice` also carries `printer_line`, `model_error` and `catalog_empty`.
 
 **Printer models and nozzles**
-- **Unlisted models.** P1P and H2S are in neither of the spec's lists, so they read as unknown. They are assumed enclosed, and the page says so.
+- **P1P and H2S (controller ruling).** The P1P is open-frame and the H2S is enclosed, so they join the open and enclosed lists. Any other model reads as unknown, is assumed enclosed, and the page says so.
 - **Aliases.** "X1 Carbon" and "H2D Pro" are read as the listed X1C and H2D. Discovery codes such as `C12` are named first.
 - **H2 nozzle codes.** Codes such as `HS01` count as hardened when they start with `H`. Any other code is unknown, which adds a note and filters nothing.
 
