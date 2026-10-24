@@ -235,6 +235,16 @@ pub struct PrinterState {
     pub gcode_state: Option<String>,
     /// `subtask_name`: the file being printed.
     pub subtask_name: Option<String>,
+    /// `task_id`: the cloud task, `"0"` for local and SD jobs.
+    pub task_id: Option<String>,
+    /// `subtask_id`, `"0"` for local and SD jobs.
+    pub subtask_id: Option<String>,
+    /// `job_id`, a number or a string on the wire; kept as a string.
+    pub job_id: Option<String>,
+    /// `gcode_file`: the path or name of the file being printed.
+    pub gcode_file: Option<String>,
+    /// `plate_idx`, when the printer reports it (0 means it doesn't).
+    pub plate_idx: Option<u32>,
     pub mc_percent: Option<u32>,
     /// `mc_remaining_time`, in minutes.
     pub mc_remaining_time: Option<u32>,
@@ -267,6 +277,9 @@ pub struct Nozzle {
     pub diameter: Option<f64>,
     /// `HS01` style on the H2 series, `stainless_steel` style elsewhere.
     pub nozzle_type: Option<String>,
+    /// `snow` on the H2 series: the tray feeding this extruder, packed as
+    /// `(ams_id << 8) | slot`, 0xFFFF for none. See [`decode_extruder_tray`].
+    pub tray_now: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -333,6 +346,113 @@ impl HmsCode {
     }
 }
 
+/// A tray in the numbering `slot_assignments` and the Printer page use:
+/// AMS units 0–3 and AMS HT units 128+ with their tray, and the external
+/// spools as `ams_id` 255 with tray 254 or 255.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TrayRef {
+    pub ams_id: u32,
+    pub tray_id: u32,
+}
+
+/// `ams_id` of the external spool holders.
+const EXTERNAL_UNIT: u32 = 255;
+
+/// `ams.tray_now`: 255 is none and 254 the external spool. 0x80–0x87 are
+/// standalone units (AMS HT, one tray each). Any other value packs four
+/// trays per unit: `ams_id = v >> 2`, `tray = v & 3`.
+pub fn decode_tray_now(v: u32) -> Option<TrayRef> {
+    match v {
+        255 => None,
+        254 => Some(TrayRef {
+            ams_id: EXTERNAL_UNIT,
+            tray_id: 254,
+        }),
+        0x80..=0x87 => Some(TrayRef {
+            ams_id: v,
+            tray_id: 0,
+        }),
+        0..=0x7F => Some(TrayRef {
+            ams_id: v >> 2,
+            tray_id: v & 3,
+        }),
+        _ => None,
+    }
+}
+
+/// `device.extruder.info[].snow` on the H2 series: `(ams_id << 8) | slot`,
+/// 0xFFFF for none. Units 254 and 255 are the external spool holders, read
+/// as the external tray with that id.
+pub fn decode_extruder_tray(v: u32) -> Option<TrayRef> {
+    if v >= 0xFFFF {
+        return None;
+    }
+    let (ams_id, slot) = (v >> 8, v & 0xFF);
+    if ams_id >= 254 {
+        return Some(TrayRef {
+            ams_id: EXTERNAL_UNIT,
+            tray_id: ams_id,
+        });
+    }
+    Some(TrayRef {
+        ams_id,
+        tray_id: slot,
+    })
+}
+
+/// The plate number in a local job's file name: the digits between the
+/// last `_` and the last `.` (`plate_2.gcode` is plate 2).
+pub fn plate_from_gcode_file(file: &str) -> Option<u32> {
+    let dot = file.rfind('.')?;
+    let under = file[..dot].rfind('_')?;
+    let digits = &file[under + 1..dot];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().filter(|n| *n > 0)
+}
+
+impl PrinterState {
+    /// `plate_idx` when the printer reports one, else the plate in the
+    /// file name.
+    pub fn plate(&self) -> Option<u32> {
+        self.plate_idx
+            .filter(|n| *n > 0)
+            .or_else(|| self.gcode_file.as_deref().and_then(plate_from_gcode_file))
+    }
+
+    /// The tray feeding the print. On the H2 series this is the active
+    /// extruder's `snow`; elsewhere it is `ams.tray_now`.
+    pub fn current_tray(&self) -> Option<TrayRef> {
+        let packed: Vec<&Nozzle> = self
+            .nozzles
+            .iter()
+            .filter(|n| n.tray_now.is_some())
+            .collect();
+        if packed.is_empty() {
+            return self.tray_now.and_then(decode_tray_now);
+        }
+        let nozzle = self
+            .active_nozzle
+            .and_then(|a| packed.iter().find(|n| n.id == a).copied())
+            .or_else(|| packed.first().copied())?;
+        nozzle.tray_now.and_then(decode_extruder_tray)
+    }
+
+    /// What the printer reports for the tray at `at`.
+    pub fn tray_at(&self, at: TrayRef) -> Option<&Tray> {
+        if at.ams_id == EXTERNAL_UNIT {
+            return self.external_spools.iter().find(|t| t.id == at.tray_id);
+        }
+        self.ams_units
+            .iter()
+            .find(|u| u.id == at.ams_id)?
+            .trays
+            .iter()
+            .find(|t| t.id == at.tray_id)
+    }
+}
+
 impl PrinterState {
     /// Reads the typed state out of a merged `print` object.
     pub fn from_print(p: &Map<String, Value>) -> Self {
@@ -356,6 +476,11 @@ impl PrinterState {
         PrinterState {
             gcode_state: str_field(p, "gcode_state"),
             subtask_name: str_field(p, "subtask_name"),
+            task_id: id_field(p, "task_id"),
+            subtask_id: id_field(p, "subtask_id"),
+            job_id: id_field(p, "job_id"),
+            gcode_file: str_field(p, "gcode_file"),
+            plate_idx: p.get("plate_idx").and_then(num_u32),
             mc_percent: p.get("mc_percent").and_then(num_u32),
             mc_remaining_time: p.get("mc_remaining_time").and_then(num_u32),
             layer_num: p.get("layer_num").and_then(num_u32),
@@ -430,6 +555,7 @@ fn nozzles(p: &Map<String, Value>, device: Option<&Value>) -> Vec<Nozzle> {
                         .and_then(|n| n.get("type"))
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    tray_now: e.get("snow").and_then(num_u32),
                 })
             })
             .collect();
@@ -448,6 +574,7 @@ fn nozzles(p: &Map<String, Value>, device: Option<&Value>) -> Vec<Nozzle> {
         target_temp: p.get("nozzle_target_temper").and_then(num_f64),
         diameter: p.get("nozzle_diameter").and_then(num_f64),
         nozzle_type: str_field(p, "nozzle_type"),
+        tray_now: None,
     }]
 }
 
@@ -535,6 +662,15 @@ fn unpack_temp(packed: u64) -> (Option<f64>, Option<f64>) {
 
 fn str_field(p: &Map<String, Value>, key: &str) -> Option<String> {
     p.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// An id that arrives as a string or a number, kept as a string.
+fn id_field(p: &Map<String, Value>, key: &str) -> Option<String> {
+    match p.get(key)? {
+        Value::String(s) => Some(s.trim().to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 /// Numbers arrive as JSON numbers or as strings ("27.0", "190").
@@ -907,5 +1043,179 @@ mod tests {
         let round: PrinterState =
             serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
         assert_eq!(round, full);
+    }
+
+    #[test]
+    fn job_identity_fields_parse_from_strings_and_numbers() {
+        let local = delta(
+            r#""task_id":"0","subtask_id":"0","job_id":5521,"gcode_file":"/data/Metadata/plate_2.gcode","plate_idx":"2""#,
+        );
+        let s = state_after(&[H2D_FULL, &local]);
+        assert_eq!(s.task_id.as_deref(), Some("0"));
+        assert_eq!(s.subtask_id.as_deref(), Some("0"));
+        assert_eq!(s.job_id.as_deref(), Some("5521"));
+        assert_eq!(
+            s.gcode_file.as_deref(),
+            Some("/data/Metadata/plate_2.gcode")
+        );
+        assert_eq!(s.plate_idx, Some(2));
+        assert_eq!(s.plate(), Some(2));
+        let cloud = delta(r#""task_id":"812345678","job_id":"77""#);
+        let s = state_after(&[H2D_FULL, &cloud]);
+        assert_eq!(s.task_id.as_deref(), Some("812345678"));
+        assert_eq!(s.job_id.as_deref(), Some("77"));
+    }
+
+    #[test]
+    fn the_plate_falls_back_to_the_gcode_file_name() {
+        assert_eq!(
+            plate_from_gcode_file("/data/Metadata/plate_3.gcode"),
+            Some(3)
+        );
+        assert_eq!(plate_from_gcode_file("cube_plate_12.gcode"), Some(12));
+        assert_eq!(plate_from_gcode_file("cube.gcode.3mf"), None);
+        assert_eq!(plate_from_gcode_file("plate_.gcode"), None);
+        assert_eq!(plate_from_gcode_file("no-dot"), None);
+        let s = PrinterState {
+            plate_idx: Some(0),
+            gcode_file: Some("/data/Metadata/plate_4.gcode".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.plate(), Some(4), "plate_idx 0 means not reported");
+    }
+
+    #[test]
+    fn tray_now_decodes_none_external_standalone_and_packed_values() {
+        assert_eq!(decode_tray_now(255), None);
+        assert_eq!(
+            decode_tray_now(254),
+            Some(TrayRef {
+                ams_id: 255,
+                tray_id: 254
+            })
+        );
+        assert_eq!(
+            decode_tray_now(0x80),
+            Some(TrayRef {
+                ams_id: 128,
+                tray_id: 0
+            })
+        );
+        assert_eq!(
+            decode_tray_now(0x87),
+            Some(TrayRef {
+                ams_id: 135,
+                tray_id: 0
+            })
+        );
+        assert_eq!(
+            decode_tray_now(0),
+            Some(TrayRef {
+                ams_id: 0,
+                tray_id: 0
+            })
+        );
+        assert_eq!(
+            decode_tray_now(6),
+            Some(TrayRef {
+                ams_id: 1,
+                tray_id: 2
+            })
+        );
+        assert_eq!(
+            decode_tray_now(15),
+            Some(TrayRef {
+                ams_id: 3,
+                tray_id: 3
+            })
+        );
+        assert_eq!(decode_tray_now(300), None);
+    }
+
+    #[test]
+    fn h2_extruder_trays_decode_from_ams_and_slot() {
+        assert_eq!(decode_extruder_tray(0xFFFF), None);
+        assert_eq!(
+            decode_extruder_tray(259),
+            Some(TrayRef {
+                ams_id: 1,
+                tray_id: 3
+            })
+        );
+        assert_eq!(
+            decode_extruder_tray(128 << 8),
+            Some(TrayRef {
+                ams_id: 128,
+                tray_id: 0
+            })
+        );
+        assert_eq!(
+            decode_extruder_tray(0xFEFF),
+            Some(TrayRef {
+                ams_id: 255,
+                tray_id: 254
+            })
+        );
+        assert_eq!(
+            decode_extruder_tray(0xFF00),
+            Some(TrayRef {
+                ams_id: 255,
+                tray_id: 255
+            })
+        );
+        assert_eq!(decode_extruder_tray(0x1_0000), None);
+    }
+
+    #[test]
+    fn the_current_tray_comes_from_the_active_extruder_on_the_h2() {
+        let s = state_after(&[H2D_FULL]);
+        assert_eq!(s.nozzles[0].tray_now, Some(259));
+        assert_eq!(s.nozzles[1].tray_now, Some(0xFEFF));
+        assert_eq!(
+            s.current_tray(),
+            Some(TrayRef {
+                ams_id: 1,
+                tray_id: 3
+            }),
+            "snow on the active extruder beats tray_now"
+        );
+        let left = delta(r#""device":{"extruder":{"state":18}}"#);
+        let s = state_after(&[H2D_FULL, &left]);
+        let ext = TrayRef {
+            ams_id: 255,
+            tray_id: 254,
+        };
+        assert_eq!(s.current_tray(), Some(ext));
+        assert_eq!(
+            s.tray_at(ext).map(|t| t.tray_info_idx.as_str()),
+            Some("GFA01")
+        );
+    }
+
+    #[test]
+    fn the_current_tray_comes_from_tray_now_elsewhere() {
+        let s = state_after(&[P1P_FULL, P1P_DELTA]);
+        assert_eq!(s.current_tray(), None, "255 is nothing loaded");
+        let s = PrinterState {
+            tray_now: Some(1),
+            ams_units: state_after(&[H2D_FULL]).ams_units,
+            ..Default::default()
+        };
+        let at = s.current_tray().unwrap();
+        assert_eq!(
+            at,
+            TrayRef {
+                ams_id: 0,
+                tray_id: 1
+            }
+        );
+        assert_eq!(s.tray_at(at).map(|t| t.tray_type.as_str()), Some("PLA"));
+        assert_eq!(
+            s.tray_at(TrayRef {
+                ams_id: 9,
+                tray_id: 0
+            }),
+            None
+        );
     }
 }
