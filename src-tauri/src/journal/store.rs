@@ -293,7 +293,8 @@ impl JournalStore {
 
     /// Remembers how far an open print had got, so a restart can tell the
     /// same run from a reprint. Not a user edit: `updated_at` is untouched.
-    pub fn set_progress(&self, id: i64, percent: u32, layer: u32) -> Result<(), String> {
+    /// `layer` is `None` while the print's own layer isn't known.
+    pub fn set_progress(&self, id: i64, percent: u32, layer: Option<u32>) -> Result<(), String> {
         let changed = self
             .conn
             .execute(
@@ -851,8 +852,15 @@ mod tests {
             .start(&new_print("local:cube|f", "cube", 1_000), 1_000)
             .unwrap();
         let before = s.get(id).unwrap().unwrap().updated_at;
-        s.set_progress(id, 42, 120).unwrap();
-        s.set_progress(id, 43, 125).unwrap();
+        s.set_progress(id, 2, None).unwrap();
+        let open_now = s.open_entries().unwrap();
+        assert_eq!(
+            (open_now[0].last_percent, open_now[0].last_layer),
+            (Some(2), None),
+            "a layer not known yet stays unknown"
+        );
+        s.set_progress(id, 42, Some(120)).unwrap();
+        s.set_progress(id, 43, Some(125)).unwrap();
         let open_now = s.open_entries().unwrap();
         assert_eq!(
             (open_now[0].last_percent, open_now[0].last_layer),
@@ -864,7 +872,7 @@ mod tests {
             "not an edit"
         );
         assert_eq!(
-            s.set_progress(id + 99, 1, 1),
+            s.set_progress(id + 99, 1, Some(1)),
             Err("That print isn't in the journal any more.".to_string())
         );
         // A closed entry is no longer open, whatever progress it kept.
