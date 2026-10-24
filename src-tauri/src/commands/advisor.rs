@@ -127,13 +127,51 @@ pub fn get_preferred_brands(app: AppHandle) -> Result<Vec<String>, String> {
     Ok(read_preferred(&app))
 }
 
+/// The slice of the store that saving the brands touches.
+trait BrandStore {
+    fn get_value(&self, key: &str) -> Option<serde_json::Value>;
+    fn set_value(&self, key: &str, value: serde_json::Value);
+    fn delete_value(&self, key: &str);
+    fn save_to_disk(&self) -> Result<(), String>;
+}
+
+impl BrandStore for tauri_plugin_store::Store<tauri::Wry> {
+    fn get_value(&self, key: &str) -> Option<serde_json::Value> {
+        self.get(key)
+    }
+    fn set_value(&self, key: &str, value: serde_json::Value) {
+        self.set(key, value);
+    }
+    fn delete_value(&self, key: &str) {
+        self.delete(key);
+    }
+    fn save_to_disk(&self) -> Result<(), String> {
+        self.save().map_err(|e| e.to_string())
+    }
+}
+
+/// Set `value` and save it. The in-memory value is what `advise` and
+/// `get_preferred_brands` read, so when the save fails the previous value
+/// goes back (or the key is removed if it was absent): the list that failed
+/// to save must not stay live.
+fn persist_brands(store: &impl BrandStore, value: serde_json::Value) -> Result<(), String> {
+    let previous = store.get_value(PREFERRED_BRANDS_KEY);
+    store.set_value(PREFERRED_BRANDS_KEY, value);
+    store.save_to_disk().inspect_err(|_| match previous {
+        Some(old) => store.set_value(PREFERRED_BRANDS_KEY, old),
+        None => store.delete_value(PREFERRED_BRANDS_KEY),
+    })
+}
+
 /// Store the brands (normalised) and return what was stored.
 #[tauri::command]
 pub fn set_preferred_brands(app: AppHandle, brands: Vec<String>) -> Result<Vec<String>, String> {
     let store = app.store(STORE).map_err(|e| e.to_string())?;
     let (value, stored) = stored_brands(&brands);
-    store.set(PREFERRED_BRANDS_KEY, value);
-    store.save().map_err(|e| e.to_string())?;
+    persist_brands(store.as_ref(), value).map_err(|e| {
+        warn!("preferred brands not saved: {e}");
+        "Couldn't save your preferred brands.".to_string()
+    })?;
     Ok(stored)
 }
 
@@ -205,5 +243,67 @@ mod tests {
     fn unreadable_stored_brands_read_as_none() {
         assert!(brands_from_value(None).is_empty());
         assert!(brands_from_value(Some(&json!("Polymaker"))).is_empty());
+    }
+
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct FakeStore {
+        data: RefCell<HashMap<String, serde_json::Value>>,
+        fail_save: bool,
+    }
+
+    impl BrandStore for FakeStore {
+        fn get_value(&self, key: &str) -> Option<serde_json::Value> {
+            self.data.borrow().get(key).cloned()
+        }
+        fn set_value(&self, key: &str, value: serde_json::Value) {
+            self.data.borrow_mut().insert(key.to_string(), value);
+        }
+        fn delete_value(&self, key: &str) {
+            self.data.borrow_mut().remove(key);
+        }
+        fn save_to_disk(&self) -> Result<(), String> {
+            if self.fail_save {
+                Err("disk full".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn a_saved_list_stays_in_the_store() {
+        let store = FakeStore::default();
+        assert_eq!(persist_brands(&store, json!(["Polymaker"])), Ok(()));
+        assert_eq!(
+            store.get_value(PREFERRED_BRANDS_KEY),
+            Some(json!(["Polymaker"]))
+        );
+    }
+
+    #[test]
+    fn a_failed_save_puts_the_previous_list_back() {
+        let store = FakeStore {
+            fail_save: true,
+            ..Default::default()
+        };
+        store.set_value(PREFERRED_BRANDS_KEY, json!(["Bambu Lab"]));
+        assert!(persist_brands(&store, json!(["Polymaker"])).is_err());
+        assert_eq!(
+            store.get_value(PREFERRED_BRANDS_KEY),
+            Some(json!(["Bambu Lab"]))
+        );
+    }
+
+    #[test]
+    fn a_failed_save_removes_a_key_that_was_absent() {
+        let store = FakeStore {
+            fail_save: true,
+            ..Default::default()
+        };
+        assert!(persist_brands(&store, json!(["Polymaker"])).is_err());
+        assert_eq!(store.get_value(PREFERRED_BRANDS_KEY), None);
     }
 }
