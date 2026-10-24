@@ -411,45 +411,130 @@ async function driveApp(browserType, engine, baseUrl) {
     if (h3s !== 0) throw new Error(`${h3s} section h3s left unstyled`);
   });
 
+  // Preferred brands. Waits here are on the fixture's invoke log, the proof
+  // that a save reached the backend, never on the optimistic button state.
+  const PB = ".preferred-brands";
+  const pbSaves = () => callsOf("set_preferred_brands");
+  const pbPressed = async () => (await page.locator(`${PB} .pb-brand[aria-pressed='true']`).allTextContents()).join("|");
+  const pbSavedPast = (n) =>
+    page.waitForFunction((k) => window.__ipc.calls.filter((c) => c.cmd === "set_preferred_brands").length >= k, n, { timeout: 5000 });
+  const pbSettledPast = (n) =>
+    page.waitForFunction((k) => window.__ipc.settled.filter((c) => c === "set_preferred_brands").length >= k, n, { timeout: 5000 });
+  const pbStatusIs = (text) =>
+    page.waitForFunction(([sel, t]) => document.querySelector(sel)?.textContent === t, [`${PB} .pb-status`, text], { timeout: 5000 });
+  const pbSettle = () => page.evaluate(() => new Promise((r) => setTimeout(r, 60)));
+  const pbArgs = async (from) => JSON.stringify((await pbSaves()).slice(from).map((c) => c.args.brands));
+  const FAILED_SENTENCE = "[ERROR: Couldn't save your preferred brands.]";
+
   await step(run, page, "Settings lists the catalog's brands and saves a toggle inline", async () => {
-    await page.waitForSelector(".preferred-brands .pb-brand", { timeout: 15000 });
-    const labels = await page.locator(".preferred-brands .pb-brand").allTextContents();
+    await page.waitForSelector(`${PB} .pb-brand`, { timeout: 15000 });
+    const labels = await page.locator(`${PB} .pb-brand`).allTextContents();
     if (labels.join("|") !== "Bambu Lab|Polymaker|Prusament") throw new Error(`brands ${labels.join("|")}`);
-    const pressed = await page.locator(".preferred-brands .pb-brand[aria-pressed='true']").count();
-    if (pressed !== 0) throw new Error(`${pressed} brands pressed before any choice`);
-    if ((await page.locator(".preferred-brands .pb-saved").count()) !== 0) throw new Error("[SAVED] shown before a save");
-    const before = (await callsOf("set_preferred_brands")).length;
+    if ((await pbPressed()) !== "") throw new Error(`pressed before any choice: ${await pbPressed()}`);
+    // The status node is there from the start and empty, so its text is announced when it arrives.
+    const status = page.locator(`${PB} .pb-status[role='status']`);
+    if ((await status.count()) !== 1 || (await status.textContent()) !== "") throw new Error("the status line is not mounted empty");
+    const before = (await pbSaves()).length;
     await withFixtures({ set_preferred_brands: ["Polymaker"] }, async () => {
-      await page.click(".preferred-brands .pb-brand:has-text('Polymaker')");
-      await page.waitForSelector(".preferred-brands .pb-saved", { timeout: 5000 });
+      await page.click(`${PB} .pb-brand:has-text('Polymaker')`);
+      await pbSavedPast(before + 1);
+      await pbStatusIs("[SAVED]");
     });
-    const calls = await callsOf("set_preferred_brands");
-    if (calls.length !== before + 1) throw new Error(`${calls.length - before} saves for one toggle`);
-    if (JSON.stringify(calls.at(-1).args) !== JSON.stringify({ brands: ["Polymaker"] })) throw new Error(JSON.stringify(calls.at(-1).args));
-    const text = (await page.locator(".preferred-brands .pb-saved").innerText()).trim();
-    if (text !== "[SAVED]") throw new Error(`saved line reads "${text}"`);
-    const on = await page.locator(".preferred-brands .pb-brand[aria-pressed='true']").allTextContents();
-    if (on.join("|") !== "Polymaker") throw new Error(`pressed ${on.join("|")}`);
-    if ((await page.locator(".toast, [role='alert']").filter({ hasText: /saved/i }).count()) !== 0) throw new Error("a toast announced the save");
-    // Toggling it back off saves the empty list.
-    await withFixtures({ set_preferred_brands: [] }, async () => {
-      await page.click(".preferred-brands .pb-brand:has-text('Polymaker')");
-      await page.waitForFunction(() => document.querySelectorAll(".preferred-brands .pb-brand[aria-pressed='true']").length === 0, null, { timeout: 5000 });
-    });
-    if (JSON.stringify((await callsOf("set_preferred_brands")).at(-1).args) !== JSON.stringify({ brands: [] })) throw new Error("the un-toggle did not save []");
+    if ((await pbSaves()).length !== before + 1) throw new Error("not exactly one save for one toggle");
+    if ((await pbArgs(before)) !== '[["Polymaker"]]') throw new Error(await pbArgs(before));
+    if ((await pbPressed()) !== "Polymaker") throw new Error(`pressed ${await pbPressed()}`);
+    if ((await page.locator(".toast").count()) !== 0) throw new Error("a toast announced the save");
   });
 
-  await step(run, page, "a failed save shows an inline error, not [SAVED]", async () => {
-    await withFixtures({ set_preferred_brands: { __reject: "disk full" } }, async () => {
-      await page.click(".preferred-brands .pb-brand:has-text('Prusament')");
-      await page.waitForSelector(".preferred-brands .nd-state[data-kind='error']", { timeout: 5000 });
-    });
-    if ((await page.locator(".preferred-brands .pb-saved").count()) !== 0) throw new Error("[SAVED] beside an error");
-    // Put the picker back for later steps: toggle Prusament off again.
+  await step(run, page, "toggling a brand off saves the empty list", async () => {
+    const before = (await pbSaves()).length;
     await withFixtures({ set_preferred_brands: [] }, async () => {
-      await page.click(".preferred-brands .pb-brand:has-text('Prusament')");
-      await page.waitForSelector(".preferred-brands .nd-state[data-kind='error']", { state: "detached", timeout: 5000 });
+      await page.click(`${PB} .pb-brand:has-text('Polymaker')`);
+      await pbSavedPast(before + 1);
+      await pbStatusIs("[SAVED]");
     });
+    if ((await pbArgs(before)) !== "[[]]") throw new Error(await pbArgs(before));
+    if ((await pbPressed()) !== "") throw new Error(`pressed ${await pbPressed()}`);
+  });
+
+  await step(run, page, "a failed save reverts the picker and says so in a fixed sentence", async () => {
+    const before = (await pbSaves()).length;
+    await withFixtures({ set_preferred_brands: { __reject: "disk full: /secret/path" } }, async () => {
+      await page.click(`${PB} .pb-brand:has-text('Prusament')`);
+      await pbSavedPast(before + 1);
+      await pbStatusIs(FAILED_SENTENCE);
+    });
+    if ((await page.locator(`${PB} .pb-status`).getAttribute("data-kind")) !== "error") throw new Error("the failure is not marked as an error");
+    if ((await pbPressed()) !== "") throw new Error(`the failed toggle stayed pressed: ${await pbPressed()}`);
+    if ((await page.locator(PB).innerText()).includes("disk full")) throw new Error("the raw error leaked into the page");
+  });
+
+  await step(run, page, "rapid toggles settle on the last save, shown and stored agreeing", async () => {
+    const before = (await pbSaves()).length;
+    const settled = await page.evaluate(() => window.__ipc.settled.filter((c) => c === "set_preferred_brands").length);
+    const seq = [
+      { __hold: "pb-a", answer: ["Bambu Lab"] },
+      { __hold: "pb-b", answer: ["Bambu Lab", "Polymaker"] },
+    ];
+    await withFixtures({ set_preferred_brands: { __sequence: seq } }, async () => {
+      await page.click(`${PB} .pb-brand:has-text('Bambu Lab')`);
+      await page.click(`${PB} .pb-brand:has-text('Polymaker')`);
+      await pbSavedPast(before + 2);
+      if ((await pbPressed()) !== "Bambu Lab|Polymaker") throw new Error(`optimistic ${await pbPressed()}`);
+      // The newest answer arrives first; the older one arrives late and must change nothing.
+      await page.evaluate(() => window.__release("pb-b"));
+      await pbStatusIs("[SAVED]");
+      await page.evaluate(() => window.__release("pb-a"));
+      await pbSettledPast(settled + 2);
+      await pbSettle();
+    });
+    if ((await pbArgs(before)) !== '[["Bambu Lab"],["Bambu Lab","Polymaker"]]') throw new Error(await pbArgs(before));
+    if ((await pbPressed()) !== "Bambu Lab|Polymaker") throw new Error(`shown ${await pbPressed()}`);
+    if ((await page.locator(`${PB} .pb-status`).textContent()) !== "[SAVED]") throw new Error("status not [SAVED]");
+  });
+
+  await step(run, page, "a success dropped before a failed newest save is not lost", async () => {
+    // Stored: Bambu Lab, Polymaker. Toggle Prusament (saves), then Bambu Lab (fails).
+    const before = (await pbSaves()).length;
+    const settled = await page.evaluate(() => window.__ipc.settled.filter((c) => c === "set_preferred_brands").length);
+    const seq = [
+      { __hold: "pb-c", answer: ["Bambu Lab", "Polymaker", "Prusament"] },
+      { __hold: "pb-d", answer: { __reject: "nope" } },
+    ];
+    await withFixtures({ set_preferred_brands: { __sequence: seq } }, async () => {
+      await page.click(`${PB} .pb-brand:has-text('Prusament')`);
+      await page.click(`${PB} .pb-brand:has-text('Bambu Lab')`);
+      await pbSavedPast(before + 2);
+      await page.evaluate(() => window.__release("pb-d"));
+      await pbStatusIs(FAILED_SENTENCE);
+      // The newest failed while the first is still out: back to what was confirmed so far.
+      await page.waitForFunction(() => [...document.querySelectorAll(".preferred-brands .pb-brand[aria-pressed='true']")].map((b) => b.textContent).join("|") === "Bambu Lab|Polymaker", null, { timeout: 5000 });
+      await page.evaluate(() => window.__release("pb-c"));
+      await pbSettledPast(settled + 2);
+      await pbSettle();
+    });
+    // The first save did reach the store, so the picker shows it.
+    if ((await pbPressed()) !== "Bambu Lab|Polymaker|Prusament") throw new Error(`shown ${await pbPressed()}`);
+    if ((await page.locator(`${PB} .pb-status`).textContent()) !== FAILED_SENTENCE) throw new Error("the failure was forgotten");
+  });
+
+  await step(run, page, "an unreadable stored set hides the picker until a read succeeds", async () => {
+    await page.click('nav.sidebar a[href="/profiles"]');
+    await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+    const before = (await pbSaves()).length;
+    await withFixtures({ get_preferred_brands: { __reject: "ipc down" } }, async () => {
+      await page.click('nav.sidebar a[href="/settings"]');
+      await page.waitForSelector(`${PB} .pb-retry`, { timeout: 5000 });
+      if ((await page.locator(`${PB} .pb-brand`).count()) !== 0) throw new Error("the picker is offered without the stored set");
+      const msg = (await page.locator(`${PB} .nd-state[data-kind='error']`).textContent()).trim();
+      if (msg !== "[ERROR: Couldn't read your preferred brands.]") throw new Error(msg);
+    });
+    await withFixtures({ get_preferred_brands: ["Polymaker"] }, async () => {
+      await page.click(`${PB} .pb-retry`);
+      await page.waitForSelector(`${PB} .pb-brand`, { timeout: 5000 });
+    });
+    if ((await pbPressed()) !== "Polymaker") throw new Error(`pressed ${await pbPressed()}`);
+    if ((await pbSaves()).length !== before) throw new Error("a save was sent while the stored set was unknown");
   });
 
   // -- filament search and selection ---------------------------------------

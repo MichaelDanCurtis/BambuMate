@@ -145,7 +145,6 @@
 
 /* A text button beside the 3D view: opens Filament → Advise with this model. */
 .sl-suggest {
-    align-self: flex-start;
     font-family: var(--nd-font-mono);
     font-size: 11px;
     letter-spacing: 0.08em;

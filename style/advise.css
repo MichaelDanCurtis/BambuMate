@@ -54,8 +54,13 @@
 }
 
 /* The inline confirmation under the picker: colour marks the event. */
-.pb-saved {
+.pb-status[data-kind="saved"] {
     color: var(--nd-success);
+}
+
+/* Empty until a save answers; it takes no room then. */
+.pb-status:empty {
+    margin: 0;
 }
 
 /* .nd-tab is styled for links; these are buttons. */
