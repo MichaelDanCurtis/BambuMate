@@ -65,7 +65,16 @@ fn geometry_for(
         None => Ok(None),
         Some(p) => load(Path::new(p))
             .map(|v| Some(Geometry::from_view(&v)))
-            .map_err(|e| e.to_string()),
+            .map_err(|e| plain_model_error(&e)),
+    }
+}
+
+/// A fixed sentence for why a model couldn't be read. `Io` wraps OS error
+/// text, which varies by platform, so it never reaches the page.
+fn plain_model_error(e: &ModelError) -> String {
+    match e {
+        ModelError::Io(_) => "The model file couldn't be read.".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -158,6 +167,25 @@ mod tests {
     fn a_model_that_fails_to_load_becomes_a_plain_sentence() {
         let got = geometry_for(Some("/x/part.stl"), |_| Err(ModelError::Truncated));
         assert_eq!(got, Err("The STL file is cut short.".to_string()));
+    }
+
+    #[test]
+    fn os_error_text_never_reaches_the_page() {
+        let got = geometry_for(Some("/x/gone.stl"), |_| {
+            Err(ModelError::Io(
+                "No such file or directory (os error 2)".into(),
+            ))
+        });
+        assert_eq!(got, Err("The model file couldn't be read.".to_string()));
+        // The other kinds are already fixed sentences.
+        assert_eq!(
+            plain_model_error(&ModelError::NotAModel),
+            "This file isn't an STL or 3MF."
+        );
+        assert_eq!(
+            plain_model_error(&ModelError::Archive("The 3MF is damaged.")),
+            "The 3MF is damaged."
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use serde::Serialize;
 use super::needs::{with_default, Need};
 use super::products::{products_for, Product};
 use super::score::{printer_line, score, Excluded, Geometry, MaterialFit, PrinterFacts};
+use crate::printer::client::ConnectionState;
 use crate::printer::service::PrinterView;
 use crate::scraper::catalog::CatalogEntry;
 
@@ -39,8 +40,23 @@ pub struct AdviceInput<'a> {
     pub preferred: &'a [String],
 }
 
+/// The view as the advice may trust it: the AMS trays and nozzle are the
+/// last report, so they count only while the printer is connected. The
+/// model from settings is kept either way.
+fn trusted_view(view: &PrinterView) -> std::borrow::Cow<'_, PrinterView> {
+    if view.connection == ConnectionState::Connected {
+        return std::borrow::Cow::Borrowed(view);
+    }
+    let mut v = view.clone();
+    v.state = None;
+    v.slots = Vec::new();
+    std::borrow::Cow::Owned(v)
+}
+
 pub fn build_advice(input: AdviceInput<'_>) -> Advice {
-    let facts = PrinterFacts::from_view(input.view);
+    let view = trusted_view(input.view);
+    let view = view.as_ref();
+    let facts = PrinterFacts::from_view(view);
     let (geometry, model_error) = match input.geometry {
         Ok(g) => (g, None),
         Err(e) => (None, Some(e)),
@@ -50,12 +66,7 @@ pub fn build_advice(input: AdviceInput<'_>) -> Advice {
         .fits
         .into_iter()
         .map(|fit| {
-            let products = products_for(
-                fit.material,
-                &input.view.slots,
-                input.catalog,
-                input.preferred,
-            );
+            let products = products_for(fit.material, &view.slots, input.catalog, input.preferred);
             AdvisedFit { fit, products }
         })
         .collect();
@@ -63,7 +74,7 @@ pub fn build_advice(input: AdviceInput<'_>) -> Advice {
         needs: with_default(input.needs),
         fits,
         ruled_out: scored.ruled_out,
-        printer_line: printer_line(&facts, input.view.configured),
+        printer_line: printer_line(&facts, view.configured),
         model_error,
         catalog_empty: input.catalog.is_empty(),
     }
@@ -181,6 +192,38 @@ mod tests {
         assert_eq!(v["fits"][0]["reasons"][0]["verdict"], "met");
         assert!(v["fits"][0]["products"].is_array());
         assert_eq!(v["catalog_empty"], true);
+    }
+
+    #[test]
+    fn a_disconnected_printer_keeps_its_model_but_not_its_ams_or_nozzle() {
+        let slots = vec![slot("A2", "PLA", "PLA Basic", true)];
+        let mut view = view_with("A1", "stainless_steel", slots);
+        let catalog = vec![entry("Polymaker", "PLA", "PolyLite PLA")];
+        let ruled =
+            |a: &Advice| -> Vec<MaterialId> { a.ruled_out.iter().map(|e| e.material).collect() };
+
+        let connected = build_advice(input(&[Need::EasyPrint], &view, &catalog));
+        let pla = &connected.fits[0];
+        assert_eq!(pla.products[0].status, ProductStatus::Loaded);
+        assert!(ruled(&connected).contains(&MaterialId::PlaCf));
+
+        view.connection = ConnectionState::Disconnected;
+        let a = build_advice(input(&[Need::EasyPrint], &view, &catalog));
+        assert_eq!(a.printer_line, None);
+        // No stale "Loaded in A2".
+        for f in &a.fits {
+            assert!(f.products.iter().all(|p| p.status != ProductStatus::Loaded));
+        }
+        let pla = a
+            .fits
+            .iter()
+            .find(|f| f.fit.material == MaterialId::Pla)
+            .unwrap();
+        assert_eq!(pla.products[0].brand, "Polymaker");
+        // The nozzle is unknown again, so abrasive materials are noted, not ruled out...
+        assert!(!ruled(&a).contains(&MaterialId::PlaCf));
+        // ...but the model from settings still says open, so ABS stays out.
+        assert!(ruled(&a).contains(&MaterialId::Abs));
     }
 
     #[test]
