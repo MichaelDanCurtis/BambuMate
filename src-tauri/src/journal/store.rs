@@ -148,9 +148,14 @@ fn entry_row(r: &Row) -> rusqlite::Result<PrintEntry> {
     })
 }
 
-/// A stored photo file name: one plain path component.
+/// A stored photo file name: one plain path component. Separators, `:` (a
+/// drive prefix on Windows), NUL and a leading dot are all refused, so a
+/// joined name can never leave the entry's folder.
 fn is_plain_name(name: &str) -> bool {
-    !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\'])
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\', ':', '\0'])
+        && Path::new(name).components().count() == 1
 }
 
 fn remove_file_quietly(path: &Path) {
@@ -184,6 +189,8 @@ pub fn month_bounds<Tz: TimeZone>(now: &DateTime<Tz>) -> (i64, i64) {
             .earliest()
             .map(|t| t.timestamp())
     };
+    // A local midnight that doesn't exist (a DST gap at 00:00) falls back to
+    // `now`, which is rare and only narrows the month's start.
     (
         first(year, month).unwrap_or_else(|| now.timestamp()),
         first(next_year, next_month).unwrap_or(i64::MAX),
@@ -219,6 +226,13 @@ impl JournalStore {
             }
             v => return Err(read_err(format!("unexpected schema version {v}"))),
         }
+        // WAL lets the recorder thread's writes and the command handlers'
+        // reads proceed without blocking each other. Set after the version
+        // check so a newer journal is refused without being touched.
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(read_err)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(read_err)?;
         Ok(Self {
             conn,
             root: paths.root.clone(),
@@ -277,8 +291,8 @@ impl JournalStore {
 
     /// Records a tray once; `false` when it was already recorded.
     pub fn add_tray(&self, id: i64, tray: &TrayUse, now: i64) -> Result<bool, String> {
-        let added = self
-            .conn
+        let tx = self.conn.unchecked_transaction().map_err(save_err)?;
+        let added = tx
             .execute(
                 "INSERT OR IGNORE INTO print_trays \
                  (print_id, ams_id, tray_id, label, tray_type, color, brand, seen_order) \
@@ -298,11 +312,17 @@ impl JournalStore {
         if added > 0 {
             self.touch(id, now)?;
         }
+        tx.commit().map_err(save_err)?;
         Ok(added > 0)
     }
 
-    /// Closes an open entry; `false` when it was not open.
+    /// Closes an open entry; `false` when it was not open. `Printing` is not
+    /// an end: it is refused (also `false`) and nothing is written.
     pub fn end(&self, id: i64, end: &PrintEnd, now: i64) -> Result<bool, String> {
+        if end.outcome == Outcome::Printing {
+            tracing::warn!("print journal: refused to end entry {id} as still printing");
+            return Ok(false);
+        }
         let hms = serde_json::to_string(&end.hms).map_err(save_err)?;
         let changed = self
             .conn
@@ -324,7 +344,9 @@ impl JournalStore {
 
     /// Saves the slice snapshot, and the plate thumbnail as a file when
     /// there is one. A thumbnail that can't be written only loses the
-    /// thumbnail.
+    /// thumbnail. An entry that isn't there (any more) gets [`GONE`] and no
+    /// thumbnail file: the row is checked before the file is written, and the
+    /// file is removed again if the row went away or the update failed.
     pub fn set_slice(
         &self,
         id: i64,
@@ -332,7 +354,11 @@ impl JournalStore {
         thumbnail_png: Option<&[u8]>,
         now: i64,
     ) -> Result<(), String> {
+        if !self.exists(id)? {
+            return Err(GONE.to_string());
+        }
         let mut slice = slice.clone();
+        let mut thumbnail_written = None;
         slice.has_thumbnail = match thumbnail_png {
             Some(png) => {
                 let path = self.thumbnail_path(id);
@@ -342,7 +368,10 @@ impl JournalStore {
                     .transpose()
                     .and_then(|_| std::fs::write(&path, png));
                 match written {
-                    Ok(()) => true,
+                    Ok(()) => {
+                        thumbnail_written = Some(path);
+                        true
+                    }
                     Err(e) => {
                         tracing::warn!("print journal: thumbnail not saved: {e}");
                         false
@@ -351,14 +380,28 @@ impl JournalStore {
             }
             None => false,
         };
-        let json = serde_json::to_string(&slice).map_err(save_err)?;
-        self.conn
-            .execute(
-                "UPDATE prints SET slice_json = ?2, updated_at = ?3 WHERE id = ?1",
-                params![id, json, now],
-            )
-            .map_err(save_err)?;
-        Ok(())
+        let saved = serde_json::to_string(&slice)
+            .map_err(save_err)
+            .and_then(|json| {
+                self.conn
+                    .execute(
+                        "UPDATE prints SET slice_json = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![id, json, now],
+                    )
+                    .map_err(save_err)
+            });
+        match saved {
+            Ok(changed) if changed > 0 => Ok(()),
+            outcome => {
+                if let Some(path) = thumbnail_written {
+                    remove_file_quietly(&path);
+                }
+                match outcome {
+                    Ok(_) => Err(GONE.to_string()),
+                    Err(e) => Err(e),
+                }
+            }
+        }
     }
 
     /// Entries still printing, newest first.
@@ -477,13 +520,25 @@ impl JournalStore {
         entries.into_iter().map(|e| self.fill(e)).collect()
     }
 
-    /// Applies an annotation change; `None` when the entry is gone.
+    /// Applies an annotation change; `None` when the entry is gone. A change
+    /// that alters nothing writes nothing and leaves `updated_at` alone.
     pub fn update(
         &self,
         id: i64,
         update: &EntryUpdate,
         now: i64,
     ) -> Result<Option<PrintEntry>, String> {
+        let Some(current) = self.get(id)? else {
+            return Ok(None);
+        };
+        let verdict_changes = update
+            .verdict
+            .is_some_and(|choice| choice.verdict() != current.verdict);
+        let tags_change = update.tags.as_ref().is_some_and(|t| *t != current.tags);
+        let notes_change = update.notes.as_ref().is_some_and(|n| *n != current.notes);
+        if !(verdict_changes || tags_change || notes_change) {
+            return Ok(Some(current));
+        }
         let tx = self.conn.unchecked_transaction().map_err(save_err)?;
         let found = tx
             .execute(
@@ -594,21 +649,29 @@ impl JournalStore {
                 tracing::warn!("print journal: photo not written: {e}");
                 PHOTO_FAILED.to_string()
             })?;
-        let inserted = self.conn.execute(
-            "INSERT INTO print_photos (print_id, file_name, added_at) VALUES (?1, ?2, ?3)",
-            params![id, file_name, now],
-        );
-        if let Err(e) = inserted {
-            remove_file_quietly(&path);
-            return Err(save_err(e));
+        let saved = (|| {
+            let tx = self.conn.unchecked_transaction().map_err(save_err)?;
+            tx.execute(
+                "INSERT INTO print_photos (print_id, file_name, added_at) VALUES (?1, ?2, ?3)",
+                params![id, file_name, now],
+            )
+            .map_err(save_err)?;
+            let photo_id = tx.last_insert_rowid();
+            self.touch(id, now)?;
+            tx.commit().map_err(save_err)?;
+            Ok(photo_id)
+        })();
+        match saved {
+            Ok(photo_id) => Ok(Photo {
+                id: photo_id,
+                file_name,
+                added_at: now,
+            }),
+            Err(e) => {
+                remove_file_quietly(&path);
+                Err(e)
+            }
         }
-        let photo_id = self.conn.last_insert_rowid();
-        self.touch(id, now)?;
-        Ok(Photo {
-            id: photo_id,
-            file_name,
-            added_at: now,
-        })
     }
 
     /// The file of photo `photo_id` of entry `id`; `None` when it isn't
@@ -630,24 +693,29 @@ impl JournalStore {
 
     pub fn remove_photo(&self, id: i64, photo_id: i64, now: i64) -> Result<bool, String> {
         let path = self.photo_path(id, photo_id)?;
-        let removed = self
-            .conn
+        let tx = self.conn.unchecked_transaction().map_err(save_err)?;
+        let removed = tx
             .execute(
                 "DELETE FROM print_photos WHERE id = ?1 AND print_id = ?2",
                 [photo_id, id],
             )
             .map_err(save_err)?;
         if removed > 0 {
+            self.touch(id, now)?;
+        }
+        tx.commit().map_err(save_err)?;
+        if removed > 0 {
             if let Some(p) = path {
                 remove_file_quietly(&p);
             }
-            self.touch(id, now)?;
         }
         Ok(removed > 0)
     }
 
     /// Removes the entry, its trays, photos and analysis links, and its
-    /// photo and thumbnail files.
+    /// photo and thumbnail files. The row goes first and its deletion stands
+    /// even if a file can't be removed afterwards: that is logged as a
+    /// warning, and `true` is still returned.
     pub fn delete(&self, id: i64) -> Result<bool, String> {
         let removed = self
             .conn
@@ -662,14 +730,15 @@ impl JournalStore {
         if !self.exists(id)? {
             return Err(GONE.to_string());
         }
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO print_analyses (print_id, session_id, created_at) \
-                 VALUES (?1, ?2, ?3)",
-                params![id, session_id, now],
-            )
-            .map_err(save_err)?;
-        self.touch(id, now)
+        let tx = self.conn.unchecked_transaction().map_err(save_err)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO print_analyses (print_id, session_id, created_at) \
+             VALUES (?1, ?2, ?3)",
+            params![id, session_id, now],
+        )
+        .map_err(save_err)?;
+        self.touch(id, now)?;
+        tx.commit().map_err(save_err)
     }
 }
 
@@ -1044,5 +1113,197 @@ mod tests {
         s.link_analysis(id, 42, 4).unwrap();
         assert_eq!(s.get(id).unwrap().unwrap().analyses, vec![41, 42]);
         assert_eq!(s.link_analysis(999, 1, 5).err().as_deref(), Some(GONE));
+    }
+    fn count(paths: &JournalPaths, table: &str) -> i64 {
+        Connection::open(&paths.db)
+            .unwrap()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_slice_for_a_missing_entry_is_refused_and_leaves_no_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let s = JournalStore::open(&paths).unwrap();
+        let png = Some(&b"\x89PNG\r\n\x1a\nthumb"[..]);
+        assert_eq!(
+            s.set_slice(999, &slice(), png, 1).err().as_deref(),
+            Some(GONE)
+        );
+        assert!(!s.thumbnail_path(999).exists());
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        s.delete(id).unwrap();
+        assert_eq!(
+            s.set_slice(id, &slice(), png, 2).err().as_deref(),
+            Some(GONE)
+        );
+        assert!(
+            !s.thumbnail_path(id).exists(),
+            "a deleted entry gets no thumbnail"
+        );
+        assert!(!paths.root.join("thumbs").join(format!("{id}.png")).exists());
+    }
+
+    #[test]
+    fn the_search_treats_percent_underscore_and_backslash_literally() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        for (i, name) in [
+            "Plate 50% infill",
+            "Plate 50 infill",
+            "snake_case",
+            "snakeXcase",
+            "back\\slash",
+            "backXslash",
+        ]
+        .iter()
+        .enumerate()
+        {
+            // No file name: the default one contains an underscore.
+            let new = NewPrint {
+                gcode_file: None,
+                ..new_print(name, name, i as i64)
+            };
+            s.start(&new, i as i64).unwrap();
+        }
+        assert_eq!(names(&s, FilterKind::All, "50%"), ["Plate 50% infill"]);
+        assert_eq!(names(&s, FilterKind::All, "%"), ["Plate 50% infill"]);
+        assert_eq!(names(&s, FilterKind::All, "snake_case"), ["snake_case"]);
+        assert_eq!(names(&s, FilterKind::All, "_"), ["snake_case"]);
+        assert_eq!(names(&s, FilterKind::All, "k\\s"), ["back\\slash"]);
+        assert_eq!(names(&s, FilterKind::All, "\\"), ["back\\slash"]);
+    }
+
+    #[test]
+    fn foreign_keys_are_on_and_deleting_a_print_cascades() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let s = JournalStore::open(&paths).unwrap();
+        let on: i64 = s
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1, "foreign keys are enforced on the connection");
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        let keep = s.start(&new_print("b", "gear", 2), 2).unwrap();
+        for who in [id, keep] {
+            s.add_tray(who, &tray(0, 1, "A2", "PLA", "Basic"), 3)
+                .unwrap();
+            s.add_photo(who, b"\xFF\xD8\xFFjpeg", 3).unwrap();
+            s.link_analysis(who, 7, 3).unwrap();
+        }
+        for table in ["print_trays", "print_photos", "print_analyses"] {
+            assert_eq!(count(&paths, table), 2, "{table} before");
+        }
+        assert!(s.delete(id).unwrap());
+        for table in ["print_trays", "print_photos", "print_analyses"] {
+            assert_eq!(
+                count(&paths, table),
+                1,
+                "{table} keeps only the other entry's rows"
+            );
+        }
+        assert!(
+            s.add_tray(id, &tray(0, 1, "A2", "PLA", ""), 4).is_err(),
+            "no orphan rows"
+        );
+    }
+
+    #[test]
+    fn printing_is_not_an_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        assert!(!s.end(id, &ended(Outcome::Printing, 5), 5).unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(
+            (e.outcome, e.ended_at, e.updated_at),
+            (Outcome::Printing, None, 1)
+        );
+        assert_eq!(s.open_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn photo_names_must_be_one_plain_component() {
+        for ok in ["0123abcd.jpg", "a b.jpg"] {
+            assert!(is_plain_name(ok), "{ok}");
+        }
+        for bad in [
+            "", ".hidden", "..", "a/b.jpg", "a\\b.jpg", "C:x.jpg", "x:y", "a\0b.jpg",
+        ] {
+            assert!(!is_plain_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_update_that_changes_nothing_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        let same = |now| {
+            s.update(id, &EntryUpdate::default(), now)
+                .unwrap()
+                .unwrap()
+                .updated_at
+        };
+        assert_eq!(same(5), 1, "an empty update");
+        let set = EntryUpdate {
+            verdict: Some(VerdictChoice::Good),
+            tags: Some(vec!["warping".into()]),
+            notes: Some("n".into()),
+        };
+        assert_eq!(s.update(id, &set, 6).unwrap().unwrap().updated_at, 6);
+        assert_eq!(
+            s.update(id, &set, 7).unwrap().unwrap().updated_at,
+            6,
+            "the same values"
+        );
+        let clear = EntryUpdate {
+            verdict: Some(VerdictChoice::Clear),
+            ..Default::default()
+        };
+        assert_eq!(s.update(id, &clear, 8).unwrap().unwrap().updated_at, 8);
+        assert_eq!(
+            s.update(id, &clear, 9).unwrap().unwrap().updated_at,
+            8,
+            "already clear"
+        );
+    }
+
+    #[test]
+    fn two_connections_can_write_in_wal_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let first = JournalStore::open(&paths).unwrap();
+        let mode: String = first
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        first.start(&new_print("a", "one", 1), 1).unwrap();
+        let writer_paths = paths.clone();
+        let writer = std::thread::spawn(move || {
+            let second = JournalStore::open(&writer_paths).unwrap();
+            for i in 0..20 {
+                second
+                    .start(
+                        &new_print(&format!("w{i}"), "from the thread", 10 + i),
+                        10 + i,
+                    )
+                    .unwrap();
+            }
+        });
+        for i in 0..20 {
+            first
+                .start(
+                    &new_print(&format!("m{i}"), "from the main thread", 100 + i),
+                    100 + i,
+                )
+                .unwrap();
+            first.list(&JournalFilter::default()).unwrap();
+        }
+        writer.join().unwrap();
+        assert_eq!(first.list(&JournalFilter::default()).unwrap().len(), 41);
     }
 }
