@@ -120,6 +120,12 @@ fn journal_param(raw: Option<&str>) -> Option<i64> {
         .filter(|id| *id > 0)
 }
 
+/// Whether a field still holds what it did when a load began. A late
+/// prefill only fills fields the user hasn't touched since.
+fn untouched<T: PartialEq>(at_start: &T, now: Option<T>) -> bool {
+    now.as_ref() == Some(at_start)
+}
+
 /// The path of the profile named like a slice's filament preset. Only an
 /// exact, single match counts: with two of the same name there is no telling
 /// which the print used, so none is chosen.
@@ -164,7 +170,11 @@ pub fn PrintAnalysisPage() -> impl IntoView {
     // analyses the page has dropped.
     let journal_link = RwSignal::new(None::<(i64, String)>);
     let journal_note = RwSignal::new(None::<(StateKind, String)>);
-    let pending_preset = RwSignal::new(None::<String>);
+    // The filament preset to choose once the profile list is in, and the
+    // profile held when the load began (the user's pick wins over it).
+    let pending_preset = RwSignal::new(None::<(String, Option<String>)>);
+    // The photo of the analysis in flight, so "Try Again" can keep it.
+    let retry_photo = RwSignal::new(None::<String>);
     let journal_gen = RwSignal::new(0u32);
     let analyze_gen = RwSignal::new(0u32);
 
@@ -186,6 +196,7 @@ pub fn PrintAnalysisPage() -> impl IntoView {
             let material = material_override.get();
             let path = profile_path.get();
             let journal = journal_link.with_untracked(|j| j.as_ref().map(|(id, _)| *id));
+            retry_photo.set(Some(base64.clone()));
             let started = analyze_gen.get_untracked();
             spawn_local(async move {
                 let result = commands::analyze_print(base64, path, material, journal).await;
@@ -197,6 +208,7 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                     Ok(response) => {
                         // Store session ID for apply flow
                         set_current_session_id.try_set(response.session_id);
+                        retry_photo.try_set(None);
                         set_state.try_set(AnalysisState::Complete(response));
                     }
                     Err(e) => {
@@ -235,8 +247,21 @@ pub fn PrintAnalysisPage() -> impl IntoView {
         journal_link.set(None);
         journal_note.set(None);
         pending_preset.set(None);
+        retry_photo.set(None);
     };
     let on_reset = move |_| clear_photo();
+    // After a failed analysis, a photo that came from a journal entry stays,
+    // with its link; any other page starts over as before.
+    let on_retry = move |_| {
+        let kept = journal_link
+            .with_untracked(Option::is_some)
+            .then(|| retry_photo.get_untracked())
+            .flatten();
+        match kept {
+            Some(base64) => set_state.set(AnalysisState::Ready(base64)),
+            None => clear_photo(),
+        }
+    };
 
     // `?journal=<id>` opens that entry, on load and whenever a link changes
     // it. Without the parameter the page is untouched.
@@ -258,6 +283,10 @@ pub fn PrintAnalysisPage() -> impl IntoView {
         journal_link.set(None);
         journal_note.set(None);
         pending_preset.set(None);
+        // What the user holds now; a field changed since is left alone.
+        let start_model = model.get_untracked();
+        let start_material = material_override.get_untracked();
+        let start_profile = profile_path.get_untracked();
         let Some(id) = id else {
             return id;
         };
@@ -284,12 +313,16 @@ pub fn PrintAnalysisPage() -> impl IntoView {
             let prefill = analyze_prefill(&entry);
             journal_link.try_set(Some((id, entry.name.clone())));
             if let Some(path) = prefill.model_path {
-                model.try_set(Some(path));
+                if untouched(&start_model, model.try_get_untracked()) {
+                    model.try_set(Some(path));
+                }
             }
             if let Some(material) = prefill.material {
-                set_material_override.try_set(Some(material.to_string()));
+                if untouched(&start_material, material_override.try_get_untracked()) {
+                    set_material_override.try_set(Some(material.to_string()));
+                }
             }
-            pending_preset.try_set(prefill.filament_preset);
+            pending_preset.try_set(prefill.filament_preset.map(|name| (name, start_profile)));
             let Some(photo_id) = prefill.photo_id else {
                 return;
             };
@@ -310,7 +343,7 @@ pub fn PrintAnalysisPage() -> impl IntoView {
     });
     // The entry's filament preset is chosen once the profile list is in.
     Effect::new(move |_| {
-        let Some(name) = pending_preset.get() else {
+        let Some((name, at_start)) = pending_preset.get() else {
             return;
         };
         if profiles_loading.get() {
@@ -318,7 +351,9 @@ pub fn PrintAnalysisPage() -> impl IntoView {
         }
         let found = profiles.with(|list| preset_profile(list, &name));
         if let Some(path) = found {
-            set_profile_path.set(Some(path));
+            if untouched(&at_start, profile_path.try_get_untracked()) {
+                set_profile_path.set(Some(path));
+            }
         }
         pending_preset.set(None);
     });
@@ -621,7 +656,7 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                         view! {
                             <div class="error-state">
                                 <StateText kind=StateKind::Error message=msg />
-                                <button class="btn btn-secondary" on:click=on_reset>
+                                <button class="btn btn-secondary" on:click=on_retry>
                                     "Try Again"
                                 </button>
                             </div>
@@ -893,6 +928,19 @@ mod tests {
         assert_eq!(journal_param(Some("0")), None);
         assert_eq!(journal_param(Some("-3")), None);
         assert_eq!(journal_param(Some("2.5")), None);
+    }
+
+    #[test]
+    fn a_late_prefill_only_fills_a_field_nobody_touched() {
+        assert!(untouched(&None::<String>, Some(None)));
+        assert!(!untouched(&None::<String>, Some(Some("PETG".to_string()))));
+        assert!(untouched(
+            &Some("PLA".to_string()),
+            Some(Some("PLA".to_string()))
+        ));
+        assert!(!untouched(&Some("PLA".to_string()), Some(None)));
+        // A page that is gone isn't filled.
+        assert!(!untouched(&None::<String>, None));
     }
 
     #[test]

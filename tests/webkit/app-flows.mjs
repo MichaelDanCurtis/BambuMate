@@ -2973,6 +2973,52 @@ async function driveApp(browserType, engine, baseUrl) {
     });
   });
 
+  await step(run, page, "Try Again after a failed analysis keeps the journal photo and link", async () => {
+    await page.click('nav.sidebar a[href="/"]');
+    await goTo("/analysis?journal=2", "/analysis");
+    await page.waitForSelector(".analysis-preview img.preview-image", { timeout: 15000 });
+    await withFixtures({ analyze_print: { __reject: "The analysis service is unavailable." } }, async () => {
+      const before = await countOf("analyze_print");
+      await page.click("text=Analyze Print");
+      await pastCalls("analyze_print", before);
+      await page.waitForSelector(".error-state", { timeout: 5000 });
+    });
+    await page.click("text=Try Again");
+    await page.waitForSelector(".analysis-preview img.preview-image", { timeout: 5000 });
+    if (!(await page.locator('.an-journal a[href="/printer/journal?entry=2"]').count())) throw new Error("the journal link was dropped");
+    const req = await analyzeNow();
+    if (req.journal_id !== 2) throw new Error(`journal_id ${req.journal_id} after a retry`);
+    if (!req.image_base64) throw new Error("the retry sent no photo");
+    // Choosing a different photo is still an explicit reset.
+    await page.click("text=Analyze Another Photo");
+    await page.waitForSelector(".drop-zone", { timeout: 5000 });
+    if (await page.locator(".an-journal").count()) throw new Error("the link outlived a reset");
+  });
+
+  await step(run, page, "an entry's prefill doesn't overwrite what the user already chose", async () => {
+    const other = { ...JOURNAL_FINISHED, photos: [], slice: { ...JOURNAL_FINISHED.slice, model_path: "/Users/runner/models/other.stl" } };
+    await withFixtures({ journal_get: { __hold: "an-journal-late", answer: other } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await goTo("/analysis?journal=2", "/analysis");
+      // The user gets on while the entry is still being read.
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+      await page.waitForSelector(".profile-select option:nth-child(2)", { state: "attached", timeout: 10000 });
+      await page.selectOption(".material-selector select", "PETG");
+      await page.selectOption(".profile-select", FIXTURES.list_profiles[0].path);
+      await page.click(".an-pick-model");
+      await page.waitForSelector(".an-model-name", { timeout: 5000 });
+      const answered = await settledCount("journal_get");
+      await page.evaluate(() => window.__release("an-journal-late"));
+      await page.waitForFunction((n) => window.__ipc.settled.filter((x) => x === "journal_get").length > n, answered, { timeout: 5000 });
+      await page.waitForSelector(".an-journal a", { timeout: 5000 });
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await page.locator(".an-model-name").innerText()).trim() !== "cube.stl") throw new Error("the entry's model replaced the user's");
+      if ((await page.locator(".material-selector select").inputValue()) !== "PETG") throw new Error("the entry's material replaced the user's");
+      if ((await page.locator(".profile-select").inputValue()) !== FIXTURES.list_profiles[0].path) throw new Error("the entry's preset replaced the user's");
+    });
+  });
+
   // -- settings --------------------------------------------------------------
   await step(run, page, "navigate to Settings", async () => {
     await page.click('a[href="/settings"]');
