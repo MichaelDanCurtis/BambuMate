@@ -252,9 +252,13 @@
     color: var(--nd-text-secondary);
 }
 
-/* The detail opens under the row's line, inside its hairlines. */
+/* The detail opens under the row's line, inside its hairlines: padding
+   only, no card. */
 .jr-detail {
-    padding: 0 0 var(--nd-space-md);
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-lg);
+    padding: 0 0 var(--nd-space-lg);
 }
 
 .jr-facts {
@@ -280,6 +284,142 @@
     margin: 0;
     color: var(--nd-text-primary);
     overflow-wrap: anywhere;
+}
+
+/* Each part: a label, its controls, then a status line that is empty
+   (and takes no room) until a save answers. */
+.jr-section {
+    min-width: 0;
+}
+
+.jr-section > .nd-label {
+    display: block;
+    margin: 0 0 var(--nd-space-sm);
+}
+
+.jr-rate > .nd-label + .jr-verdicts {
+    margin-bottom: var(--nd-space-md);
+}
+
+.jr-status {
+    margin: 0;
+}
+
+.jr-status:not(:empty) {
+    margin-top: var(--nd-space-sm);
+}
+
+.jr-status[data-kind="saved"] {
+    color: var(--nd-success);
+}
+
+.jr-verdicts,
+.jr-tags,
+.jr-photo-strip,
+.jr-photo-actions,
+.jr-actions,
+.jr-confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--nd-space-sm);
+}
+
+/* .nd-tab is styled for links; these are buttons. */
+.jr-verdict,
+.jr-tag {
+    background-color: transparent;
+    cursor: pointer;
+}
+
+.jr-verdict[aria-pressed="true"],
+.jr-tag[aria-pressed="true"] {
+    background-color: var(--nd-text-display);
+    border-color: var(--nd-text-display);
+    color: var(--nd-black);
+}
+
+.jr-notes {
+    display: block;
+    width: 100%;
+    max-width: 640px;
+    box-sizing: border-box;
+    padding: var(--nd-space-sm) var(--nd-space-md);
+    border: 1px solid var(--nd-border-visible);
+    border-radius: var(--nd-radius-input);
+    background-color: var(--nd-surface);
+    color: var(--nd-text-primary);
+    font-family: var(--nd-font-body);
+    font-size: 14px;
+    line-height: 1.5;
+    resize: vertical;
+}
+
+.jr-notes:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+/* The whole part takes a dropped photo; a dashed outline marks it while a
+   file is dragged over, without moving anything. */
+.jr-photos.jr-drop-over {
+    outline: 1px dashed var(--nd-text-secondary);
+    outline-offset: var(--nd-space-xs);
+    border-radius: var(--nd-radius-input);
+}
+
+.jr-photo-strip {
+    align-items: flex-start;
+    margin-bottom: var(--nd-space-sm);
+}
+
+.jr-photo-strip:empty {
+    display: none;
+}
+
+.jr-photo {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--nd-space-xs);
+    margin: 0;
+}
+
+.jr-photo img,
+.jr-photo-missing {
+    display: block;
+    width: 96px;
+    height: 96px;
+    box-sizing: border-box;
+    border-radius: var(--nd-radius-input);
+    object-fit: cover;
+}
+
+.jr-photo-missing {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--nd-space-xs);
+    background-color: var(--nd-surface-raised);
+    font-size: 11px;
+    line-height: 1.2;
+    text-align: center;
+    color: var(--nd-text-secondary);
+}
+
+/* A quiet control under each thumbnail, smaller than the page's buttons. */
+.jr-photo-remove {
+    padding: 2px var(--nd-space-sm);
+    font-size: 11px;
+}
+
+.jr-photo-hint {
+    font-size: 12px;
+    color: var(--nd-text-secondary);
+}
+
+.jr-confirm span {
+    color: var(--nd-text-primary);
 }
 
 @media (max-width: 720px) {

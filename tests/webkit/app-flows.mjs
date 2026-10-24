@@ -2419,6 +2419,332 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(`${JR} .jr-no-printer`, { state: "detached", timeout: 5000 });
   });
 
+  // -- the entry detail: verdict, tags, notes, photos, Analyze, delete ------
+  const journalDetail = (id) => `${journalRow(id)} .jr-detail`;
+  const expand = async (id) => {
+    if (!(await page.locator(journalDetail(id)).count())) await page.click(`${journalRow(id)} .jr-row-main`);
+    await page.waitForSelector(journalDetail(id), { timeout: 5000 });
+  };
+  const collapse = async (id) => {
+    if (await page.locator(journalDetail(id)).count()) await page.click(`${journalRow(id)} .jr-row-main`);
+    await page.waitForSelector(journalDetail(id), { state: "detached", timeout: 5000 });
+  };
+  // The status line of one part of the open detail.
+  const statusIs = (scope, text) =>
+    page.waitForFunction(([s, t]) => document.querySelector(`${s} .jr-status`)?.textContent === t, [scope, text], { timeout: 5000 });
+  const pressedTags = (id) =>
+    page.locator(`${journalDetail(id)} .jr-tag[aria-pressed="true"]`).evaluateAll((bs) => bs.map((b) => b.dataset.tag).join("|"));
+  const pngBase64 = png.toString("base64");
+  // Hands files to the page the way a drop or a pick does, built in the page
+  // so a 25 MB file doesn't cross the wire.
+  const dropFiles = (selector, files) =>
+    page.evaluate(([sel, list]) => {
+      const dt = new DataTransfer();
+      for (const f of list) {
+        const bytes = f.base64 ? Uint8Array.from(atob(f.base64), (c) => c.charCodeAt(0)) : new Uint8Array(f.size);
+        dt.items.add(new File([bytes], f.name, { type: f.type }));
+      }
+      const target = document.querySelector(sel);
+      target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: dt }));
+      target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+    }, [selector, files]);
+  const pickFiles = (selector, files) =>
+    page.evaluate(([sel, list]) => {
+      const dt = new DataTransfer();
+      for (const f of list) dt.items.add(new File([new Uint8Array(f.size)], f.name, { type: f.type }));
+      const input = document.querySelector(sel);
+      input.files = dt.files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }, [selector, files]);
+  const SAVE_FAILED = "The print journal couldn't be saved.";
+
+  await step(run, page, "an entry expands in place with its facts", async () => {
+    await openJournal();
+    const path = await page.evaluate(() => location.pathname);
+    await expand(1);
+    if ((await page.locator(`${journalRow(1)} .jr-row-main`).getAttribute("aria-expanded")) !== "true") throw new Error("not marked expanded");
+    if ((await page.locator(journalDetail(1)).getAttribute("role")) !== "region") throw new Error("the detail is not a region");
+    if (!(await page.locator(journalDetail(1)).getAttribute("aria-label"))) throw new Error("the region has no name");
+    if (await page.locator('[role="dialog"]').count()) throw new Error("the detail opened a dialog");
+    if ((await page.evaluate(() => location.pathname)) !== path) throw new Error("the detail changed the page");
+    const facts = (await page.locator(`${journalDetail(1)} dl.jr-facts`).textContent()).replace(/\s+/g, " ");
+    for (const want of ["(approximate)", "0300-400C", "0300-0100-0001-0007", "H2D", "Plate"]) {
+      if (!facts.includes(want)) throw new Error(`facts lack ${want}: ${facts}`);
+    }
+    if (facts.includes("0300_0100")) throw new Error(`an HMS code kept its underscores: ${facts}`);
+    if (facts.includes("Slice estimate")) throw new Error("an estimate without a linked slice");
+    await expand(2);
+    if (await page.locator(journalDetail(1)).count()) throw new Error("two entries open at once");
+    const linked = (await page.locator(`${journalDetail(2)} .jr-facts`).textContent()).replace(/\s+/g, " ");
+    if (!linked.includes("Slice estimate") || !linked.includes("14 m · 3.7 g")) throw new Error(`facts: ${linked}`);
+    const pressed = await page.locator(`${journalDetail(2)} .jr-verdict`).evaluateAll((bs) => bs.map((b) => `${b.textContent}:${b.getAttribute("aria-pressed")}`).join("|"));
+    if (pressed !== "Good:false|Usable:false|Failed:false") throw new Error(`verdict pills: ${pressed}`);
+  });
+
+  await step(run, page, "the verdict and issue tags save, and a failed save puts them back", async () => {
+    await expand(1);
+    const rate = `${journalDetail(1)} .jr-rate`;
+    await withFixtures({ journal_update: { ...JOURNAL_FAILED, verdict: "usable" } }, async () => {
+      const before = await countOf("journal_update");
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="usable"]`);
+      await pastCalls("journal_update", before);
+      const args = (await callsOf("journal_update")).at(-1).args;
+      if (args.id !== 1 || !sameArgs(args.update, { verdict: "usable" })) throw new Error(JSON.stringify(args));
+      await page.waitForSelector(`${journalDetail(1)} .jr-verdict[data-verdict="usable"][aria-pressed="true"]`, { timeout: 5000 });
+      if ((await page.locator(`${journalDetail(1)} .jr-verdict[data-verdict="failed"]`).getAttribute("aria-pressed")) !== "false") throw new Error("two verdicts pressed");
+      await statusIs(rate, "[SAVED]");
+      // The row's own line follows the saved verdict.
+      await page.waitForFunction(() => document.querySelector('.journal-page .jr-row[data-entry="1"] .jr-verdict-value')?.textContent === "Usable", null, { timeout: 5000 });
+    });
+    await withFixtures({ journal_update: { ...JOURNAL_FAILED, verdict: "usable", tags: ["warping", "stringing"] } }, async () => {
+      const before = await countOf("journal_update");
+      await page.click(`${journalDetail(1)} .jr-tag[data-tag="stringing"]`);
+      await pastCalls("journal_update", before);
+      const args = (await callsOf("journal_update")).at(-1).args;
+      if (!sameArgs(args.update, { tags: ["warping", "stringing"] })) throw new Error(JSON.stringify(args.update));
+      await page.waitForSelector(`${journalDetail(1)} .jr-tag[data-tag="stringing"][aria-pressed="true"]`, { timeout: 5000 });
+      const label = (await page.locator(`${journalDetail(1)} .jr-tag[data-tag="stringing"]`).textContent()).trim();
+      if (label !== "Stringing/Oozing") throw new Error(`the tag reads "${label}", not Analyze's name`);
+    });
+    await withFixtures({ journal_update: { __reject: "disk I/O error: /Users/me/Library" } }, async () => {
+      await page.click(`${journalDetail(1)} .jr-tag[data-tag="z_banding"]`);
+      await page.waitForFunction(
+        (t) => document.querySelector('.journal-page .jr-detail .nd-state[data-kind="error"]')?.textContent === t,
+        `[ERROR: ${SAVE_FAILED}]`,
+        { timeout: 5000 }
+      );
+      if ((await pressedTags(1)) !== "stringing|warping") throw new Error(`a failed tag stayed pressed: ${await pressedTags(1)}`);
+      if ((await page.locator(journalDetail(1)).innerText()).includes("disk I/O")) throw new Error("the raw error reached the page");
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="good"]`);
+      await page.waitForSelector(`${journalDetail(1)} .jr-verdict[data-verdict="usable"][aria-pressed="true"]`, { timeout: 5000 });
+      if ((await page.locator(`${journalDetail(1)} .jr-verdict[data-verdict="good"]`).getAttribute("aria-pressed")) !== "false") throw new Error("a failed verdict stayed pressed");
+      await statusIs(rate, `[ERROR: ${SAVE_FAILED}]`);
+    });
+  });
+
+  await step(run, page, "rapid tag clicks settle on the newest save, shown and stored agreeing", async () => {
+    const before = await countOf("journal_update");
+    const settled = await settledCount("journal_update");
+    const first = { ...JOURNAL_FAILED, verdict: "usable", tags: ["warping", "stringing", "layer_adhesion"] };
+    const second = { ...first, tags: [...first.tags, "elephants_foot"] };
+    const seq = [{ __hold: "jr-a", answer: first }, { __hold: "jr-b", answer: second }];
+    await withFixtures({ journal_update: { __sequence: seq } }, async () => {
+      await page.click(`${journalDetail(1)} .jr-tag[data-tag="layer_adhesion"]`);
+      await page.click(`${journalDetail(1)} .jr-tag[data-tag="elephants_foot"]`);
+      await pastCalls("journal_update", before + 1);
+      if ((await pressedTags(1)) !== "stringing|warping|layer_adhesion|elephants_foot") throw new Error(`shown at once: ${await pressedTags(1)}`);
+      // The newest answer arrives first; the older one arrives late and changes nothing.
+      await page.evaluate(() => window.__release("jr-b"));
+      await statusIs(`${journalDetail(1)} .jr-rate`, "[SAVED]");
+      await page.evaluate(() => window.__release("jr-a"));
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_update", settled + 2], { timeout: 5000 });
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+    });
+    const sent = (await callsOf("journal_update")).slice(before).map((c) => c.args.update.tags.join(","));
+    if (sent.join("|") !== "warping,stringing,layer_adhesion|warping,stringing,layer_adhesion,elephants_foot") throw new Error(`sent ${sent.join("|")}`);
+    if ((await pressedTags(1)) !== "stringing|warping|layer_adhesion|elephants_foot") throw new Error(`settled on ${await pressedTags(1)}`);
+  });
+
+  await step(run, page, "notes save when the box loses focus, not while typing, and not unchanged", async () => {
+    const text = "Lifted at the front corner. Try a brim.";
+    const notes = `${journalDetail(1)} .jr-notes-field`;
+    const box = `${journalDetail(1)} .jr-notes`;
+    await withFixtures({ journal_update: { ...JOURNAL_FAILED, verdict: "usable", tags: ["warping", "stringing"], notes: text } }, async () => {
+      const before = await countOf("journal_update");
+      await page.fill(box, text);
+      if ((await countOf("journal_update")) !== before) throw new Error("saved while typing");
+      await page.locator(box).blur();
+      await pastCalls("journal_update", before);
+      const args = (await callsOf("journal_update")).at(-1).args;
+      if (args.id !== 1 || !sameArgs(args.update, { notes: text })) throw new Error(JSON.stringify(args.update));
+      // Focus and leave again at once, before or after the answer: nothing changed.
+      await page.click(box);
+      await page.locator(box).blur();
+      await statusIs(notes, "[SAVED]");
+      await page.click(box);
+      await page.locator(box).blur();
+      if ((await countOf("journal_update")) !== before + 1) throw new Error("an unchanged note was saved again");
+    });
+    await withFixtures({ journal_update: { __reject: SAVE_FAILED } }, async () => {
+      const before = await countOf("journal_update");
+      await page.fill(box, `${text} Failed again.`);
+      await page.locator(box).blur();
+      await statusIs(notes, `[ERROR: ${SAVE_FAILED}]`);
+      if ((await page.locator(box).inputValue()) !== `${text} Failed again.`) throw new Error("a failed save threw the text away");
+      // The text isn't stored, so the next blur tries again.
+      await page.click(box);
+      await page.locator(box).blur();
+      await pastCalls("journal_update", before + 1);
+    });
+  });
+
+  await step(run, page, "a note saved after its entry closed changes nothing on the next one", async () => {
+    const box = `${journalDetail(1)} .jr-notes`;
+    const settled = await settledCount("journal_update");
+    const late = { __hold: "jr-notes-late", answer: { ...JOURNAL_FAILED, notes: "late" } };
+    await withFixtures({ journal_update: late }, async () => {
+      const before = await countOf("journal_update");
+      await page.fill(box, "late");
+      // Opening entry 2 takes focus from the box, which sends the save.
+      await page.click(`${journalRow(2)} .jr-row-main`);
+      await page.waitForSelector(journalDetail(2), { timeout: 5000 });
+      await pastCalls("journal_update", before);
+      await page.evaluate(() => window.__release("jr-notes-late"));
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length > n, ["journal_update", settled], { timeout: 5000 });
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+    });
+    const status = await page.locator(`${journalDetail(2)} .jr-status`).allTextContents();
+    if (status.some((s) => s !== "")) throw new Error(`entry 2 shows "${status.join("|")}"`);
+    if ((await page.locator(`${journalDetail(2)} .jr-notes`).inputValue()) !== "") throw new Error("entry 2's notes changed");
+  });
+
+  await step(run, page, "a photo can be added by picking or dropping it, one upload at a time", async () => {
+    await expand(2);
+    await page.waitForSelector(`${journalDetail(2)} .jr-photo img`, { timeout: 5000 });
+    if ((await page.locator(`${journalDetail(2)} .jr-photo-add`).evaluate((el) => el.tagName)) !== "BUTTON") throw new Error("Add photo is not a button");
+    const before = await countOf("journal_add_photo");
+    await page.setInputFiles(`${journalDetail(2)} .jr-photo-input`, { name: "print.png", mimeType: "image/png", buffer: png });
+    await pastCalls("journal_add_photo", before);
+    const args = (await callsOf("journal_add_photo")).at(-1).args;
+    if (args.id !== 2 || typeof args.dataBase64 !== "string" || args.dataBase64 !== pngBase64) throw new Error(`args: ${JSON.stringify({ ...args, dataBase64: args.dataBase64?.length })}`);
+    await page.waitForFunction(() => document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo').length === 2, null, { timeout: 5000 });
+    // Photos go up one after the other: two dropped together, and a third
+    // dropped while the first is still going up.
+    const two = { ...JOURNAL_FINISHED, photos: [...JOURNAL_FINISHED.photos, { id: 8, file_name: "9a1e.jpg", added_at: 0 }] };
+    await withFixtures({ journal_add_photo: { __sequence: [{ __hold: "jr-photo-1", answer: two }, two] } }, async () => {
+      const sent = await countOf("journal_add_photo");
+      const done = await settledCount("journal_add_photo");
+      const file = { name: "a.png", type: "image/png", base64: pngBase64 };
+      await dropFiles(`${journalDetail(2)} .jr-photos`, [file, { ...file, name: "b.png" }]);
+      await pastCalls("journal_add_photo", sent);
+      await statusIs(`${journalDetail(2)} .jr-photos`, "[LOADING: Adding the photo]");
+      await dropFiles(`${journalDetail(2)} .jr-photos`, [{ ...file, name: "c.png" }]);
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await countOf("journal_add_photo")) !== sent + 1) throw new Error("a photo went up before the first answered");
+      await page.evaluate(() => window.__release("jr-photo-1"));
+      await pastCalls("journal_add_photo", sent + 1);
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_add_photo", done + 3], { timeout: 5000 });
+      if ((await countOf("journal_add_photo")) !== sent + 3) throw new Error(`${(await countOf("journal_add_photo")) - sent} photos went up, not 3`);
+      await statusIs(`${journalDetail(2)} .jr-photos`, "");
+      if (await page.locator(`${journalDetail(2)} .jr-photos.jr-drop-over`).count()) throw new Error("the drop outline stayed");
+    });
+  });
+
+  await step(run, page, "a photo over 25 MB, or a file that isn't one, is refused before it is sent", async () => {
+    const photos = `${journalDetail(2)} .jr-photos`;
+    const before = await countOf("journal_add_photo");
+    await pickFiles(`${journalDetail(2)} .jr-photo-input`, [{ name: "huge.png", type: "image/png", size: 25 * 1024 * 1024 + 1 }]);
+    await statusIs(photos, "[ERROR: That photo is over 25 MB. Choose a smaller one.]");
+    if ((await page.locator(`${photos} .jr-status`).getAttribute("data-kind")) !== "error") throw new Error("the refusal is not marked as an error");
+    await page.setInputFiles(`${journalDetail(2)} .jr-photo-input`, { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello") });
+    await page.waitForFunction(
+      () => document.querySelector('.journal-page .jr-row[data-entry="2"] .nd-state[data-kind="error"]')?.textContent ===
+        "[ERROR: That file isn't a photo BambuMate can read. Choose a JPEG, PNG or WebP image.]",
+      null,
+      { timeout: 5000 }
+    );
+    if ((await countOf("journal_add_photo")) !== before) throw new Error("a refused file was sent");
+  });
+
+  await step(run, page, "a photo that can't be read shows a placeholder and can be removed", async () => {
+    for (const unreadable of [{ __reject: "Photo unavailable" }, null]) {
+      await withFixtures({ journal_image: unreadable }, async () => {
+        await collapse(2);
+        await expand(2);
+        await page.waitForFunction(
+          () => {
+            const missing = [...document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo-missing')];
+            return missing.length === 2 && missing.every((e) => e.textContent === "Photo unavailable");
+          },
+          null,
+          { timeout: 5000 }
+        );
+        if (await page.locator(`${journalDetail(2)} .jr-photo img`).count()) throw new Error("an image beside the placeholder");
+      });
+    }
+    await withFixtures({ journal_remove_photo: { __reject: SAVE_FAILED } }, async () => {
+      await page.locator(`${journalDetail(2)} .jr-photo-remove`).first().click();
+      await statusIs(`${journalDetail(2)} .jr-photos`, `[ERROR: ${SAVE_FAILED}]`);
+      if ((await page.locator(`${journalDetail(2)} .jr-photo`).count()) !== 2) throw new Error("a photo went though its removal failed");
+    });
+    const before = await countOf("journal_remove_photo");
+    await page.locator(`${journalDetail(2)} .jr-photo-remove`).first().click();
+    await pastCalls("journal_remove_photo", before);
+    const args = (await callsOf("journal_remove_photo")).at(-1).args;
+    if (args.id !== 2 || args.photoId !== 7) throw new Error(JSON.stringify(args));
+    await page.waitForFunction(() => document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo').length === 0, null, { timeout: 5000 });
+  });
+
+  await step(run, page, "Analyze a photo links to Analyze with the entry", async () => {
+    const link = page.locator(`${journalDetail(2)} a.jr-analyze`);
+    if ((await link.count()) !== 1) throw new Error("no Analyze link while AI is on");
+    if ((await link.getAttribute("href")) !== "/analysis?journal=2") throw new Error(`href ${await link.getAttribute("href")}`);
+    if ((await link.innerText()).trim().toLowerCase() !== "analyze a photo") throw new Error(`reads "${await link.innerText()}"`);
+  });
+
+  await step(run, page, "deleting an entry asks inline, Keep cancels and Delete removes it", async () => {
+    await expand(1);
+    const before = await countOf("journal_delete");
+    await page.click(`${journalDetail(1)} .jr-delete`);
+    const confirm = await page.locator(`${journalDetail(1)} .jr-confirm`).innerText();
+    if (!confirm.includes("Delete this entry and its photos?")) throw new Error(`confirm reads "${confirm}"`);
+    const buttons = await page.locator(`${journalDetail(1)} .jr-confirm button`).allInnerTexts();
+    if (buttons.map((b) => b.trim().toLowerCase()).join("|") !== "delete|keep") throw new Error(`buttons ${buttons.join("|")}`);
+    if (await page.locator('[role="dialog"], [role="alertdialog"], dialog').count()) throw new Error("the confirmation is a dialog");
+    if ((await countOf("journal_delete")) !== before) throw new Error("deleted before confirming");
+    await page.waitForFunction(() => document.activeElement?.classList.contains("jr-confirm-keep"), null, { timeout: 5000 });
+    await page.click(`${journalDetail(1)} .jr-confirm-keep`);
+    await page.waitForSelector(`${journalDetail(1)} .jr-confirm`, { state: "detached", timeout: 5000 });
+    await page.waitForFunction(() => document.activeElement?.classList.contains("jr-delete"), null, { timeout: 5000 });
+    await withFixtures({ journal_delete: { __reject: SAVE_FAILED } }, async () => {
+      await page.click(`${journalDetail(1)} .jr-delete`);
+      await page.click(`${journalDetail(1)} .jr-confirm-delete`);
+      await page.waitForFunction(
+        (t) => document.querySelector('.journal-page .jr-row[data-entry="1"] .nd-state[data-kind="error"]')?.textContent === t,
+        `[ERROR: ${SAVE_FAILED}]`,
+        { timeout: 5000 }
+      );
+      if (await page.locator(`${journalDetail(1)} .jr-confirm`).count()) throw new Error("the confirmation stayed after a failed delete");
+    });
+    const failed = await countOf("journal_delete");
+    await page.click(`${journalDetail(1)} .jr-delete`);
+    await page.click(`${journalDetail(1)} .jr-confirm-delete`);
+    await pastCalls("journal_delete", failed);
+    if ((await callsOf("journal_delete")).at(-1).args.id !== 1) throw new Error("deleted the wrong entry");
+    await page.waitForSelector(journalRow(1), { state: "detached", timeout: 5000 });
+    if (await page.locator(`${JR} .jr-detail`).count()) throw new Error("a detail is still open");
+    // Focus moves to the row that followed the deleted one.
+    await page.waitForFunction(() => document.activeElement?.closest('.jr-row[data-entry="4"]') && document.activeElement.classList.contains("jr-row-main"), null, { timeout: 5000 });
+  });
+
+  await step(run, page, "the journal opens the entry a link names and brings it into view", async () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({ ...JOURNAL_FINISHED, id: 100 + i, name: `Plate ${i + 1}` }));
+    await withFixtures({ journal_list: many }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+      await goTo("/printer/journal?entry=139", "/printer/journal");
+      await page.waitForSelector(journalDetail(139), { timeout: 15000 });
+      await page.waitForFunction(
+        () => {
+          const row = document.querySelector('.journal-page .jr-row[data-entry="139"]').getBoundingClientRect();
+          const view = document.querySelector(".content").getBoundingClientRect();
+          return row.top >= view.top - 1 && row.top < view.bottom;
+        },
+        null,
+        { timeout: 5000 }
+      );
+      if ((await page.locator(`${journalRow(139)} .jr-row-main`).getAttribute("aria-expanded")) !== "true") throw new Error("the linked row isn't marked open");
+    });
+    await page.click('nav.sidebar a[href="/"]');
+    await goTo("/printer/journal?entry=2", "/printer/journal");
+    await page.waitForSelector(journalDetail(2), { timeout: 15000 });
+    // A link followed while the journal is open opens that entry too.
+    await goTo("/printer/journal?entry=4", "/printer/journal");
+    await page.waitForSelector(journalDetail(4), { timeout: 5000 });
+    if (await page.locator(journalDetail(2)).count()) throw new Error("two entries open at once");
+    await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+  });
+
   // -- settings --------------------------------------------------------------
   await step(run, page, "navigate to Settings", async () => {
     await page.click('a[href="/settings"]');
@@ -2926,6 +3252,17 @@ async function driveApp(browserType, engine, baseUrl) {
       throw new Error(`lock (x=${box.x}, w=${box.width}) extends past the ${Math.round(rail.width)}px rail`);
     }
     return `lock at x=${Math.round(box.x)} within ${Math.round(rail.width)}px rail`;
+  });
+
+  await step(run, page, "with AI off a journal entry offers no Analyze link", async () => {
+    await page.click('nav.sidebar a[href="/printer"]');
+    await page.click('.nd-tabs a[href="/printer/journal"]');
+    await page.waitForSelector('.journal-page .jr-row[data-entry="2"]', { timeout: 15000 });
+    if (!(await page.locator('.journal-page .jr-row[data-entry="2"] .jr-detail').count())) await page.click('.journal-page .jr-row[data-entry="2"] .jr-row-main');
+    await page.waitForSelector('.journal-page .jr-row[data-entry="2"] .jr-detail .jr-delete', { timeout: 5000 });
+    if (await page.locator(".journal-page .jr-analyze").count()) throw new Error("an Analyze link without AI");
+    await page.click('a[href="/settings"]');
+    await page.waitForSelector(".settings-page", { timeout: 15000 });
   });
 
   await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });

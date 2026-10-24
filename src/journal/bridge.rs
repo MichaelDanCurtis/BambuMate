@@ -66,17 +66,14 @@ pub async fn get(id: i64) -> Result<Option<PrintEntry>, String> {
     call("journal_get", &IdArgs { id }).await
 }
 
-#[expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")]
 pub async fn update(id: i64, update: &EntryUpdate) -> Result<PrintEntry, String> {
     call("journal_update", &UpdateArgs { id, update }).await
 }
 
-#[expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")]
 pub async fn add_photo(id: i64, data_base64: String) -> Result<PrintEntry, String> {
     call("journal_add_photo", &AddPhotoArgs { id, data_base64 }).await
 }
 
-#[expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")]
 pub async fn remove_photo(id: i64, photo_id: i64) -> Result<PrintEntry, String> {
     call(
         "journal_remove_photo",
@@ -88,7 +85,6 @@ pub async fn remove_photo(id: i64, photo_id: i64) -> Result<PrintEntry, String> 
     .await
 }
 
-#[expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")]
 pub async fn delete(id: i64) -> Result<(), String> {
     call("journal_delete", &IdArgs { id }).await
 }

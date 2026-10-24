@@ -2,11 +2,13 @@
 //! recorded, newest first, under this month's tally (the page's one hero).
 //! The list reloads on `journal://changed`; a generation counter drops a
 //! load that a newer one overtook. Plate thumbnails load only as their rows
-//! come near the visible part of the list.
+//! come near the visible part of the list. A row opens its entry detail in
+//! place; `?entry=<id>` opens that entry and brings it into view.
 
 use std::collections::HashMap;
 
 use leptos::prelude::*;
+use leptos_router::hooks::use_query_map;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
@@ -14,12 +16,13 @@ use wasm_bindgen_futures::spawn_local;
 use crate::components::patterns::{Hero, StateKind, StateText};
 use crate::journal::bridge;
 use crate::journal::format::{
-    fact_rows, filter_key, hero_detail, hero_unit, outcome_key, outcome_text, tray_chip,
-    verdict_text, when_line, EMPTY_JOURNAL, FILTERS, NAME_MAX, NO_MATCH, NO_PRINTER,
-    PHOTO_UNAVAILABLE, PRINTING_NOW,
+    filter_key, hero_detail, hero_unit, outcome_key, outcome_text, tray_chip, verdict_text,
+    when_line, EMPTY_JOURNAL, FILTERS, NAME_MAX, NO_MATCH, NO_PRINTER, PHOTO_UNAVAILABLE,
+    PRINTING_NOW,
 };
 use crate::journal::types::{FilterKind, JournalFilter, MonthSummary, Outcome, PrintEntry};
 use crate::journal::JournalShared;
+use crate::pages::journal_detail::EntryDetail;
 use crate::printer::types::{swatch_color, untrusted_text};
 use crate::printer::PrinterShared;
 
@@ -34,6 +37,36 @@ pub(crate) fn find_entry(entries: Entries, id: i64) -> Option<PrintEntry> {
     })
 }
 
+/// Puts a saved entry in place of its copy in the list, unless the list
+/// already holds a newer one (a reload that overtook the save). Safe after
+/// unmount.
+pub(crate) fn replace_entry(entries: Entries, entry: PrintEntry) {
+    entries.try_update(|r| {
+        if let Some(Ok(list)) = r {
+            if let Some(slot) = list
+                .iter_mut()
+                .find(|e| e.id == entry.id && e.updated_at <= entry.updated_at)
+            {
+                *slot = entry;
+            }
+        }
+    });
+}
+
+/// Drops a deleted entry from the list. Safe after unmount.
+pub(crate) fn remove_entry(entries: Entries, id: i64) {
+    entries.try_update(|r| {
+        if let Some(Ok(list)) = r {
+            list.retain(|e| e.id != id);
+        }
+    });
+}
+
+/// The entry `?entry=<id>` names.
+fn linked_entry(value: Option<&str>) -> Option<i64> {
+    value?.trim().parse().ok()
+}
+
 /// The prints still running, shown as "Printing now" above the list.
 fn printing_now(list: &[PrintEntry]) -> Vec<PrintEntry> {
     list.iter()
@@ -43,7 +76,7 @@ fn printing_now(list: &[PrintEntry]) -> Vec<PrintEntry> {
 }
 
 /// The rows of the list: every print that has ended, in the backend's order.
-fn row_ids(list: &[PrintEntry]) -> Vec<i64> {
+pub(crate) fn row_ids(list: &[PrintEntry]) -> Vec<i64> {
     list.iter()
         .filter(|e| e.outcome != Outcome::Printing)
         .map(|e| e.id)
@@ -208,7 +241,12 @@ pub fn JournalPage() -> impl IntoView {
     let entries: Entries = RwSignal::new(None);
     let summary = RwSignal::new(None::<MonthSummary>);
     let now = RwSignal::new(js_sys::Date::now());
-    let open = RwSignal::new(None::<i64>);
+    // `?entry=<id>` opens that entry, on load and whenever a link changes it.
+    let query = use_query_map();
+    let linked = Memo::new(move |_| query.with(|q| linked_entry(q.get("entry").as_deref())));
+    let open = RwSignal::new(linked.get_untracked());
+    // The linked entry still to bring into view, once the list has loaded.
+    let reveal = StoredValue::new(linked.get_untracked());
     let thumbs = Thumbs::new();
     // Each load takes the next number; only the newest load's answer lands.
     let load_gen = StoredValue::new(0u64);
@@ -260,6 +298,40 @@ pub fn JournalPage() -> impl IntoView {
             Some(Ok(list)) => row_ids(list),
             _ => Vec::new(),
         })
+    });
+    Effect::new(move |first: Option<()>| {
+        let id = linked.get();
+        if first.is_some() {
+            if let Some(id) = id {
+                open.set(Some(id));
+                reveal.set_value(Some(id));
+            }
+        }
+    });
+    // Brings the linked row into view once its row is listed. A link to an
+    // entry the list doesn't show is dropped with the first answer.
+    Effect::new(move |_| {
+        let listed = ids.get();
+        if entries.with(Option::is_none) {
+            return;
+        }
+        let Some(id) = reveal.get_value() else {
+            return;
+        };
+        reveal.set_value(None);
+        if !listed.contains(&id) {
+            return;
+        }
+        request_animation_frame(move || {
+            let row = web_sys::window().and_then(|w| w.document()).and_then(|d| {
+                d.query_selector(&format!(".journal-page .jr-row[data-entry=\"{id}\"]"))
+                    .ok()
+                    .flatten()
+            });
+            if let Some(row) = row {
+                row.scroll_into_view_with_bool(true);
+            }
+        });
     });
     let status = move || {
         let filtered = search.with(|q| is_filtered(kind.get(), q));
@@ -342,8 +414,7 @@ fn JournalRow(
     let entry = Memo::new(move |_| find_entry(entries, id));
     let has_thumbnail = Memo::new(move |_| entry.with(|e| e.as_ref().is_some_and(wants_thumbnail)));
     let expanded = Memo::new(move |_| open.get() == Some(id));
-    let detail_id = format!("jr-detail-{id}");
-    let controls = detail_id.clone();
+    let controls = format!("jr-detail-{id}");
     view! {
         <li class="jr-row" data-entry=id.to_string()>
             <button type="button" class="jr-row-main" class:jr-has-thumb=move || has_thumbnail.get()
@@ -353,7 +424,7 @@ fn JournalRow(
                 <RowSummary id=id entry=entry now=now has_thumbnail=has_thumbnail thumbs=thumbs />
             </button>
             <Show when=move || expanded.get()>
-                <RowDetail dom_id=detail_id.clone() entry=entry />
+                <EntryDetail id=id entries=entries open=open />
             </Show>
         </li>
     }
@@ -474,34 +545,6 @@ fn RowThumb(id: i64, thumbs: Thumbs) -> impl IntoView {
     }
 }
 
-/// What opens under a row. For now it lists the entry's facts; the verdict,
-/// tags, notes and photos join it with the entry detail (plan Task 8).
-#[component]
-fn RowDetail(dom_id: String, entry: Memo<Option<PrintEntry>>) -> impl IntoView {
-    // Minutes east of UTC, for the start and end times.
-    let offset = -(js_sys::Date::new_0().get_timezone_offset() as i32);
-    let facts = move || {
-        entry
-            .with(|e| e.as_ref().map(|e| fact_rows(e, offset)))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(label, value)| {
-                view! {
-                    <div class="jr-fact">
-                        <dt>{label}</dt>
-                        <dd>{value}</dd>
-                    </div>
-                }
-            })
-            .collect_view()
-    };
-    view! {
-        <div class="jr-detail" id=dom_id role="region" aria-label="Print details">
-            <dl class="jr-facts">{facts}</dl>
-        </div>
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +649,44 @@ mod tests {
         assert_eq!(toggled(None, 2), Some(2));
         assert_eq!(toggled(Some(1), 2), Some(2));
         assert_eq!(toggled(Some(2), 2), None);
+    }
+
+    #[test]
+    fn a_link_names_an_entry_by_its_id() {
+        assert_eq!(linked_entry(Some("2")), Some(2));
+        assert_eq!(linked_entry(Some(" 14 ")), Some(14));
+        assert_eq!(linked_entry(Some("two")), None);
+        assert_eq!(linked_entry(Some("")), None);
+        assert_eq!(linked_entry(None), None);
+    }
+
+    #[test]
+    fn a_saved_entry_replaces_its_copy_unless_the_list_has_a_newer_one() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let stamped = |id, notes: &str, updated_at| PrintEntry {
+                notes: notes.into(),
+                updated_at,
+                ..at(id, Outcome::Finished)
+            };
+            let entries: Entries =
+                RwSignal::new(Some(Ok(vec![stamped(1, "old", 10), stamped(2, "", 10)])));
+            replace_entry(entries, stamped(1, "saved", 11));
+            assert_eq!(find_entry(entries, 1).unwrap().notes, "saved");
+            // An answer older than what a reload brought changes nothing.
+            replace_entry(entries, stamped(1, "stale", 9));
+            assert_eq!(find_entry(entries, 1).unwrap().notes, "saved");
+            // An entry the list doesn't hold isn't added.
+            replace_entry(entries, stamped(7, "x", 20));
+            assert_eq!(find_entry(entries, 7), None);
+            remove_entry(entries, 1);
+            assert_eq!(find_entry(entries, 1), None);
+            assert!(find_entry(entries, 2).is_some());
+            // After unmount both are no-ops rather than panics.
+            entries.dispose();
+            replace_entry(entries, stamped(2, "late", 30));
+            remove_entry(entries, 2);
+        });
     }
 
     #[test]

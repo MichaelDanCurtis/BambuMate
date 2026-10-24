@@ -25,30 +25,14 @@ pub const NO_PRINTER: &str = "The journal fills in by itself once a printer is s
     )
 )]
 pub const RATE_LAST: &str = "Rate your last print";
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub const DELETE_CONFIRM: &str = "Delete this entry and its photos?";
 /// In place of a photo or thumbnail whose file is missing or unreadable.
 pub const PHOTO_UNAVAILABLE: &str = "Photo unavailable";
 /// The backend's refusals (`journal::photos`), for the checks made before
 /// a file is sent.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub const TOO_LARGE: &str = "That photo is over 25 MB. Choose a smaller one.";
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub const NOT_AN_IMAGE: &str =
     "That file isn't a photo BambuMate can read. Choose a JPEG, PNG or WebP image.";
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub const MAX_PHOTO_BYTES: f64 = 25.0 * 1024.0 * 1024.0;
 /// Most characters shown of a print name the printer reports.
 pub const NAME_MAX: usize = 120;
@@ -56,10 +40,6 @@ pub const NAME_MAX: usize = 120;
 const TEXT_MAX: usize = 64;
 
 /// Analyze's defect ids, in the order the chips show them.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub const ISSUE_TAGS: &[&str] = &[
     "stringing",
     "warping",
@@ -76,10 +56,6 @@ pub const FILTERS: &[(FilterKind, &str)] = &[
     (FilterKind::Failed, "Failed"),
 ];
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub const VERDICTS: &[Verdict] = &[Verdict::Good, Verdict::Usable, Verdict::Failed];
 
 /// `data-kind` on a filter pill.
@@ -110,10 +86,6 @@ pub fn outcome_text(o: Outcome) -> &'static str {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub fn verdict_key(v: Verdict) -> &'static str {
     match v {
         Verdict::Good => "good",
@@ -131,10 +103,6 @@ pub fn verdict_text(v: Verdict) -> &'static str {
 }
 
 /// Clicking the pressed verdict clears it; any other sets that one.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub fn verdict_after_click(current: Option<Verdict>, clicked: Verdict) -> VerdictChoice {
     if current == Some(clicked) {
         VerdictChoice::Clear
@@ -144,10 +112,6 @@ pub fn verdict_after_click(current: Option<Verdict>, clicked: Verdict) -> Verdic
 }
 
 /// `tags` with `tag` removed if present, else added at the end.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub fn toggle_tag(tags: &[String], tag: &str) -> Vec<String> {
     if tags.iter().any(|t| t == tag) {
         tags.iter().filter(|t| *t != tag).cloned().collect()
@@ -354,10 +318,6 @@ pub fn entry_href(id: i64) -> String {
     format!("/printer/journal?entry={id}")
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
-)]
 pub fn analyze_href(id: i64) -> String {
     format!("/analysis?journal={id}")
 }
