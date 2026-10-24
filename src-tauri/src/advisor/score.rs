@@ -248,6 +248,10 @@ pub struct MaterialFit {
     /// the fit. Ranking uses this. Not sent to the page.
     #[serde(skip)]
     pub points: i32,
+    /// The score from the needs alone, before geometry. A material with none
+    /// is not shown; geometry only moves it down. Not sent to the page.
+    #[serde(skip)]
+    pub needs_points: i32,
     pub total: u32,
     pub fit_pct: u8,
     pub reasons: Vec<NeedReason>,
@@ -379,6 +383,7 @@ pub fn fit_for(
         printer_notes.push("Needs an enclosure; assuming this printer has one.".to_string());
     }
 
+    let needs_points = points;
     let mut geometry_notes = Vec::new();
     if let Some(g) = geometry {
         if (g.large_footprint() || g.small_bed_contact) && m.warp > 0 {
@@ -420,6 +425,7 @@ pub fn fit_for(
         material: m.id,
         name: m.name.to_string(),
         points,
+        needs_points,
         total,
         fit_pct,
         reasons,
@@ -430,8 +436,9 @@ pub fn fit_for(
 }
 
 /// The top `TOP_N` fits, plus every material ruled out by a hard
-/// constraint. A material with no fit at all is not shown and not listed:
-/// the page says `NOTHING_FITS` when none is left.
+/// constraint. A material that scores nothing on the needs themselves is not
+/// shown and not listed; geometry never hides a material, it only lowers its
+/// rank. The page says `NOTHING_FITS` when none is left.
 pub fn score(needs: &[Need], printer: &PrinterFacts, geometry: Option<&Geometry>) -> Scored {
     let mut fits = Vec::new();
     let mut ruled_out = Vec::new();
@@ -441,7 +448,7 @@ pub fn score(needs: &[Need], printer: &PrinterFacts, geometry: Option<&Geometry>
             Err(e) => ruled_out.push(e),
         }
     }
-    fits.retain(|f| f.fit_pct > 0);
+    fits.retain(|f| f.needs_points > 0);
     // A stable sort on the unclamped points: equal scores keep the table's order.
     fits.sort_by_key(|f| std::cmp::Reverse(f.points));
     fits.truncate(TOP_N);
@@ -682,21 +689,42 @@ mod tests {
     }
 
     #[test]
-    fn a_large_part_needing_heat_never_shows_a_pla_or_a_zero_fit() {
+    fn a_large_part_needing_heat_is_lowered_never_hidden() {
         let big = flat(200.0, 100.0);
         let s = score(&[Need::Heat100], &enclosed(), Some(&big));
-        assert!(s.fits.iter().all(|f| f.fit_pct > 0));
+        // No PLA: heat rules it out.
         assert!(s
             .fits
             .iter()
             .all(|f| !matches!(f.material, Pla | PlaPlus | PlaCf)));
-        assert_eq!(ids(&s), [PaCf]);
-        // PC meets the heat need but its warp penalty takes it to nothing:
-        // not shown, and not listed as ruled out either.
-        assert!(!excluded(&s).contains(&Pc));
-        // Without the big footprint PC is a real pick.
-        let s = score(&[Need::Heat100], &enclosed(), None);
+        for id in [Pla, PlaPlus, PlaCf] {
+            assert!(excluded(&s).contains(&id));
+        }
+        // PA-CF first; PC, which meets heat, is shown below it with a warp note.
         assert_eq!(&ids(&s)[..2], [PaCf, Pc]);
+        let pc = &s.fits[1];
+        assert_eq!(pc.total, 0);
+        assert_eq!(pc.fit_pct, 0);
+        assert_eq!(pc.reasons[0].verdict, Verdict::Met);
+        assert!(pc.geometry_notes[0].contains("PC may warp"));
+        // Same needs, no geometry: the same materials are shown.
+        let plain = score(&[Need::Heat100], &enclosed(), None);
+        assert_eq!(&ids(&plain)[..2], [PaCf, Pc]);
+    }
+
+    #[test]
+    fn a_fit_clamped_to_zero_by_geometry_is_still_shown() {
+        let big = flat(200.0, 100.0);
+        let s = score(&[Need::Heat100], &enclosed(), Some(&big));
+        let shown: Vec<_> = s.fits.iter().filter(|f| f.total == 0).collect();
+        assert!(!shown.is_empty());
+        for f in &shown {
+            assert!(f.needs_points > 0, "{f:?}");
+        }
+        // But a material that fails the needs themselves is still not shown.
+        let s = score(&[Need::Flexible], &enclosed(), None);
+        assert_eq!(ids(&s)[0], Tpu);
+        assert!(!ids(&s).contains(&Pla));
     }
 
     #[test]
