@@ -92,7 +92,7 @@ Every task's requirements include this section.
 
 **Design**
 - Nothing tokens (`--nd-*`) only. No raw colours.
-- The shared patterns (`PageHeader`, `Hero`, `HeroStats`, `StatRow`, `StateText`) apply, in both themes.
+- The shared patterns (`Hero`, `StatRow`, `StateText`) apply, in both themes. One hero per page: no `HeroStats` on Advise, and no second `PageHeader` inside the hub.
 - Chips and rank buttons use `aria-pressed`.
 
 **Frontend robustness**
