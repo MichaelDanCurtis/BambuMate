@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod recorder;
+pub mod slice;
 pub mod store;
 pub mod types;
 pub mod watch;

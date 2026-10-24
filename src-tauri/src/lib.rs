@@ -238,6 +238,7 @@ pub fn run() {
                 use std::sync::Arc;
 
                 let data_dir = app.path().app_data_dir().ok();
+                let journal_paths = data_dir.as_deref().map(journal::JournalPaths::in_dir);
                 let service = printer::service::PrinterService::new(
                     Arc::new(printer::service::TauriEvents(app.handle().clone())),
                     data_dir.as_ref().map(|d| d.join("refinement_history.db")),
@@ -245,6 +246,22 @@ pub fn run() {
                     printer::hms::HMS_URL,
                     printer::client::Timing::default(),
                 );
+                // The print journal records what the printer runs. Its
+                // writes go to their own thread; a broken journal only logs.
+                // The slicer is managed above (`commands::slicer::start`).
+                if let Some(paths) = journal_paths {
+                    let slices: Arc<dyn journal::recorder::SliceJobs> =
+                        match app.try_state::<slicer::jobs::SlicerService>() {
+                            Some(svc) => Arc::new(svc.inner().clone()),
+                            None => Arc::new(journal::recorder::NoSlices),
+                        };
+                    let (recorder, watch) = journal::recorder::Recorder::start(
+                        paths,
+                        slices,
+                        Arc::new(journal::recorder::TauriNotify(app.handle().clone())),
+                    );
+                    service.attach_journal(recorder, watch);
+                }
                 if let Some(config) = printer::settings::load_config(app.handle()) {
                     match printer::settings::get_access_code(&config.serial) {
                         Ok(Some(code)) => {

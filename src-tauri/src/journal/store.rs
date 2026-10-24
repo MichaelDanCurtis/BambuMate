@@ -291,6 +291,31 @@ impl JournalStore {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Gives an open entry the identity the printer now reports for the
+    /// same job (a `task_id` arrived, or the file name caught up). An empty
+    /// `name` keeps the one known. `false` when the entry isn't open.
+    pub fn rekey(
+        &self,
+        id: i64,
+        job_key: &str,
+        name: &str,
+        gcode_file: Option<&str>,
+        plate: Option<u32>,
+        now: i64,
+    ) -> Result<bool, String> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE prints SET job_key = ?2, \
+                 name = CASE WHEN trim(?3) = '' THEN name ELSE ?3 END, \
+                 gcode_file = ?4, plate = ?5, updated_at = ?6 \
+                 WHERE id = ?1 AND outcome = 'printing'",
+                params![id, job_key, name, gcode_file, plate, now],
+            )
+            .map_err(save_err)?;
+        Ok(changed > 0)
+    }
+
     /// Remembers how far an open print had got, so a restart can tell the
     /// same run from a reprint. Not a user edit: `updated_at` is untouched.
     /// `layer` is `None` while the print's own layer isn't known.
@@ -888,6 +913,52 @@ mod tests {
         )
         .unwrap();
         assert!(s.open_entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rekeyed_entry_keeps_its_id_and_takes_the_new_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s
+            .start(
+                &new_print("local:|/data/Metadata/plate_1.gcode", "", 1_000),
+                1_000,
+            )
+            .unwrap();
+        assert!(s
+            .rekey(
+                id,
+                "task:42",
+                "Cube",
+                Some("/data/Metadata/plate_2.gcode"),
+                Some(2),
+                1_100
+            )
+            .unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.job_key, "task:42");
+        assert_eq!(e.name, "Cube");
+        assert_eq!(
+            e.gcode_file.as_deref(),
+            Some("/data/Metadata/plate_2.gcode")
+        );
+        assert_eq!(e.plate, Some(2));
+        assert_eq!((e.started_at, e.outcome), (1_000, Outcome::Printing));
+        assert_eq!(e.updated_at, 1_100);
+        assert_eq!(s.open_entries().unwrap()[0].job_key, "task:42");
+
+        assert!(s.rekey(id, "task:42", "", None, None, 1_200).unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.name, "Cube", "an empty name keeps the one known");
+        assert_eq!((e.gcode_file, e.plate), (None, None));
+
+        s.end(id, &ended(Outcome::Finished, 2_000), 2_000).unwrap();
+        assert!(
+            !s.rekey(id, "task:43", "Gear", None, None, 2_100).unwrap(),
+            "a closed entry keeps its identity"
+        );
+        assert_eq!(s.get(id).unwrap().unwrap().job_key, "task:42");
+        assert!(!s.rekey(id + 99, "task:44", "x", None, None, 2_100).unwrap());
     }
 
     #[test]

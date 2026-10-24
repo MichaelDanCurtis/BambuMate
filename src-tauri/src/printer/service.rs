@@ -42,6 +42,8 @@ use super::slots::{compute_slots, preset_needs_cloud_sync, SlotView, EXTERNAL_AM
 use super::state::{parse_report, PrinterState, Report, ReportMerger};
 use super::tls::{client_config, normalize_fingerprint, PrinterCertVerifier, RejectionSlot};
 use crate::history::{RefinementHistory, SlotAssignment};
+use crate::journal::recorder::Recorder;
+use crate::journal::watch::{observe, unwatched, Fresh, JournalEvent, WatchState};
 
 pub const STATE_EVENT: &str = "printer://state";
 pub const CONNECTION_EVENT: &str = "printer://connection";
@@ -180,6 +182,20 @@ impl ConnKey {
     }
 }
 
+/// The print journal's recorder and the watcher state it is fed with.
+struct JournalLink {
+    recorder: Recorder,
+    watch: WatchState,
+}
+
+impl JournalLink {
+    /// The connection changed: until the job is reported active again,
+    /// an end isn't watched.
+    fn unwatch(&mut self) {
+        self.watch = unwatched(&self.watch);
+    }
+}
+
 struct Live {
     config: Option<PrinterConfig>,
     /// The running client's parameters; `None` once stopped.
@@ -197,6 +213,9 @@ struct Live {
     /// Bumped on every start and stop, so a stopped client's late events
     /// are ignored.
     generation: u64,
+    /// `None` until `attach_journal`. Kept across `reset`: the job it
+    /// follows is still open whichever printer connects next.
+    journal: Option<JournalLink>,
 }
 
 impl Live {
@@ -214,7 +233,64 @@ impl Live {
             hms: None,
             hms_loading: false,
             generation,
+            journal: None,
         }
+    }
+
+    /// Starts from nothing at `generation`, keeping the journal link, now
+    /// unwatched.
+    fn reset(&mut self, generation: u64) {
+        let mut journal = self.journal.take();
+        *self = Live::empty(generation);
+        if let Some(link) = journal.as_mut() {
+            link.unwatch();
+        }
+        self.journal = journal;
+    }
+
+    /// The connection state changed: tells the journal watcher, which
+    /// counts nothing as watched until the job is reported again.
+    fn set_connection(&mut self, state: ConnectionState) {
+        self.connection = state;
+        if let Some(link) = self.journal.as_mut() {
+            link.unwatch();
+        }
+    }
+
+    /// Feeds one merged report to the journal watcher and queues what it
+    /// saw. `fresh` is what the push itself carried. The recorder writes
+    /// on its own thread; nothing here waits or touches the database. A
+    /// watcher panic (it should never panic) detaches the journal rather
+    /// than poisoning the live state.
+    fn watch_journal(&mut self, state: &PrinterState, fresh: Fresh<'_>) {
+        let Some(link) = self.journal.as_mut() else {
+            return;
+        };
+        let now = chrono::Utc::now().timestamp();
+        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            observe(&link.watch, state, fresh, now)
+        }));
+        let Ok((next, mut events)) = observed else {
+            tracing::error!("print journal watcher panicked; prints aren't recorded");
+            self.journal = None;
+            return;
+        };
+        link.watch = next;
+        if events.is_empty() {
+            return;
+        }
+        let model = self
+            .model
+            .clone()
+            .or_else(|| self.config.as_ref().map(|c| c.model.clone()))
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        for event in &mut events {
+            if let JournalEvent::Started(s) = event {
+                s.printer_model = model.clone();
+            }
+        }
+        link.recorder.record(events);
     }
 }
 
@@ -381,7 +457,7 @@ impl PrinterService {
                 live.generation = generation;
                 config.ca_verified |= live.config.as_ref().is_some_and(|c| c.ca_verified);
             } else {
-                *live = Live::empty(generation);
+                live.reset(generation);
                 live.hms = Some(Arc::new(HmsCatalog::with_base_url(
                     self.inner.data_dir.clone(),
                     Some(&config.serial),
@@ -390,7 +466,7 @@ impl PrinterService {
             }
             live.config = Some(config);
             live.key = key;
-            live.connection = ConnectionState::Connecting;
+            live.set_connection(ConnectionState::Connecting);
             live.assignments = assignments;
             live.cloud_sync = cloud_sync;
             generation
@@ -421,7 +497,7 @@ impl PrinterService {
         let generation = {
             let mut live = self.inner.live.lock().unwrap();
             let generation = live.generation + 1;
-            *live = Live::empty(generation);
+            live.reset(generation);
             generation
         };
         self.send(Command {
@@ -657,6 +733,11 @@ impl PrinterService {
         self.mark_dirty();
     }
 
+    /// Records prints in the journal from now on. Call once, before `start`.
+    pub fn attach_journal(&self, recorder: Recorder, watch: WatchState) {
+        self.inner.live.lock().unwrap().journal = Some(JournalLink { recorder, watch });
+    }
+
     fn mark_dirty(&self) {
         self.inner.dirty.send_modify(|n| *n = n.wrapping_add(1));
     }
@@ -671,7 +752,7 @@ impl PrinterService {
             }
             match event {
                 ClientEvent::Connection(state) => {
-                    live.connection = state.clone();
+                    live.set_connection(state.clone());
                     drop(live);
                     self.inner.events.connection(&state);
                     self.mark_dirty();
@@ -695,6 +776,7 @@ impl PrinterService {
                     }
                     Ok(Report::Status { print, full }) => {
                         let state = live.merger.apply(&print, full);
+                        live.watch_journal(&state, Fresh::of(&print));
                         let has_errors = !state.hms.is_empty() || state.print_error.is_some();
                         live.state = Some(state);
                         if has_errors && !live.hms_loading {
@@ -735,7 +817,7 @@ impl PrinterService {
             {
                 return;
             }
-            live.connection = ConnectionState::Disconnected;
+            live.set_connection(ConnectionState::Disconnected);
         }
         self.inner.events.connection(&ConnectionState::Disconnected);
         self.mark_dirty();
@@ -943,6 +1025,10 @@ async fn emit_loop(inner: Weak<Inner>, mut dirty: watch::Receiver<u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::recorder::{CountChanges, NoSlices, Recorder as JournalRecorder};
+    use crate::journal::store::JournalStore;
+    use crate::journal::types::{Outcome, PrintEntry};
+    use crate::journal::JournalPaths;
     use crate::printer::client::ConnectionState;
     use crate::printer::slots::SlotStatus;
     use crate::printer::state::fixtures::{GET_VERSION_H2D, H2D_DELTA_PROGRESS, H2D_FULL};
@@ -1775,5 +1861,139 @@ mod tests {
             rec.connections.lock().unwrap().last(),
             Some(&ConnectionState::Disconnected)
         );
+    }
+
+    const FINISH: &str =
+        r#"{"print":{"command":"push_status","msg":1,"gcode_state":"FINISH","mc_percent":100}}"#;
+
+    fn with_journal(svc: &PrinterService, dir: &tempfile::TempDir) -> JournalPaths {
+        let paths = JournalPaths::in_dir(dir.path());
+        let (recorder, watch) = JournalRecorder::start(
+            paths.clone(),
+            Arc::new(NoSlices),
+            Arc::new(CountChanges::default()),
+        );
+        svc.attach_journal(recorder, watch);
+        paths
+    }
+
+    fn last_entry(paths: &JournalPaths) -> Option<PrintEntry> {
+        JournalStore::open(paths).ok()?.last().ok()?
+    }
+
+    fn entries(paths: &JournalPaths) -> Vec<PrintEntry> {
+        JournalStore::open(paths)
+            .and_then(|s| s.list(&Default::default()))
+            .unwrap_or_default()
+    }
+
+    fn report(svc: &PrinterService, generation: u64, json: &str) {
+        svc.handle_event(generation, ClientEvent::Report(json.as_bytes().to_vec()));
+    }
+
+    #[tokio::test]
+    async fn a_watched_print_is_recorded_in_the_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = with_journal(&svc, &dir);
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| entries(&paths).len() == 1).await;
+        assert_eq!(entries(&paths)[0].outcome, Outcome::Printing);
+        report(&svc, generation, FINISH);
+        wait_for(|| last_entry(&paths).is_some()).await;
+        let e = last_entry(&paths).unwrap();
+        assert_eq!(e.outcome, Outcome::Finished);
+        assert_eq!(e.name, "T-pose - slim H2D dual AMS riser");
+        assert!(e.start_approx, "joined at 6 %");
+        assert_eq!(e.printer_model.as_deref(), Some("H2D"));
+        assert_eq!(entries(&paths).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_print_that_ends_while_disconnected_is_recorded_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = with_journal(&svc, &dir);
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        svc.handle_event(
+            generation,
+            ClientEvent::Connection(ConnectionState::Disconnected),
+        );
+        report(&svc, generation, FINISH);
+        wait_for(|| last_entry(&paths).is_some()).await;
+        let e = last_entry(&paths).unwrap();
+        assert_eq!((e.outcome, e.ended_at), (Outcome::Unknown, None));
+    }
+
+    #[tokio::test]
+    async fn a_client_that_ends_leaves_the_print_unwatched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = with_journal(&svc, &dir);
+        let generation = svc.configure_for_test(config());
+        svc.handle_event(
+            generation,
+            ClientEvent::Connection(ConnectionState::Connected),
+        );
+        report(&svc, generation, H2D_FULL);
+        svc.client_ended(generation);
+        report(&svc, generation, FINISH);
+        wait_for(|| last_entry(&paths).is_some()).await;
+        assert_eq!(last_entry(&paths).unwrap().outcome, Outcome::Unknown);
+    }
+
+    #[tokio::test]
+    async fn a_restart_keeps_following_the_same_print() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = with_journal(&svc, &dir);
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| entries(&paths).len() == 1).await;
+        // Stop forgets the live state, but the journal still follows the
+        // job: the same print seen again is the same entry.
+        svc.stop();
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        report(&svc, generation, FINISH);
+        wait_for(|| last_entry(&paths).is_some()).await;
+        let all = entries(&paths);
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[0].outcome, Outcome::Finished);
+    }
+
+    #[tokio::test]
+    async fn an_end_reported_by_the_next_printer_is_not_the_old_print_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let paths = with_journal(&svc, &dir);
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        let generation = svc.configure_for_test(config_for("0948SV000000009"));
+        report(
+            &svc,
+            generation,
+            r#"{"print":{"command":"push_status","msg":0,"gcode_state":"FINISH","subtask_name":"Other","mc_percent":100}}"#,
+        );
+        wait_for(|| last_entry(&paths).is_some()).await;
+        let e = last_entry(&paths).unwrap();
+        assert_eq!(e.name, "T-pose - slim H2D dual AMS riser");
+        assert_eq!(e.outcome, Outcome::Unknown);
+    }
+
+    #[tokio::test]
+    async fn without_a_journal_reports_are_handled_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let generation = svc.configure_for_test(config());
+        report(&svc, generation, H2D_FULL);
+        report(&svc, generation, FINISH);
+        assert_eq!(
+            svc.view().state.unwrap().gcode_state.as_deref(),
+            Some("FINISH")
+        );
+        assert!(!JournalPaths::in_dir(dir.path()).db.exists());
     }
 }
