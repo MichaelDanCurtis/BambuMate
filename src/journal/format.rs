@@ -241,8 +241,11 @@ pub fn local_time_text(unix_secs: i64, offset_minutes: i32) -> String {
     )
 }
 
-pub fn start_text(e: &PrintEntry, offset_minutes: i32) -> String {
-    let at = local_time_text(e.started_at, offset_minutes);
+/// The start, at the UTC offset that applied then: `offset_at(t)` is the
+/// local offset, in minutes east of UTC, at Unix time `t`. A DST change
+/// between the start and today doesn't shift it.
+pub fn start_text(e: &PrintEntry, offset_at: impl Fn(i64) -> i32) -> String {
+    let at = local_time_text(e.started_at, offset_at(e.started_at));
     if e.start_approx {
         format!("{at}{APPROXIMATE}")
     } else {
@@ -250,20 +253,22 @@ pub fn start_text(e: &PrintEntry, offset_minutes: i32) -> String {
     }
 }
 
-pub fn end_text(e: &PrintEntry, offset_minutes: i32) -> String {
+/// The end, at the UTC offset that applied then (see [`start_text`]).
+pub fn end_text(e: &PrintEntry, offset_at: impl Fn(i64) -> i32) -> String {
     match (e.ended_at, e.outcome) {
-        (Some(at), _) => local_time_text(at, offset_minutes),
+        (Some(at), _) => local_time_text(at, offset_at(at)),
         (None, Outcome::Printing) => "Still printing".into(),
         (None, _) => UNWATCHED.into(),
     }
 }
 
 /// The detail's facts, label then value. Error and HMS codes only on a
-/// failure; the slice estimate only with a linked slice.
-pub fn fact_rows(e: &PrintEntry, offset_minutes: i32) -> Vec<(&'static str, String)> {
+/// failure; the slice estimate only with a linked slice. Each time is shown
+/// at its own UTC offset, `offset_at(t)` minutes east of UTC.
+pub fn fact_rows(e: &PrintEntry, offset_at: impl Fn(i64) -> i32) -> Vec<(&'static str, String)> {
     let mut rows = vec![
-        ("Started", start_text(e, offset_minutes)),
-        ("Ended", end_text(e, offset_minutes)),
+        ("Started", start_text(e, &offset_at)),
+        ("Ended", end_text(e, &offset_at)),
     ];
     if let Some(d) = duration_text(e) {
         rows.push(("Duration", d));
@@ -482,7 +487,7 @@ mod tests {
             slice: Some(slice()),
             ..entry()
         };
-        assert!(fact_rows(&failed, 0)
+        assert!(fact_rows(&failed, |_| 0)
             .iter()
             .any(|(label, value)| *label == "Slice estimate" && value == "14 m · 3.7 g"));
     }
@@ -597,31 +602,59 @@ mod tests {
     }
 
     #[test]
+    fn each_time_is_shown_at_the_offset_that_applied_then() {
+        // London leaves BST (+60) for GMT (0) at 2026-10-25 01:00 UTC.
+        const GMT_FROM: i64 = 1_792_890_000;
+        let london = |t: i64| if t < GMT_FROM { 60 } else { 0 };
+        let across = PrintEntry {
+            // 23:30 UTC, half past midnight BST.
+            started_at: 1_792_884_600,
+            // 02:00 UTC, 02:00 GMT.
+            ended_at: Some(1_792_893_600),
+            outcome: Outcome::Finished,
+            start_approx: false,
+            ..entry()
+        };
+        let rows = fact_rows(&across, london);
+        assert!(rows.contains(&("Started", "25 Oct 2026 00:30".to_string())));
+        assert!(rows.contains(&("Ended", "25 Oct 2026 02:00".to_string())));
+        // A summer print read in winter keeps its summer time.
+        let summer = PrintEntry {
+            started_at: 1_792_501_500,
+            ..across
+        };
+        assert_eq!(start_text(&summer, london), "20 Oct 2026 14:05");
+    }
+
+    #[test]
     fn starts_and_ends_mark_what_was_not_seen() {
         let approx = PrintEntry {
             start_approx: true,
             ..entry()
         };
-        assert_eq!(start_text(&approx, 0), "24 Oct 2026 12:07 (approximate)");
-        assert_eq!(end_text(&entry(), 0), "24 Oct 2026 14:05");
+        assert_eq!(
+            start_text(&approx, |_| 0),
+            "24 Oct 2026 12:07 (approximate)"
+        );
+        assert_eq!(end_text(&entry(), |_| 0), "24 Oct 2026 14:05");
         let lost = PrintEntry {
             ended_at: None,
             outcome: Outcome::Unknown,
             ..entry()
         };
-        assert_eq!(end_text(&lost, 0), UNWATCHED);
+        assert_eq!(end_text(&lost, |_| 0), UNWATCHED);
         let open = PrintEntry {
             ended_at: None,
             outcome: Outcome::Printing,
             ..entry()
         };
-        assert_eq!(end_text(&open, 0), "Still printing");
+        assert_eq!(end_text(&open, |_| 0), "Still printing");
     }
 
     #[test]
     fn facts_show_errors_only_on_failure_and_estimates_only_with_a_slice() {
         let labels = |e: &PrintEntry| {
-            fact_rows(e, 0)
+            fact_rows(e, |_| 0)
                 .into_iter()
                 .map(|(l, _)| l)
                 .collect::<Vec<_>>()
@@ -638,7 +671,7 @@ mod tests {
             analyses: vec![41],
             ..entry()
         };
-        let rows = fact_rows(&failed, 0);
+        let rows = fact_rows(&failed, |_| 0);
         assert!(rows.contains(&("Error", "0300-400C".to_string())));
         // HMS codes read with dashes, like the print error above them.
         assert!(rows.contains(&("HMS", "0300-0100-0001-0007".to_string())));
@@ -646,7 +679,7 @@ mod tests {
             hms: vec!["0300_0100_0001_0007".into(), "0C00_0300_0002_0001".into()],
             ..failed.clone()
         };
-        assert!(fact_rows(&two, 0).contains(&(
+        assert!(fact_rows(&two, |_| 0).contains(&(
             "HMS",
             "0300-0100-0001-0007, 0C00-0300-0002-0001".to_string()
         )));
@@ -792,7 +825,7 @@ mod tests {
             printer_model: Some("H2D\n".into()),
             ..entry()
         };
-        let rows = fact_rows(&e, 0);
+        let rows = fact_rows(&e, |_| 0);
         assert!(rows.contains(&("Printer", "H2D\u{fffd}".to_string())));
     }
 
@@ -808,7 +841,7 @@ mod tests {
             when_line(&approx, now_ms),
             "4h ago (approximate) · 1 h 58 m (approximate)"
         );
-        let rows = fact_rows(&approx, 0);
+        let rows = fact_rows(&approx, |_| 0);
         assert!(rows.contains(&("Started", "24 Oct 2026 12:07 (approximate)".to_string())));
         assert!(rows.contains(&("Duration", "1 h 58 m (approximate)".to_string())));
         // No end was seen, so there is nothing to subtract the start from.

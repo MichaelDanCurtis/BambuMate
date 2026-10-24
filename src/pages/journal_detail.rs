@@ -111,6 +111,13 @@ fn photo_alt(n: usize, total: usize, added_at: i64, offset_minutes: i32) -> Stri
     format!("Photo {n} of {total}, added {day}")
 }
 
+/// The local UTC offset, in minutes east, at Unix time `unix_secs`: each
+/// time gets its own, so a DST change since then doesn't shift it.
+fn local_offset_minutes(unix_secs: i64) -> i32 {
+    let at = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(unix_secs as f64 * 1000.0));
+    -(at.get_timezone_offset() as i32)
+}
+
 fn chosen(choice: VerdictChoice) -> Option<Verdict> {
     match choice {
         VerdictChoice::Good => Some(Verdict::Good),
@@ -478,11 +485,9 @@ fn StatusLine(status: RwSignal<Status>) -> impl IntoView {
 pub fn EntryDetail(id: i64, entries: Entries, open: RwSignal<Option<i64>>) -> impl IntoView {
     let flags = expect_context::<FeatureFlagsContext>().flags;
     let entry = Memo::new(move |_| find_entry(entries, id));
-    // Minutes east of UTC, for the start and end times.
-    let offset = -(js_sys::Date::new_0().get_timezone_offset() as i32);
     let facts = move || {
         entry
-            .with(|e| e.as_ref().map(|e| fact_rows(e, offset)))
+            .with(|e| e.as_ref().map(|e| fact_rows(e, local_offset_minutes)))
             .unwrap_or_default()
             .into_iter()
             .map(|(label, value)| {
@@ -500,7 +505,7 @@ pub fn EntryDetail(id: i64, entries: Entries, open: RwSignal<Option<i64>>) -> im
             <dl class="jr-facts">{facts}</dl>
             <RatingControls id=id entry=entry entries=entries />
             <Notes id=id entry=entry entries=entries />
-            <Photos id=id entry=entry entries=entries offset=offset />
+            <Photos id=id entry=entry entries=entries />
             <Actions id=id entries=entries open=open
                 analysis=Signal::derive(move || flags.get().analysis_enabled) />
         </div>
@@ -740,12 +745,7 @@ fn Notes(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl Int
 /// remove each one. Files go up through the app's queue ([`PhotoUploads`]),
 /// one at a time, and finish even if the detail closes meanwhile.
 #[component]
-fn Photos(
-    id: i64,
-    entry: Memo<Option<PrintEntry>>,
-    entries: Entries,
-    offset: i32,
-) -> impl IntoView {
+fn Photos(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl IntoView {
     let status = RwSignal::new(Status::Quiet);
     // Drags over the strip, counted so that crossing a child doesn't clear it.
     let over = RwSignal::new(0u32);
@@ -844,7 +844,7 @@ fn Photos(
                     key=|(photo_id, _)| *photo_id
                     children=move |(photo_id, added_at)| view! {
                         <PhotoThumb id=id photo_id=photo_id added_at=added_at photos=photo_ids
-                            offset=offset entries=entries status=status />
+                            entries=entries status=status />
                     }
                 />
             </div>
@@ -871,7 +871,6 @@ fn PhotoThumb(
     photo_id: i64,
     added_at: i64,
     photos: Memo<Vec<i64>>,
-    offset: i32,
     entries: Entries,
     status: RwSignal<Status>,
 ) -> impl IntoView {
@@ -885,6 +884,7 @@ fn PhotoThumb(
             (n, p.len())
         })
     });
+    let offset = local_offset_minutes(added_at);
     let alt = move || {
         let (n, total) = place.get();
         photo_alt(n, total, added_at, offset)
