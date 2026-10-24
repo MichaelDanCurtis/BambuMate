@@ -1,0 +1,251 @@
+/* Filament → Advise and Settings → Preferred brands (spec 2026-10-23).
+   Nothing tokens only. */
+
+.advise-page {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-lg);
+}
+
+.adv-input,
+.adv-model,
+.adv-detail,
+.adv-results {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-md);
+}
+
+.adv-model {
+    gap: var(--nd-space-xs);
+}
+
+.adv-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-xs);
+}
+
+.adv-description {
+    width: 100%;
+    box-sizing: border-box;
+    padding: var(--nd-space-sm) var(--nd-space-md);
+    border: 1px solid var(--nd-border-visible);
+    border-radius: var(--nd-radius-input);
+    background-color: var(--nd-surface);
+    color: var(--nd-text-primary);
+    font-family: var(--nd-font-body);
+    font-size: 14px;
+    resize: vertical;
+}
+
+.adv-description:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+.adv-chips,
+.adv-ranks,
+.adv-model-actions,
+.pb-brands {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--nd-space-sm);
+}
+
+/* The inline confirmation under the picker: colour marks the event. */
+.pb-status[data-kind="saved"] {
+    color: var(--nd-success);
+}
+
+/* Empty until a save answers; it takes no room then. */
+.pb-status:empty {
+    margin: 0;
+}
+
+/* .nd-tab is styled for links; these are buttons. */
+.adv-chip,
+.adv-rank,
+.pb-brand {
+    background-color: transparent;
+    cursor: pointer;
+}
+
+.adv-chip[aria-pressed="true"],
+.adv-rank[aria-pressed="true"],
+.pb-brand[aria-pressed="true"] {
+    background-color: var(--nd-text-display);
+    border-color: var(--nd-text-display);
+    color: var(--nd-black);
+}
+
+.adv-ai-off,
+.adv-printer-line,
+.adv-order-rule,
+.adv-order-note,
+.adv-model-line {
+    margin: 0;
+    color: var(--nd-text-secondary);
+    font-size: 13px;
+}
+
+.adv-ai-error,
+.adv-buy-error {
+    margin: 0;
+    color: var(--nd-warning);
+}
+
+.adv-buy-error {
+    margin-top: var(--nd-space-xs);
+    font-size: 13px;
+    text-align: right;
+}
+
+/* The status line is always in the page (it is a live region), often
+   holding only the visually hidden summary. It cancels its own gap in the
+   page's column, and each line it shows puts one back. */
+.adv-status {
+    margin-top: calc(-1 * var(--nd-space-lg));
+}
+
+.adv-status > :not(.nd-visually-hidden) {
+    margin-top: var(--nd-space-lg);
+}
+
+.adv-run[aria-disabled="true"] {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.adv-model-name {
+    margin: 0;
+    font-family: var(--nd-font-mono);
+    color: var(--nd-text-primary);
+    overflow-wrap: anywhere;
+}
+
+.adv-notes {
+    margin: 0;
+    padding-left: var(--nd-space-md);
+    color: var(--nd-text-secondary);
+}
+
+.adv-products {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.adv-products thead th {
+    padding: var(--nd-space-xs) var(--nd-space-sm);
+    border-bottom: 1px solid var(--nd-border-visible);
+    text-align: left;
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-text-secondary);
+}
+
+.adv-products td,
+.adv-products tbody th {
+    padding: var(--nd-space-sm);
+    text-align: left;
+    font-weight: 400;
+    border-bottom: 1px solid var(--nd-border);
+    color: var(--nd-text-primary);
+}
+
+.adv-product-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--nd-space-sm);
+    justify-content: flex-end;
+}
+
+.adv-tag {
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-signal);
+}
+
+.adv-excluded summary {
+    cursor: pointer;
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-text-secondary);
+}
+
+.adv-excluded summary:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+.adv-excluded-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-xs);
+    margin: var(--nd-space-sm) 0 0;
+    padding-left: var(--nd-space-md);
+}
+
+.adv-excluded-name {
+    font-family: var(--nd-font-mono);
+    color: var(--nd-text-primary);
+}
+
+.adv-excluded-reason {
+    color: var(--nd-text-secondary);
+}
+
+/* A phone-width products table: each product becomes a block, its name
+   first, then the brand and status on one line, then the actions. */
+@media (max-width: 600px) {
+    .adv-products thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+
+    .adv-products tr {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: var(--nd-space-xs) var(--nd-space-sm);
+        padding: var(--nd-space-sm) 0;
+        border-bottom: 1px solid var(--nd-border);
+    }
+
+    .adv-products td,
+    .adv-products tbody th {
+        padding: 0;
+        border-bottom: 0;
+    }
+
+    .adv-products .adv-product-name {
+        flex-basis: 100%;
+    }
+
+    .adv-products .adv-product-brand {
+        color: var(--nd-text-secondary);
+    }
+
+    .adv-products td:last-child {
+        flex-basis: 100%;
+    }
+
+    .adv-product-actions {
+        justify-content: flex-start;
+    }
+
+    .adv-buy-error {
+        text-align: left;
+    }
+}

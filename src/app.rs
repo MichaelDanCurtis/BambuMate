@@ -5,11 +5,13 @@ use leptos_router::path;
 use leptos_router::NavigateOptions;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::advisor::PendingCatalogPick;
 use crate::agent::drawer::{AgentDrawer, AgentEvents, AgentRefresh, AgentShared};
 use crate::commands::{self, FeatureFlags, UpdateInfo};
 use crate::components::patterns::{StateKind, StateText};
 use crate::components::sidebar::Sidebar;
 use crate::pages::about::AboutPage;
+use crate::pages::advise::AdvisePage;
 use crate::pages::batch_generate::BatchGeneratePage;
 use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
@@ -89,6 +91,7 @@ pub fn App() -> impl IntoView {
     provide_context(AgentShared::default());
     provide_context(PrinterShared::new());
     provide_context(SlicerShared::default());
+    provide_context(PendingCatalogPick::new());
 
     // Feature flags with both enabled by default
     let (flags, set_flags) = signal(FeatureFlags {
@@ -169,6 +172,7 @@ pub fn App() -> impl IntoView {
                             <Route path=path!("/printer") view=PrinterPage />
                             <ParentRoute path=path!("/filament") view=|| view! { <HubPage title="Filament" tabs=FILAMENT_TABS /> }>
                                 <Route path=path!("") view=FilamentSearchPage />
+                                <Route path=path!("advise") view=AdvisePage />
                                 <Route path=path!("batch") view=BatchGeneratePage />
                             </ParentRoute>
                             <ParentRoute path=path!("/profiles") view=|| view! { <HubPage title="Profiles" tabs=PROFILES_TABS /> }>

@@ -761,7 +761,7 @@ pub struct InstallResult {
 // -- Catalog types for autocomplete search --
 
 /// A single entry in the filament catalog.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CatalogEntry {
     pub brand: String,
     pub name: String,

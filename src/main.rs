@@ -1,3 +1,4 @@
+mod advisor;
 mod agent;
 mod app;
 mod commands;

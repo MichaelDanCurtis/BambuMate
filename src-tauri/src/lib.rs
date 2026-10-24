@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod advisor;
 pub mod agent;
 pub mod analyzer;
 mod commands;
@@ -99,6 +100,10 @@ pub fn run() {
             commands::slicer::slicer_clear_cache,
             commands::slicer::slicer_pick_model,
             commands::model_view::model_view,
+            commands::advisor::advise,
+            commands::advisor::advise_interpret,
+            commands::advisor::get_preferred_brands,
+            commands::advisor::set_preferred_brands,
             commands::slicer::slicer_stage_model,
             commands::slicer::slicer_model_exists,
             commands::stl_bridge::set_stl_watch_dir,

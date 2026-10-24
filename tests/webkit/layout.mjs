@@ -187,6 +187,7 @@ const RAIL_WIDTH_VIEWPORT = { width: 900, height: 800 };
 // to open), and that element's selector.
 const TAB_ROUTES = [
   ["/filament", "/filament"],
+  ["/filament", "/filament/advise"],
   ["/filament", "/filament/batch"],
   ["/profiles", "/profiles"],
   ["/profiles", "/profiles/compare"],

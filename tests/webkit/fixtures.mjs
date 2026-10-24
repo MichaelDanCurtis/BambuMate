@@ -280,6 +280,45 @@ export const MODEL_VIEW = {
   ],
 };
 
+// -- filament advisor ---------------------------------------------------------
+export const reason = (need, verdict, detail) => ({ need, verdict, detail });
+const asaEntry = (brand) => {
+  const slug = brand.toLowerCase().replace(/ /g, "-");
+  return { brand, name: "ASA", material: "ASA", url_slug: "asa-asa", full_url: `https://www.spoolscout.com/data-sheets/${slug}/asa-asa` };
+};
+export const product = (brand, status, slot) => {
+  const entry = asaEntry(brand);
+  return { name: "ASA", brand, status, slot, buy_url: entry.full_url, entry };
+};
+/** What advise answers for outdoor + heat ≥80 on an enclosed printer. */
+export const ADVICE = {
+  needs: ["heat_80", "outdoor_uv"],
+  fits: [
+    {
+      material: "asa", name: "ASA", total: 6, fit_pct: 100,
+      reasons: [reason("heat_80", "met", "heat deflection ≈95 °C"), reason("outdoor_uv", "met", "3/3")],
+      printer_notes: [], geometry_notes: ["Supports likely, whatever the material"], material_notes: [],
+      products: [product("Bambu Lab", "loaded", "A2"), product("Polymaker", "preferred", null), product("Sunlu", "catalog", null)],
+    },
+    {
+      material: "pa_cf", name: "PA-CF", total: 5, fit_pct: 83,
+      reasons: [reason("heat_80", "met", "heat deflection ≈120 °C"), reason("outdoor_uv", "partly", "2/3")],
+      printer_notes: [], geometry_notes: ["Supports likely, whatever the material"], material_notes: ["Dry the spool before printing."],
+      products: [],
+    },
+    {
+      material: "pet_cf", name: "PET-CF", total: 4, fit_pct: 66,
+      reasons: [reason("heat_80", "met", "heat deflection ≈80 °C"), reason("outdoor_uv", "partly", "2/3")],
+      printer_notes: [], geometry_notes: ["Supports likely, whatever the material"], material_notes: ["Dry the spool before printing."],
+      products: [],
+    },
+  ],
+  ruled_out: [],
+  printer_line: null,
+  model_error: null,
+  catalog_empty: false,
+};
+
 export const FIXTURES = {
   // -- boot --
   get_preference: null,
@@ -573,6 +612,13 @@ export const FIXTURES = {
 
   // -- batch generate (/batch) --
   list_catalog_brands: ["Bambu Lab", "Polymaker", "Prusament"],
+  refresh_catalog: { entry_count: 847, needs_refresh: false },
+  get_ai_capabilities: { provider: "openai", model_id: "gpt-5.4", text: true, vision: true },
+  advise_interpret: ["heat_80", "outdoor_uv"],
+  advise: ADVICE,
+  // -- preferred brands (Settings → General) --
+  get_preferred_brands: [],
+  set_preferred_brands: [],
   // One failure among the successes on purpose: it exercises the .row-fail
   // branch and the error-hint span, which the all-success path never renders.
   batch_generate_brand: {

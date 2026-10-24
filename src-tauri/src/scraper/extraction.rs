@@ -47,34 +47,7 @@ pub async fn extract_specs(
         filament_name, provider, model
     );
 
-    // Call the appropriate provider API
-    let response_text = match provider {
-        "claude" => call_claude(api_key, model, &prompt, &schema).await?,
-        "openai" => call_openai(api_key, model, &prompt, &schema).await?,
-        "kimi" => call_kimi(api_key, model, &prompt).await?,
-        "openrouter" => call_openrouter(api_key, model, &prompt, &schema).await?,
-        "local" => call_local(api_key, model, &prompt).await?,
-        _ => {
-            let msg = format!(
-                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
-                provider
-            );
-            error!("{}", msg);
-            return Err(msg);
-        }
-    };
-
-    // Parse LLM response into intermediate JSON first
-    let response_text = strip_markdown_json(&response_text);
-    let response_json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-        let truncated = truncate_with_ellipsis(&response_text, 500, "...");
-        let msg = format!(
-            "Failed to parse LLM response as JSON: {}. Raw response (first 500 chars): {}",
-            e, truncated
-        );
-        error!("{}", msg);
-        msg
-    })?;
+    let response_json = complete_json(&prompt, &schema, provider, model, api_key).await?;
 
     // Map the LLM response JSON to our FilamentSpecs struct.
     // The LLM schema uses "confidence" but our struct uses "extraction_confidence",
@@ -130,34 +103,7 @@ pub async fn extract_specs_from_html(
         filament_name, provider, model
     );
 
-    // Call the appropriate provider API
-    let response_text = match provider {
-        "claude" => call_claude(api_key, model, &prompt, &schema).await?,
-        "openai" => call_openai(api_key, model, &prompt, &schema).await?,
-        "kimi" => call_kimi(api_key, model, &prompt).await?,
-        "openrouter" => call_openrouter(api_key, model, &prompt, &schema).await?,
-        "local" => call_local(api_key, model, &prompt).await?,
-        _ => {
-            let msg = format!(
-                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
-                provider
-            );
-            error!("{}", msg);
-            return Err(msg);
-        }
-    };
-
-    // Parse LLM response into intermediate JSON
-    let response_text = strip_markdown_json(&response_text);
-    let response_json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-        let truncated = truncate_with_ellipsis(&response_text, 500, "...");
-        let msg = format!(
-            "Failed to parse LLM response as JSON: {}. Raw response (first 500 chars): {}",
-            e, truncated
-        );
-        error!("{}", msg);
-        msg
-    })?;
+    let response_json = complete_json(&prompt, &schema, provider, model, api_key).await?;
 
     let specs = map_response_to_specs(&response_json, filament_name).map_err(|e| {
         let msg = format!(
@@ -217,34 +163,7 @@ pub async fn generate_specs_from_knowledge(
         filament_name, provider, model
     );
 
-    // Call the appropriate provider API
-    let response_text = match provider {
-        "claude" => call_claude(api_key, model, &prompt, &schema).await?,
-        "openai" => call_openai(api_key, model, &prompt, &schema).await?,
-        "kimi" => call_kimi(api_key, model, &prompt).await?,
-        "openrouter" => call_openrouter(api_key, model, &prompt, &schema).await?,
-        "local" => call_local(api_key, model, &prompt).await?,
-        _ => {
-            let msg = format!(
-                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
-                provider
-            );
-            error!("{}", msg);
-            return Err(msg);
-        }
-    };
-
-    // Parse LLM response into intermediate JSON
-    let response_text = strip_markdown_json(&response_text);
-    let response_json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-        let truncated = truncate_with_ellipsis(&response_text, 500, "...");
-        let msg = format!(
-            "Failed to parse LLM response as JSON: {}. Raw response: {}",
-            e, truncated
-        );
-        error!("{}", msg);
-        msg
-    })?;
+    let response_json = complete_json(&prompt, &schema, provider, model, api_key).await?;
 
     // Map the LLM response JSON to our FilamentSpecs struct
     let mut specs = map_response_to_specs(&response_json, filament_name).map_err(|e| {
@@ -321,32 +240,7 @@ pub async fn tune_specs_for_nozzle(
         filament_name, nozzle_diameter, flow_cap, provider, model
     );
 
-    let response_text = match provider {
-        "claude" => call_claude(api_key, model, &prompt, &schema).await?,
-        "openai" => call_openai(api_key, model, &prompt, &schema).await?,
-        "kimi" => call_kimi(api_key, model, &prompt).await?,
-        "openrouter" => call_openrouter(api_key, model, &prompt, &schema).await?,
-        "local" => call_local(api_key, model, &prompt).await?,
-        _ => {
-            let msg = format!(
-                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
-                provider
-            );
-            error!("{}", msg);
-            return Err(msg);
-        }
-    };
-
-    let response_text = strip_markdown_json(&response_text);
-    let response_json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-        let truncated = truncate_with_ellipsis(&response_text, 500, "...");
-        let msg = format!(
-            "Failed to parse nozzle tuning response as JSON: {}. Raw response: {}",
-            e, truncated
-        );
-        error!("{}", msg);
-        msg
-    })?;
+    let response_json = complete_json(&prompt, &schema, provider, model, api_key).await?;
 
     let mut tuning = apply_nozzle_tuning(specs, nozzle_diameter, &response_json);
 
@@ -682,6 +576,49 @@ fn map_response_to_specs(
         // Metadata
         source_url: json["source_url"].as_str().unwrap_or("").to_string(),
         extraction_confidence: json["confidence"].as_f64().unwrap_or(0.0) as f32,
+    })
+}
+
+/// Send `prompt` to the configured provider and parse its reply as JSON.
+/// The one provider dispatch every AI feature shares: spec extraction,
+/// nozzle tuning and the filament advisor. `schema` is used by providers
+/// that support structured output.
+pub(crate) async fn complete_json(
+    prompt: &str,
+    schema: &serde_json::Value,
+    provider: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<serde_json::Value, String> {
+    let response_text = match provider {
+        "claude" => call_claude(api_key, model, prompt, schema).await?,
+        "openai" => call_openai(api_key, model, prompt, schema).await?,
+        "kimi" => call_kimi(api_key, model, prompt).await?,
+        "openrouter" => call_openrouter(api_key, model, prompt, schema).await?,
+        "local" => call_local(api_key, model, prompt).await?,
+        _ => {
+            let msg = format!(
+                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
+                provider
+            );
+            error!("{}", msg);
+            return Err(msg);
+        }
+    };
+    parse_json_response(&response_text)
+}
+
+/// A model's reply as JSON, with any markdown code fence removed.
+pub(crate) fn parse_json_response(raw: &str) -> Result<serde_json::Value, String> {
+    let text = strip_markdown_json(raw);
+    serde_json::from_str(&text).map_err(|e| {
+        let truncated = truncate_with_ellipsis(&text, 500, "...");
+        let msg = format!(
+            "Failed to parse LLM response as JSON: {}. Raw response (first 500 chars): {}",
+            e, truncated
+        );
+        error!("{}", msg);
+        msg
     })
 }
 
@@ -1267,6 +1204,36 @@ mod tests {
             err
         );
         assert!(err.contains("invalid_provider"));
+    }
+
+    #[tokio::test]
+    async fn complete_json_names_an_unsupported_provider() {
+        let err = complete_json("p", &serde_json::json!({}), "nope", "m", "k")
+            .await
+            .unwrap_err();
+        assert!(err.contains("Unsupported AI provider"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn json_replies_may_be_fenced() {
+        assert_eq!(
+            parse_json_response("```json\n{\"a\": 1}\n```").unwrap(),
+            serde_json::json!({"a": 1})
+        );
+        assert_eq!(
+            parse_json_response(" {\"a\": 2} ").unwrap(),
+            serde_json::json!({"a": 2})
+        );
+    }
+
+    #[test]
+    fn a_malformed_reply_is_an_error() {
+        let err = parse_json_response("{\"needs\": [").unwrap_err();
+        assert!(
+            err.starts_with("Failed to parse LLM response as JSON"),
+            "{err}"
+        );
     }
 
     #[test]

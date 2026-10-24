@@ -12,6 +12,7 @@ use leptos_router::hooks::use_query_map;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::advisor::format::advise_href;
 use crate::agent::drawer::AgentShared;
 use crate::agent::types::SliceContext;
 use crate::commands::{self, StlFile};
@@ -430,6 +431,9 @@ pub fn SlicePage() -> impl IntoView {
                         }}
                     </p>
                     <ModelViewport path=Signal::derive(move || model.get()) hide_name=true />
+                    {move || model.get().map(|p| view! {
+                        <a class="sl-suggest" href=advise_href(&p)>"Suggest filament"</a>
+                    })}
                     <div class="sl-drop-actions">
                         <button class="sl-btn sl-browse" on:click=browse>"Choose file"</button>
                         <Show when=move || !watched.with(Vec::is_empty)>

@@ -24,6 +24,7 @@ import { deflateSync } from "node:zlib";
 import { extname, join, resolve } from "node:path";
 import {
   A3_ASSIGNED,
+  ADVICE,
   FIXTURES,
   GIF_1X1,
   makePng,
@@ -33,6 +34,8 @@ import {
   PRINTER_SLOTS,
   PRINTER_UNCONFIGURED,
   PRINTER_VIEW,
+  product,
+  reason,
   SLICE_MODEL,
   STL_INBOX_FILE,
   sliceJob,
@@ -409,6 +412,144 @@ async function driveApp(browserType, engine, baseUrl) {
     if (h2s < 4) throw new Error(`${h2s} section titles`);
     const h3s = await page.locator(".settings-page .settings-section h3").count();
     if (h3s !== 0) throw new Error(`${h3s} section h3s left unstyled`);
+  });
+
+  // Preferred brands. Waits here are on the fixture's invoke log, the proof
+  // that a save reached the backend, never on the optimistic button state.
+  const PB = ".preferred-brands";
+  const pbSaves = () => callsOf("set_preferred_brands");
+  const pbPressed = async () => (await page.locator(`${PB} .pb-brand[aria-pressed='true']`).allTextContents()).join("|");
+  const pbSavedPast = (n) =>
+    page.waitForFunction((k) => window.__ipc.calls.filter((c) => c.cmd === "set_preferred_brands").length >= k, n, { timeout: 5000 });
+  const pbSettledPast = (n) =>
+    page.waitForFunction((k) => window.__ipc.settled.filter((c) => c === "set_preferred_brands").length >= k, n, { timeout: 5000 });
+  const pbStatusIs = (text) =>
+    page.waitForFunction(([sel, t]) => document.querySelector(sel)?.textContent === t, [`${PB} .pb-status`, text], { timeout: 5000 });
+  // What the picker and its status line show right now. Used after an answer
+  // has settled: the invoke log's `settled` entry is pushed just before the
+  // answer reaches the page, whose continuation runs as microtasks, so by the
+  // time this poll reads the DOM that answer has already been handled.
+  const pbShows = (pressed, status) =>
+    page.waitForFunction(
+      ([sel, want, text]) => {
+        const on = [...document.querySelectorAll(`${sel} .pb-brand[aria-pressed='true']`)].map((b) => b.textContent).join("|");
+        return on === want && document.querySelector(`${sel} .pb-status`)?.textContent === text;
+      },
+      [PB, pressed, status],
+      { timeout: 5000 }
+    );
+  const pbArgs = async (from) => JSON.stringify((await pbSaves()).slice(from).map((c) => c.args.brands));
+  const FAILED_SENTENCE = "[ERROR: Couldn't save your preferred brands.]";
+
+  await step(run, page, "Settings lists the catalog's brands and saves a toggle inline", async () => {
+    await page.waitForSelector(`${PB} .pb-brand`, { timeout: 15000 });
+    const labels = await page.locator(`${PB} .pb-brand`).allTextContents();
+    if (labels.join("|") !== "Bambu Lab|Polymaker|Prusament") throw new Error(`brands ${labels.join("|")}`);
+    if ((await pbPressed()) !== "") throw new Error(`pressed before any choice: ${await pbPressed()}`);
+    // The status node is there from the start and empty, so its text is announced when it arrives.
+    const status = page.locator(`${PB} .pb-status[role='status']`);
+    if ((await status.count()) !== 1 || (await status.textContent()) !== "") throw new Error("the status line is not mounted empty");
+    const before = (await pbSaves()).length;
+    await withFixtures({ set_preferred_brands: ["Polymaker"] }, async () => {
+      await page.click(`${PB} .pb-brand:has-text('Polymaker')`);
+      await pbSavedPast(before + 1);
+      await pbStatusIs("[SAVED]");
+    });
+    if ((await pbSaves()).length !== before + 1) throw new Error("not exactly one save for one toggle");
+    if ((await pbArgs(before)) !== '[["Polymaker"]]') throw new Error(await pbArgs(before));
+    if ((await pbPressed()) !== "Polymaker") throw new Error(`pressed ${await pbPressed()}`);
+    if ((await page.locator(".toast").count()) !== 0) throw new Error("a toast announced the save");
+  });
+
+  await step(run, page, "toggling a brand off saves the empty list", async () => {
+    const before = (await pbSaves()).length;
+    await withFixtures({ set_preferred_brands: [] }, async () => {
+      await page.click(`${PB} .pb-brand:has-text('Polymaker')`);
+      await pbSavedPast(before + 1);
+      await pbStatusIs("[SAVED]");
+    });
+    if ((await pbArgs(before)) !== "[[]]") throw new Error(await pbArgs(before));
+    if ((await pbPressed()) !== "") throw new Error(`pressed ${await pbPressed()}`);
+  });
+
+  await step(run, page, "a failed save reverts the picker and says so in a fixed sentence", async () => {
+    const before = (await pbSaves()).length;
+    await withFixtures({ set_preferred_brands: { __reject: "disk full: /secret/path" } }, async () => {
+      await page.click(`${PB} .pb-brand:has-text('Prusament')`);
+      await pbSavedPast(before + 1);
+      await pbStatusIs(FAILED_SENTENCE);
+    });
+    if ((await page.locator(`${PB} .pb-status`).getAttribute("data-kind")) !== "error") throw new Error("the failure is not marked as an error");
+    if ((await pbPressed()) !== "") throw new Error(`the failed toggle stayed pressed: ${await pbPressed()}`);
+    if ((await page.locator(PB).innerText()).includes("disk full")) throw new Error("the raw error leaked into the page");
+  });
+
+  await step(run, page, "rapid toggles settle on the last save, shown and stored agreeing", async () => {
+    const before = (await pbSaves()).length;
+    const settled = await page.evaluate(() => window.__ipc.settled.filter((c) => c === "set_preferred_brands").length);
+    const seq = [
+      { __hold: "pb-a", answer: ["Bambu Lab"] },
+      { __hold: "pb-b", answer: ["Bambu Lab", "Polymaker"] },
+    ];
+    await withFixtures({ set_preferred_brands: { __sequence: seq } }, async () => {
+      await page.click(`${PB} .pb-brand:has-text('Bambu Lab')`);
+      await page.click(`${PB} .pb-brand:has-text('Polymaker')`);
+      await pbSavedPast(before + 2);
+      if ((await pbPressed()) !== "Bambu Lab|Polymaker") throw new Error(`optimistic ${await pbPressed()}`);
+      // The newest answer arrives first; the older one arrives late and must change nothing.
+      await page.evaluate(() => window.__release("pb-b"));
+      await pbStatusIs("[SAVED]");
+      await page.evaluate(() => window.__release("pb-a"));
+      await pbSettledPast(settled + 2);
+      await pbShows("Bambu Lab|Polymaker", "[SAVED]");
+    });
+    if ((await pbArgs(before)) !== '[["Bambu Lab"],["Bambu Lab","Polymaker"]]') throw new Error(await pbArgs(before));
+    if ((await pbPressed()) !== "Bambu Lab|Polymaker") throw new Error(`shown ${await pbPressed()}`);
+    if ((await page.locator(`${PB} .pb-status`).textContent()) !== "[SAVED]") throw new Error("status not [SAVED]");
+  });
+
+  await step(run, page, "a success dropped before a failed newest save is not lost", async () => {
+    // Stored: Bambu Lab, Polymaker. Toggle Prusament (saves), then Bambu Lab (fails).
+    const before = (await pbSaves()).length;
+    const settled = await page.evaluate(() => window.__ipc.settled.filter((c) => c === "set_preferred_brands").length);
+    const seq = [
+      { __hold: "pb-c", answer: ["Bambu Lab", "Polymaker", "Prusament"] },
+      { __hold: "pb-d", answer: { __reject: "nope" } },
+    ];
+    await withFixtures({ set_preferred_brands: { __sequence: seq } }, async () => {
+      await page.click(`${PB} .pb-brand:has-text('Prusament')`);
+      await page.click(`${PB} .pb-brand:has-text('Bambu Lab')`);
+      await pbSavedPast(before + 2);
+      await page.evaluate(() => window.__release("pb-d"));
+      await pbStatusIs(FAILED_SENTENCE);
+      // The newest failed while the first is still out: back to what was confirmed so far.
+      await page.waitForFunction(() => [...document.querySelectorAll(".preferred-brands .pb-brand[aria-pressed='true']")].map((b) => b.textContent).join("|") === "Bambu Lab|Polymaker", null, { timeout: 5000 });
+      await page.evaluate(() => window.__release("pb-c"));
+      await pbSettledPast(settled + 2);
+      await pbShows("Bambu Lab|Polymaker|Prusament", FAILED_SENTENCE);
+    });
+    // The first save did reach the store, so the picker shows it.
+    if ((await pbPressed()) !== "Bambu Lab|Polymaker|Prusament") throw new Error(`shown ${await pbPressed()}`);
+    if ((await page.locator(`${PB} .pb-status`).textContent()) !== FAILED_SENTENCE) throw new Error("the failure was forgotten");
+  });
+
+  await step(run, page, "an unreadable stored set hides the picker until a read succeeds", async () => {
+    await page.click('nav.sidebar a[href="/profiles"]');
+    await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+    const before = (await pbSaves()).length;
+    await withFixtures({ get_preferred_brands: { __reject: "ipc down" } }, async () => {
+      await page.click('nav.sidebar a[href="/settings"]');
+      await page.waitForSelector(`${PB} .pb-retry`, { timeout: 5000 });
+      if ((await page.locator(`${PB} .pb-brand`).count()) !== 0) throw new Error("the picker is offered without the stored set");
+      const msg = (await page.locator(`${PB} .nd-state[data-kind='error']`).textContent()).trim();
+      if (msg !== "[ERROR: Couldn't read your preferred brands.]") throw new Error(msg);
+    });
+    await withFixtures({ get_preferred_brands: ["Polymaker"] }, async () => {
+      await page.click(`${PB} .pb-retry`);
+      await page.waitForSelector(`${PB} .pb-brand`, { timeout: 5000 });
+    });
+    if ((await pbPressed()) !== "Polymaker") throw new Error(`pressed ${await pbPressed()}`);
+    if ((await pbSaves()).length !== before) throw new Error("a save was sent while the stored set was unknown");
   });
 
   // -- filament search and selection ---------------------------------------
@@ -1110,6 +1251,18 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_set_settings"), null, { timeout: 5000 });
   });
 
+  await step(run, page, "a chosen model offers a Suggest filament link to Advise", async () => {
+    const link = page.locator("a.sl-suggest");
+    if ((await link.count()) !== 1) throw new Error(`${await link.count()} Suggest filament links`);
+    const href = await link.getAttribute("href");
+    const want = `/filament/advise?model=${encodeURIComponent(SLICE_MODEL)}`;
+    if (href !== want) throw new Error(`href ${href}, wanted ${want}`);
+    if ((await link.innerText()).trim().toLowerCase() !== "suggest filament") throw new Error(`text ${await link.innerText()}`);
+    // A real anchor with an href: keyboard-focusable and middle-clickable.
+    const tag = await link.evaluate((el) => `${el.tagName}${el.tabIndex}`);
+    if (tag !== "A0") throw new Error(`link is ${tag}`);
+  });
+
   // Whether this engine can give a WebGL2 context at all. When it can, the
   // viewport must draw: a shader or link failure shows the "couldn't start"
   // text, which no step here accepts.
@@ -1710,6 +1863,347 @@ async function driveApp(browserType, engine, baseUrl) {
       await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "hinge.stl", null, { timeout: 5000 });
     });
     await page.waitForSelector(".sl-watch", { state: "detached", timeout: 15000 });
+  });
+
+  // -- filament advisor ------------------------------------------------------
+  // Every wait here is on the invoke log, a DOM condition or a __hold gate;
+  // none is on a clock. Fixture overrides go through withFixtures, so each
+  // step puts back what it changed.
+  const ADV = ".advise-page";
+  const countOf = (cmd) => page.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c).length, cmd);
+  const pastCalls = (cmd, n) =>
+    page.waitForFunction(([c, k]) => window.__ipc.calls.filter((x) => x.cmd === c).length > k, [cmd, n], { timeout: 5000 });
+  // Advise is aria-disabled, never disabled, while a request is out.
+  const adviseIdle = () => page.waitForSelector(`${ADV} .adv-run[aria-disabled="false"]`, { timeout: 10000 });
+  const openAdvise = async () => {
+    await openTab("/filament", "/filament/advise");
+    await page.waitForSelector(`${ADV} .adv-run`, { timeout: 15000 });
+    await adviseIdle();
+  };
+  // Presses Advise and returns once that answer has been handled.
+  const pressAdvise = async () => {
+    const settled = await settledCount("advise");
+    await page.click(`${ADV} .adv-run`);
+    await page.waitForFunction((k) => window.__ipc.settled.filter((c) => c === "advise").length > k, settled, { timeout: 10000 });
+    await adviseIdle();
+  };
+  const pressedChips = async () => (await page.locator(`${ADV} .adv-chip[aria-pressed="true"]`).allTextContents()).join("|");
+  const chipNamed = (label) => page.locator(`${ADV} .adv-chip`, { hasText: label });
+  const statusText = async () => (await page.locator(`${ADV} .adv-status`).textContent()).trim();
+  const ASA_ROW = (over = {}) => ({ ...ADVICE.fits[0], ...over });
+
+  await step(run, page, "Suggest filament on Slice opens Advise with the model", async () => {
+    await page.click('nav.sidebar a[href="/slice"]');
+    await page.waitForSelector(".slice-page", { timeout: 15000 });
+    await page.click(".sl-browse");
+    await page.waitForFunction(() => document.querySelector(".sl-model")?.innerText === "cube.stl", null, { timeout: 5000 });
+    const views = (await callsOf("model_view")).length;
+    await page.click(".sl-suggest");
+    await page.waitForFunction(() => location.pathname === "/filament/advise", null, { timeout: 5000 });
+    const model = await page.evaluate(() => new URLSearchParams(location.search).get("model"));
+    if (model !== SLICE_MODEL) throw new Error(`?model= is ${model}`);
+    await page.waitForSelector(`${ADV} .adv-model-name`, { timeout: 15000 });
+    const name = (await page.locator(".adv-model-name").textContent()).trim();
+    if (name !== "cube.stl") throw new Error(`model row reads "${name}"`);
+    await page.waitForFunction(
+      () => document.querySelector(".adv-model-line")?.textContent === "10 × 10 mm · Overhang 64 mm² · Tall and thin 6.0:1",
+      null,
+      { timeout: 5000 }
+    );
+    const asked = (await callsOf("model_view")).slice(views).map((c) => c.args.path);
+    if (!asked.includes(SLICE_MODEL)) throw new Error(`model_view asked for ${JSON.stringify(asked)}`);
+    const current = await page.locator('.nd-tabs a[aria-current="page"]').getAttribute("href");
+    if (current !== "/filament/advise") throw new Error(`the current tab is ${current}`);
+    const tabs = await page.locator(".nd-tabs a").allTextContents();
+    if (tabs.join("|") !== "Advise|Search|Batch") throw new Error(`tabs read ${tabs.join("|")}`);
+  });
+
+  await step(run, page, "before advising the page says what to do", async () => {
+    await page.waitForSelector(`${ADV} .adv-description`, { timeout: 10000 });
+    const text = (await page.locator(`${ADV} .nd-state[data-kind="empty"]`).textContent()).trim();
+    if (text !== "[EMPTY: Describe the part or pick what it needs]") throw new Error(`reads "${text}"`);
+    if (await page.locator(`${ADV} .adv-results`).count()) throw new Error("results are shown before advising");
+  });
+
+  await step(run, page, "the needs chips toggle and the heat options exclude each other", async () => {
+    await chipNamed("Strong").click();
+    await chipNamed("Heat ≥60 °C").click();
+    await chipNamed("Heat ≥100 °C").click();
+    const pressed = await pressedChips();
+    if (pressed !== "Strong|Heat ≥100 °C") throw new Error(`pressed: ${pressed}`);
+    await chipNamed("Strong").click();
+    await chipNamed("Heat ≥100 °C").click();
+    const left = await page.locator(`${ADV} .adv-chip[aria-pressed="true"]`).count();
+    if (left !== 0) throw new Error(`${left} chips stayed on`);
+    if ((await countOf("advise")) !== 0) throw new Error("toggling a chip asked the backend");
+  });
+
+  await step(run, page, "a description fills the chips and the hero shows the top material", async () => {
+    await page.fill(`${ADV} .adv-description`, "A sensor bracket on a hot car dashboard");
+    await pressAdvise();
+    await page.waitForSelector(`${ADV} .adv-results .nd-hero-number`, { timeout: 10000 });
+    const interp = (await callsOf("advise_interpret")).at(-1)?.args;
+    if (interp?.text !== "A sensor bracket on a hot car dashboard") throw new Error(JSON.stringify(interp));
+    const pressed = await pressedChips();
+    if (pressed !== "Heat ≥80 °C|Outdoor/UV") throw new Error(`pressed: ${pressed}`);
+    const advise = (await callsOf("advise")).at(-1).args;
+    if (!sameArgs(advise, { needs: ["heat_80", "outdoor_uv"], modelPath: SLICE_MODEL })) throw new Error(JSON.stringify(advise));
+    const word = (await page.locator(`${ADV} .adv-results .nd-hero-number`).textContent()).trim();
+    if (word !== "ASA") throw new Error(`hero reads "${word}"`);
+    const detail = (await page.locator(`${ADV} .adv-results .nd-hero-detail`).first().textContent()).trim();
+    if (detail !== "Fit 100% · ✓ Heat ≥80 °C · ✓ Outdoor/UV") throw new Error(`detail reads "${detail}"`);
+    const tone = await page.locator(`${ADV} .adv-results .nd-hero`).getAttribute("data-tone");
+    if (tone !== "signal") throw new Error(`a fit with no unmet need has the ${tone} tone`);
+    const ranks = await page.locator(`${ADV} .adv-rank`).allTextContents();
+    if (ranks.join("|") !== "1 · ASA|2 · PA-CF|3 · PET-CF") throw new Error(`ranks: ${ranks.join("|")}`);
+  });
+
+  await step(run, page, "the live region carries the result summary", async () => {
+    const region = page.locator(`${ADV} .adv-status`);
+    if ((await region.getAttribute("role")) !== "status" || (await region.getAttribute("aria-live")) !== "polite") {
+      throw new Error("the status line is not a polite live region");
+    }
+    const text = await statusText();
+    if (text !== "Best fit ASA, fit 100%. Also PA-CF, PET-CF.") throw new Error(`reads "${text}"`);
+  });
+
+  await step(run, page, "choosing rank 2 changes the reasons", async () => {
+    const reasons = () => page.locator(`${ADV} .adv-reasons .nd-stat-row-value`).allTextContents();
+    const first = await reasons();
+    if (first.join("|") !== "100%|✓ heat deflection ≈95 °C|✓ 3/3") throw new Error(`rank 1: ${first.join("|")}`);
+    await page.locator(`${ADV} .adv-rank`).nth(1).click();
+    await page.waitForFunction(() => document.querySelector(".adv-detail")?.dataset.material === "pa_cf", null, { timeout: 5000 });
+    const second = await reasons();
+    if (second.join("|") !== "83%|✓ heat deflection ≈120 °C|~ 2/3") throw new Error(`rank 2: ${second.join("|")}`);
+    if ((await page.locator(`${ADV} .adv-rank`).nth(1).getAttribute("aria-pressed")) !== "true") throw new Error("rank 2 is not pressed");
+    if ((await page.locator(`${ADV} .adv-rank`).nth(0).getAttribute("aria-pressed")) !== "false") throw new Error("rank 1 stayed pressed");
+    const notes = await page.locator(`${ADV} .adv-notes li`).allTextContents();
+    if (notes.join("|") !== "Supports likely, whatever the material|Dry the spool before printing.") throw new Error(`notes: ${notes.join("|")}`);
+    const none = (await page.locator(`${ADV} .adv-detail .nd-state[data-kind="empty"]`).textContent()).trim();
+    if (none !== "[EMPTY: No PA-CF filaments in the catalog]") throw new Error(`products read "${none}"`);
+    // One hero still: the pills switch the panel, they do not add a second.
+    if ((await page.locator(`${ADV} .nd-hero`).count()) !== 1) throw new Error("more than one hero");
+    await page.locator(`${ADV} .adv-rank`).nth(0).click();
+    await page.waitForFunction(() => document.querySelector(".adv-detail")?.dataset.material === "asa", null, { timeout: 5000 });
+  });
+
+  await step(run, page, "AMS-loaded products come first and the order is stated", async () => {
+    const statuses = await page.locator(`${ADV} .adv-product`).evaluateAll((rows) => rows.map((r) => r.dataset.status));
+    if (statuses.join("|") !== "loaded|preferred|catalog") throw new Error(`rows: ${statuses.join("|")}`);
+    const tag = (await page.locator(`${ADV} .adv-product`).first().locator(".adv-tag").textContent()).trim();
+    if (tag !== "Loaded in A2") throw new Error(`tag reads "${tag}"`);
+    const brands = await page.locator(`${ADV} .adv-product-brand`).allTextContents();
+    if (brands.join("|") !== "Bambu Lab|Polymaker|Sunlu") throw new Error(`brands: ${brands.join("|")}`);
+    const rule = (await page.locator(`${ADV} .adv-order-rule`).textContent()).trim();
+    if (!rule.startsWith("Loaded in your AMS first, then your preferred brands, then the rest A–Z.")) throw new Error(`rule reads "${rule}"`);
+  });
+
+  await step(run, page, "Where to buy opens the plain link", async () => {
+    const before = (await callsOf("open_external_url")).length;
+    await page.locator(`${ADV} .adv-product`).nth(1).locator(".adv-buy").click();
+    await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "open_external_url").length > n, before, { timeout: 5000 });
+    const url = (await callsOf("open_external_url")).at(-1).args.url;
+    if (url !== "https://www.spoolscout.com/data-sheets/polymaker/asa-asa") throw new Error(`opened ${url}`);
+    if ((await page.locator(`${ADV} .adv-buy-error`).count()) !== 0) throw new Error("an error shows after a link that opened");
+  });
+
+  await step(run, page, "a failed Where to buy shows its inline sentence", async () => {
+    await withFixtures({ open_external_url: { __reject: "no browser: /secret/path" } }, async () => {
+      const before = await countOf("open_external_url");
+      const row = page.locator(`${ADV} .adv-product`).nth(2);
+      await row.locator(".adv-buy").click();
+      await pastCalls("open_external_url", before);
+      await row.locator(".adv-buy-error").waitFor({ timeout: 5000 });
+      const text = (await row.locator(".adv-buy-error").textContent()).trim();
+      if (text !== "Couldn't open that link in your browser.") throw new Error(`reads "${text}"`);
+      if ((await row.locator(".adv-buy-error").getAttribute("role")) !== "alert") throw new Error("the error is not an alert");
+      if ((await row.innerText()).includes("secret")) throw new Error("the raw error leaked into the row");
+      // The other rows are untouched.
+      if ((await page.locator(`${ADV} .adv-buy-error`).count()) !== 1) throw new Error("the error shows on other rows");
+    });
+  });
+
+  await step(run, page, "Generate profile hands the entry to Search exactly once and installs nothing", async () => {
+    const fetches = await countOf("fetch_filament_from_catalog");
+    const installs = await countOf("install_generated_profile");
+    await page.locator(`${ADV} .adv-product`).nth(1).locator(".adv-generate").click();
+    await page.waitForFunction(() => location.pathname === "/filament", null, { timeout: 5000 });
+    await page.waitForSelector(".filament-search-page", { timeout: 15000 });
+    await pastCalls("fetch_filament_from_catalog", fetches);
+    const entry = (await callsOf("fetch_filament_from_catalog")).at(-1).args.entry;
+    if (entry.brand !== "Polymaker" || entry.name !== "ASA") throw new Error(JSON.stringify(entry));
+    // The pick is spent: leaving Search and coming back hands over nothing.
+    await openAdvise();
+    await page.click('.nd-tabs a[href="/filament"]');
+    await page.waitForSelector(".filament-search-page", { timeout: 15000 });
+    if ((await countOf("fetch_filament_from_catalog")) !== fetches + 1) throw new Error("the entry was handed over more than once");
+    if ((await countOf("install_generated_profile")) !== installs) throw new Error("something was installed");
+  });
+
+  await step(run, page, "Where to buy and Generate profile show only for a product that has them", async () => {
+    const bare = { ...product("Sunlu", "catalog", null), buy_url: null, entry: null };
+    const noEntry = { ...product("Polymaker", "preferred", null), entry: null };
+    const advice = { ...ADVICE, fits: [ASA_ROW({ products: [bare, noEntry] })] };
+    await withFixtures({ advise: advice }, async () => {
+      await openAdvise();
+      await pressAdvise();
+      await page.waitForSelector(`${ADV} .adv-product`, { timeout: 5000 });
+      const rows = page.locator(`${ADV} .adv-product`);
+      if ((await rows.count()) !== 2) throw new Error(`${await rows.count()} product rows`);
+      const first = `${await rows.nth(0).locator(".adv-buy").count()}${await rows.nth(0).locator(".adv-generate").count()}`;
+      const second = `${await rows.nth(1).locator(".adv-buy").count()}${await rows.nth(1).locator(".adv-generate").count()}`;
+      if (first !== "00") throw new Error(`a product with no link or entry offers buy/generate: ${first}`);
+      if (second !== "10") throw new Error(`a product with a link and no entry offers buy/generate: ${second}`);
+    });
+  });
+
+  await step(run, page, "a double press of Advise sends one request", async () => {
+    await openAdvise();
+    const before = await countOf("advise");
+    await withFixtures({ advise: { __hold: "adv-double", answer: ADVICE } }, async () => {
+      // Both clicks land before the page can answer. Playwright's own click
+      // would refuse the aria-disabled button, so dispatch them directly.
+      await page.evaluate(() => {
+        const button = document.querySelector(".advise-page .adv-run");
+        button.click();
+        button.click();
+      });
+      await pastCalls("advise", before);
+      if ((await page.locator(`${ADV} .adv-run`).getAttribute("aria-disabled")) !== "true") throw new Error("Advise stayed enabled while a request was out");
+      if ((await page.locator(`${ADV} .adv-status .nd-state[data-kind="loading"]`).count()) !== 1) throw new Error("no loading line while a request is out");
+      await page.evaluate(() => window.__release("adv-double"));
+      await page.waitForSelector(`${ADV} .adv-results .nd-hero-number`, { timeout: 5000 });
+      await adviseIdle();
+    });
+    const sent = (await countOf("advise")) - before;
+    if (sent !== 1) throw new Error(`${sent} requests for two presses`);
+  });
+
+  await step(run, page, "a chip edit survives the next Advise and the description is not read again", async () => {
+    await openAdvise();
+    await page.fill(`${ADV} .adv-description`, "A gate hinge outdoors");
+    const reads = await countOf("advise_interpret");
+    await pressAdvise();
+    if ((await countOf("advise_interpret")) !== reads + 1) throw new Error("the description was not read once");
+    await chipNamed("Strong").click();
+    const edited = { ...ADVICE, needs: ["strong", "heat_80", "outdoor_uv"] };
+    await withFixtures({ advise: edited }, async () => {
+      await pressAdvise();
+    });
+    if ((await countOf("advise_interpret")) !== reads + 1) throw new Error("an unchanged description was read again");
+    const sent = (await callsOf("advise")).at(-1).args.needs;
+    if (JSON.stringify(sent) !== '["strong","heat_80","outdoor_uv"]') throw new Error(`advise got ${JSON.stringify(sent)}`);
+    const pressed = await pressedChips();
+    if (pressed !== "Strong|Heat ≥80 °C|Outdoor/UV") throw new Error(`pressed: ${pressed}`);
+    // A new description is read, and it fills the chips again.
+    await page.fill(`${ADV} .adv-description`, "A gate hinge outdoors, in the sun");
+    await pressAdvise();
+    if ((await countOf("advise_interpret")) !== reads + 2) throw new Error("a changed description was not read");
+    const reread = await pressedChips();
+    if (reread !== "Heat ≥80 °C|Outdoor/UV") throw new Error(`pressed after the new reading: ${reread}`);
+  });
+
+  await step(run, page, "the hero is neutral when the top fit misses a need and signal when it misses none", async () => {
+    const unmet = ASA_ROW({
+      fit_pct: 56,
+      reasons: [reason("heat_80", "met", "heat deflection ≈95 °C"), reason("flexible", "not_met", "0/3")],
+    });
+    await withFixtures({ advise: { ...ADVICE, needs: ["flexible", "heat_80"], fits: [unmet] } }, async () => {
+      await openAdvise();
+      await pressAdvise();
+      await page.waitForSelector(`${ADV} .adv-results .nd-hero-number`, { timeout: 5000 });
+      const tone = await page.locator(`${ADV} .adv-results .nd-hero`).getAttribute("data-tone");
+      if (tone !== "neutral") throw new Error(`a fit with an unmet need has the ${tone} tone`);
+      const rows = await page.locator(`${ADV} .adv-reasons .nd-stat-row-value`).allTextContents();
+      if (rows.join("|") !== "56%|✓ heat deflection ≈95 °C|✗ 0/3") throw new Error(`rows: ${rows.join("|")}`);
+    });
+    await pressAdvise();
+    await page.waitForSelector(`${ADV} .adv-results .nd-hero[data-tone="signal"]`, { timeout: 5000 });
+  });
+
+  await step(run, page, "when nothing fits the page says so and Ruled out opens with every reason", async () => {
+    const out = (material, name, ...reasons) => ({ material, name, reasons });
+    const none = {
+      ...ADVICE,
+      fits: [],
+      ruled_out: [
+        out("pla", "PLA", "Needs an enclosed printer", "Softens around 55 °C"),
+        out("petg", "PETG", "Softens around 70 °C"),
+      ],
+    };
+    await withFixtures({ advise: none }, async () => {
+      await openAdvise();
+      await pressAdvise();
+      await page.waitForSelector(`${ADV} .adv-excluded`, { timeout: 5000 });
+      const text = await statusText();
+      if (text !== "[EMPTY: Nothing on this printer meets all of that.]") throw new Error(`status reads "${text}"`);
+      if (await page.locator(`${ADV} .nd-hero`).count()) throw new Error("a hero is shown with nothing that fits");
+      if (await page.locator(`${ADV} .adv-rank`).count()) throw new Error("rank pills are shown with nothing that fits");
+      if (!(await page.locator(`${ADV} details.adv-excluded`).evaluate((d) => d.open))) throw new Error("Ruled out is closed");
+      const summary = (await page.locator(`${ADV} .adv-excluded summary`).textContent()).trim();
+      if (summary !== "Ruled out (2)") throw new Error(`summary reads "${summary}"`);
+      const rows = (await page.locator(`${ADV} .adv-excluded li`).allTextContents()).map((t) => t.replace(/\s+/g, " ").trim());
+      if (rows.join("|") !== "PLA Needs an enclosed printer; Softens around 55 °C|PETG Softens around 70 °C") throw new Error(`rows: ${rows.join("|")}`);
+      if ((await page.locator(`${ADV} .adv-excluded li:visible`).count()) !== 2) throw new Error("the reasons are not visible");
+    });
+  });
+
+  await step(run, page, "Ruled out stays closed when something fits", async () => {
+    const some = { ...ADVICE, ruled_out: [{ material: "pla", name: "PLA", reasons: ["Softens around 55 °C"] }] };
+    await withFixtures({ advise: some }, async () => {
+      await openAdvise();
+      await pressAdvise();
+      await page.waitForSelector(`${ADV} .adv-excluded`, { timeout: 5000 });
+      if (await page.locator(`${ADV} details.adv-excluded`).evaluate((d) => d.open)) throw new Error("Ruled out opened with a fit shown");
+      if ((await page.locator(`${ADV} .adv-excluded summary`).textContent()).trim() !== "Ruled out (1)") throw new Error("wrong count");
+    });
+  });
+
+  await step(run, page, "an empty catalog asks for a refresh in place of the products", async () => {
+    const empty = { ...ADVICE, catalog_empty: true, fits: [ASA_ROW({ products: [] })] };
+    await withFixtures({ advise: empty }, async () => {
+      await openAdvise();
+      await pressAdvise();
+      await page.waitForSelector(`${ADV} .adv-detail`, { timeout: 5000 });
+      const text = (await page.locator(`${ADV} .adv-detail .nd-state[data-kind="empty"]`).textContent()).trim();
+      if (text !== "[EMPTY: The filament catalog is empty. Refresh it on the Search tab.]") throw new Error(`reads "${text}"`);
+      if (await page.locator(`${ADV} .adv-products`).count()) throw new Error("a products table is shown with an empty catalog");
+    });
+  });
+
+  await step(run, page, "a failed description read still scores from the chips", async () => {
+    await withFixtures({ advise_interpret: { __reject: "Couldn't read the description; pick the needs below." } }, async () => {
+      await openAdvise();
+      await page.fill(`${ADV} .adv-description`, "something");
+      const before = await countOf("advise");
+      await page.click(`${ADV} .adv-run`);
+      await page.waitForSelector(`${ADV} .adv-ai-error`, { timeout: 5000 });
+      const text = (await page.locator(`${ADV} .adv-ai-error`).textContent()).trim();
+      if (text !== "Couldn't read the description; pick the needs below.") throw new Error(`reads "${text}"`);
+      await pastCalls("advise", before);
+      await page.waitForSelector(`${ADV} .adv-results .nd-hero-number`, { timeout: 5000 });
+      // Pressing Advise again scores the chips; the same failed text isn't re-read.
+      const reads = await countOf("advise_interpret");
+      const scored = await countOf("advise");
+      await adviseIdle();
+      await page.click(`${ADV} .adv-run`);
+      await pastCalls("advise", scored);
+      if ((await countOf("advise_interpret")) !== reads) throw new Error("a failed description was read again");
+    });
+  });
+
+  await step(run, page, "with no AI the description field is hidden", async () => {
+    await withFixtures({ get_ai_capabilities: { provider: null, model_id: null, text: false, vision: false } }, async () => {
+      await openTab("/filament", "/filament/advise");
+      await page.waitForSelector(`${ADV} .adv-ai-off`, { timeout: 10000 });
+      if (await page.locator(`${ADV} .adv-description`).count()) throw new Error("the description field is shown without AI");
+      // The chips still work and Advise scores them without reading anything.
+      const reads = await countOf("advise_interpret");
+      await chipNamed("Strong").click();
+      await pressAdvise();
+      if ((await countOf("advise_interpret")) !== reads) throw new Error("a description was read without AI");
+      await page.waitForSelector(`${ADV} .adv-results .nd-hero-number`, { timeout: 5000 });
+    });
   });
 
   // -- settings --------------------------------------------------------------
