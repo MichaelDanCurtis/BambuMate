@@ -2182,6 +2182,13 @@ async function driveApp(browserType, engine, baseUrl) {
       if (text !== "Couldn't read the description; pick the needs below.") throw new Error(`reads "${text}"`);
       await pastCalls("advise", before);
       await page.waitForSelector(`${ADV} .adv-results .nd-hero-number`, { timeout: 5000 });
+      // Pressing Advise again scores the chips; the same failed text isn't re-read.
+      const reads = await countOf("advise_interpret");
+      const scored = await countOf("advise");
+      await adviseIdle();
+      await page.click(`${ADV} .adv-run`);
+      await pastCalls("advise", scored);
+      if ((await countOf("advise_interpret")) !== reads) throw new Error("a failed description was read again");
     });
   });
 

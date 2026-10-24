@@ -9,7 +9,9 @@
 //! chips or model.
 //!
 //! The description is read only when it is new (`last_read`): pressing
-//! Advise again after editing the chips scores those chips.
+//! Advise again after editing the chips scores those chips. A failed
+//! reading counts too, so the chips picked after "pick the needs below"
+//! are scored as they are; changing the description tries again.
 //!
 //! The results' status line is a polite live region that is always in the
 //! page: the loading line, the AI-failed line, `NOTHING_FITS`, and a
@@ -57,7 +59,7 @@ pub fn AdvisePage() -> impl IntoView {
     // `None` until get_ai_capabilities answers.
     let ai_ready = RwSignal::new(None::<bool>);
     let description = RwSignal::new(String::new());
-    // The description as last read into chips; read again only once it changes.
+    // The description as last tried (read or failed); read again only once it changes.
     let last_read = RwSignal::new(None::<String>);
     let needs = RwSignal::new(Vec::<Need>::new());
     let model = RwSignal::new(
@@ -167,12 +169,12 @@ pub fn AdvisePage() -> impl IntoView {
                     Ok(found) => {
                         chosen = found.clone();
                         needs.try_set(found);
-                        last_read.try_set(Some(text));
                     }
                     Err(_) => {
                         ai_failed.try_set(true);
                     }
                 }
+                last_read.try_set(Some(text));
                 phase.try_set(Phase::Scoring);
             }
             let answer = bridge::advise(&chosen, path.as_deref()).await;
