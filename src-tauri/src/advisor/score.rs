@@ -300,13 +300,13 @@ fn need_points(m: &Material, need: Need) -> Option<(u8, String)> {
         Need::FineDetail => prop(p.detail),
         Need::LowCost => prop(p.cheapness),
         Need::Heat60 | Need::Heat80 | Need::Heat100 => {
+            // Heat is a requirement: at or above the level is Met (3 with 10 °C
+            // to spare, else 2); below it scores 0 and the material is ruled out.
             let margin = i32::from(m.hdt_c) - i32::from(need.heat_threshold()?);
             let points = if margin >= 10 {
                 3
             } else if margin >= 0 {
                 2
-            } else if margin >= -10 {
-                1
             } else {
                 0
             };
@@ -322,11 +322,11 @@ fn exclusions(m: &Material, needs: &[Need], printer: &PrinterFacts) -> Vec<Strin
     let mut reasons = Vec::new();
     if m.needs_enclosure && printer.enclosure == Enclosure::Open {
         reasons.push(match printer.model.as_deref() {
-            Some(model) => format!(
+            Some(model) if !friendly_model(model).is_empty() => format!(
                 "Needs an enclosed printer; the {} is open.",
                 friendly_model(model)
             ),
-            None => "Needs an enclosed printer; this printer is open.".to_string(),
+            _ => "Needs an enclosed printer; this printer is open.".to_string(),
         });
     }
     if m.abrasive && printer.nozzle == NozzleKind::NotHardened {
@@ -399,10 +399,14 @@ pub fn fit_for(
         }
         if g.tall_thin {
             points += i32::from(m.props.stiffness);
-            geometry_notes.push(format!(
-                "Tall and thin: stiffness {}/3 helps it stay straight.",
-                m.props.stiffness
-            ));
+            // The rank bonus applies to every material; the note only where
+            // stiffness actually helps.
+            if m.props.stiffness >= 2 {
+                geometry_notes.push(format!(
+                    "Tall and thin: stiffness {}/3 helps it stay straight.",
+                    m.props.stiffness
+                ));
+            }
         }
         if g.overhang {
             geometry_notes.push(OVERHANG_NOTE.to_string());
@@ -449,8 +453,14 @@ pub fn score(needs: &[Need], printer: &PrinterFacts, geometry: Option<&Geometry>
         }
     }
     fits.retain(|f| f.needs_points > 0);
-    // A stable sort on the unclamped points: equal scores keep the table's order.
-    fits.sort_by_key(|f| std::cmp::Reverse(f.points));
+    // A stable sort on the unclamped points, then the needs-only score;
+    // anything still equal keeps the table's order.
+    fits.sort_by_key(|f| {
+        (
+            std::cmp::Reverse(f.points),
+            std::cmp::Reverse(f.needs_points),
+        )
+    });
     fits.truncate(TOP_N);
     Scored { fits, ruled_out }
 }
@@ -462,6 +472,8 @@ pub fn printer_line(printer: &PrinterFacts, configured: bool) -> Option<String> 
     }
     if printer.enclosure == Enclosure::Unknown {
         return Some(match printer.model.as_deref() {
+            // A model that is only "Bambu Lab" or "Combo" names nothing.
+            Some(m) if friendly_model(m).is_empty() => NO_PRINTER_LINE.to_string(),
             Some(m) => format!(
                 "BambuMate doesn't know whether the {} is enclosed; assuming it is.",
                 friendly_model(m)
@@ -513,7 +525,7 @@ mod tests {
         let s = score(&[Need::OutdoorUv, Need::Heat80], &enclosed(), None);
         assert_eq!(ids(&s), [Asa, PaCf, PetCf]);
         // Heat is a hard requirement: these soften below 80 °C.
-        assert_eq!(excluded(&s), [Pla, PlaPlus, PlaCf, Tpu]);
+        assert_eq!(excluded(&s), [Pla, PlaPlus, PlaCf, Petg, Tpu]);
         let asa = &s.fits[0];
         assert_eq!(asa.total, 6);
         assert_eq!(asa.fit_pct, 100);
@@ -530,11 +542,11 @@ mod tests {
         // ones that soften below 80 °C (the controller's ruling I1).
         assert_eq!(
             excluded(&s),
-            [Pla, PlaPlus, PlaCf, Abs, Asa, Tpu, Pa, PaCf, Pc]
+            [Pla, PlaPlus, PlaCf, Petg, Abs, Asa, Tpu, Pa, PaCf, Pc]
         );
         let asa = s.ruled_out.iter().find(|e| e.material == Asa).unwrap();
         assert_eq!(asa.reasons, ["Needs an enclosed printer; the A1 is open."]);
-        assert_eq!(ids(&s), [PetCf, Petg]);
+        assert_eq!(ids(&s), [PetCf]);
     }
 
     #[test]
@@ -627,18 +639,42 @@ mod tests {
     }
 
     #[test]
-    fn heat_reasons_are_graded_by_margin() {
-        let verdict = |id| {
-            fit_for(material(id), &[Need::Heat80], &enclosed(), None)
-                .unwrap()
-                .reasons[0]
-                .verdict
+    fn heat_is_met_or_ruled_out_never_partly() {
+        let at = |id, need| fit_for(material(id), &[need], &enclosed(), None);
+        let softens = |id, need, hdt: u16| {
+            assert_eq!(
+                at(id, need).unwrap_err().reasons,
+                [format!("Softens around {hdt} °C")],
+                "{id:?}"
+            );
         };
-        assert_eq!(verdict(Petg), Verdict::Partly); // 70 °C: 10 short
-        assert_eq!(verdict(PetCf), Verdict::Met); // 80 °C: just enough
-                                                  // 55 °C is 25 short: heat is a hard requirement, so PLA is ruled out.
-        let pla = fit_for(material(Pla), &[Need::Heat80], &enclosed(), None).unwrap_err();
-        assert_eq!(pla.reasons, ["Softens around 55 °C"]);
+        let met = |id, need| {
+            assert_eq!(
+                at(id, need).unwrap().reasons[0].verdict,
+                Verdict::Met,
+                "{id:?}"
+            );
+        };
+        // heat >= 80
+        softens(Petg, Need::Heat80, 70); // 10 short is still short
+        softens(Pla, Need::Heat80, 55);
+        met(PetCf, Need::Heat80); // 80 °C: exactly enough
+                                  // heat >= 100
+        softens(Abs, Need::Heat100, 95);
+        softens(Asa, Need::Heat100, 95);
+        met(Pc, Need::Heat100);
+        met(PaCf, Need::Heat100);
+        // heat >= 60
+        softens(Pla, Need::Heat60, 55);
+        met(Tpu, Need::Heat60); // 60 °C: exactly enough
+                                // No material ever gets a "Partly" heat row.
+        for m in MATERIALS {
+            for need in [Need::Heat60, Need::Heat80, Need::Heat100] {
+                if let Ok(f) = fit_for(m, &[need], &enclosed(), None) {
+                    assert_eq!(f.reasons[0].verdict, Verdict::Met);
+                }
+            }
+        }
     }
 
     #[test]
@@ -653,18 +689,15 @@ mod tests {
         };
         assert_eq!(total(90), Ok(3)); // +10
         assert_eq!(total(89), Ok(2)); // +9
-        assert_eq!(total(80), Ok(2)); // 0
-        assert_eq!(total(79), Ok(1)); // -1
-        assert_eq!(total(70), Ok(1)); // -10
-        let out = total(69).unwrap_err(); // -11
-        assert_eq!(out.reasons, ["Softens around 69 °C"]);
-        // The shipped table: PA at 90 is +10, PET-CF at 80 is 0.
-        let pts = |id| {
-            fit_for(material(id), &[Need::Heat80], &enclosed(), None)
-                .unwrap()
-                .total
-        };
-        assert_eq!((pts(Pa), pts(PetCf), pts(Petg)), (3, 2, 1));
+        assert_eq!(total(80), Ok(2)); // exactly the threshold: Met
+        let out = total(79).unwrap_err(); // 1 short: ruled out
+        assert_eq!(out.reasons, ["Softens around 79 °C"]);
+        assert!(total(70).is_err());
+        // The shipped table: PA at 90 is +10, PET-CF at 80 is 0, PETG is out.
+        let pts = |id| fit_for(material(id), &[Need::Heat80], &enclosed(), None);
+        assert_eq!(pts(Pa).unwrap().total, 3);
+        assert_eq!(pts(PetCf).unwrap().total, 2);
+        assert!(pts(Petg).is_err());
     }
 
     #[test]
@@ -683,8 +716,18 @@ mod tests {
         for (id, hdt) in [(Pla, 55), (PlaPlus, 58), (PlaCf, 60)] {
             assert_eq!(reasons(id), [format!("Softens around {hdt} °C")]);
         }
-        for id in [Abs, Asa, Pa, PaCf, Pc] {
+        for id in [PaCf, Pc] {
             assert_eq!(reasons(id), ["Needs an enclosed printer; the A1 is open."]);
+        }
+        // Several reasons at once: the enclosure, then heat.
+        for (id, hdt) in [(Abs, 95), (Asa, 95), (Pa, 90)] {
+            assert_eq!(
+                reasons(id),
+                [
+                    "Needs an enclosed printer; the A1 is open.".to_string(),
+                    format!("Softens around {hdt} °C")
+                ]
+            );
         }
         // Nothing is dropped silently: every material is ruled out here.
         assert_eq!(s.ruled_out.len(), MATERIALS.len());
@@ -702,8 +745,12 @@ mod tests {
         for id in [Pla, PlaPlus, PlaCf] {
             assert!(excluded(&s).contains(&id));
         }
+        // ABS, ASA and PA soften below 100 °C, so they are ruled out too.
+        for id in [Abs, Asa, Pa] {
+            assert!(excluded(&s).contains(&id));
+        }
         // PA-CF first; PC, which meets heat, is shown below it with a warp note.
-        assert_eq!(&ids(&s)[..2], [PaCf, Pc]);
+        assert_eq!(ids(&s), [PaCf, Pc]);
         let pc = &s.fits[1];
         // It meets the need, so it shows a full fit; geometry only reorders.
         assert_eq!(pc.total, 3);
@@ -732,7 +779,7 @@ mod tests {
 
     #[test]
     fn geometry_keeps_the_fit_but_lowers_the_rank() {
-        let needs = [Need::Heat100, Need::Strong];
+        let needs = [Need::Heat80, Need::Strong];
         let big = flat(200.0, 100.0);
         let tall = Geometry {
             tall_thin: true,
@@ -763,27 +810,75 @@ mod tests {
 
     #[test]
     fn ranking_uses_the_unclamped_points() {
-        // Equal displayed fits can have different signed points: the sort sees both.
+        // The sort sees the signed points, which the displayed fit hides.
         let big = flat(200.0, 100.0);
-        let pc = fit_for(
-            material(Pc),
-            &[Need::Heat100, Need::Strong],
-            &enclosed(),
-            Some(&big),
-        )
-        .unwrap();
-        let abs = fit_for(
-            material(Abs),
-            &[Need::Heat100, Need::Strong],
-            &enclosed(),
-            Some(&big),
-        )
-        .unwrap();
+        let needs = [Need::Heat80, Need::Strong];
+        let pc = fit_for(material(Pc), &needs, &enclosed(), Some(&big)).unwrap();
+        let abs = fit_for(material(Abs), &needs, &enclosed(), Some(&big)).unwrap();
         assert!(pc.points > abs.points);
-        let none = fit_for(material(Pa), &[Need::Heat100], &enclosed(), Some(&big)).unwrap();
+        // ABS warps: on chemical resistance alone it goes below zero.
+        let none = fit_for(material(Abs), &[Need::Chemical], &enclosed(), Some(&big)).unwrap();
         assert!(none.points < 0);
-        // The fit shown is from the needs alone: 1/3 on heat.
+        // The fit shown is from the needs alone: chemical 1/3.
         assert_eq!(none.total, 1);
+    }
+
+    #[test]
+    fn a_tie_on_points_goes_to_the_better_fit_then_table_order() {
+        // Strong with a big footprint: PET-CF 3 - 1 warp ties PLA at 2, but PET-CF
+        // fits the need better, so it comes first.
+        let big = flat(200.0, 100.0);
+        let s = score(&[Need::Strong], &enclosed(), Some(&big));
+        assert_eq!(ids(&s), [PetCf, Pla, PlaPlus]);
+        assert_eq!(s.fits[0].points, s.fits[1].points);
+        assert!(s.fits[0].needs_points > s.fits[1].needs_points);
+        // Equal on both: table order (PLA before PLA+).
+        assert_eq!(s.fits[1].needs_points, s.fits[2].needs_points);
+    }
+
+    #[test]
+    fn the_tall_note_is_only_for_stiff_materials() {
+        let tall = Geometry {
+            tall_thin: true,
+            ..flat(10.0, 10.0)
+        };
+        let note = |id| {
+            fit_for(material(id), &[Need::Flexible], &enclosed(), Some(&tall))
+                .unwrap()
+                .geometry_notes
+                .iter()
+                .any(|n| n.starts_with("Tall and thin"))
+        };
+        assert!(!note(Tpu)); // stiffness 0
+        assert!(!note(Pa)); // stiffness 1
+        assert!(note(PlaCf)); // stiffness 3
+        assert!(note(Pla)); // stiffness 2
+                            // The rank bonus still applies to every material.
+        let pa = fit_for(material(Pa), &[Need::Flexible], &enclosed(), Some(&tall)).unwrap();
+        assert!(pa.points > pa.needs_points);
+    }
+
+    #[test]
+    fn a_model_that_cleans_to_nothing_is_no_model() {
+        for raw in ["Bambu Lab", "Combo", "Lab", "  "] {
+            let p = PrinterFacts {
+                model: Some(raw.into()),
+                enclosure: enclosure_for_model(raw),
+                nozzle: NozzleKind::Unknown,
+            };
+            assert_eq!(p.enclosure, Enclosure::Unknown, "{raw:?}");
+            assert_eq!(printer_line(&p, true).as_deref(), Some(NO_PRINTER_LINE));
+        }
+        let open = PrinterFacts {
+            model: Some("Bambu Lab".into()),
+            enclosure: Enclosure::Open,
+            nozzle: NozzleKind::Unknown,
+        };
+        let out = fit_for(material(Asa), &[Need::Strong], &open, None).unwrap_err();
+        assert_eq!(
+            out.reasons,
+            ["Needs an enclosed printer; this printer is open."]
+        );
     }
 
     #[test]
