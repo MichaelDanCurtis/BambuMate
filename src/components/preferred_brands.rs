@@ -7,7 +7,7 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::advisor::bridge;
-use crate::advisor::format::toggle_brand;
+use crate::advisor::format::{toggle_brand, CATALOG_EMPTY};
 use crate::commands;
 use crate::components::patterns::{state_text, StateKind, StateText};
 
@@ -176,7 +176,7 @@ pub fn PreferredBrands() -> impl IntoView {
                 }
                 .into_any(),
                 (None, Some(list), true) if list.is_empty() => view! {
-                    <StateText kind=StateKind::Empty message="The filament catalog is empty. Open Filament → Search to fill it." />
+                    <StateText kind=StateKind::Empty message=CATALOG_EMPTY />
                 }
                 .into_any(),
                 (None, Some(list), true) => view! {
