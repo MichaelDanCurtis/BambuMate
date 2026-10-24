@@ -4,6 +4,7 @@
 
 use leptos::html::Div;
 use leptos::prelude::*;
+use leptos_router::hooks::use_query_map;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::JsCast;
@@ -15,8 +16,11 @@ use crate::components::change_preview::ChangePreview;
 use crate::components::defect_report::DefectReportDisplay;
 use crate::components::history_panel::HistoryPanel;
 use crate::components::patterns::{Hero, PageHeader, StateKind, StateText};
+use crate::journal::bridge as journal_bridge;
+use crate::journal::format::{analyze_prefill, data_url_base64, entry_href, NAME_MAX};
 use crate::pages::analysis_view::{analysis_detail, quality_tone, quality_word};
 use crate::pages::slice::file_name;
+use crate::printer::types::untrusted_text;
 use crate::slicer::state::newest_source;
 use crate::slicer::SlicerShared;
 use crate::viewport::ModelViewport;
@@ -95,6 +99,38 @@ pub enum AnalysisState {
     Error(String),
 }
 
+/// The material choices: value, then label.
+const MATERIAL_OPTIONS: &[(&str, &str)] = &[
+    ("", "Auto-detect"),
+    ("PLA", "PLA"),
+    ("PETG", "PETG"),
+    ("ABS", "ABS"),
+    ("ASA", "ASA"),
+    ("TPU", "TPU"),
+    ("PA", "Nylon (PA)"),
+    ("PC", "Polycarbonate (PC)"),
+];
+
+/// Said when `?journal=<id>` names an entry that has been deleted.
+const ENTRY_GONE: &str = "That print isn't in the journal any more.";
+
+/// The entry id in `?journal=<id>`; anything else means no entry.
+fn journal_param(raw: Option<&str>) -> Option<i64> {
+    raw.and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|id| *id > 0)
+}
+
+/// The path of the profile named like a slice's filament preset. Only an
+/// exact, single match counts: with two of the same name there is no telling
+/// which the print used, so none is chosen.
+fn preset_profile(profiles: &[commands::ProfileInfo], preset: &str) -> Option<String> {
+    let mut named = profiles.iter().filter(|p| p.name == preset);
+    match (named.next(), named.next()) {
+        (Some(only), None) => Some(only.path.clone()),
+        _ => None,
+    }
+}
+
 /// Print analysis page component.
 #[component]
 pub fn PrintAnalysisPage() -> impl IntoView {
@@ -121,6 +157,16 @@ pub fn PrintAnalysisPage() -> impl IntoView {
     // History/revert state
     let (revert_message, set_revert_message) = signal::<Option<String>>(None);
     let (history_key, set_history_key) = signal(0u32);
+    // Opened from a journal entry (`?journal=<id>`): its newest photo, model,
+    // material and filament preset are filled in, and the analysis is linked
+    // back to the entry. `journal_gen` counts opens and resets, so the answer
+    // to an older open can't land over a newer one. `analyze_gen` counts the
+    // analyses the page has dropped.
+    let journal_link = RwSignal::new(None::<(i64, String)>);
+    let journal_note = RwSignal::new(None::<(StateKind, String)>);
+    let pending_preset = RwSignal::new(None::<String>);
+    let journal_gen = RwSignal::new(0u32);
+    let analyze_gen = RwSignal::new(0u32);
 
     // Load profiles on mount
     spawn_local(async move {
@@ -139,15 +185,22 @@ pub fn PrintAnalysisPage() -> impl IntoView {
 
             let material = material_override.get();
             let path = profile_path.get();
+            let journal = journal_link.with_untracked(|j| j.as_ref().map(|(id, _)| *id));
+            let started = analyze_gen.get_untracked();
             spawn_local(async move {
-                match commands::analyze_print(base64, path, material).await {
+                let result = commands::analyze_print(base64, path, material, journal).await;
+                // An answer for a photo the page has since dropped is ignored.
+                if analyze_gen.try_get_untracked() != Some(started) {
+                    return;
+                }
+                match result {
                     Ok(response) => {
                         // Store session ID for apply flow
-                        set_current_session_id.set(response.session_id);
-                        set_state.set(AnalysisState::Complete(response));
+                        set_current_session_id.try_set(response.session_id);
+                        set_state.try_set(AnalysisState::Complete(response));
                     }
                     Err(e) => {
-                        set_state.set(AnalysisState::Error(e));
+                        set_state.try_set(AnalysisState::Error(e));
                     }
                 }
             });
@@ -166,8 +219,12 @@ pub fn PrintAnalysisPage() -> impl IntoView {
     };
 
     // Reset to try another image
-    let on_reset = move |_| {
+    // Drops the photo and everything tied to it, the journal link included:
+    // the link says where this photo came from.
+    let clear_photo = move || {
         model_gen.update(|g| *g = g.wrapping_add(1));
+        journal_gen.update(|g| *g = g.wrapping_add(1));
+        analyze_gen.update(|g| *g = g.wrapping_add(1));
         model.set(None);
         set_state.set(AnalysisState::Idle);
         set_image_preview.set(None);
@@ -175,13 +232,113 @@ pub fn PrintAnalysisPage() -> impl IntoView {
         set_current_session_id.set(None);
         set_apply_message.set(None);
         set_revert_message.set(None);
+        journal_link.set(None);
+        journal_note.set(None);
+        pending_preset.set(None);
     };
+    let on_reset = move |_| clear_photo();
+
+    // `?journal=<id>` opens that entry, on load and whenever a link changes
+    // it. Without the parameter the page is untouched.
+    let query = use_query_map();
+    let journal_id = Memo::new(move |_| journal_param(query.with(|q| q.get("journal")).as_deref()));
+    Effect::new(move |prev: Option<Option<i64>>| {
+        let id = journal_id.get();
+        if prev.is_none() && id.is_none() {
+            return id;
+        }
+        if prev.is_some() && id.is_some() {
+            // Another entry's link: start from a clean page.
+            clear_photo();
+            set_material_override.set(None);
+            set_profile_path.set(None);
+        }
+        journal_gen.update(|g| *g = g.wrapping_add(1));
+        let generation = journal_gen.get_untracked();
+        journal_link.set(None);
+        journal_note.set(None);
+        pending_preset.set(None);
+        let Some(id) = id else {
+            return id;
+        };
+        spawn_local(async move {
+            let current = move || journal_gen.try_get_untracked() == Some(generation);
+            let entry = match journal_bridge::get(id).await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => {
+                    if current() {
+                        journal_note.try_set(Some((StateKind::Empty, ENTRY_GONE.to_string())));
+                    }
+                    return;
+                }
+                Err(e) => {
+                    if current() {
+                        journal_note.try_set(Some((StateKind::Error, e)));
+                    }
+                    return;
+                }
+            };
+            if !current() {
+                return;
+            }
+            let prefill = analyze_prefill(&entry);
+            journal_link.try_set(Some((id, entry.name.clone())));
+            if let Some(path) = prefill.model_path {
+                model.try_set(Some(path));
+            }
+            if let Some(material) = prefill.material {
+                set_material_override.try_set(Some(material.to_string()));
+            }
+            pending_preset.try_set(prefill.filament_preset);
+            let Some(photo_id) = prefill.photo_id else {
+                return;
+            };
+            let Ok(url) = journal_bridge::image(id, Some(photo_id)).await else {
+                return;
+            };
+            if !current() {
+                return;
+            }
+            // A photo the user picked meanwhile wins.
+            let idle = state.try_with_untracked(|s| matches!(s, AnalysisState::Idle));
+            if let (Some(true), Some(data)) = (idle, data_url_base64(&url)) {
+                set_image_preview.try_set(Some(url));
+                set_state.try_set(AnalysisState::Ready(data));
+            }
+        });
+        Some(id)
+    });
+    // The entry's filament preset is chosen once the profile list is in.
+    Effect::new(move |_| {
+        let Some(name) = pending_preset.get() else {
+            return;
+        };
+        if profiles_loading.get() {
+            return;
+        }
+        let found = profiles.with(|list| preset_profile(list, &name));
+        if let Some(path) = found {
+            set_profile_path.set(Some(path));
+        }
+        pending_preset.set(None);
+    });
 
     view! {
         <div class="page print-analysis-page">
             <style>{include_str!("print_analysis.css")}</style>
 
             <PageHeader title="Analyze" />
+            {move || journal_link.get().map(|(id, name)| view! {
+                <p class="an-journal">
+                    "From the journal: "
+                    <a href=entry_href(id)>{untrusted_text(&name, NAME_MAX)}</a>
+                </p>
+            })}
+            {move || journal_note.get().map(|(kind, message)| view! {
+                <div class="an-journal-note">
+                    <StateText kind=kind message=message />
+                </div>
+            })}
 
             <Show
                 when=move || ff_ctx.flags.get().analysis_enabled
@@ -221,14 +378,15 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                         set_material_override.set(Some(value));
                                     }
                                 }>
-                                    <option value="">"Auto-detect"</option>
-                                    <option value="PLA">"PLA"</option>
-                                    <option value="PETG">"PETG"</option>
-                                    <option value="ABS">"ABS"</option>
-                                    <option value="ASA">"ASA"</option>
-                                    <option value="TPU">"TPU"</option>
-                                    <option value="PA">"Nylon (PA)"</option>
-                                    <option value="PC">"Polycarbonate (PC)"</option>
+                                    {MATERIAL_OPTIONS
+                                        .iter()
+                                        .map(|&(value, label)| view! {
+                                            <option value=value
+                                                prop:selected=move || material_override.get().as_deref().unwrap_or("") == value>
+                                                {label}
+                                            </option>
+                                        })
+                                        .collect_view()}
                                 </select>
                             </div>
 
@@ -259,9 +417,13 @@ pub fn PrintAnalysisPage() -> impl IntoView {
                                                     <option value="">"-- Select a profile --"</option>
                                                     {profile_list.iter().map(|p| {
                                                         let path = p.path.clone();
+                                                        let chosen = path.clone();
                                                         let display = format!("{} ({})", p.name, p.filament_type.clone().unwrap_or_else(|| "Unknown".to_string()));
                                                         view! {
-                                                            <option value=path.clone()>{display}</option>
+                                                            <option value=path
+                                                                prop:selected=move || profile_path.get().as_deref() == Some(chosen.as_str())>
+                                                                {display}
+                                                            </option>
                                                         }
                                                     }).collect::<Vec<_>>()}
                                                 </select>
@@ -705,4 +867,57 @@ fn event_target_value_input(ev: &web_sys::Event) -> String {
 /// Helper to get event target
 fn event_target<T: wasm_bindgen::JsCast>(ev: &web_sys::Event) -> T {
     ev.target().unwrap().dyn_into::<T>().unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(name: &str, path: &str) -> commands::ProfileInfo {
+        commands::ProfileInfo {
+            name: name.into(),
+            filament_type: Some("PLA".into()),
+            filament_id: None,
+            path: path.into(),
+            is_user_profile: true,
+        }
+    }
+
+    #[test]
+    fn the_journal_param_is_an_entry_id() {
+        assert_eq!(journal_param(Some("2")), Some(2));
+        assert_eq!(journal_param(Some(" 12 ")), Some(12));
+        assert_eq!(journal_param(None), None);
+        assert_eq!(journal_param(Some("")), None);
+        assert_eq!(journal_param(Some("abc")), None);
+        assert_eq!(journal_param(Some("0")), None);
+        assert_eq!(journal_param(Some("-3")), None);
+        assert_eq!(journal_param(Some("2.5")), None);
+    }
+
+    #[test]
+    fn a_preset_picks_the_one_profile_with_that_name() {
+        let list = [
+            profile("Bambu PLA Basic", "/a.json"),
+            profile("Other", "/b.json"),
+        ];
+        assert_eq!(
+            preset_profile(&list, "Bambu PLA Basic").as_deref(),
+            Some("/a.json")
+        );
+    }
+
+    #[test]
+    fn a_preset_with_no_or_several_matches_picks_nothing() {
+        let list = [
+            profile("Bambu PLA Basic", "/a.json"),
+            profile("Bambu PLA Basic", "/b.json"),
+            profile("Other", "/c.json"),
+        ];
+        assert_eq!(preset_profile(&list, "Bambu PLA Basic"), None);
+        assert_eq!(preset_profile(&list, "Missing"), None);
+        assert_eq!(preset_profile(&[], "Other"), None);
+        // Names are compared as they are: no case folding, no trimming.
+        assert_eq!(preset_profile(&list, "other"), None);
+    }
 }

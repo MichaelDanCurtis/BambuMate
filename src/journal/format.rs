@@ -307,13 +307,6 @@ pub fn fact_rows(e: &PrintEntry, offset_minutes: i32) -> Vec<(&'static str, Stri
     rows
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Analyze opened from an entry (plan Task 9) is its first user"
-    )
-)]
 pub fn entry_href(id: i64) -> String {
     format!("/printer/journal?entry={id}")
 }
@@ -353,13 +346,6 @@ pub struct AnalyzePrefill {
     pub photo_id: Option<i64>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Analyze opened from an entry (plan Task 9) is its first user"
-    )
-)]
 pub fn analyze_prefill(e: &PrintEntry) -> AnalyzePrefill {
     let slice = e.slice.as_ref();
     AnalyzePrefill {
@@ -383,13 +369,6 @@ pub fn analyze_prefill(e: &PrintEntry) -> AnalyzePrefill {
 }
 
 /// The base64 part of a `data:…;base64,…` URL.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Analyze opened from an entry (plan Task 9) is its first user"
-    )
-)]
 pub fn data_url_base64(url: &str) -> Option<String> {
     url.split_once(";base64,")
         .map(|(_, data)| data.to_string())

@@ -2859,6 +2859,120 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
   });
 
+  // -- analyze from the journal --------------------------------------------------
+  // `/analysis?journal=<id>` fills Analyze from an entry and links the result.
+  const AN = ".print-analysis-page";
+  const filamentPreset = FIXTURES.list_profiles[1].path;
+  const journalNote = `${AN} .an-journal-note`;
+  const lastAnalyze = async () => (await callsOf("analyze_print")).at(-1).args.request;
+  const analyzeNow = async () => {
+    const before = await countOf("analyze_print");
+    await page.click("text=Analyze Print");
+    await pastCalls("analyze_print", before);
+    await page.waitForSelector(".analysis-results", { timeout: 15000 });
+    return lastAnalyze();
+  };
+
+  await step(run, page, "Analyze a photo opens Analyze with the entry's photo, model and preset", async () => {
+    await openJournal();
+    await expand(2);
+    await page.click(`${journalDetail(2)} .jr-analyze`);
+    await page.waitForFunction(() => location.pathname === "/analysis" && location.search === "?journal=2", null, { timeout: 5000 });
+    await page.waitForSelector(".analysis-preview img.preview-image", { timeout: 15000 });
+    const link = page.locator('.an-journal a[href="/printer/journal?entry=2"]');
+    if ((await link.innerText()).trim() !== JOURNAL_FINISHED.name) throw new Error("no link back to the entry");
+    if (!(await page.locator(".an-journal").innerText()).startsWith("From the journal:")) throw new Error("the link line doesn't say where it is from");
+    await page.waitForFunction((p) => document.querySelector(".profile-select")?.value === p, filamentPreset, { timeout: 5000 });
+    if ((await page.locator(".material-selector select").inputValue()) !== "PLA") throw new Error("material not picked");
+    if ((await page.locator(".an-model-name").innerText()).trim() !== "cube.stl") throw new Error("model not picked");
+    const photos = (await callsOf("journal_image")).filter((c) => c.args.photoId === 7);
+    if (!photos.length) throw new Error("the entry's newest photo wasn't asked for");
+    const req = await analyzeNow();
+    if (req.journal_id !== 2) throw new Error(`journal_id ${req.journal_id}`);
+    if (req.profile_path !== filamentPreset || req.material_type !== "PLA") throw new Error(JSON.stringify({ ...req, image_base64: req.image_base64.length }));
+    if (!req.image_base64 || req.image_base64.startsWith("data:")) throw new Error("the photo wasn't sent as bare base64");
+    await page.click("text=Analyze Another Photo");
+    await page.waitForSelector(".drop-zone", { timeout: 5000 });
+    if (await page.locator(".an-journal").count()) throw new Error("the journal link outlived a reset");
+    // A photo chosen after the reset isn't linked to the entry.
+    await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+    await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+    const own = await analyzeNow();
+    if (own.journal_id != null) throw new Error(`a photo of its own was linked to entry ${own.journal_id}`);
+  });
+
+  await step(run, page, "an entry with no photo still fills in the model, material and preset", async () => {
+    await withFixtures({ journal_get: { ...JOURNAL_FINISHED, photos: [] } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await goTo("/analysis?journal=2", "/analysis");
+      await page.waitForSelector(".an-journal a", { timeout: 15000 });
+      await page.waitForSelector(".drop-zone", { timeout: 5000 });
+      if (await page.locator(".analysis-preview").count()) throw new Error("a photo was invented");
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+      await page.waitForFunction((p) => document.querySelector(".profile-select")?.value === p, filamentPreset, { timeout: 5000 });
+      if ((await page.locator(".material-selector select").inputValue()) !== "PLA") throw new Error("material not picked");
+      if ((await page.locator(".an-model-name").innerText()).trim() !== "cube.stl") throw new Error("model not picked");
+      const req = await analyzeNow();
+      if (req.journal_id !== 2) throw new Error(`journal_id ${req.journal_id}`);
+    });
+  });
+
+  await step(run, page, "a photo that can't be read leaves the drop zone", async () => {
+    await withFixtures({ journal_image: { __reject: "Photo unavailable" } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      const asked = await countOf("journal_image");
+      const answered = await settledCount("journal_image");
+      await goTo("/analysis?journal=2", "/analysis");
+      await pastCalls("journal_image", asked);
+      await settledPast("journal_image", answered);
+      await page.waitForSelector(".an-journal a", { timeout: 15000 });
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      await page.waitForSelector(".drop-zone", { timeout: 5000 });
+      if (await page.locator(".analysis-preview").count()) throw new Error("a photo was shown for an unreadable file");
+    });
+  });
+
+  await step(run, page, "an entry that is gone says so and leaves Analyze usable", async () => {
+    await withFixtures({ journal_get: null }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await goTo("/analysis?journal=99", "/analysis");
+      await page.waitForFunction(
+        ([sel, text]) => document.querySelector(sel)?.innerText.includes(text),
+        [journalNote, "That print isn't in the journal any more."],
+        { timeout: 5000 }
+      );
+      if (await page.locator(".an-journal").count()) throw new Error("a link to a gone entry");
+      await page.waitForSelector(".drop-zone", { timeout: 5000 });
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+      const req = await analyzeNow();
+      if (req.journal_id != null) throw new Error(`journal_id ${req.journal_id} for a gone entry`);
+    });
+  });
+
+  await step(run, page, "an older ?journal answer doesn't land over a newer link", async () => {
+    const slow = { __hold: "an-journal-stale", answer: JOURNAL_FINISHED };
+    await withFixtures({ journal_get: { __sequence: [slow, JOURNAL_GOOD] } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      const asked = await countOf("journal_get");
+      const answered = await settledCount("journal_get");
+      await goTo("/analysis?journal=2", "/analysis");
+      await pastCalls("journal_get", asked);
+      // The link changes in place while entry 2 is still being read.
+      await goTo("/analysis?journal=4", "/analysis");
+      await pastCalls("journal_get", asked + 1);
+      await page.waitForFunction((name) => document.querySelector(".an-journal a")?.textContent === name, JOURNAL_GOOD.name, { timeout: 5000 });
+      await page.evaluate(() => window.__release("an-journal-stale"));
+      await page.waitForFunction((n) => window.__ipc.settled.filter((x) => x === "journal_get").length >= n, answered + 2, { timeout: 5000 });
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      const name = (await page.locator(".an-journal a").innerText()).trim();
+      if (name !== JOURNAL_GOOD.name) throw new Error(`the older answer landed: "${name}"`);
+      if (await page.locator(".analysis-preview").count()) throw new Error("the older entry's photo landed");
+      if (await page.locator('.an-journal a[href="/printer/journal?entry=2"]').count()) throw new Error("the older entry is linked");
+    });
+  });
+
   // -- settings --------------------------------------------------------------
   await step(run, page, "navigate to Settings", async () => {
     await page.click('a[href="/settings"]');

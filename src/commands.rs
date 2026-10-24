@@ -1312,18 +1312,20 @@ struct AnalyzePrintArgs {
     request: AnalyzeRequest,
 }
 
-/// Analyze a print photo for defects.
+/// Analyze a print photo for defects. `journal_id` links the analysis to
+/// the journal entry the photo came from.
 pub async fn analyze_print(
     image_base64: String,
     profile_path: Option<String>,
     material_type: Option<String>,
+    journal_id: Option<i64>,
 ) -> Result<crate::pages::print_analysis::AnalyzeResponse, String> {
     let args = AnalyzePrintArgs {
         request: AnalyzeRequest {
             image_base64,
             profile_path,
             material_type,
-            journal_id: None,
+            journal_id,
         },
     };
 

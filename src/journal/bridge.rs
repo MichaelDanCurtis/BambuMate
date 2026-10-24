@@ -62,10 +62,6 @@ pub async fn list(filter: &JournalFilter) -> Result<Vec<PrintEntry>, String> {
     call("journal_list", &ListArgs { filter }).await
 }
 
-#[expect(
-    dead_code,
-    reason = "Analyze opened from an entry (plan Task 9) is its first user"
-)]
 pub async fn get(id: i64) -> Result<Option<PrintEntry>, String> {
     call("journal_get", &IdArgs { id }).await
 }
