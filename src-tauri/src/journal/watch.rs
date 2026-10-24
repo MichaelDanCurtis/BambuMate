@@ -253,7 +253,8 @@ fn started(report: &PrinterState, key: &str, state: &str, now: i64) -> StartedPr
     // Joined while printing and already under way. SLICING and PREPARE
     // are the job's start; RUNNING at 0 % with no layer is its warm-up.
     let midway = is_printing_stage(state) && (percent > 0 || layer > 0);
-    let elapsed = if midway && percent > 0 {
+    // Only 1 to 99 % back-dates: 100 % may be the previous job's end.
+    let elapsed = if midway && (1..=99).contains(&percent) {
         elapsed_secs(percent, report.mc_remaining_time)
     } else {
         0
@@ -402,6 +403,21 @@ fn note_tray(
     job
 }
 
+/// A job joined in RUNNING or PAUSE at 100 %: the printer may still show
+/// the previous job's end, so that percent and its layer are inherited
+/// (unknown until they change), not progress and not a tray's layer.
+fn join(job: &mut WatchedJob, report: &PrinterState, state: &str) {
+    if is_printing_stage(state)
+        && job.inherited.is_none()
+        && report.mc_percent.is_some_and(|p| p >= 100)
+    {
+        job.inherited = Some(Progress {
+            percent: report.mc_percent,
+            layer: report.layer_num,
+        });
+    }
+}
+
 /// Brings a continuing (or just started) job up to date with `report`.
 fn follow(
     mut job: WatchedJob,
@@ -438,6 +454,18 @@ pub fn observe(
     now: i64,
 ) -> (WatchState, Vec<JournalEvent>) {
     let mut events = Vec::new();
+    // A push that itself names another `print_type` ends the calibration
+    // memory: the remembered key may have been read from a lagging "system".
+    let forgot;
+    let prev = if fresh.print_type.is_some() && !says_system(fresh) && prev.system_key.is_some() {
+        forgot = WatchState {
+            job: prev.job.clone(),
+            system_key: None,
+        };
+        &forgot
+    } else {
+        prev
+    };
     let Some(state) = fresh.gcode_state.map(str::trim) else {
         let next = carry(prev, report, &mut events);
         return (next, events);
@@ -497,6 +525,7 @@ fn carry(prev: &WatchState, report: &PrinterState, events: &mut Vec<JournalEvent
         return prev.clone();
     };
     // N6 (deferred): a key change with a progress drop seen only in diffs is rekeyed, not split.
+    // S2 (deferred): a calibration whose file arrives after its PREPARE is rekeyed into a phantom.
     if let Some(key) = job_key(report) {
         if key != job.key {
             rekey(&mut job, key, report, events);
@@ -542,6 +571,9 @@ fn active(
     // N5 (deferred): a key firming up across a disconnect or restart leaves a phantom unknown.
     if let Some(mut job) = prev.job.clone() {
         let same = job.key == key || job.confirmed;
+        if !job.confirmed {
+            join(&mut job, report, state);
+        }
         let (own, _) = own_progress(&job, report, state);
         if same && !restarted(&job, own, state) {
             if job.key != key {
@@ -557,7 +589,7 @@ fn active(
     }
 
     let print = started(report, &key, state, now);
-    let job = WatchedJob {
+    let mut job = WatchedJob {
         key,
         trays: Vec::new(),
         confirmed: true,
@@ -565,6 +597,7 @@ fn active(
         progress: None,
         inherited: None,
     };
+    join(&mut job, report, state);
     events.push(JournalEvent::Started(print));
     WatchState {
         job: Some(follow(job, report, state, events)),
@@ -2262,5 +2295,160 @@ mod tests {
         s.diff(json!({"gcode_state": "FINISH"}), 500);
         assert_eq!(s.kinds(), ["tray", "ended"], "{:?}", s.events);
         assert_eq!(trays_of(&s.events, &sim_key()), ["A1"]);
+    }
+    // S1: a push that names another `print_type` ends the calibration
+    // memory, so a lagging "system" in a full push can't hold a print's key.
+
+    fn typed(mut p: Map<String, Value>, print_type: &str) -> Map<String, Value> {
+        p.insert("print_type".into(), json!(print_type));
+        p
+    }
+
+    /// An X1/H2D-style print: every push is a full one carrying
+    /// `print_type`, the first with `first_type`. Returns the next time.
+    fn full_push_print(s: &mut Sim, name: &str, t0: i64, first_type: &str) -> i64 {
+        let push = |gcode: &str, pct: u32, layer: u32, tray: &str| {
+            full(gcode, name, "0", "plate_1.gcode", pct, layer, tray)
+        };
+        s.full(typed(push("PREPARE", 0, 0, "255"), first_type), t0);
+        s.full(typed(push("PREPARE", 0, 0, "255"), "local"), t0 + 1);
+        s.full(typed(push("RUNNING", 0, 0, "0"), "local"), t0 + 60);
+        let mut t = t0 + 600;
+        for layer in 1..=50 {
+            s.full(typed(push("RUNNING", layer * 2, layer, "0"), "local"), t);
+            t += 30;
+        }
+        s.full(typed(push("FINISH", 100, 50, "0"), "local"), t);
+        t + 1
+    }
+
+    #[test]
+    fn x1a_a_lagging_system_print_type_in_full_pushes_loses_no_print() {
+        let mut s = after_a_calibration_run_before_the_app_started();
+        // The first push of the print still says "system".
+        let t = full_push_print(&mut s, "Benchy", 400, "system");
+        let t = full_push_print(&mut s, "Benchy", t + 1000, "local");
+        full_push_print(&mut s, "Gear", t + 1000, "local");
+        assert_eq!(
+            s.kinds(),
+            ["started", "tray", "ended", "started", "tray", "ended", "started", "tray", "ended"],
+            "{:?}",
+            s.events
+        );
+        assert_eq!(
+            started_keys(&s.events),
+            [
+                sim_key().as_str(),
+                sim_key().as_str(),
+                "local:Gear|plate_1.gcode"
+            ]
+        );
+        let JournalEvent::Started(p) = &s.events[0] else {
+            panic!("{:?}", s.events)
+        };
+        assert_eq!(
+            (p.started_at, p.approx),
+            (401, false),
+            "from the first push that names it"
+        );
+        assert_eq!(s.watch.system_key, None);
+    }
+
+    #[test]
+    fn x1c_a_reconnect_pushall_in_the_lag_window_splits_the_print_but_loses_nothing() {
+        let mut s = after_a_calibration_run_before_the_app_started();
+        s.diff(
+            json!({"gcode_state": "PREPARE", "subtask_name": "Benchy",
+                "gcode_file": "plate_1.gcode", "mc_percent": 0, "layer_num": 0}),
+            400,
+        );
+        s.disconnect();
+        s.full(
+            typed(
+                full("PREPARE", "Benchy", "0", "plate_1.gcode", 0, 0, "255"),
+                "system",
+            ),
+            401,
+        );
+        s.diff(json!({"print_type": "local"}), 402);
+        s.diff(
+            json!({"gcode_state": "RUNNING", "layer_num": 1, "mc_percent": 1,
+                "ams": {"tray_now": "0"}}),
+            500,
+        );
+        s.diff(json!({"gcode_state": "FINISH", "mc_percent": 100}), 6000);
+        // The reprint's pushes don't repeat the unchanged `print_type`.
+        s.diff(
+            json!({"gcode_state": "PREPARE", "mc_percent": 0, "layer_num": 0}),
+            7000,
+        );
+        s.diff(
+            json!({"gcode_state": "RUNNING", "layer_num": 1, "mc_percent": 1}),
+            7100,
+        );
+        s.diff(json!({"gcode_state": "FINISH", "mc_percent": 100}), 12_000);
+        // Accepted: the pushall's "system" ends the first entry as unknown,
+        // and the print rejoins as an approximate one. The reprint is kept.
+        assert_eq!(
+            s.kinds(),
+            ["started", "lost", "started", "tray", "ended", "started", "tray", "ended"],
+            "{:?}",
+            s.events
+        );
+        let JournalEvent::Started(p) = &s.events[2] else {
+            panic!("{:?}", s.events)
+        };
+        assert!(p.approx, "joined at 1 %");
+        assert_eq!(s.watch.system_key, None);
+    }
+
+    // S3: joined while printing at 100 %, the printer may still show the
+    // previous job's end. That percent and its layer are unknown.
+
+    #[test]
+    fn n3a_a_join_in_running_at_a_leftover_100_percent_is_not_back_dated() {
+        let mut s = Sim::new();
+        s.full(
+            full("RUNNING", "Benchy", "0", "plate_1.gcode", 100, 250, "2"),
+            10_000,
+        );
+        let JournalEvent::Started(p) = &s.events[0] else {
+            panic!("{:?}", s.events)
+        };
+        assert_eq!(p.started_at, 10_000, "no multi-day start from 100 %");
+        assert!(p.approx, "joined while printing: the start isn't known");
+        assert_eq!(
+            s.kinds(),
+            ["started"],
+            "no tray from the leftover layer 250"
+        );
+        assert!(progress_of(&s.events, &sim_key()).is_empty());
+        s.diff(
+            json!({"gcode_state": "RUNNING", "mc_percent": 0, "layer_num": 0,
+                "ams": {"tray_now": "0"}}),
+            10_300,
+        );
+        s.diff(
+            json!({"gcode_state": "RUNNING", "mc_percent": 1, "layer_num": 1}),
+            10_900,
+        );
+        s.diff(json!({"gcode_state": "FINISH", "mc_percent": 100}), 20_000);
+        assert_eq!(s.kinds(), ["started", "tray", "ended"], "{:?}", s.events);
+        assert_eq!(
+            trays_of(&s.events, &sim_key()),
+            ["A1"],
+            "not the leftover A3"
+        );
+        assert_eq!(progress_of(&s.events, &sim_key()), [(1, Some(1))]);
+
+        // Only 1 to 99 % back-dates.
+        assert_eq!(elapsed_secs(99, Some(1)), 5_940);
+        let mut r = report("RUNNING", 99);
+        r.mc_remaining_time = Some(1);
+        let (_, events) = obs(&WatchState::default(), &r, T0);
+        let JournalEvent::Started(p) = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!((p.started_at, p.approx), (T0 - 5_940, true));
     }
 }
