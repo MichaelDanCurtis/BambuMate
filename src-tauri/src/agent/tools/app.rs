@@ -12,6 +12,7 @@ use crate::agent::types::UiCommand;
 pub const ROUTES: &[&str] = &[
     "/",
     "/printer",
+    "/printer/journal",
     "/filament",
     "/filament/batch",
     "/profiles",
@@ -38,7 +39,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bm_navigate",
-            description: "Move the BambuMate UI to a page so the user can follow along. Routes: /, /printer, /filament, /filament/batch, /profiles, /profiles/compare, /slice, /analysis, /settings, /settings/health, /settings/about. The older /batch, /compare, /health and /about still work.",
+            description: "Move the BambuMate UI to a page so the user can follow along. Routes: /, /printer, /printer/journal, /filament, /filament/batch, /profiles, /profiles/compare, /slice, /analysis, /settings, /settings/health, /settings/about. The older /batch, /compare, /health and /about still work.",
             input_schema: json!({"type":"object","properties":{"route":{"type":"string"},"profile_path":{"type":"string"}},"required":["route"]}),
         },
         ToolSpec {
@@ -266,6 +267,7 @@ mod tests {
         let h = Arc::new(FakeHost::new());
         let (reg, _rx) = registry_with(h.clone());
         for route in [
+            "/printer/journal",
             "/filament/batch",
             "/profiles/compare",
             "/settings/health",

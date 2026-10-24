@@ -32,6 +32,7 @@ const HEIGHT = 860; // the minimum; taller pages grow the viewport, see below
 const ROUTES = [
   "/",
   "/printer",
+  "/printer/journal",
   "/filament",
   "/filament/advise",
   "/filament/batch",
@@ -45,6 +46,7 @@ const ROUTES = [
 ];
 // A tab route is reached through its hub: the hub's rail link, then the tab.
 const HUB_OF = {
+  "/printer/journal": "/printer",
   "/filament/advise": "/filament",
   "/filament/batch": "/filament",
   "/profiles/compare": "/profiles",

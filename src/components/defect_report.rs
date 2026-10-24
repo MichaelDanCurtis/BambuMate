@@ -188,8 +188,9 @@ fn ConflictCard(conflict: Conflict) -> impl IntoView {
     }
 }
 
-/// Convert defect type ID to display name.
-fn defect_display_name(defect_type: &str) -> String {
+/// Convert defect type ID to display name. The print journal labels its
+/// issue tags with these names too.
+pub fn defect_display_name(defect_type: &str) -> String {
     match defect_type {
         "stringing" => "Stringing/Oozing".to_string(),
         "warping" => "Warping".to_string(),

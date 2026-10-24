@@ -195,6 +195,11 @@ pub fn listen<T: DeserializeOwned + 'static>(event: &'static str, mut on: impl F
 /// Registering takes an await, so the owner may be gone before it finishes.
 /// The handle is then kept with `try_update_value`, which finds nothing to
 /// write to, and the listener is removed straight away instead.
+///
+/// `on` can still run after the owner is disposed: an event delivered in
+/// that window, before the listener is removed, reaches it with its signals
+/// gone. So `on` must touch signals only through `try_*` (`try_set`,
+/// `try_update`, `try_get`…), never `set`/`get`, which would panic.
 pub fn listen_scoped<T: DeserializeOwned + 'static>(
     event: &'static str,
     mut on: impl FnMut(T) + 'static,

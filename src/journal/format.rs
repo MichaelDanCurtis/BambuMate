@@ -14,13 +14,25 @@ pub const SLICE_ESTIMATE: &str = "Slice estimate";
 pub const EMPTY_JOURNAL: &str = "Prints appear here as your printer runs them";
 pub const NO_MATCH: &str = "No prints match";
 pub const NO_PRINTER: &str = "The journal fills in by itself once a printer is set up.";
+// Home's last print (plan Task 10) uses this; nothing does before it.
+#[allow(dead_code)]
 pub const RATE_LAST: &str = "Rate your last print";
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub const DELETE_CONFIRM: &str = "Delete this entry and its photos?";
+/// In place of a photo or thumbnail whose file is missing or unreadable.
+pub const PHOTO_UNAVAILABLE: &str = "Photo unavailable";
 /// The backend's refusals (`journal::photos`), for the checks made before
 /// a file is sent.
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub const TOO_LARGE: &str = "That photo is over 25 MB. Choose a smaller one.";
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub const NOT_AN_IMAGE: &str =
     "That file isn't a photo BambuMate can read. Choose a JPEG, PNG or WebP image.";
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub const MAX_PHOTO_BYTES: f64 = 25.0 * 1024.0 * 1024.0;
 /// Most characters shown of a print name the printer reports.
 pub const NAME_MAX: usize = 120;
@@ -28,6 +40,8 @@ pub const NAME_MAX: usize = 120;
 const TEXT_MAX: usize = 64;
 
 /// Analyze's defect ids, in the order the chips show them.
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub const ISSUE_TAGS: &[&str] = &[
     "stringing",
     "warping",
@@ -44,6 +58,8 @@ pub const FILTERS: &[(FilterKind, &str)] = &[
     (FilterKind::Failed, "Failed"),
 ];
 
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub const VERDICTS: &[Verdict] = &[Verdict::Good, Verdict::Usable, Verdict::Failed];
 
 /// `data-kind` on a filter pill.
@@ -74,6 +90,8 @@ pub fn outcome_text(o: Outcome) -> &'static str {
     }
 }
 
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub fn verdict_key(v: Verdict) -> &'static str {
     match v {
         Verdict::Good => "good",
@@ -91,6 +109,8 @@ pub fn verdict_text(v: Verdict) -> &'static str {
 }
 
 /// Clicking the pressed verdict clears it; any other sets that one.
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub fn verdict_after_click(current: Option<Verdict>, clicked: Verdict) -> VerdictChoice {
     if current == Some(clicked) {
         VerdictChoice::Clear
@@ -100,6 +120,8 @@ pub fn verdict_after_click(current: Option<Verdict>, clicked: Verdict) -> Verdic
 }
 
 /// `tags` with `tag` removed if present, else added at the end.
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub fn toggle_tag(tags: &[String], tag: &str) -> Vec<String> {
     if tags.iter().any(|t| t == tag) {
         tags.iter().filter(|t| *t != tag).cloned().collect()
@@ -127,9 +149,14 @@ pub fn duration_text(e: &PrintEntry) -> Option<String> {
     ))
 }
 
-/// `4h ago · 1 h 58 m` on a row; `Started 30m ago` while printing.
+/// `4h ago · 1 h 58 m` on a row; `Started 30m ago` while printing. The
+/// "ago" is counted from the start, so it is marked approximate when the
+/// start was, and so is the duration.
 pub fn when_line(e: &PrintEntry, now_ms: f64) -> String {
-    let ago = format_ago(now_ms, e.started_at as f64 * 1000.0);
+    let mut ago = format_ago(now_ms, e.started_at as f64 * 1000.0);
+    if e.start_approx {
+        ago.push_str(APPROXIMATE);
+    }
     if e.outcome == Outcome::Printing {
         return format!("Started {ago}");
     }
@@ -284,15 +311,21 @@ pub fn fact_rows(e: &PrintEntry, offset_minutes: i32) -> Vec<(&'static str, Stri
     rows
 }
 
+// Analyze opened from an entry (plan Task 9) uses this; nothing does before it.
+#[allow(dead_code)]
 pub fn entry_href(id: i64) -> String {
     format!("/printer/journal?entry={id}")
 }
 
+// The entry detail (plan Task 8) uses this; nothing does before it.
+#[allow(dead_code)]
 pub fn analyze_href(id: i64) -> String {
     format!("/analysis?journal={id}")
 }
 
 /// Home's "Rate your last print": a finished print with no verdict.
+// Home's last print (plan Task 10) uses this; nothing does before it.
+#[allow(dead_code)]
 pub fn rate_href(e: &PrintEntry) -> Option<String> {
     (e.outcome == Outcome::Finished && e.verdict.is_none()).then(|| entry_href(e.id))
 }
@@ -316,6 +349,8 @@ pub struct AnalyzePrefill {
     pub photo_id: Option<i64>,
 }
 
+// Analyze opened from an entry (plan Task 9) uses this; nothing does before it.
+#[allow(dead_code)]
 pub fn analyze_prefill(e: &PrintEntry) -> AnalyzePrefill {
     let slice = e.slice.as_ref();
     AnalyzePrefill {
@@ -339,6 +374,8 @@ pub fn analyze_prefill(e: &PrintEntry) -> AnalyzePrefill {
 }
 
 /// The base64 part of a `data:…;base64,…` URL.
+// Analyze opened from an entry (plan Task 9) uses this; nothing does before it.
+#[allow(dead_code)]
 pub fn data_url_base64(url: &str) -> Option<String> {
     url.split_once(";base64,")
         .map(|(_, data)| data.to_string())
@@ -424,7 +461,72 @@ mod tests {
                 ("failed", "Failed")
             ]
         );
-        assert_eq!(ISSUE_TAGS.len(), 7);
+        assert_eq!(
+            ISSUE_TAGS,
+            [
+                "stringing",
+                "warping",
+                "layer_adhesion",
+                "elephants_foot",
+                "under_extrusion",
+                "over_extrusion",
+                "z_banding",
+            ]
+        );
+    }
+
+    // The constants are compared with the spec's wording, not with
+    // themselves, so a typo in one fails here.
+    #[test]
+    fn the_required_strings_read_exactly_as_the_spec_says() {
+        assert_eq!(PRINTING_NOW, "Printing now");
+        assert_eq!(UNWATCHED, "Ended while BambuMate wasn't watching");
+        assert_eq!(APPROXIMATE, " (approximate)");
+        assert_eq!(SLICE_ESTIMATE, "Slice estimate");
+        assert_eq!(
+            EMPTY_JOURNAL,
+            "Prints appear here as your printer runs them"
+        );
+        assert_eq!(NO_MATCH, "No prints match");
+        assert_eq!(
+            NO_PRINTER,
+            "The journal fills in by itself once a printer is set up."
+        );
+        assert_eq!(RATE_LAST, "Rate your last print");
+        assert_eq!(DELETE_CONFIRM, "Delete this entry and its photos?");
+        assert_eq!(PHOTO_UNAVAILABLE, "Photo unavailable");
+        assert_eq!(TOO_LARGE, "That photo is over 25 MB. Choose a smaller one.");
+        assert_eq!(
+            NOT_AN_IMAGE,
+            "That file isn't a photo BambuMate can read. Choose a JPEG, PNG or WebP image."
+        );
+        assert_eq!(MAX_PHOTO_BYTES, 26_214_400.0);
+        let failed = PrintEntry {
+            outcome: Outcome::Failed,
+            slice: Some(slice()),
+            ..entry()
+        };
+        assert!(fact_rows(&failed, 0)
+            .iter()
+            .any(|(label, value)| *label == "Slice estimate" && value == "14 m · 3.7 g"));
+    }
+
+    #[test]
+    fn every_issue_tag_has_an_analyze_name() {
+        use crate::components::defect_report::defect_display_name;
+        let names: Vec<String> = ISSUE_TAGS.iter().map(|t| defect_display_name(t)).collect();
+        assert_eq!(
+            names,
+            [
+                "Stringing/Oozing",
+                "Warping",
+                "Poor Layer Adhesion",
+                "Elephant's Foot",
+                "Under-Extrusion",
+                "Over-Extrusion",
+                "Z-Banding",
+            ]
+        );
     }
 
     #[test]
@@ -463,6 +565,14 @@ mod tests {
             ..entry()
         };
         assert_eq!(when_line(&open, END as f64 * 1000.0), "Started 30m ago");
+        let back_dated = PrintEntry {
+            start_approx: true,
+            ..open
+        };
+        assert_eq!(
+            when_line(&back_dated, END as f64 * 1000.0),
+            "Started 30m ago (approximate)"
+        );
         assert_eq!(tray_chip(&tray("A2", "PLA")), "PLA · A2");
         assert_eq!(tray_chip(&tray("B4", "")), "B4");
     }
@@ -708,9 +818,10 @@ mod tests {
             ..entry()
         };
         let now_ms = (END + 3 * 3_600) as f64 * 1000.0;
+        // Both the "ago" and the duration are worked out from the start.
         assert_eq!(
             when_line(&approx, now_ms),
-            "4h ago · 1 h 58 m (approximate)"
+            "4h ago (approximate) · 1 h 58 m (approximate)"
         );
         let rows = fact_rows(&approx, 0);
         assert!(rows.contains(&("Started", "24 Oct 2026 12:07 (approximate)".to_string())));
@@ -723,7 +834,7 @@ mod tests {
             ..entry()
         };
         assert_eq!(duration_text(&lost), None);
-        assert_eq!(when_line(&lost, now_ms), "4h ago");
+        assert_eq!(when_line(&lost, now_ms), "4h ago (approximate)");
     }
 
     #[test]

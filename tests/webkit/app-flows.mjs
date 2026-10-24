@@ -27,6 +27,11 @@ import {
   ADVICE,
   FIXTURES,
   GIF_1X1,
+  JOURNAL_FAILED,
+  JOURNAL_FINISHED,
+  JOURNAL_GOOD,
+  JOURNAL_PRINTING,
+  JOURNAL_UNKNOWN,
   makePng,
   PETG,
   PRINTER_FINGERPRINT,
@@ -2206,6 +2211,191 @@ async function driveApp(browserType, engine, baseUrl) {
     });
   });
 
+  // -- print journal -----------------------------------------------------------
+  // Printer → Journal. Waits are on the invoke log or the DOM, never a clock.
+  const JR = ".journal-page";
+  const journalEmit = (name, payload) => page.evaluate(([n, p]) => window.__emit(n, p), [name, payload]);
+  const journalRow = (id) => `${JR} .jr-row[data-entry="${id}"]`;
+  const openJournal = async () => {
+    await openTab("/printer", "/printer/journal");
+    await page.waitForSelector(`${JR} .jr-row`, { timeout: 15000 });
+  };
+  const rowNames = () => page.locator(`${JR} .jr-row .jr-name`).allInnerTexts();
+  const rowsRead = (names) =>
+    page.waitForFunction(
+      (n) => [...document.querySelectorAll(".journal-page .jr-row .jr-name")].map((e) => e.textContent).join("|") === n,
+      names.join("|"),
+      { timeout: 5000 }
+    );
+  const ALL_ROWS = [JOURNAL_FINISHED.name, JOURNAL_FAILED.name, JOURNAL_GOOD.name, JOURNAL_UNKNOWN.name];
+
+  await step(run, page, "the journal lists prints newest first under this month's hero", async () => {
+    await setFixture("printer_view", PRINTER_VIEW);
+    await openJournal();
+    const tabs = await page.locator('.hub[data-hub="printer"] .nd-tabs a').evaluateAll((as) => as.map((a) => a.textContent.trim()));
+    if (tabs.join("|") !== "Live|Journal") throw new Error(`tabs: ${tabs.join("|")}`);
+    if ((await page.locator('.hub[data-hub="printer"] h1').count()) !== 1) throw new Error("expected one page title");
+    if ((await page.locator(`${JR} .nd-hero`).count()) !== 1) throw new Error("expected one hero");
+    const text = (sel) => page.locator(`${JR} ${sel}`).evaluate((el) => el.textContent.trim());
+    if ((await text(".nd-hero-label")) !== "This month") throw new Error("hero label");
+    if ((await text(".nd-hero-number")) !== "5" || (await text(".nd-hero-unit")) !== "prints") throw new Error("hero value");
+    const detail = await text(".nd-hero-detail");
+    if (detail !== "1 good · 1 finished · 1 failed · 4 h printing") throw new Error(`hero detail "${detail}"`);
+    const now = await page.locator(`${JR} .jr-now`).evaluate((el) => el.textContent);
+    if (!now.includes("Printing now") || !now.includes(JOURNAL_PRINTING.name)) throw new Error(`printing now reads "${now}"`);
+    if ((await page.locator(`${JR} .jr-now a[href="/printer"]`).count()) !== 1) throw new Error("printing now doesn't link to Live");
+    const names = await rowNames();
+    if (names.join("|") !== ALL_ROWS.join("|")) throw new Error(`rows: ${names.join("|")}`);
+    const chips = await page.locator(`${journalRow(2)} .jr-chip`).allInnerTexts();
+    if (chips.map((c) => c.trim()).join("|") !== "PLA · A2|PETG-CF · B3") throw new Error(`chips: ${chips.join("|")}`);
+    const swatch = await page.locator(`${journalRow(2)} .jr-swatch`).first().evaluate((el) => getComputedStyle(el).backgroundColor);
+    if (swatch !== "rgb(255, 255, 255)") throw new Error(`the A2 swatch is ${swatch}`);
+    if ((await page.locator(`${journalRow(2)} .jr-outcome`).getAttribute("data-outcome")) !== "finished") throw new Error("outcome");
+    if ((await page.locator(`${journalRow(2)} .jr-verdict-tag`).innerText()).trim() !== "") throw new Error("an unrated print shows a verdict");
+    if ((await page.locator(`${journalRow(1)} .jr-verdict-tag`).innerText()).trim() !== "Failed") throw new Error("verdict");
+    if ((await page.locator(`${journalRow(4)} .jr-verdict-tag`).innerText()).trim() !== "Good") throw new Error("the good verdict");
+    const unknown = (await page.locator(`${journalRow(5)} .jr-outcome`).innerText()).trim();
+    if (unknown.toLowerCase() !== "ended while bambumate wasn't watching") throw new Error(`unknown reads "${unknown}"`);
+    const approx = await page.locator(`${journalRow(1)} .jr-when`).innerText();
+    if (!approx.includes("(approximate)")) throw new Error(`an approximate start reads "${approx}"`);
+    if ((await page.locator(`${journalRow(2)} .jr-when`).innerText()).includes("(approximate)")) throw new Error("an exact start is marked approximate");
+    await page.waitForSelector(`${journalRow(2)} .jr-thumb img`, { timeout: 5000 });
+    const thumbs = await callsOf("journal_image");
+    if (!thumbs.length || thumbs.some((c) => c.args.id !== 2 || c.args.photoId != null)) throw new Error(`thumbnails asked for: ${JSON.stringify(thumbs.map((c) => c.args))}`);
+    if ((await page.locator(`${journalRow(1)} .jr-thumb`).count()) !== 0) throw new Error("a thumbnail without a slice");
+    const sidebarActive = await page.locator('nav.sidebar a[href="/printer"]').getAttribute("aria-current");
+    if (sidebarActive !== "page") throw new Error("the rail doesn't mark Printer");
+  });
+
+  await step(run, page, "a journal row opens its detail in place, one at a time", async () => {
+    const path = await page.evaluate(() => location.pathname);
+    const main = (id) => page.locator(`${journalRow(id)} .jr-row-main`);
+    if ((await main(2).evaluate((el) => el.tagName)) !== "BUTTON") throw new Error("the row is not a button");
+    if ((await main(2).getAttribute("aria-expanded")) !== "false") throw new Error("a row starts open");
+    await main(2).click();
+    await page.waitForSelector(`${journalRow(2)} .jr-detail`, { timeout: 5000 });
+    if ((await main(2).getAttribute("aria-expanded")) !== "true") throw new Error("not marked expanded");
+    const controls = await main(2).getAttribute("aria-controls");
+    if (!controls || (await page.locator(`${journalRow(2)} .jr-detail`).getAttribute("id")) !== controls) throw new Error("aria-controls names no detail");
+    if (await page.locator('[role="dialog"]').count()) throw new Error("the detail opened a dialog");
+    if ((await page.evaluate(() => location.pathname)) !== path) throw new Error("the detail changed the page");
+    await main(1).click();
+    await page.waitForSelector(`${journalRow(1)} .jr-detail`, { timeout: 5000 });
+    if (await page.locator(`${journalRow(2)} .jr-detail`).count()) throw new Error("two entries open at once");
+    if ((await main(2).getAttribute("aria-expanded")) !== "false") throw new Error("the closed row is still marked expanded");
+    await main(1).click();
+    await page.waitForSelector(`${journalRow(1)} .jr-detail`, { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "journal filters and search ask the backend for what was picked", async () => {
+    const lastFilter = async () => (await callsOf("journal_list")).at(-1).args.filter;
+    await withFixtures({ journal_list: [JOURNAL_FINISHED] }, async () => {
+      const before = await countOf("journal_list");
+      await page.click(`${JR} .jr-filter[data-kind="needs_verdict"]`);
+      await pastCalls("journal_list", before);
+      await page.waitForFunction(() => document.querySelectorAll(".journal-page .jr-row").length === 1, null, { timeout: 5000 });
+      if (!sameArgs(await lastFilter(), { kind: "needs_verdict", query: "" })) throw new Error(JSON.stringify(await lastFilter()));
+      if ((await page.locator(`${JR} .jr-filter[data-kind="needs_verdict"]`).getAttribute("aria-pressed")) !== "true") throw new Error("pill not pressed");
+      if ((await page.locator(`${JR} .jr-filter[data-kind="all"]`).getAttribute("aria-pressed")) !== "false") throw new Error("All still pressed");
+    });
+    await withFixtures({ journal_list: [JOURNAL_FAILED] }, async () => {
+      await page.click(`${JR} .jr-filter[data-kind="failed"]`);
+      await page.fill(`${JR} .jr-search`, "petg");
+      await page.waitForFunction(
+        () => window.__ipc.calls.filter((c) => c.cmd === "journal_list").at(-1)?.args.filter.query === "petg",
+        null,
+        { timeout: 5000 }
+      );
+      if (!sameArgs(await lastFilter(), { kind: "failed", query: "petg" })) throw new Error(JSON.stringify(await lastFilter()));
+      await rowsRead([JOURNAL_FAILED.name]);
+    });
+    await withFixtures({ journal_list: [] }, async () => {
+      await page.fill(`${JR} .jr-search`, "nothing like this");
+      await page.waitForFunction(() => document.querySelector(".journal-page .nd-state")?.textContent === "[EMPTY: No prints match]", null, { timeout: 5000 });
+    });
+    await page.fill(`${JR} .jr-search`, "");
+    await page.click(`${JR} .jr-filter[data-kind="all"]`);
+    await page.waitForFunction(() => document.querySelectorAll(".journal-page .jr-row").length === 4, null, { timeout: 5000 });
+  });
+
+  await step(run, page, "a journal answer overtaken by a newer search is dropped", async () => {
+    // The first search's answer is held back until the second one has landed.
+    const slow = { __hold: "journal-stale", answer: [JOURNAL_GOOD] };
+    await withFixtures({ journal_list: { __sequence: [slow, [JOURNAL_FAILED]] } }, async () => {
+      const lists = await countOf("journal_list");
+      const months = await countOf("journal_month_summary");
+      await page.fill(`${JR} .jr-search`, "swatch");
+      await pastCalls("journal_list", lists);
+      await page.fill(`${JR} .jr-search`, "bracket");
+      await pastCalls("journal_list", lists + 1);
+      await rowsRead([JOURNAL_FAILED.name]);
+      await page.evaluate(() => window.__release("journal-stale"));
+      // The held load asks for the month once its list arrives; then let its
+      // continuation run before reading the rows again.
+      await pastCalls("journal_month_summary", months + 1);
+      await page.waitForFunction(
+        (n) => window.__ipc.settled.filter((c) => c === "journal_month_summary").length >= n,
+        months + 2,
+        { timeout: 5000 }
+      );
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      const names = await rowNames();
+      if (names.join("|") !== JOURNAL_FAILED.name) throw new Error(`the stale answer landed: ${names.join("|")}`);
+    });
+    await page.fill(`${JR} .jr-search`, "");
+    await rowsRead(ALL_ROWS);
+  });
+
+  await step(run, page, "the journal reloads when the backend says it changed", async () => {
+    await withFixtures({ journal_list: [JOURNAL_GOOD] }, async () => {
+      const before = await countOf("journal_list");
+      await journalEmit("journal://changed", null);
+      await pastCalls("journal_list", before);
+      await rowsRead([JOURNAL_GOOD.name]);
+    });
+    await journalEmit("journal://changed", null);
+    await rowsRead(ALL_ROWS);
+  });
+
+  await step(run, page, "a thumbnail that can't be read says so", async () => {
+    await withFixtures({ journal_image: { __reject: "Photo unavailable" } }, async () => {
+      await page.click('.nd-tabs a[href="/printer"]');
+      await page.waitForSelector(".printer-page", { timeout: 15000 });
+      await page.click('.nd-tabs a[href="/printer/journal"]');
+      await page.waitForFunction(
+        () => document.querySelector('.journal-page .jr-row[data-entry="2"] .jr-thumb')?.textContent === "Photo unavailable",
+        null,
+        { timeout: 5000 }
+      );
+      if (await page.locator(`${journalRow(2)} .jr-thumb img`).count()) throw new Error("an image beside the placeholder");
+      const box = await page.locator(`${journalRow(2)} .jr-thumb`).boundingBox();
+      if (Math.round(box.width) !== 56 || Math.round(box.height) !== 56) throw new Error(`the placeholder is ${box.width}x${box.height}`);
+    });
+  });
+
+  await step(run, page, "an empty journal says prints appear as the printer runs them", async () => {
+    await withFixtures({ journal_list: [] }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await openTab("/printer", "/printer/journal");
+      await page.waitForFunction(
+        () => document.querySelector(".journal-page .nd-state")?.textContent === "[EMPTY: Prints appear here as your printer runs them]",
+        null,
+        { timeout: 5000 }
+      );
+    });
+  });
+
+  await step(run, page, "without a printer the journal says it fills in by itself", async () => {
+    await journalEmit("printer://state", PRINTER_UNCONFIGURED);
+    await page.waitForSelector(`${JR} .jr-no-printer`, { timeout: 5000 });
+    const note = await page.locator(`${JR} .jr-no-printer`).innerText();
+    if (!note.includes("The journal fills in by itself once a printer is set up.")) throw new Error(`note reads "${note}"`);
+    if (!note.includes("Set one up in Settings → Printer")) throw new Error(`note reads "${note}"`);
+    if ((await page.locator(`${JR} .jr-no-printer a[href="/settings#printer"]`).count()) !== 1) throw new Error("no Settings link");
+    await journalEmit("printer://state", PRINTER_VIEW);
+    await page.waitForSelector(`${JR} .jr-no-printer`, { state: "detached", timeout: 5000 });
+  });
+
   // -- settings --------------------------------------------------------------
   await step(run, page, "navigate to Settings", async () => {
     await page.click('a[href="/settings"]');
@@ -2936,6 +3126,7 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "activating a tab from the keyboard keeps focus on that tab", async () => {
     // The header must stay mounted across a tab switch, or focus falls to <body>.
     for (const [hub, page_, tab, selector] of [
+      ["/printer", ".printer-page", "/printer/journal", ".journal-page"],
       ["/settings", ".settings-page", "/settings/about", ".about-page"],
       ["/filament", ".filament-search-page", "/filament/batch", ".batch-generate-page"],
       ["/profiles", ".profile-management-page", "/profiles/compare", ".profile-diff-page"],
@@ -3194,7 +3385,7 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   await step(run, page, "the printer page has the shared header and lists HMS codes seen earlier", async () => {
-    const title = (await page.locator(".printer-page h1.nd-page-title").innerText()).trim();
+    const title = (await page.locator('.hub[data-hub="printer"] h1.nd-page-title').innerText()).trim();
     if (title !== "Printer") throw new Error(`page title reads "${title}"`);
     const code = PRINTER_VIEW.errors[0].code;
     // While active, the code sits in the active list and not under Earlier.
@@ -3333,7 +3524,7 @@ async function driveApp(browserType, engine, baseUrl) {
     if (!ident.includes(`<b>N</b>${"N".repeat(56)} · `)) throw new Error(`ident: ${ident}`);
     const preset = await slotCard("A2").locator(".pr-preset").innerText();
     if (preset !== `<u>S</u>${"S".repeat(56)}`) throw new Error(`A2 preset: ${preset}`);
-    if ((await page.locator(".printer-page b, .printer-page i, .printer-page u").count()) !== 0) {
+    if ((await page.locator('.hub[data-hub="printer"] :is(b, i, u)').count()) !== 0) {
       throw new Error("a printer-supplied name was rendered as HTML");
     }
     await emitEvent("printer://state", PRINTER_VIEW);

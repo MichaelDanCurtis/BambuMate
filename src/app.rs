@@ -18,8 +18,9 @@ use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
 use crate::pages::home::HomePage;
 use crate::pages::hub::HubPage;
+use crate::pages::journal::JournalPage;
 use crate::pages::print_analysis::PrintAnalysisPage;
-use crate::pages::printer::PrinterPage;
+use crate::pages::printer::{PrinterHub, PrinterPage};
 use crate::pages::profile_diff::ProfileDiffPage;
 use crate::pages::profile_management::ProfileManagementPage;
 use crate::pages::settings::SettingsPage;
@@ -172,7 +173,10 @@ pub fn App() -> impl IntoView {
                     <main class="content">
                         <Routes fallback=|| view! { <NoRoute /> }>
                             <Route path=path!("/") view=HomePage />
-                            <Route path=path!("/printer") view=PrinterPage />
+                            <ParentRoute path=path!("/printer") view=PrinterHub>
+                                <Route path=path!("") view=PrinterPage />
+                                <Route path=path!("journal") view=JournalPage />
+                            </ParentRoute>
                             <ParentRoute path=path!("/filament") view=|| view! { <HubPage title="Filament" tabs=FILAMENT_TABS /> }>
                                 <Route path=path!("") view=FilamentSearchPage />
                                 <Route path=path!("advise") view=AdvisePage />
