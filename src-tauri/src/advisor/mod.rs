@@ -3,3 +3,5 @@
 //! AI only turns a description into needs.
 
 pub mod materials;
+pub mod needs;
+pub mod score;
