@@ -9,7 +9,7 @@
 .printer-dot[data-state="error"] { background: var(--nd-accent); }
 
 /* -- page ------------------------------------------------------------------ */
-.printer-page { display: grid; gap: var(--nd-space-lg); max-width: 1100px; }
+.printer-page { display: grid; gap: var(--nd-space-lg); }
 .pr-ident { font-size: 12px; color: var(--nd-text-secondary); }
 .pr-empty { padding: var(--nd-space-xl); border: 1px dashed var(--nd-border-visible); border-radius: 12px; text-align: center; }
 .pr-setup-link { color: var(--nd-interactive); }

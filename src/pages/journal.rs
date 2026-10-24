@@ -1,9 +1,14 @@
 //! Printer → Journal (spec 2026-10-24 §2): every print the backend
 //! recorded, newest first, under this month's tally (the page's one hero).
 //! The list reloads on `journal://changed`; a generation counter drops a
-//! load that a newer one overtook.
+//! load that a newer one overtook. Plate thumbnails load only as their rows
+//! come near the visible part of the list.
+
+use std::collections::HashMap;
 
 use leptos::prelude::*;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::components::patterns::{Hero, StateKind, StateText};
@@ -72,6 +77,120 @@ fn hero_value(summary: Option<MonthSummary>) -> String {
     summary.map_or_else(|| "—".into(), |s| s.prints.to_string())
 }
 
+/// Whether the entry has a plate image to show: only a linked slice brings
+/// one. Without it the row has no thumbnail and asks for none.
+fn wants_thumbnail(e: &PrintEntry) -> bool {
+    e.slice.as_ref().is_some_and(|s| s.has_thumbnail)
+}
+
+/// The "no printer" line shows only once the printer config is known, so a
+/// cold load doesn't flash it before the first view arrives.
+fn shows_no_printer(known: bool, configured: bool) -> bool {
+    known && !configured
+}
+
+/// How far beyond the visible list a row starts loading its thumbnail.
+const THUMB_MARGIN: &str = "300px 0px";
+
+/// Loads plate thumbnails only once their row comes near the visible part of
+/// the list: one `IntersectionObserver` for the page, made when the first
+/// thumbnail mounts (the page is in the document by then) and disconnected
+/// when the page unmounts. Loaded images are kept by entry id, so a row that
+/// a filter hid and brings back doesn't ask again.
+#[derive(Clone, Copy)]
+struct Thumbs {
+    observer: StoredValue<Option<web_sys::IntersectionObserver>, LocalStorage>,
+    /// Rows waiting to come into view: entry id → their "near" flag.
+    waiting: StoredValue<HashMap<i64, RwSignal<bool>>>,
+    loaded: StoredValue<HashMap<i64, String>>,
+}
+
+impl Thumbs {
+    fn new() -> Self {
+        let observer = StoredValue::new_local(None::<web_sys::IntersectionObserver>);
+        on_cleanup(move || {
+            if let Some(Some(o)) = observer.try_with_value(|o| o.clone()) {
+                o.disconnect();
+            }
+        });
+        Self {
+            observer,
+            waiting: StoredValue::new(HashMap::new()),
+            loaded: StoredValue::new(HashMap::new()),
+        }
+    }
+
+    /// The page's observer, made on first use.
+    fn observer(self) -> Option<web_sys::IntersectionObserver> {
+        if let Some(o) = self.observer.try_with_value(|o| o.clone()).flatten() {
+            return Some(o);
+        }
+        let waiting = self.waiting;
+        let on_seen = Closure::<dyn FnMut(js_sys::Array, web_sys::IntersectionObserver)>::new(
+            move |seen: js_sys::Array, observer: web_sys::IntersectionObserver| {
+                for item in seen.iter() {
+                    let item: web_sys::IntersectionObserverEntry = item.unchecked_into();
+                    if !item.is_intersecting() {
+                        continue;
+                    }
+                    let target = item.target();
+                    observer.unobserve(&target);
+                    let near = target
+                        .get_attribute("data-thumb-for")
+                        .and_then(|id| id.parse::<i64>().ok())
+                        .and_then(|id| waiting.try_update_value(|w| w.remove(&id)).flatten());
+                    if let Some(near) = near {
+                        near.try_set(true);
+                    }
+                }
+            },
+        );
+        let init = web_sys::IntersectionObserverInit::new();
+        init.set_root_margin(THUMB_MARGIN);
+        // The app scrolls inside `.content`, not the window; with it as the
+        // root, the margin reaches below the fold.
+        let content = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.query_selector(".content").ok().flatten());
+        init.set_root(content.as_ref());
+        let made = web_sys::IntersectionObserver::new_with_options(
+            on_seen.as_ref().unchecked_ref(),
+            &init,
+        )
+        .ok();
+        // A callback already queued when the page unmounts may still run, so
+        // the closure is leaked rather than dropped; it touches only `try_*`.
+        on_seen.forget();
+        self.observer.try_set_value(made.clone());
+        made
+    }
+
+    /// Sets `near` once `el` comes near the visible list; at once if no
+    /// observer could be made.
+    fn watch(self, id: i64, el: &web_sys::Element, near: RwSignal<bool>) {
+        match self.observer() {
+            Some(o) => {
+                self.waiting.try_update_value(|w| {
+                    w.insert(id, near);
+                });
+                o.observe(el);
+            }
+            None => {
+                near.try_set(true);
+            }
+        }
+    }
+
+    fn unwatch(self, id: i64, el: &web_sys::Element) {
+        self.waiting.try_update_value(|w| {
+            w.remove(&id);
+        });
+        if let Some(Some(o)) = self.observer.try_with_value(|o| o.clone()) {
+            o.unobserve(el);
+        }
+    }
+}
+
 /// The open row after `id` is clicked: one row is open at a time.
 fn toggled(open: Option<i64>, id: i64) -> Option<i64> {
     (open != Some(id)).then_some(id)
@@ -81,15 +200,19 @@ fn toggled(open: Option<i64>, id: i64) -> Option<i64> {
 pub fn JournalPage() -> impl IntoView {
     let printer = expect_context::<PrinterShared>();
     let changes = expect_context::<JournalShared>().changes;
-    let configured = Memo::new(move |_| printer.view.with(|v| v.configured));
+    let no_printer = Memo::new(move |_| {
+        shows_no_printer(printer.known.get(), printer.view.with(|v| v.configured))
+    });
     let kind = RwSignal::new(FilterKind::All);
     let search = RwSignal::new(String::new());
     let entries: Entries = RwSignal::new(None);
     let summary = RwSignal::new(None::<MonthSummary>);
     let now = RwSignal::new(js_sys::Date::now());
     let open = RwSignal::new(None::<i64>);
+    let thumbs = Thumbs::new();
     // Each load takes the next number; only the newest load's answer lands.
     let load_gen = StoredValue::new(0u64);
+    let month_gen = StoredValue::new(0u64);
 
     Effect::new(move |_| {
         changes.track();
@@ -101,15 +224,28 @@ pub fn JournalPage() -> impl IntoView {
         load_gen.set_value(generation);
         spawn_local(async move {
             let list = bridge::list(&filter).await;
-            let month = bridge::month_summary().await;
             if load_gen.try_get_value() != Some(generation) {
                 return;
             }
             entries.try_set(Some(list));
+            now.try_set(js_sys::Date::now());
+        });
+    });
+
+    // The month doesn't depend on the filter: it is counted when the page
+    // opens and when the journal changes, never on a search keystroke.
+    Effect::new(move |_| {
+        changes.track();
+        let generation = month_gen.get_value().wrapping_add(1);
+        month_gen.set_value(generation);
+        spawn_local(async move {
+            let month = bridge::month_summary().await;
+            if month_gen.try_get_value() != Some(generation) {
+                return;
+            }
             if let Ok(m) = month {
                 summary.try_set(Some(m));
             }
-            now.try_set(js_sys::Date::now());
         });
     });
 
@@ -142,7 +278,7 @@ pub fn JournalPage() -> impl IntoView {
                 unit=Signal::derive(move || hero_unit(summary.get().map_or(0, |s| s.prints)).to_string())
                 detail=Signal::derive(move || summary.get().map(|s| hero_detail(&s)).unwrap_or_default())
             />
-            <Show when=move || !configured.get()>
+            <Show when=move || no_printer.get()>
                 <p class="jr-no-printer">
                     {NO_PRINTER}
                     " "
@@ -186,7 +322,7 @@ pub fn JournalPage() -> impl IntoView {
                 <For
                     each=move || ids.get()
                     key=|id| *id
-                    children=move |id| view! { <JournalRow id=id entries=entries now=now open=open /> }
+                    children=move |id| view! { <JournalRow id=id entries=entries now=now open=open thumbs=thumbs /> }
                 />
             </ul>
         </div>
@@ -201,18 +337,20 @@ fn JournalRow(
     entries: Entries,
     now: RwSignal<f64>,
     open: RwSignal<Option<i64>>,
+    thumbs: Thumbs,
 ) -> impl IntoView {
     let entry = Memo::new(move |_| find_entry(entries, id));
+    let has_thumbnail = Memo::new(move |_| entry.with(|e| e.as_ref().is_some_and(wants_thumbnail)));
     let expanded = Memo::new(move |_| open.get() == Some(id));
     let detail_id = format!("jr-detail-{id}");
     let controls = detail_id.clone();
     view! {
         <li class="jr-row" data-entry=id.to_string()>
-            <button type="button" class="jr-row-main"
+            <button type="button" class="jr-row-main" class:jr-has-thumb=move || has_thumbnail.get()
                 aria-expanded=move || expanded.get().to_string()
                 aria-controls=move || expanded.get().then(|| controls.clone())
                 on:click=move |_| open.update(|o| *o = toggled(*o, id))>
-                <RowSummary id=id entry=entry now=now />
+                <RowSummary id=id entry=entry now=now has_thumbnail=has_thumbnail thumbs=thumbs />
             </button>
             <Show when=move || expanded.get()>
                 <RowDetail dom_id=detail_id.clone() entry=entry />
@@ -224,14 +362,13 @@ fn JournalRow(
 /// The row's line: thumbnail, name, when and how long, trays, outcome and
 /// verdict. Printer-reported text goes through `untrusted_text`.
 #[component]
-fn RowSummary(id: i64, entry: Memo<Option<PrintEntry>>, now: RwSignal<f64>) -> impl IntoView {
-    let has_thumbnail = Memo::new(move |_| {
-        entry.with(|e| {
-            e.as_ref()
-                .and_then(|e| e.slice.as_ref())
-                .is_some_and(|s| s.has_thumbnail)
-        })
-    });
+fn RowSummary(
+    id: i64,
+    entry: Memo<Option<PrintEntry>>,
+    now: RwSignal<f64>,
+    has_thumbnail: Memo<bool>,
+    thumbs: Thumbs,
+) -> impl IntoView {
     let outcome =
         Memo::new(move |_| entry.with(|e| e.as_ref().map(|e| e.outcome).unwrap_or_default()));
     let name = move || {
@@ -245,12 +382,14 @@ fn RowSummary(id: i64, entry: Memo<Option<PrintEntry>>, now: RwSignal<f64>) -> i
         let now = now.get();
         entry.with(|e| e.as_ref().map(|e| when_line(e, now)).unwrap_or_default())
     };
+    // Labelled, so the user's rating isn't read as an echo of the outcome.
     let verdict = move || {
-        entry.with(|e| {
-            e.as_ref()
-                .and_then(|e| e.verdict)
-                .map(verdict_text)
-                .unwrap_or_default()
+        entry.with(|e| e.as_ref().and_then(|e| e.verdict)).map(|v| {
+            view! {
+                <span class="nd-label jr-verdict-label">"Verdict"</span>
+                " "
+                <span class="jr-verdict-value">{verdict_text(v)}</span>
+            }
         })
     };
     let chips = move || {
@@ -269,7 +408,7 @@ fn RowSummary(id: i64, entry: Memo<Option<PrintEntry>>, now: RwSignal<f64>) -> i
     };
     view! {
         <Show when=move || has_thumbnail.get()>
-            <RowThumb id=id />
+            <RowThumb id=id thumbs=thumbs />
         </Show>
         <span class="jr-name">{name}</span>
         <span class="jr-when">{when}</span>
@@ -281,18 +420,51 @@ fn RowSummary(id: i64, entry: Memo<Option<PrintEntry>>, now: RwSignal<f64>) -> i
     }
 }
 
-/// The plate thumbnail of the linked slice. It loads on its own once the row
-/// is shown, so the list never waits for it; a missing or unreadable file
-/// reads "Photo unavailable".
+/// The plate thumbnail of the linked slice, in a fixed box. It is asked for
+/// only once the row comes near the visible list (see [`Thumbs`]), so the
+/// list never waits for it; a missing or unreadable file reads "Photo
+/// unavailable".
 #[component]
-fn RowThumb(id: i64) -> impl IntoView {
-    let src = RwSignal::new(None::<Result<String, ()>>);
-    spawn_local(async move {
-        let url = bridge::image(id, None).await.map_err(|_| ());
-        src.try_set(Some(url));
+fn RowThumb(id: i64, thumbs: Thumbs) -> impl IntoView {
+    let cached = thumbs.loaded.with_value(|l| l.get(&id).cloned());
+    let near = RwSignal::new(cached.is_some());
+    let src = RwSignal::new(cached.map(Ok::<String, ()>));
+    let node = NodeRef::<leptos::html::Span>::new();
+    let watched = StoredValue::new_local(None::<web_sys::Element>);
+
+    Effect::new(move |_| {
+        let Some(el) = node.get() else {
+            return;
+        };
+        if near.get_untracked() {
+            return;
+        }
+        let el: web_sys::Element = el.unchecked_into();
+        thumbs.watch(id, &el, near);
+        watched.set_value(Some(el));
     });
+    on_cleanup(move || {
+        if let Some(Some(el)) = watched.try_with_value(|e| e.clone()) {
+            thumbs.unwatch(id, &el);
+        }
+    });
+    Effect::new(move |_| {
+        if !near.get() || src.with_untracked(Option::is_some) {
+            return;
+        }
+        spawn_local(async move {
+            let url = bridge::image(id, None).await.map_err(|_| ());
+            if let Ok(u) = &url {
+                thumbs.loaded.try_update_value(|l| {
+                    l.insert(id, u.clone());
+                });
+            }
+            src.try_set(Some(url));
+        });
+    });
+
     view! {
-        <span class="jr-thumb">
+        <span class="jr-thumb" node_ref=node data-thumb-for=id.to_string()>
             {move || match src.get() {
                 Some(Ok(s)) => view! { <img src=s alt="" /> }.into_any(),
                 Some(Err(())) => view! { <span class="jr-thumb-missing">{PHOTO_UNAVAILABLE}</span> }.into_any(),
@@ -400,6 +572,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(hero_value(Some(s)), "5");
+    }
+
+    #[test]
+    fn only_a_slice_with_a_plate_image_asks_for_a_thumbnail() {
+        use crate::journal::types::SliceSnapshot;
+        assert!(!wants_thumbnail(&at(1, Outcome::Finished)));
+        let no_image = PrintEntry {
+            slice: Some(SliceSnapshot::default()),
+            ..at(2, Outcome::Finished)
+        };
+        assert!(!wants_thumbnail(&no_image));
+        let linked = PrintEntry {
+            slice: Some(SliceSnapshot {
+                has_thumbnail: true,
+                ..Default::default()
+            }),
+            ..at(2, Outcome::Finished)
+        };
+        assert!(wants_thumbnail(&linked));
+    }
+
+    #[test]
+    fn the_no_printer_line_waits_until_the_printer_config_is_known() {
+        assert!(!shows_no_printer(false, false));
+        assert!(!shows_no_printer(false, true));
+        assert!(shows_no_printer(true, false));
+        assert!(!shows_no_printer(true, true));
     }
 
     #[test]

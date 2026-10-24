@@ -2252,8 +2252,10 @@ async function driveApp(browserType, engine, baseUrl) {
     if (swatch !== "rgb(255, 255, 255)") throw new Error(`the A2 swatch is ${swatch}`);
     if ((await page.locator(`${journalRow(2)} .jr-outcome`).getAttribute("data-outcome")) !== "finished") throw new Error("outcome");
     if ((await page.locator(`${journalRow(2)} .jr-verdict-tag`).innerText()).trim() !== "") throw new Error("an unrated print shows a verdict");
-    if ((await page.locator(`${journalRow(1)} .jr-verdict-tag`).innerText()).trim() !== "Failed") throw new Error("verdict");
-    if ((await page.locator(`${journalRow(4)} .jr-verdict-tag`).innerText()).trim() !== "Good") throw new Error("the good verdict");
+    const verdictOf = (id) => page.locator(`${journalRow(id)} .jr-verdict-tag`).evaluate((el) => el.textContent.replace(/\s+/g, " ").trim());
+    if ((await verdictOf(1)) !== "Verdict Failed") throw new Error(`verdict reads "${await verdictOf(1)}"`);
+    if ((await verdictOf(4)) !== "Verdict Good") throw new Error(`the good verdict reads "${await verdictOf(4)}"`);
+    if ((await page.locator(`${journalRow(2)} .jr-thumb`).count()) !== 1 || (await page.locator(`${JR} .jr-row-main.jr-has-thumb`).count()) !== 1) throw new Error("only the linked print has a thumbnail column");
     const unknown = (await page.locator(`${journalRow(5)} .jr-outcome`).innerText()).trim();
     if (unknown.toLowerCase() !== "ended while bambumate wasn't watching") throw new Error(`unknown reads "${unknown}"`);
     const approx = await page.locator(`${journalRow(1)} .jr-when`).innerText();
@@ -2299,6 +2301,7 @@ async function driveApp(browserType, engine, baseUrl) {
       if ((await page.locator(`${JR} .jr-filter[data-kind="all"]`).getAttribute("aria-pressed")) !== "false") throw new Error("All still pressed");
     });
     await withFixtures({ journal_list: [JOURNAL_FAILED] }, async () => {
+      const months = await countOf("journal_month_summary");
       await page.click(`${JR} .jr-filter[data-kind="failed"]`);
       await page.fill(`${JR} .jr-search`, "petg");
       await page.waitForFunction(
@@ -2308,6 +2311,7 @@ async function driveApp(browserType, engine, baseUrl) {
       );
       if (!sameArgs(await lastFilter(), { kind: "failed", query: "petg" })) throw new Error(JSON.stringify(await lastFilter()));
       await rowsRead([JOURNAL_FAILED.name]);
+      if ((await countOf("journal_month_summary")) !== months) throw new Error("a filter or search recounted the month");
     });
     await withFixtures({ journal_list: [] }, async () => {
       await page.fill(`${JR} .jr-search`, "nothing like this");
@@ -2323,19 +2327,17 @@ async function driveApp(browserType, engine, baseUrl) {
     const slow = { __hold: "journal-stale", answer: [JOURNAL_GOOD] };
     await withFixtures({ journal_list: { __sequence: [slow, [JOURNAL_FAILED]] } }, async () => {
       const lists = await countOf("journal_list");
-      const months = await countOf("journal_month_summary");
       await page.fill(`${JR} .jr-search`, "swatch");
       await pastCalls("journal_list", lists);
       await page.fill(`${JR} .jr-search`, "bracket");
       await pastCalls("journal_list", lists + 1);
       await rowsRead([JOURNAL_FAILED.name]);
       await page.evaluate(() => window.__release("journal-stale"));
-      // The held load asks for the month once its list arrives; then let its
-      // continuation run before reading the rows again.
-      await pastCalls("journal_month_summary", months + 1);
+      // Wait for the held answer to be out, then let its continuation run
+      // before reading the rows again.
       await page.waitForFunction(
-        (n) => window.__ipc.settled.filter((c) => c === "journal_month_summary").length >= n,
-        months + 2,
+        (n) => window.__ipc.settled.filter((c) => c === "journal_list").length >= n,
+        lists + 2,
         { timeout: 5000 }
       );
       await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
@@ -2349,8 +2351,10 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "the journal reloads when the backend says it changed", async () => {
     await withFixtures({ journal_list: [JOURNAL_GOOD] }, async () => {
       const before = await countOf("journal_list");
+      const months = await countOf("journal_month_summary");
       await journalEmit("journal://changed", null);
       await pastCalls("journal_list", before);
+      await pastCalls("journal_month_summary", months);
       await rowsRead([JOURNAL_GOOD.name]);
     });
     await journalEmit("journal://changed", null);
@@ -2370,6 +2374,25 @@ async function driveApp(browserType, engine, baseUrl) {
       if (await page.locator(`${journalRow(2)} .jr-thumb img`).count()) throw new Error("an image beside the placeholder");
       const box = await page.locator(`${journalRow(2)} .jr-thumb`).boundingBox();
       if (Math.round(box.width) !== 56 || Math.round(box.height) !== 56) throw new Error(`the placeholder is ${box.width}x${box.height}`);
+    });
+  });
+
+  await step(run, page, "thumbnails load only as their rows come near the visible list", async () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({ ...JOURNAL_FINISHED, id: 100 + i, name: `Plate ${i + 1}` }));
+    await withFixtures({ journal_list: many }, async () => {
+      await page.click('.nd-tabs a[href="/printer"]');
+      await page.waitForSelector(".printer-page", { timeout: 15000 });
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+      const before = await countOf("journal_image");
+      await page.click('.nd-tabs a[href="/printer/journal"]');
+      await page.waitForSelector(`${journalRow(100)} .jr-thumb img`, { timeout: 5000 });
+      const asked = (await callsOf("journal_image")).slice(before).map((c) => c.args.id);
+      if (asked.includes(139) || asked.length >= many.length) throw new Error(`asked for ${asked.length} thumbnails: ${asked.join(",")}`);
+      await page.locator(journalRow(139)).scrollIntoViewIfNeeded();
+      await page.waitForSelector(`${journalRow(139)} .jr-thumb img`, { timeout: 5000 });
+      const again = (await callsOf("journal_image")).slice(before).map((c) => c.args.id);
+      if (new Set(again).size !== again.length) throw new Error("a thumbnail was asked for twice");
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
     });
   });
 

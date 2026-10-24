@@ -7,6 +7,9 @@ use crate::journal::types::{
 use crate::pages::home_state::format_ago;
 use crate::printer::types::{format_remaining, untrusted_text};
 
+// Items the later journal tasks consume carry `expect(dead_code)`, so the
+// lint flags the attribute once its consumer lands and it can go. The tests
+// use them too, so the expectation applies outside tests only.
 pub const PRINTING_NOW: &str = "Printing now";
 pub const UNWATCHED: &str = "Ended while BambuMate wasn't watching";
 pub const APPROXIMATE: &str = " (approximate)";
@@ -14,25 +17,38 @@ pub const SLICE_ESTIMATE: &str = "Slice estimate";
 pub const EMPTY_JOURNAL: &str = "Prints appear here as your printer runs them";
 pub const NO_MATCH: &str = "No prints match";
 pub const NO_PRINTER: &str = "The journal fills in by itself once a printer is set up.";
-// Home's last print (plan Task 10) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Home's last print (plan Task 10) is its first user"
+    )
+)]
 pub const RATE_LAST: &str = "Rate your last print";
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub const DELETE_CONFIRM: &str = "Delete this entry and its photos?";
 /// In place of a photo or thumbnail whose file is missing or unreadable.
 pub const PHOTO_UNAVAILABLE: &str = "Photo unavailable";
 /// The backend's refusals (`journal::photos`), for the checks made before
 /// a file is sent.
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub const TOO_LARGE: &str = "That photo is over 25 MB. Choose a smaller one.";
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub const NOT_AN_IMAGE: &str =
     "That file isn't a photo BambuMate can read. Choose a JPEG, PNG or WebP image.";
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub const MAX_PHOTO_BYTES: f64 = 25.0 * 1024.0 * 1024.0;
 /// Most characters shown of a print name the printer reports.
 pub const NAME_MAX: usize = 120;
@@ -40,8 +56,10 @@ pub const NAME_MAX: usize = 120;
 const TEXT_MAX: usize = 64;
 
 /// Analyze's defect ids, in the order the chips show them.
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub const ISSUE_TAGS: &[&str] = &[
     "stringing",
     "warping",
@@ -58,8 +76,10 @@ pub const FILTERS: &[(FilterKind, &str)] = &[
     (FilterKind::Failed, "Failed"),
 ];
 
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub const VERDICTS: &[Verdict] = &[Verdict::Good, Verdict::Usable, Verdict::Failed];
 
 /// `data-kind` on a filter pill.
@@ -90,8 +110,10 @@ pub fn outcome_text(o: Outcome) -> &'static str {
     }
 }
 
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub fn verdict_key(v: Verdict) -> &'static str {
     match v {
         Verdict::Good => "good",
@@ -109,8 +131,10 @@ pub fn verdict_text(v: Verdict) -> &'static str {
 }
 
 /// Clicking the pressed verdict clears it; any other sets that one.
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub fn verdict_after_click(current: Option<Verdict>, clicked: Verdict) -> VerdictChoice {
     if current == Some(clicked) {
         VerdictChoice::Clear
@@ -120,8 +144,10 @@ pub fn verdict_after_click(current: Option<Verdict>, clicked: Verdict) -> Verdic
 }
 
 /// `tags` with `tag` removed if present, else added at the end.
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub fn toggle_tag(tags: &[String], tag: &str) -> Vec<String> {
     if tags.iter().any(|t| t == tag) {
         tags.iter().filter(|t| *t != tag).cloned().collect()
@@ -136,6 +162,12 @@ pub fn toggle_tag(tags: &[String], tag: &str) -> Vec<String> {
 pub fn error_code_text(code: u32) -> String {
     let hex = format!("{code:08X}");
     format!("{}-{}", &hex[..4], &hex[4..])
+}
+
+/// An HMS code as Bambu shows it, with dashes like `error_code_text`:
+/// `0300-0100-0001-0007`. The backend keeps the printer's underscores.
+pub fn hms_code_text(code: &str) -> String {
+    untrusted_text(&code.replace('_', "-"), TEXT_MAX)
 }
 
 /// `1 h 58 m`, marked approximate when the start was; `None` until it ends.
@@ -293,7 +325,7 @@ pub fn fact_rows(e: &PrintEntry, offset_minutes: i32) -> Vec<(&'static str, Stri
             rows.push(("Error", error_code_text(code)));
         }
         if !e.hms.is_empty() {
-            let codes: Vec<String> = e.hms.iter().map(|h| untrusted_text(h, TEXT_MAX)).collect();
+            let codes: Vec<String> = e.hms.iter().map(|h| hms_code_text(h)).collect();
             rows.push(("HMS", codes.join(", ")));
         }
     }
@@ -311,21 +343,33 @@ pub fn fact_rows(e: &PrintEntry, offset_minutes: i32) -> Vec<(&'static str, Stri
     rows
 }
 
-// Analyze opened from an entry (plan Task 9) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Analyze opened from an entry (plan Task 9) is its first user"
+    )
+)]
 pub fn entry_href(id: i64) -> String {
     format!("/printer/journal?entry={id}")
 }
 
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")
+)]
 pub fn analyze_href(id: i64) -> String {
     format!("/analysis?journal={id}")
 }
 
 /// Home's "Rate your last print": a finished print with no verdict.
-// Home's last print (plan Task 10) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Home's last print (plan Task 10) is its first user"
+    )
+)]
 pub fn rate_href(e: &PrintEntry) -> Option<String> {
     (e.outcome == Outcome::Finished && e.verdict.is_none()).then(|| entry_href(e.id))
 }
@@ -349,8 +393,13 @@ pub struct AnalyzePrefill {
     pub photo_id: Option<i64>,
 }
 
-// Analyze opened from an entry (plan Task 9) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Analyze opened from an entry (plan Task 9) is its first user"
+    )
+)]
 pub fn analyze_prefill(e: &PrintEntry) -> AnalyzePrefill {
     let slice = e.slice.as_ref();
     AnalyzePrefill {
@@ -374,8 +423,13 @@ pub fn analyze_prefill(e: &PrintEntry) -> AnalyzePrefill {
 }
 
 /// The base64 part of a `data:…;base64,…` URL.
-// Analyze opened from an entry (plan Task 9) uses this; nothing does before it.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Analyze opened from an entry (plan Task 9) is its first user"
+    )
+)]
 pub fn data_url_base64(url: &str) -> Option<String> {
     url.split_once(";base64,")
         .map(|(_, data)| data.to_string())
@@ -664,7 +718,16 @@ mod tests {
         };
         let rows = fact_rows(&failed, 0);
         assert!(rows.contains(&("Error", "0300-400C".to_string())));
-        assert!(rows.contains(&("HMS", "0300_0100_0001_0007".to_string())));
+        // HMS codes read with dashes, like the print error above them.
+        assert!(rows.contains(&("HMS", "0300-0100-0001-0007".to_string())));
+        let two = PrintEntry {
+            hms: vec!["0300_0100_0001_0007".into(), "0C00_0300_0002_0001".into()],
+            ..failed.clone()
+        };
+        assert!(fact_rows(&two, 0).contains(&(
+            "HMS",
+            "0300-0100-0001-0007, 0C00-0300-0002-0001".to_string()
+        )));
         assert!(rows.contains(&(SLICE_ESTIMATE, "14 m · 3.7 g".to_string())));
         assert!(rows.contains(&("Analyses", "1".to_string())));
         let finished_with_code = PrintEntry {

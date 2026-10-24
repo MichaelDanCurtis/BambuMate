@@ -67,10 +67,13 @@
 .jr-list {
     display: flex;
     flex-direction: column;
-    gap: var(--nd-space-sm);
     margin: 0;
     padding: 0;
     list-style: none;
+}
+
+.jr-now-list {
+    gap: var(--nd-space-sm);
 }
 
 .jr-now-list:empty {
@@ -98,37 +101,51 @@
     color: var(--nd-signal);
 }
 
+/* Identical rows, so a plain list with hairlines between them; the
+   "Printing now" bar above is the one boxed element. */
 .jr-row {
-    border: 1px solid var(--nd-border);
-    border-radius: var(--nd-radius-card);
-    background-color: var(--nd-surface);
+    border-bottom: 1px solid var(--nd-border);
 }
 
-.jr-row:hover {
-    border-color: var(--nd-border-visible);
+.jr-row:first-child {
+    border-top: 1px solid var(--nd-border);
 }
 
-/* The row is a button that opens its detail under it. */
+/* The row is a button that opens its detail under it. A row with a plate
+   thumbnail gets a column for it; the others start at the left edge. */
 .jr-row-main {
     display: grid;
-    grid-template-columns: 56px minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
-        "thumb name outcome"
-        "thumb when verdict"
-        "thumb chips chips";
+        "name outcome"
+        "when verdict"
+        "chips chips";
     align-items: center;
     column-gap: var(--nd-space-md);
     row-gap: var(--nd-space-xs);
     width: 100%;
     box-sizing: border-box;
-    padding: var(--nd-space-sm) var(--nd-space-md);
+    padding: var(--nd-space-md) 0;
     border: 0;
-    border-radius: var(--nd-radius-card);
+    border-radius: 0;
     background: transparent;
     color: inherit;
     font: inherit;
     text-align: left;
     cursor: pointer;
+}
+
+.jr-row-main.jr-has-thumb {
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+    grid-template-areas:
+        "thumb name outcome"
+        "thumb when verdict"
+        "thumb chips chips";
+}
+
+.jr-row-main:hover .jr-name {
+    text-decoration: underline;
+    text-underline-offset: 3px;
 }
 
 .jr-row-main:focus-visible {
@@ -155,12 +172,15 @@
     object-fit: cover;
 }
 
+/* The required wording, in the fixed box: split across lines if need be. */
 .jr-thumb-missing {
     padding: 2px;
-    font-family: var(--nd-font-mono);
-    font-size: 9px;
-    line-height: 1.2;
+    font-size: 11px;
+    line-height: 1.15;
     text-align: center;
+    hyphens: auto;
+    -webkit-hyphens: auto;
+    overflow-wrap: anywhere;
     color: var(--nd-text-secondary);
 }
 
@@ -181,7 +201,7 @@
     grid-area: chips;
     display: flex;
     flex-wrap: wrap;
-    gap: var(--nd-space-xs);
+    gap: var(--nd-space-xs) var(--nd-space-md);
 }
 
 .jr-chips:empty {
@@ -192,9 +212,6 @@
     display: inline-flex;
     align-items: center;
     gap: var(--nd-space-xs);
-    padding: 2px 8px;
-    border: 1px solid var(--nd-border-visible);
-    border-radius: var(--nd-radius-pill);
     font-family: var(--nd-font-mono);
     font-size: 11px;
     color: var(--nd-text-secondary);
@@ -210,6 +227,7 @@
 .jr-outcome {
     grid-area: outcome;
     justify-self: end;
+    max-width: 18em;
     text-align: right;
     color: var(--nd-text-secondary);
 }
@@ -230,10 +248,13 @@
     color: var(--nd-text-primary);
 }
 
-/* The detail opens inside the row's border: a divider, not a second card. */
+.jr-verdict-label {
+    color: var(--nd-text-secondary);
+}
+
+/* The detail opens under the row's line, inside its hairlines. */
 .jr-detail {
-    padding: var(--nd-space-sm) var(--nd-space-md) var(--nd-space-md);
-    border-top: 1px solid var(--nd-border);
+    padding: 0 0 var(--nd-space-md);
 }
 
 .jr-facts {
@@ -263,6 +284,16 @@
 
 @media (max-width: 720px) {
     .jr-row-main {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas:
+            "name"
+            "when"
+            "chips"
+            "outcome"
+            "verdict";
+    }
+
+    .jr-row-main.jr-has-thumb {
         grid-template-columns: 48px minmax(0, 1fr);
         grid-template-areas:
             "thumb name"
@@ -285,10 +316,12 @@
     .jr-outcome,
     .jr-verdict-tag {
         justify-self: start;
+        max-width: none;
         text-align: left;
     }
 
     .jr-search {
         max-width: none;
+        font-size: 13px;
     }
 }

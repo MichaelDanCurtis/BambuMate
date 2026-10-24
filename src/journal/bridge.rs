@@ -58,26 +58,25 @@ pub async fn list(filter: &JournalFilter) -> Result<Vec<PrintEntry>, String> {
     call("journal_list", &ListArgs { filter }).await
 }
 
-// Analyze opened from an entry (plan Task 9) uses this; nothing does before it.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "Analyze opened from an entry (plan Task 9) is its first user"
+)]
 pub async fn get(id: i64) -> Result<Option<PrintEntry>, String> {
     call("journal_get", &IdArgs { id }).await
 }
 
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")]
 pub async fn update(id: i64, update: &EntryUpdate) -> Result<PrintEntry, String> {
     call("journal_update", &UpdateArgs { id, update }).await
 }
 
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")]
 pub async fn add_photo(id: i64, data_base64: String) -> Result<PrintEntry, String> {
     call("journal_add_photo", &AddPhotoArgs { id, data_base64 }).await
 }
 
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")]
 pub async fn remove_photo(id: i64, photo_id: i64) -> Result<PrintEntry, String> {
     call(
         "journal_remove_photo",
@@ -89,8 +88,7 @@ pub async fn remove_photo(id: i64, photo_id: i64) -> Result<PrintEntry, String> 
     .await
 }
 
-// The entry detail (plan Task 8) uses this; nothing does before it.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "the entry detail (plan Task 8) is its first user")]
 pub async fn delete(id: i64) -> Result<(), String> {
     call("journal_delete", &IdArgs { id }).await
 }
@@ -99,8 +97,10 @@ pub async fn month_summary() -> Result<MonthSummary, String> {
     call("journal_month_summary", &NoArgs {}).await
 }
 
-// Home's last print (plan Task 10) uses this; nothing does before it.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "Home's last print (plan Task 10) is its first user"
+)]
 pub async fn last() -> Result<Option<PrintEntry>, String> {
     call("journal_last", &NoArgs {}).await
 }
