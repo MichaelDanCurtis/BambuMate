@@ -24,6 +24,8 @@ pub const NO_PRINTER_LINE: &str = "Assuming an enclosed printer; nozzle unknown.
 pub const HARDENED_NOTE: &str =
     "Needs a hardened nozzle; BambuMate can't see which nozzle is fitted.";
 pub const DRYING_NOTE: &str = "Dry the spool before printing.";
+/// The page's line when no material is left to recommend.
+pub const NOTHING_FITS: &str = "Nothing on this printer meets all of that.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Enclosure {
@@ -90,10 +92,38 @@ fn squash(s: &str) -> String {
         .to_ascii_uppercase()
 }
 
+/// A hand-typed model with the maker and bundle words removed:
+/// "Bambu Lab X1 Carbon" becomes "X1 Carbon", "P1S Combo" becomes "P1S".
+fn clean_model(model: &str) -> String {
+    const LEADING: &[&str] = &["bambu", "lab", "bambulab"];
+    const TRAILING: &[&str] = &["combo", "ams", "with", "printer", "lite"];
+    let mut words: Vec<&str> = model.split_whitespace().collect();
+    while words
+        .first()
+        .is_some_and(|w| LEADING.contains(&w.to_ascii_lowercase().as_str()))
+    {
+        words.remove(0);
+    }
+    while words
+        .last()
+        .is_some_and(|w| TRAILING.contains(&w.to_ascii_lowercase().as_str()))
+    {
+        words.pop();
+    }
+    words.join(" ")
+}
+
+/// The name shown to the user: a discovery code such as `N2S` becomes "A1".
+fn friendly_model(model: &str) -> String {
+    let cleaned = clean_model(model);
+    model_name(&cleaned)
+}
+
 /// Whether a model is enclosed. Discovery codes (`C12`) are named first;
-/// "X1 Carbon" and "H2D Pro" are spellings of the listed X1C and H2D.
+/// "X1 Carbon" and "H2D Pro" are spellings of the listed X1C and H2D, and a
+/// leading "Bambu Lab" or trailing "Combo" is ignored.
 pub fn enclosure_for_model(model: &str) -> Enclosure {
-    let named = squash(&model_name(model.trim()));
+    let named = squash(&friendly_model(model));
     let named = match named.as_str() {
         "X1CARBON" => "X1C".to_string(),
         "H2DPRO" => "H2D".to_string(),
@@ -133,12 +163,25 @@ fn one_nozzle(kind: Option<&str>) -> NozzleKind {
     let Some(raw) = kind.map(str::trim).filter(|k| !k.is_empty()) else {
         return NozzleKind::Unknown;
     };
+    // Whole words only, so a negation such as `not_hardened` is never read
+    // as hardened. A name that says both is left unknown.
     let lower = raw.to_ascii_lowercase();
-    if lower.contains("hardened") || lower.contains("tungsten") {
-        return NozzleKind::Hardened;
-    }
-    if lower.contains("stainless") || lower.contains("brass") {
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |w: &str| words.contains(&w);
+    let negated = ["not", "non", "no", "un"].iter().any(|n| has(n));
+    let hard_word = has("hardened") || has("tungsten");
+    let soft_word = has("stainless") || has("brass") || has("unhardened") || has("nonhardened");
+    if hard_word && negated {
         return NozzleKind::NotHardened;
+    }
+    match (hard_word, soft_word) {
+        (true, false) => return NozzleKind::Hardened,
+        (false, true) => return NozzleKind::NotHardened,
+        (true, true) => return NozzleKind::Unknown,
+        (false, false) => {}
     }
     let b = raw.as_bytes();
     let is_code = b.len() == 4
@@ -201,6 +244,10 @@ pub struct NeedReason {
 pub struct MaterialFit {
     pub material: MaterialId,
     pub name: String,
+    /// The score before the display clamp: negative when warping outweighs
+    /// the fit. Ranking uses this. Not sent to the page.
+    #[serde(skip)]
+    pub points: i32,
     pub total: u32,
     pub fit_pct: u8,
     pub reasons: Vec<NeedReason>,
@@ -209,18 +256,21 @@ pub struct MaterialFit {
     pub material_notes: Vec<String>,
 }
 
-/// A material that fails a hard constraint, with why.
+/// A material that fails a hard constraint, with every reason it fails.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Excluded {
     pub material: MaterialId,
     pub name: String,
-    pub reason: String,
+    pub reasons: Vec<String>,
 }
 
+/// The result of scoring. `fits` is the top `TOP_N` and is empty when
+/// nothing fits (the page then shows `NOTHING_FITS`). `ruled_out` lists the
+/// materials that fail a hard constraint (enclosure, nozzle or heat).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scored {
     pub fits: Vec<MaterialFit>,
-    pub not_on_printer: Vec<Excluded>,
+    pub ruled_out: Vec<Excluded>,
 }
 
 fn verdict(points: u8) -> Verdict {
@@ -262,20 +312,32 @@ fn need_points(m: &Material, need: Need) -> Option<(u8, String)> {
     }
 }
 
-fn exclusion(m: &Material, printer: &PrinterFacts) -> Option<String> {
+/// Every hard constraint the material fails here. Heat is one: a material
+/// that scores nothing on the chosen heat level is ruled out, not ranked.
+fn exclusions(m: &Material, needs: &[Need], printer: &PrinterFacts) -> Vec<String> {
+    let mut reasons = Vec::new();
     if m.needs_enclosure && printer.enclosure == Enclosure::Open {
-        return Some(match printer.model.as_deref() {
-            Some(model) => format!("Needs an enclosed printer; the {model} is open."),
+        reasons.push(match printer.model.as_deref() {
+            Some(model) => format!(
+                "Needs an enclosed printer; the {} is open.",
+                friendly_model(model)
+            ),
             None => "Needs an enclosed printer; this printer is open.".to_string(),
         });
     }
     if m.abrasive && printer.nozzle == NozzleKind::NotHardened {
-        return Some(
+        reasons.push(
             "Abrasive: needs a hardened nozzle, and this printer reports a standard one."
                 .to_string(),
         );
     }
-    None
+    let fails_heat = needs
+        .iter()
+        .any(|n| matches!(need_points(m, *n), Some((0, _))) && n.heat_threshold().is_some());
+    if fails_heat {
+        reasons.push(format!("Softens around {} °C", m.hdt_c));
+    }
+    reasons
 }
 
 /// One material's fit, or why it can't be printed here.
@@ -285,14 +347,15 @@ pub fn fit_for(
     printer: &PrinterFacts,
     geometry: Option<&Geometry>,
 ) -> Result<MaterialFit, Excluded> {
-    if let Some(reason) = exclusion(m, printer) {
+    let needs = with_default(needs);
+    let reasons = exclusions(m, &needs, printer);
+    if !reasons.is_empty() {
         return Err(Excluded {
             material: m.id,
             name: m.name.to_string(),
-            reason,
+            reasons,
         });
     }
-    let needs = with_default(needs);
     let mut reasons = Vec::new();
     let mut points: i32 = 0;
     let mut max: i32 = 0;
@@ -356,6 +419,7 @@ pub fn fit_for(
     Ok(MaterialFit {
         material: m.id,
         name: m.name.to_string(),
+        points,
         total,
         fit_pct,
         reasons,
@@ -365,23 +429,23 @@ pub fn fit_for(
     })
 }
 
-/// The top `TOP_N` fits, plus every material that fails a hard constraint.
+/// The top `TOP_N` fits, plus every material ruled out by a hard
+/// constraint. A material with no fit at all is not shown and not listed:
+/// the page says `NOTHING_FITS` when none is left.
 pub fn score(needs: &[Need], printer: &PrinterFacts, geometry: Option<&Geometry>) -> Scored {
     let mut fits = Vec::new();
-    let mut not_on_printer = Vec::new();
+    let mut ruled_out = Vec::new();
     for m in MATERIALS {
         match fit_for(m, needs, printer, geometry) {
             Ok(fit) => fits.push(fit),
-            Err(e) => not_on_printer.push(e),
+            Err(e) => ruled_out.push(e),
         }
     }
-    // A stable sort: equal totals keep the table's order.
-    fits.sort_by_key(|f| std::cmp::Reverse(f.total));
+    fits.retain(|f| f.fit_pct > 0);
+    // A stable sort on the unclamped points: equal scores keep the table's order.
+    fits.sort_by_key(|f| std::cmp::Reverse(f.points));
     fits.truncate(TOP_N);
-    Scored {
-        fits,
-        not_on_printer,
-    }
+    Scored { fits, ruled_out }
 }
 
 /// The page's one line about the printer, when it is assuming something.
@@ -391,9 +455,10 @@ pub fn printer_line(printer: &PrinterFacts, configured: bool) -> Option<String> 
     }
     if printer.enclosure == Enclosure::Unknown {
         return Some(match printer.model.as_deref() {
-            Some(m) => {
-                format!("BambuMate doesn't know whether the {m} is enclosed; assuming it is.")
-            }
+            Some(m) => format!(
+                "BambuMate doesn't know whether the {} is enclosed; assuming it is.",
+                friendly_model(m)
+            ),
             None => "Assuming an enclosed printer.".to_string(),
         });
     }
@@ -424,7 +489,7 @@ mod tests {
         s.fits.iter().map(|f| f.material).collect()
     }
     fn excluded(s: &Scored) -> Vec<MaterialId> {
-        s.not_on_printer.iter().map(|e| e.material).collect()
+        s.ruled_out.iter().map(|e| e.material).collect()
     }
     fn flat(w: f32, d: f32) -> Geometry {
         Geometry {
@@ -440,7 +505,8 @@ mod tests {
     fn outdoor_and_heat_80_is_asa_on_an_enclosed_printer() {
         let s = score(&[Need::OutdoorUv, Need::Heat80], &enclosed(), None);
         assert_eq!(ids(&s), [Asa, PaCf, PetCf]);
-        assert!(s.not_on_printer.is_empty());
+        // Heat is a hard requirement: these soften below 80 °C.
+        assert_eq!(excluded(&s), [Pla, PlaPlus, PlaCf, Tpu]);
         let asa = &s.fits[0];
         assert_eq!(asa.total, 6);
         assert_eq!(asa.fit_pct, 100);
@@ -453,10 +519,15 @@ mod tests {
     #[test]
     fn on_an_a1_asa_is_not_on_this_printer() {
         let s = score(&[Need::OutdoorUv, Need::Heat80], &a1(), None);
-        assert_eq!(excluded(&s), [Abs, Asa, Pa, PaCf, Pc]);
-        let asa = s.not_on_printer.iter().find(|e| e.material == Asa).unwrap();
-        assert_eq!(asa.reason, "Needs an enclosed printer; the A1 is open.");
-        assert_eq!(ids(&s), [PetCf, Petg, Tpu]);
+        // Open printer rules out the enclosed materials; heat rules out the
+        // ones that soften below 80 °C (the controller's ruling I1).
+        assert_eq!(
+            excluded(&s),
+            [Pla, PlaPlus, PlaCf, Abs, Asa, Tpu, Pa, PaCf, Pc]
+        );
+        let asa = s.ruled_out.iter().find(|e| e.material == Asa).unwrap();
+        assert_eq!(asa.reasons, ["Needs an enclosed printer; the A1 is open."]);
+        assert_eq!(ids(&s), [PetCf, Petg]);
     }
 
     #[test]
@@ -511,7 +582,7 @@ mod tests {
     fn an_unknown_nozzle_notes_cf_materials_without_filtering_them() {
         let s = score(&[Need::Stiff], &PrinterFacts::unknown(), None);
         assert_eq!(ids(&s), [PlaCf, PetCf, PaCf]);
-        assert!(s.not_on_printer.is_empty());
+        assert!(s.ruled_out.is_empty());
         for f in &s.fits {
             assert!(
                 f.printer_notes.contains(&HARDENED_NOTE.to_string()),
@@ -524,7 +595,7 @@ mod tests {
         };
         let s = score(&[Need::Stiff], &stainless, None);
         assert_eq!(excluded(&s), [PlaCf, PetCf, PaCf]);
-        assert!(s.not_on_printer[0].reason.contains("hardened nozzle"));
+        assert!(s.ruled_out[0].reasons[0].contains("hardened nozzle"));
         assert_eq!(ids(&s), [Pla, PlaPlus, Abs]);
     }
 
@@ -554,9 +625,208 @@ mod tests {
                 .reasons[0]
                 .verdict
         };
-        assert_eq!(verdict(Pla), Verdict::NotMet); // 55 °C: 25 short
         assert_eq!(verdict(Petg), Verdict::Partly); // 70 °C: 10 short
         assert_eq!(verdict(PetCf), Verdict::Met); // 80 °C: just enough
+                                                  // 55 °C is 25 short: heat is a hard requirement, so PLA is ruled out.
+        let pla = fit_for(material(Pla), &[Need::Heat80], &enclosed(), None).unwrap_err();
+        assert_eq!(pla.reasons, ["Softens around 55 °C"]);
+    }
+
+    #[test]
+    fn heat_margin_boundaries() {
+        // A copy of PLA with a chosen heat deflection temperature, against 80 °C.
+        let total = |hdt_c: u16| {
+            let m = Material {
+                hdt_c,
+                ..*material(Pla)
+            };
+            fit_for(&m, &[Need::Heat80], &enclosed(), None).map(|f| f.total)
+        };
+        assert_eq!(total(90), Ok(3)); // +10
+        assert_eq!(total(89), Ok(2)); // +9
+        assert_eq!(total(80), Ok(2)); // 0
+        assert_eq!(total(79), Ok(1)); // -1
+        assert_eq!(total(70), Ok(1)); // -10
+        let out = total(69).unwrap_err(); // -11
+        assert_eq!(out.reasons, ["Softens around 69 °C"]);
+        // The shipped table: PA at 90 is +10, PET-CF at 80 is 0.
+        let pts = |id| {
+            fit_for(material(id), &[Need::Heat80], &enclosed(), None)
+                .unwrap()
+                .total
+        };
+        assert_eq!((pts(Pa), pts(PetCf), pts(Petg)), (3, 2, 1));
+    }
+
+    #[test]
+    fn an_open_printer_with_a_high_heat_need_has_nothing_to_recommend() {
+        let s = score(&[Need::Heat100], &a1(), None);
+        assert!(s.fits.is_empty());
+        assert_eq!(NOTHING_FITS, "Nothing on this printer meets all of that.");
+        let reasons = |id| {
+            s.ruled_out
+                .iter()
+                .find(|e| e.material == id)
+                .unwrap()
+                .reasons
+                .clone()
+        };
+        for (id, hdt) in [(Pla, 55), (PlaPlus, 58), (PlaCf, 60)] {
+            assert_eq!(reasons(id), [format!("Softens around {hdt} °C")]);
+        }
+        for id in [Abs, Asa, Pa, PaCf, Pc] {
+            assert_eq!(reasons(id), ["Needs an enclosed printer; the A1 is open."]);
+        }
+        // Nothing is dropped silently: every material is ruled out here.
+        assert_eq!(s.ruled_out.len(), MATERIALS.len());
+    }
+
+    #[test]
+    fn a_large_part_needing_heat_never_shows_a_pla_or_a_zero_fit() {
+        let big = flat(200.0, 100.0);
+        let s = score(&[Need::Heat100], &enclosed(), Some(&big));
+        assert!(s.fits.iter().all(|f| f.fit_pct > 0));
+        assert!(s
+            .fits
+            .iter()
+            .all(|f| !matches!(f.material, Pla | PlaPlus | PlaCf)));
+        assert_eq!(ids(&s), [PaCf]);
+        // PC meets the heat need but its warp penalty takes it to nothing:
+        // not shown, and not listed as ruled out either.
+        assert!(!excluded(&s).contains(&Pc));
+        // Without the big footprint PC is a real pick.
+        let s = score(&[Need::Heat100], &enclosed(), None);
+        assert_eq!(&ids(&s)[..2], [PaCf, Pc]);
+    }
+
+    #[test]
+    fn flexible_on_an_open_printer_is_tpu_alone() {
+        let s = score(&[Need::Flexible], &a1(), None);
+        assert_eq!(ids(&s), [Tpu]);
+    }
+
+    #[test]
+    fn ranking_uses_the_unclamped_points() {
+        // Same displayed total (0), different signed points: the sort sees both.
+        let big = flat(200.0, 100.0);
+        let pc = fit_for(
+            material(Pc),
+            &[Need::Heat100, Need::Strong],
+            &enclosed(),
+            Some(&big),
+        )
+        .unwrap();
+        let abs = fit_for(
+            material(Abs),
+            &[Need::Heat100, Need::Strong],
+            &enclosed(),
+            Some(&big),
+        )
+        .unwrap();
+        assert!(pc.points > abs.points);
+        let none = fit_for(material(Pa), &[Need::Heat100], &enclosed(), Some(&big)).unwrap();
+        assert!(none.points < 0);
+        assert_eq!(none.total, 0);
+    }
+
+    #[test]
+    fn every_failing_constraint_is_reported() {
+        let both = PrinterFacts {
+            model: Some("A1".into()),
+            enclosure: Enclosure::Open,
+            nozzle: NozzleKind::NotHardened,
+        };
+        let out = fit_for(material(PaCf), &[Need::Strong], &both, None).unwrap_err();
+        assert_eq!(out.reasons.len(), 2);
+        assert!(out.reasons[0].contains("enclosed printer"));
+        assert!(out.reasons[1].contains("hardened nozzle"));
+        // With a heat need that PA-CF meets, a third reason does not appear;
+        // PLA-CF on the same printer fails the nozzle and the heat need.
+        let out = fit_for(material(PlaCf), &[Need::Heat80], &both, None).unwrap_err();
+        assert_eq!(out.reasons.len(), 2);
+        assert!(out.reasons[1].starts_with("Softens around 60"));
+    }
+
+    #[test]
+    fn an_unknown_enclosure_notes_the_enclosed_materials() {
+        let note = "Needs an enclosure; assuming this printer has one.".to_string();
+        let unknown = PrinterFacts::unknown();
+        for id in [Abs, Asa, Pa, PaCf, Pc] {
+            let f = fit_for(material(id), &[Need::Strong], &unknown, None).unwrap();
+            assert!(f.printer_notes.contains(&note), "{id:?}");
+        }
+        let f = fit_for(material(Pla), &[Need::Strong], &unknown, None).unwrap();
+        assert!(!f.printer_notes.contains(&note));
+        // A known enclosed printer needs no note.
+        let f = fit_for(material(Abs), &[Need::Strong], &enclosed(), None).unwrap();
+        assert!(f.printer_notes.is_empty());
+        let f = fit_for(material(Petg), &[Need::Strong], &unknown, None).unwrap();
+        assert!(f.material_notes.contains(&DRYING_NOTE.to_string()));
+    }
+
+    #[test]
+    fn p1_and_p2_alone_are_not_guessed() {
+        for m in ["P1", "P2", "X", "H2", "A", "A1 maxi"] {
+            assert_eq!(enclosure_for_model(m), Enclosure::Unknown, "{m}");
+        }
+    }
+
+    #[test]
+    fn vendor_and_bundle_words_are_ignored() {
+        assert_eq!(
+            enclosure_for_model("Bambu Lab X1 Carbon"),
+            Enclosure::Enclosed
+        );
+        assert_eq!(enclosure_for_model("P1S Combo"), Enclosure::Enclosed);
+        assert_eq!(enclosure_for_model("Bambu Lab A1 mini"), Enclosure::Open);
+        assert_eq!(enclosure_for_model("bambu lab a1 combo"), Enclosure::Open);
+        assert_eq!(enclosure_for_model("A1 mini Combo"), Enclosure::Open);
+        assert_eq!(enclosure_for_model("Bambu Lab P1P"), Enclosure::Open);
+        assert_eq!(enclosure_for_model("Bambu Lab Ender 3"), Enclosure::Unknown);
+    }
+
+    #[test]
+    fn exclusion_reasons_use_the_friendly_model_name() {
+        let raw = PrinterFacts {
+            model: Some("N2S".into()),
+            enclosure: enclosure_for_model("N2S"),
+            nozzle: NozzleKind::Unknown,
+        };
+        assert_eq!(raw.enclosure, Enclosure::Open);
+        let out = fit_for(material(Asa), &[Need::Strong], &raw, None).unwrap_err();
+        assert_eq!(out.reasons, ["Needs an enclosed printer; the A1 is open."]);
+        let combo = PrinterFacts {
+            model: Some("Bambu Lab A1 mini".into()),
+            enclosure: Enclosure::Open,
+            nozzle: NozzleKind::Unknown,
+        };
+        let out = fit_for(material(Asa), &[Need::Strong], &combo, None).unwrap_err();
+        assert_eq!(
+            out.reasons,
+            ["Needs an enclosed printer; the A1 mini is open."]
+        );
+    }
+
+    #[test]
+    fn negated_nozzle_words_are_never_hardened() {
+        let n = |t: &str| Nozzle {
+            nozzle_type: Some(t.to_string()),
+            ..Default::default()
+        };
+        for t in [
+            "not_hardened",
+            "non-hardened",
+            "unhardened",
+            "Not Hardened Steel",
+        ] {
+            assert_eq!(nozzle_kind(&[n(t)]), NozzleKind::NotHardened, "{t}");
+        }
+        // A name that says both is left unknown.
+        assert_eq!(nozzle_kind(&[n("stainless_hardened")]), NozzleKind::Unknown);
+        // Words must match whole: this is not "hardened".
+        assert_eq!(nozzle_kind(&[n("hardenedish")]), NozzleKind::Unknown);
+        assert_eq!(nozzle_kind(&[n("tungsten_carbide")]), NozzleKind::Hardened);
+        assert_eq!(nozzle_kind(&[n("brass")]), NozzleKind::NotHardened);
     }
 
     #[test]
