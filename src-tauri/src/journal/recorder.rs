@@ -762,14 +762,23 @@ mod tests {
         }
     }
 
+    /// Polls `done` until it holds. The deadline is generous: a slow CI
+    /// runner may take a while to schedule the writer thread.
     fn wait_until(mut done: impl FnMut() -> bool) {
-        for _ in 0..500 {
-            if done() {
-                return;
-            }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "condition not met in 10 s");
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("condition not met in 5 s");
+    }
+
+    /// Ends the writer once it has written everything queued, so what it
+    /// did is settled and can be checked, including that nothing happened.
+    fn drain(recorder: Recorder) {
+        assert!(
+            recorder.finish(Duration::from_secs(10)),
+            "the writer didn't finish"
+        );
     }
 
     #[test]
@@ -1198,7 +1207,7 @@ mod tests {
         assert_eq!((b.outcome, b.trays.len()), (Outcome::Finished, 1));
         recorder.record(Vec::new());
         recorder.record(vec![progress("b", 50, None)]);
-        std::thread::sleep(Duration::from_millis(100));
+        drain(recorder);
         assert_eq!(
             changes.count(),
             2,
@@ -1257,7 +1266,7 @@ mod tests {
         for _ in 0..3 {
             recorder.record(vec![started("k", "Benchy"), tray_used("k"), ended("k", 2)]);
         }
-        std::thread::sleep(Duration::from_millis(100));
+        drain(recorder);
         assert_eq!(changes.count(), 0);
     }
 
@@ -1459,17 +1468,23 @@ mod tests {
         assert_eq!(s.open_entries().unwrap()[0].job_key, "b");
     }
 
+    /// A journal this build can't open, until the returned connection sets
+    /// its version back to 1. Holds one entry an earlier session left open.
+    fn left_open_and_unreadable(paths: &JournalPaths) -> rusqlite::Connection {
+        JournalStore::open(paths)
+            .unwrap()
+            .start(&new_print("earlier", 10), 10)
+            .unwrap();
+        let raw = rusqlite::Connection::open(&paths.db).unwrap();
+        raw.pragma_update(None, "user_version", 2).unwrap();
+        raw
+    }
+
     #[test]
     fn a_journal_that_opens_late_closes_what_earlier_sessions_left_open() {
         let dir = tempfile::tempdir().unwrap();
         let paths = JournalPaths::in_dir(dir.path());
-        JournalStore::open(&paths)
-            .unwrap()
-            .start(&new_print("earlier", 10), 10)
-            .unwrap();
-        // A journal this build can't open, for now.
-        let raw = rusqlite::Connection::open(&paths.db).unwrap();
-        raw.pragma_update(None, "user_version", 2).unwrap();
+        let raw = left_open_and_unreadable(&paths);
         let changes = Arc::new(CountChanges::default());
         let (recorder, watch) = Recorder::start_with(
             paths.clone(),
@@ -1478,13 +1493,52 @@ mod tests {
             Duration::from_millis(20),
         );
         assert_eq!(watch, WatchState::default(), "nothing could be resumed");
-        recorder.record(vec![started("while-down", "Dropped")]);
-        std::thread::sleep(Duration::from_millis(60));
+        raw.pragma_update(None, "user_version", 1).unwrap();
+        // No batch comes: the writer's own retry opens it and closes the
+        // entry, however long the runner takes to get there.
+        let s = JournalStore::open(&paths).unwrap();
+        wait_until(|| s.open_entries().unwrap().is_empty());
+        let earlier = s.get(1).unwrap().unwrap();
+        assert_eq!(
+            (earlier.outcome, earlier.ended_at),
+            (Outcome::Unknown, None)
+        );
+        wait_until(|| changes.count() >= 1);
+        recorder.record(vec![started("now", "Now")]);
+        wait_until(|| !s.open_entries().unwrap().is_empty());
+        let open = s.open_entries().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].job_key, "now");
+        drain(recorder);
+        assert_eq!(changes.count(), 2);
+    }
+
+    #[test]
+    fn a_print_that_starts_while_the_journal_is_down_is_not_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        let raw = left_open_and_unreadable(&paths);
+        let changes = Arc::new(CountChanges::default());
+        // Driven directly: each write tries the journal again at once.
+        let mut w = Writer {
+            paths: paths.clone(),
+            slices: Arc::new(NoSlices),
+            notify: changes.clone(),
+            keys: HashMap::new(),
+            store: None,
+            retry_at: None,
+            reopen_after: Duration::ZERO,
+            unavailable: true,
+            startup_pending: true,
+            retry_ends: Vec::new(),
+        };
+        w.write(&[started("while-down", "Dropped")]);
+        assert!(w.store.is_none());
+        assert!(w.keys.is_empty(), "the dropped start opens nothing");
         assert_eq!(changes.count(), 0);
         raw.pragma_update(None, "user_version", 1).unwrap();
-        std::thread::sleep(Duration::from_millis(40));
-        recorder.record(vec![started("now", "Now")]);
-        wait_until(|| changes.count() >= 1);
+        w.write(&[started("now", "Now")]);
+        assert_eq!(changes.count(), 1, "one batch, one change event");
         let s = JournalStore::open(&paths).unwrap();
         let earlier = s.get(1).unwrap().unwrap();
         assert_eq!(
@@ -1515,7 +1569,7 @@ mod tests {
             recorder.record(vec![progress("k", percent, None)]);
         }
         recorder.record(vec![ended("k", 77)]);
-        assert!(recorder.finish(Duration::from_secs(2)));
+        drain(recorder);
         let e = JournalStore::open(&paths).unwrap().last().unwrap().unwrap();
         assert_eq!((e.outcome, e.ended_at), (Outcome::Finished, Some(77)));
     }
@@ -1525,24 +1579,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = JournalPaths::in_dir(dir.path());
         let changes = Arc::new(CountChanges::default());
+        // The retry comes 2 s after the failure: time for the test to
+        // allow ends again, however slow the runner.
         let (recorder, _) = Recorder::start_with(
             paths.clone(),
             Arc::new(NoSlices),
             changes.clone(),
-            Duration::from_millis(500),
+            Duration::from_secs(2),
         );
         recorder.record(vec![started("k", "Benchy")]);
         wait_until(|| changes.count() >= 1);
+        let s = JournalStore::open(&paths).unwrap();
         refuse_ends(&paths);
-        recorder.record(vec![ended("k", 99)]);
-        std::thread::sleep(Duration::from_millis(150));
+        // The end fails; the start in the same batch shows it was tried.
+        recorder.record(vec![ended("k", 99), started("other", "Other")]);
+        wait_until(|| s.open_entries().unwrap().len() == 2);
         allow_ends(&paths);
         // The printer goes quiet after a finish: no batch brings the retry.
-        let s = JournalStore::open(&paths).unwrap();
-        wait_until(|| s.open_entries().unwrap().is_empty());
+        wait_until(|| s.open_entries().unwrap().len() == 1);
         let e = s.last().unwrap().unwrap();
-        assert_eq!((e.outcome, e.ended_at), (Outcome::Finished, Some(99)));
-        wait_until(|| changes.count() >= 2);
+        assert_eq!((e.job_key.as_str(), e.outcome), ("k", Outcome::Finished));
+        assert_eq!(e.ended_at, Some(99));
+        wait_until(|| changes.count() >= 3);
     }
 
     #[test]
@@ -1554,12 +1612,15 @@ mod tests {
         let (recorder, _) = Recorder::start(paths.clone(), Arc::new(NoSlices), changes.clone());
         recorder.record(vec![started("k", "Benchy")]);
         wait_until(|| changes.count() >= 1);
+        let s = JournalStore::open(&paths).unwrap();
         refuse_ends(&paths);
-        recorder.record(vec![ended("k", 99)]);
-        std::thread::sleep(Duration::from_millis(150));
+        // The end fails; the start in the same batch shows it was tried.
+        recorder.record(vec![ended("k", 99), started("other", "Other")]);
+        wait_until(|| s.open_entries().unwrap().len() == 2);
         allow_ends(&paths);
-        assert!(recorder.finish(Duration::from_secs(2)));
-        let e = JournalStore::open(&paths).unwrap().last().unwrap().unwrap();
-        assert_eq!((e.outcome, e.ended_at), (Outcome::Finished, Some(99)));
+        drain(recorder);
+        let e = s.last().unwrap().unwrap();
+        assert_eq!((e.job_key.as_str(), e.outcome), ("k", Outcome::Finished));
+        assert_eq!(e.ended_at, Some(99));
     }
 }

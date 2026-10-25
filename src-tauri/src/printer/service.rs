@@ -1172,14 +1172,17 @@ mod tests {
         (svc, rec)
     }
 
+    /// Polls `check` until it holds. The deadline is generous: a slow CI
+    /// runner may take a while over TLS handshakes and task scheduling.
     async fn wait_for(mut check: impl FnMut() -> bool) {
-        for _ in 0..100 {
-            if check() {
-                return;
-            }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !check() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "condition not met in 10 s"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("condition not met in 5 s");
     }
 
     #[tokio::test]
@@ -1314,7 +1317,9 @@ mod tests {
             t.join().unwrap();
         }
         wait_for(|| svc.connection() == ConnectionState::Connected).await;
-        // Past the grace period: any replaced client has ended by now.
+        // Every replaced client ends, however long the runner takes...
+        wait_for(|| broker.open_connections() == 1 && broker.disconnect_count() >= 1).await;
+        // ...and past the grace period, no other connection is left.
         tokio::time::sleep(STOP_GRACE + Duration::from_millis(500)).await;
         assert_eq!(broker.open_connections(), 1);
         assert!(
@@ -1838,6 +1843,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (svc, rec) = service(&dir);
         let generation = svc.configure_for_test(config());
+        let started = tokio::time::Instant::now();
         svc.handle_event(
             generation,
             ClientEvent::Report(H2D_FULL.as_bytes().to_vec()),
@@ -1848,11 +1854,20 @@ mod tests {
                 ClientEvent::Report(H2D_DELTA_PROGRESS.as_bytes().to_vec()),
             );
         }
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // The last report is emitted in the end, however slow the runner.
+        let percent = |v: &PrinterView| v.state.as_ref().and_then(|s| s.mc_percent);
+        wait_for(|| {
+            rec.states
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|v| percent(v) == Some(7))
+        })
+        .await;
+        // One event at once, then at most one per interval since.
         let n = rec.states.lock().unwrap().len();
-        assert!((1..=3).contains(&n), "{n} state events in ~1 s");
-        let last = rec.states.lock().unwrap().last().cloned().unwrap();
-        assert_eq!(last.state.unwrap().mc_percent, Some(7));
+        let most = 1 + (started.elapsed().as_millis() / EMIT_INTERVAL.as_millis()) as usize;
+        assert!((1..=most).contains(&n), "{n} state events, at most {most}");
     }
 
     #[tokio::test]
@@ -2202,17 +2217,21 @@ mod tests {
         );
         svc.attach_journal(recorder, watch);
         let generation = svc.configure_for_test(config());
-        let started = std::time::Instant::now();
-        report(&svc, generation, H2D_FULL);
-        for _ in 0..500 {
-            report(&svc, generation, H2D_DELTA_PROGRESS);
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "reports wait for nothing: {:?}",
-            started.elapsed()
-        );
+        // Off the test's thread, so a report that waited on the journal
+        // fails the test instead of hanging it. Nothing releases the journal
+        // until they are all in: a slow runner only makes this take longer.
+        let reports = tokio::task::spawn_blocking({
+            let svc = svc.clone();
+            move || {
+                report(&svc, generation, H2D_FULL);
+                for _ in 0..500 {
+                    report(&svc, generation, H2D_DELTA_PROGRESS);
+                }
+            }
+        });
+        let done = tokio::time::timeout(Duration::from_secs(10), reports).await;
         release.send(()).unwrap();
+        assert!(matches!(done, Ok(Ok(()))), "reports waited for the journal");
         report(&svc, generation, FINISH);
         wait_for(|| last_entry(&paths).is_some()).await;
         assert_eq!(last_entry(&paths).unwrap().outcome, Outcome::Finished);
