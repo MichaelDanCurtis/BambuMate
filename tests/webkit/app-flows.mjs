@@ -2655,6 +2655,38 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await countOf("journal_update")) !== before) throw new Error("leaving the followed box saved again");
   });
 
+  await step(run, page, "note saves go out one at a time and the newest text is what is stored", async () => {
+    const box = `${journalDetail(1)} .jr-notes`;
+    const notes = `${journalDetail(1)} .jr-notes-field`;
+    const before = await countOf("journal_update");
+    const settled = await settledCount("journal_update");
+    // The first save's answer is held back; the second blur waits for it.
+    const seq = [
+      { __hold: "jr-notes-first", answer: { ...JOURNAL_FAILED, notes: "first" } },
+      { ...JOURNAL_FAILED, notes: "second" },
+    ];
+    await withFixtures({ journal_update: { __sequence: seq } }, async () => {
+      await page.fill(box, "first");
+      await page.locator(box).blur();
+      await pastCalls("journal_update", before);
+      await page.fill(box, "second");
+      await page.locator(box).blur();
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await countOf("journal_update")) !== before + 1) throw new Error("a second note save went out while the first was out");
+      await page.evaluate(() => window.__release("jr-notes-first"));
+      await pastCalls("journal_update", before + 1);
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_update", settled + 2], { timeout: 5000 });
+      await statusIs(notes, "[SAVED]");
+    });
+    const sent = (await callsOf("journal_update")).slice(before).map((c) => c.args.update.notes);
+    if (sent.join("|") !== "first|second") throw new Error(`sent ${sent.join("|")}`);
+    if ((await page.locator(box).inputValue()) !== "second") throw new Error(`the box settled on ${await page.locator(box).inputValue()}`);
+    // The list holds the last answer: a reopened box shows it.
+    await collapse(1);
+    await expand(1);
+    if ((await page.locator(box).inputValue()) !== "second") throw new Error(`the list holds ${await page.locator(box).inputValue()}`);
+  });
+
   await step(run, page, "a photo can be added by picking or dropping it, one upload at a time", async () => {
     await expand(2);
     await page.waitForSelector(`${journalDetail(2)} .jr-photo img`, { timeout: 5000 });

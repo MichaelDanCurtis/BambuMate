@@ -3,10 +3,12 @@
 //! Analyze / Delete. There is no modal and no new page.
 //!
 //! Every write after an await goes through `try_*`. The verdict, tags and
-//! notes keep their bookkeeping in a `StoredValue`; an answer that lands once
-//! that is gone (the detail closed, or another entry opened) changes nothing,
-//! and the list catches up through `journal://changed`. Photo uploads are
-//! the exception: they finish even if the detail closes (see [`Uploads`]).
+//! notes are saved one request at a time per entry, by books kept outside
+//! the detail ([`RatingBook`], [`NotesBook`]), so a save waiting behind
+//! another still goes out if the detail closes; an answer that lands once
+//! the detail is gone changes nothing on the page, and the list catches up
+//! through `journal://changed`. Photo uploads also finish if the detail
+//! closes (see [`Uploads`]).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -258,65 +260,137 @@ impl RatingSync {
 }
 
 /// Notes save on blur, and only when the text differs from what the journal
-/// holds. Each save takes the next generation; only the newest one's answer
-/// sets the status or the list. While the box isn't focused, has no unsaved
-/// edit and no save is out, it follows the journal's notes.
+/// holds (or will, once the saves queued for the entry land). While the box
+/// isn't focused, has no unsaved edit and no save of the entry is out, it
+/// follows the journal's notes. The saves themselves go through
+/// [`NotesBook`], one at a time.
 #[derive(Debug)]
 struct NotesSync {
-    /// The text the journal holds, as far as the page knows: the last
-    /// loaded or sent. `None` after a failed save, so the next blur tries
-    /// again and the box keeps the user's text.
+    /// The text the journal holds, as far as the box knows: the last loaded
+    /// or sent. `None` after a failed save, so the next blur tries again and
+    /// the box keeps the user's text.
     saved: Option<String>,
-    generation: u64,
-    in_flight: bool,
 }
 
 impl NotesSync {
     fn new(stored: String) -> Self {
         Self {
             saved: Some(stored),
-            generation: 0,
-            in_flight: false,
         }
     }
 
-    /// On blur: the generation to send `draft` under, or `None` if the
-    /// journal already holds it.
-    fn blur(&mut self, draft: &str) -> Option<u64> {
+    /// On blur: whether `draft` is to be saved, i.e. differs from what the
+    /// journal holds as far as the box knows.
+    fn blur(&mut self, draft: &str) -> bool {
         if self.saved.as_deref() == Some(draft) {
-            return None;
+            return false;
         }
         self.saved = Some(draft.to_string());
-        self.generation += 1;
-        self.in_flight = true;
-        Some(self.generation)
+        true
     }
 
-    /// The answer to save `generation`; `None` when a newer save has gone
-    /// out since, which owns the status.
-    fn answer(&mut self, generation: u64, result: Result<(), &'static str>) -> Option<Status> {
-        if generation != self.generation {
-            return None;
-        }
-        self.in_flight = false;
-        Some(match result {
-            Ok(()) => Status::Saved,
-            Err(e) => {
-                self.saved = None;
-                Status::Failed(e)
-            }
-        })
+    /// A save failed: the journal may not hold what the box shows.
+    fn failed(&mut self) {
+        self.saved = None;
     }
 
     /// The journal's notes are now `stored`. Returns the text to put in the
-    /// box, unless the user is in it, has an unsaved edit, or a save is out.
-    fn stored_changed(&mut self, stored: &str, draft: &str, focused: bool) -> Option<String> {
+    /// box, unless the user is in it, has an unsaved edit, or a save is out
+    /// (`saving`).
+    fn stored_changed(
+        &mut self,
+        stored: &str,
+        draft: &str,
+        focused: bool,
+        saving: bool,
+    ) -> Option<String> {
         let edited = self.saved.as_deref() != Some(draft);
-        if focused || edited || self.in_flight || self.saved.as_deref() == Some(stored) {
+        if focused || edited || saving || self.saved.as_deref() == Some(stored) {
             return None;
         }
         self.saved = Some(stored.to_string());
         Some(stored.to_string())
+    }
+}
+
+/// One entry's note saves while one is out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NoteSaves {
+    /// The text of the save out.
+    sent: String,
+    /// The newest text blurred since it went out, if it differs.
+    waiting: Option<String>,
+}
+
+/// What the notes box does after a save answers.
+#[derive(Debug, PartialEq, Eq)]
+struct NoteAnswer {
+    /// `None` while a follow-up save goes out.
+    status: Option<Status>,
+    /// The next save to send: the newest text blurred meanwhile.
+    send: Option<String>,
+}
+
+/// The note saves of every entry, kept outside the detail: one save in
+/// flight per entry, so the backend (which runs each on its own thread)
+/// can't store an older text last. A blur while a save is out only replaces
+/// the text waiting; when the save answers, that text goes out if it differs
+/// from what was stored. A failure drops it. An entry is here only while a
+/// save is out.
+#[derive(Debug, Default)]
+struct NotesBook {
+    saves: HashMap<i64, NoteSaves>,
+}
+
+impl NotesBook {
+    fn saving(&self, id: i64) -> bool {
+        self.saves.contains_key(&id)
+    }
+
+    /// The box was left with `text`, which differs from what it last knew
+    /// the journal to hold. Returns the save to send now, if one may go.
+    fn queue(&mut self, id: i64, text: &str) -> Option<String> {
+        if let Some(out) = self.saves.get_mut(&id) {
+            out.waiting = (out.sent != text).then(|| text.to_string());
+            return None;
+        }
+        self.saves.insert(
+            id,
+            NoteSaves {
+                sent: text.to_string(),
+                waiting: None,
+            },
+        );
+        Some(text.to_string())
+    }
+
+    /// The answer to entry `id`'s save in flight. The entry leaves the book
+    /// once nothing more goes out.
+    fn answer(&mut self, id: i64, result: Result<(), &'static str>) -> Option<NoteAnswer> {
+        let out = self.saves.remove(&id)?;
+        Some(match (result, out.waiting) {
+            (Ok(()), Some(next)) => {
+                self.saves.insert(
+                    id,
+                    NoteSaves {
+                        sent: next.clone(),
+                        waiting: None,
+                    },
+                );
+                NoteAnswer {
+                    status: None,
+                    send: Some(next),
+                }
+            }
+            (Ok(()), None) => NoteAnswer {
+                status: Some(Status::Saved),
+                send: None,
+            },
+            (Err(e), _) => NoteAnswer {
+                status: Some(Status::Failed(e)),
+                send: None,
+            },
+        })
     }
 }
 
@@ -666,8 +740,51 @@ fn RatingControls(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) ->
     }
 }
 
-/// The notes box. It saves when it loses focus, and only if the text changed;
-/// see [`NotesSync`] for when it follows the journal.
+/// The status line and bookkeeping of an entry's open notes box, if one is
+/// open.
+type NotesView = (RwSignal<Status>, StoredValue<NotesSync>);
+
+thread_local! {
+    static NOTES: RefCell<NotesBook> = RefCell::new(NotesBook::default());
+    static NOTES_VIEWS: RefCell<HashMap<i64, NotesView>> = RefCell::new(HashMap::new());
+}
+
+/// Sends entry `id`'s note save, then the follow-up the answer asks for.
+/// Runs to the end whether or not a detail is open.
+fn send_notes(id: i64, entries: Entries, text: String) {
+    spawn_local(async move {
+        let revision = next_revision();
+        let update = EntryUpdate {
+            notes: Some(text),
+            ..Default::default()
+        };
+        let answer = bridge::update(id, &update)
+            .await
+            .map_err(|e| fixed_error(&e, SAVE_FAILED));
+        let result = answer.as_ref().map(|_| ()).map_err(|e| *e);
+        let Some(answered) = NOTES.with_borrow_mut(|b| b.answer(id, result)) else {
+            return;
+        };
+        if let Ok(saved) = answer {
+            replace_entry(entries, saved, revision);
+        }
+        if let Some((status, sync)) = NOTES_VIEWS.with_borrow(|v| v.get(&id).copied()) {
+            if result.is_err() {
+                sync.try_update_value(NotesSync::failed);
+            }
+            if let Some(s) = answered.status {
+                status.try_set(s);
+            }
+        }
+        if let Some(next) = answered.send {
+            send_notes(id, entries, next);
+        }
+    });
+}
+
+/// The notes box. It saves when it loses focus, and only if the text changed,
+/// one save at a time per entry; see [`NotesSync`] for when it follows the
+/// journal, and [`NotesBook`] for the order of saves.
 #[component]
 fn Notes(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl IntoView {
     let stored =
@@ -681,15 +798,31 @@ fn Notes(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl Int
     let status = RwSignal::new(Status::Quiet);
     let sync = StoredValue::new(NotesSync::new(initial));
     let box_id = format!("jr-notes-{id}");
+    NOTES_VIEWS.with_borrow_mut(|v| v.insert(id, (status, sync)));
+    on_cleanup(move || {
+        NOTES_VIEWS.with_borrow_mut(|v| {
+            if v.get(&id) == Some(&(status, sync)) {
+                v.remove(&id);
+            }
+        });
+    });
+
+    // Takes the journal's notes into the box if `stored_changed` allows.
+    let follow = move |now: &str, text: &str, in_use: bool| {
+        let saving = NOTES.with_borrow(|b| b.saving(id));
+        let next = sync
+            .try_update_value(|s| s.stored_changed(now, text, in_use, saving))
+            .flatten();
+        if let Some(next) = &next {
+            draft.set(next.clone());
+            in_box.set(next.clone());
+        }
+        next.is_some()
+    };
 
     Effect::new(move |_| {
         let now = stored.get();
-        let text = draft.get_untracked();
-        let follow = focused.get_untracked();
-        if let Some(Some(next)) = sync.try_update_value(|s| s.stored_changed(&now, &text, follow)) {
-            draft.set(next.clone());
-            in_box.set(next);
-        }
+        follow(&now, &draft.get_untracked(), focused.get_untracked());
     });
 
     let on_blur = move |_| {
@@ -698,34 +831,16 @@ fn Notes(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl Int
         // Notes that arrived while the box was in use, and nothing typed:
         // take them now, rather than keep showing (and later save over
         // them) the older text.
-        let now = stored.get_untracked();
-        if let Some(Some(next)) = sync.try_update_value(|s| s.stored_changed(&now, &text, false)) {
-            draft.set(next.clone());
-            in_box.set(next);
+        if follow(&stored.get_untracked(), &text, false) {
             return;
         }
-        let Some(generation) = sync.try_update_value(|s| s.blur(&text)).flatten() else {
+        if !sync.try_update_value(|s| s.blur(&text)).unwrap_or(false) {
             return;
-        };
+        }
         status.set(Status::Quiet);
-        spawn_local(async move {
-            let revision = next_revision();
-            let update = EntryUpdate {
-                notes: Some(text),
-                ..Default::default()
-            };
-            let answer = bridge::update(id, &update)
-                .await
-                .map_err(|e| fixed_error(&e, SAVE_FAILED));
-            let result = answer.as_ref().map(|_| ()).map_err(|e| *e);
-            let Some(Some(s)) = sync.try_update_value(|n| n.answer(generation, result)) else {
-                return;
-            };
-            if let Ok(saved) = answer {
-                replace_entry(entries, saved, revision);
-            }
-            status.try_set(s);
-        });
+        if let Some(send) = NOTES.with_borrow_mut(|b| b.queue(id, &text)) {
+            send_notes(id, entries, send);
+        }
     };
 
     view! {
@@ -1289,45 +1404,124 @@ mod tests {
     fn notes_that_arrived_while_the_box_was_in_use_are_taken_on_blur() {
         let mut n = NotesSync::new("Lifted.".into());
         // The reload lands while the box is focused: skipped then.
-        assert_eq!(n.stored_changed("Use a brim.", "Lifted.", true), None);
+        assert_eq!(
+            n.stored_changed("Use a brim.", "Lifted.", true, false),
+            None
+        );
         // On blur with nothing typed, the box takes them, and saves nothing.
         assert_eq!(
-            n.stored_changed("Use a brim.", "Lifted.", false),
+            n.stored_changed("Use a brim.", "Lifted.", false, false),
             Some("Use a brim.".to_string())
         );
-        assert_eq!(n.blur("Use a brim."), None);
+        assert!(!n.blur("Use a brim."));
     }
 
     #[test]
     fn notes_save_only_when_they_differ_from_the_journal() {
         let mut n = NotesSync::new("Lifted.".into());
-        assert_eq!(n.blur("Lifted."), None);
-        let g = n.blur("Lifted. Try a brim.").unwrap();
-        // Focus and blur again before the answer: nothing new to save.
-        assert_eq!(n.blur("Lifted. Try a brim."), None);
-        assert_eq!(n.answer(g, Ok(())), Some(Status::Saved));
-        assert_eq!(n.blur("Lifted. Try a brim."), None);
+        assert!(!n.blur("Lifted."));
+        assert!(n.blur("Lifted. Try a brim."));
+        // Focus and blur again, before the answer or after: nothing new.
+        assert!(!n.blur("Lifted. Try a brim."));
     }
 
     #[test]
-    fn a_failed_note_says_so_and_the_next_blur_tries_again() {
+    fn a_failed_note_keeps_the_text_and_the_next_blur_tries_again() {
         let mut n = NotesSync::new(String::new());
-        let g = n.blur("x").unwrap();
+        let mut b = NotesBook::default();
+        assert!(n.blur("x"));
+        assert_eq!(b.queue(1, "x"), Some("x".to_string()));
         assert_eq!(
-            n.answer(g, Err(SAVE_FAILED)),
-            Some(Status::Failed(SAVE_FAILED))
+            b.answer(1, Err(SAVE_FAILED)),
+            Some(NoteAnswer {
+                status: Some(Status::Failed(SAVE_FAILED)),
+                send: None
+            })
         );
-        assert!(n.blur("x").is_some());
+        n.failed();
+        assert_eq!(
+            n.stored_changed("", "x", false, false),
+            None,
+            "a failed save keeps the text"
+        );
+        assert!(n.blur("x"));
+        assert_eq!(b.queue(1, "x"), Some("x".to_string()));
     }
 
     #[test]
-    fn only_the_newest_note_save_sets_the_status() {
+    fn note_saves_go_out_one_at_a_time_and_the_newest_text_is_sent_last() {
         let mut n = NotesSync::new(String::new());
-        let first = n.blur("a").unwrap();
-        let second = n.blur("ab").unwrap();
-        assert_eq!(n.answer(first, Err(SAVE_FAILED)), None);
-        assert_eq!(n.answer(second, Ok(())), Some(Status::Saved));
-        assert_eq!(n.blur("ab"), None);
+        let mut b = NotesBook::default();
+        assert!(n.blur("first"));
+        assert_eq!(b.queue(1, "first"), Some("first".to_string()));
+        assert!(b.saving(1));
+        // Edited and left twice while it is out: only the newest waits.
+        assert!(n.blur("second draft"));
+        assert_eq!(b.queue(1, "second draft"), None);
+        assert!(n.blur("second"));
+        assert_eq!(b.queue(1, "second"), None);
+        // Another entry is its own: its save goes out at once.
+        assert_eq!(b.queue(2, "other"), Some("other".to_string()));
+        assert_eq!(
+            b.answer(1, Ok(())),
+            Some(NoteAnswer {
+                status: None,
+                send: Some("second".to_string())
+            })
+        );
+        assert!(b.saving(1), "the follow-up is out");
+        assert_eq!(
+            n.stored_changed("first", "second", false, b.saving(1)),
+            None,
+            "the first answer's reload doesn't move the box"
+        );
+        assert_eq!(
+            b.answer(1, Ok(())),
+            Some(NoteAnswer {
+                status: Some(Status::Saved),
+                send: None
+            })
+        );
+        // Settled entries leave the book; the stored text is the box's.
+        assert!(!b.saving(1));
+        assert_eq!(n.stored_changed("second", "second", false, false), None);
+        assert!(!n.blur("second"));
+        assert_eq!(b.answer(1, Ok(())), None, "nothing out for 1");
+        b.answer(2, Ok(()));
+        assert!(b.saves.is_empty());
+    }
+
+    #[test]
+    fn a_note_edited_back_to_the_text_out_sends_nothing_more() {
+        let mut b = NotesBook::default();
+        b.queue(1, "a");
+        b.queue(1, "ab");
+        b.queue(1, "a");
+        assert_eq!(
+            b.answer(1, Ok(())),
+            Some(NoteAnswer {
+                status: Some(Status::Saved),
+                send: None
+            })
+        );
+        assert!(b.saves.is_empty());
+    }
+
+    #[test]
+    fn a_failed_note_save_drops_the_text_waiting_behind_it() {
+        let mut b = NotesBook::default();
+        b.queue(1, "first");
+        b.queue(1, "second");
+        assert_eq!(
+            b.answer(1, Err(SAVE_FAILED)),
+            Some(NoteAnswer {
+                status: Some(Status::Failed(SAVE_FAILED)),
+                send: None
+            })
+        );
+        assert!(!b.saving(1));
+        // Idle again: the next blur's save goes out at once.
+        assert_eq!(b.queue(1, "second"), Some("second".to_string()));
     }
 
     #[test]
@@ -1336,28 +1530,36 @@ mod tests {
         let mut n = NotesSync::new("Lifted.".into());
         // The reload brings the saved text; the box isn't in use, so it follows.
         assert_eq!(
-            n.stored_changed("Lifted. Try a brim.", "Lifted.", false),
+            n.stored_changed("Lifted. Try a brim.", "Lifted.", false, false),
             Some("Lifted. Try a brim.".to_string())
         );
         // Leaving the box now saves nothing: it holds what is stored.
-        assert_eq!(n.blur("Lifted. Try a brim."), None);
+        assert!(!n.blur("Lifted. Try a brim."));
         // Unchanged notes don't touch the box.
         assert_eq!(
-            n.stored_changed("Lifted. Try a brim.", "Lifted. Try a brim.", false),
+            n.stored_changed("Lifted. Try a brim.", "Lifted. Try a brim.", false, false),
             None
         );
     }
 
     #[test]
-    fn the_box_keeps_the_users_text_while_in_use_or_unsaved() {
+    fn the_box_keeps_the_users_text_while_in_use_unsaved_or_saving() {
         let mut n = NotesSync::new("a".into());
-        assert_eq!(n.stored_changed("b", "a", true), None, "focused");
-        assert_eq!(n.stored_changed("b", "a typed", false), None, "edited");
-        let g = n.blur("c").unwrap();
-        assert_eq!(n.stored_changed("b", "c", false), None, "a save is out");
-        n.answer(g, Err(SAVE_FAILED));
+        assert_eq!(n.stored_changed("b", "a", true, false), None, "focused");
         assert_eq!(
-            n.stored_changed("b", "c", false),
+            n.stored_changed("b", "a typed", false, false),
+            None,
+            "edited"
+        );
+        assert!(n.blur("c"));
+        assert_eq!(
+            n.stored_changed("b", "c", false, true),
+            None,
+            "a save is out"
+        );
+        n.failed();
+        assert_eq!(
+            n.stored_changed("b", "c", false, false),
             None,
             "a failed save keeps the text"
         );
