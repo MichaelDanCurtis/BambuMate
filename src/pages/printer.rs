@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use leptos::html;
 use leptos::prelude::*;
+use leptos_router::components::Outlet;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
@@ -26,6 +27,7 @@ use crate::printer::types::{
     SlotStatus, SlotView,
 };
 use crate::printer::PrinterShared;
+use crate::routes::PRINTER_TABS;
 
 /// Picker rows shown at once; the search narrows the rest.
 const PICKER_LIMIT: usize = 60;
@@ -36,6 +38,23 @@ const NAME_MAX: usize = 64;
 /// Most characters shown of the file name the printer reports.
 const FILE_MAX: usize = 120;
 
+/// Printer's hub: the one header (with `Name · Model · Serial`) over the
+/// Live and Journal tabs. The tabs render in the `Outlet`.
+#[component]
+pub fn PrinterHub() -> impl IntoView {
+    let view = expect_context::<PrinterShared>().view;
+    let header = Memo::new(move |_| view.with(|v| v.printer.as_ref().map(ident)));
+    view! {
+        <div class="hub" data-hub="printer">
+            <PageHeader title="Printer" tabs=PRINTER_TABS>
+                {move || header.get().map(|text| view! { <span class="pr-ident nd-mono">{text}</span> })}
+            </PageHeader>
+            <Outlet />
+        </div>
+    }
+}
+
+/// Printer → Live.
 #[component]
 pub fn PrinterPage() -> impl IntoView {
     let shared = expect_context::<PrinterShared>();
@@ -44,7 +63,6 @@ pub fn PrinterPage() -> impl IntoView {
     shared.refresh();
     let picking = RwSignal::new(Option::<SlotView>::None);
 
-    let header = Memo::new(move |_| view.with(|v| v.printer.as_ref().map(ident)));
     let configured = Memo::new(move |_| view.with(|v| v.configured));
     let notice = Memo::new(move |_| {
         view.with(|v| {
@@ -58,10 +76,6 @@ pub fn PrinterPage() -> impl IntoView {
 
     view! {
         <div class="page printer-page nd">
-            <PageHeader title="Printer">
-                {move || header.get().map(|text| view! { <span class="pr-ident nd-mono">{text}</span> })}
-            </PageHeader>
-
             <Show
                 when=move || configured.get()
                 fallback=|| view! {

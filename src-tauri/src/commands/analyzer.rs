@@ -32,6 +32,10 @@ pub struct AnalyzeRequest {
     pub profile_path: Option<String>,
     /// Material type override (if not using profile)
     pub material_type: Option<String>,
+    /// The journal entry the photo came from (Analyze opened from
+    /// Printer → Journal); the new session is linked to it.
+    #[serde(default)]
+    pub journal_id: Option<i64>,
 }
 
 /// Request payload for applying recommendations.
@@ -224,6 +228,12 @@ pub async fn analyze_print(
     })
     .await
     .unwrap_or(None);
+
+    // The analysis has succeeded; a journal entry that is gone, or any
+    // other trouble linking, is logged and never fails it.
+    if let (Some(journal_id), Some(session)) = (request.journal_id, session_id) {
+        crate::commands::journal::link_analysis(&app, journal_id, session).await;
+    }
 
     Ok(AnalyzeResponse {
         defect_report,

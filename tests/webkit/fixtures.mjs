@@ -319,6 +319,114 @@ export const ADVICE = {
   catalog_empty: false,
 };
 
+// -- print journal ------------------------------------------------------------
+//
+// Shapes mirror src-tauri/src/journal/types.rs (PrintEntry, MonthSummary).
+// Times are Unix seconds around 2026-10-24. The list is newest first, as
+// `journal_list` returns it; ids 4 and 5 are older prints added after the
+// first three, so ids don't follow the start times.
+export const JOURNAL_NOW = 1792850700;
+const DAY = 86400;
+const usedTray = (ams_id, tray_id, label, tray_type, color, brand = "") => ({ ams_id, tray_id, label, tray_type, color, brand });
+const journalEntry = (fields) => ({
+  job_key: "",
+  gcode_file: null,
+  plate: null,
+  printer_model: "H2D",
+  start_approx: false,
+  ended_at: null,
+  error_code: null,
+  hms: [],
+  verdict: null,
+  tags: [],
+  notes: "",
+  slice: null,
+  trays: [],
+  photos: [],
+  analyses: [],
+  updated_at: JOURNAL_NOW,
+  ...fields,
+});
+export const JOURNAL_PRINTING = journalEntry({
+  id: 3,
+  job_key: "local:Gear housing|/data/Metadata/plate_1.gcode",
+  name: "Gear housing",
+  gcode_file: "/data/Metadata/plate_1.gcode",
+  plate: 1,
+  started_at: JOURNAL_NOW - 1800,
+  outcome: "printing",
+  trays: [usedTray(0, 1, "A2", "PLA", "FFFFFFFF", "PLA Basic")],
+});
+export const JOURNAL_FINISHED = journalEntry({
+  id: 2,
+  job_key: "local:T-pose - slim H2D dual AMS riser|",
+  name: "T-pose - slim H2D dual AMS riser",
+  plate: 1,
+  started_at: JOURNAL_NOW - DAY - 7080,
+  ended_at: JOURNAL_NOW - DAY,
+  outcome: "finished",
+  slice: {
+    model_name: "cube.stl",
+    model_path: SLICE_MODEL,
+    printer: H2C,
+    process: H2C_PROCESS,
+    filament: "Bambu PLA Basic @BBL X1C 0.4 nozzle",
+    plate: 1,
+    time_seconds: 843,
+    weight_g: 3.69,
+    filaments: [{ slot: 1, filament_type: "PLA", color: "#00AE42", used_g: 3.69 }],
+    has_thumbnail: true,
+  },
+  trays: [usedTray(0, 1, "A2", "PLA", "FFFFFFFF", "PLA Basic"), usedTray(1, 2, "B3", "PETG-CF", "000000FF", "PETG-CF")],
+  photos: [{ id: 7, file_name: "5f0c.jpg", added_at: JOURNAL_NOW - DAY + 600 }],
+});
+export const JOURNAL_FAILED = journalEntry({
+  id: 1,
+  job_key: "local:Bracket v2|/data/Metadata/plate_2.gcode",
+  name: "Bracket v2",
+  gcode_file: "/data/Metadata/plate_2.gcode",
+  plate: 2,
+  started_at: JOURNAL_NOW - 3 * DAY - 2400,
+  start_approx: true,
+  ended_at: JOURNAL_NOW - 3 * DAY,
+  outcome: "failed",
+  error_code: 0x0300400c,
+  hms: ["0300_0100_0001_0007"],
+  verdict: "failed",
+  tags: ["warping"],
+  notes: "Lifted at the front corner.",
+  trays: [usedTray(1, 2, "B3", "PETG-CF", "000000FF", "PETG-CF")],
+});
+// Finished and rated: counts as "good" in the month, not as "finished".
+export const JOURNAL_GOOD = journalEntry({
+  id: 4,
+  job_key: "4f1d8a2c-task",
+  name: "Filament swatch card",
+  gcode_file: "/data/Metadata/plate_1.gcode",
+  plate: 1,
+  started_at: JOURNAL_NOW - 4 * DAY - 5400,
+  ended_at: JOURNAL_NOW - 4 * DAY,
+  outcome: "finished",
+  verdict: "good",
+  trays: [usedTray(0, 0, "A1", "PLA", "00AE42FF", "PLA Matte"), usedTray(254, 254, "Ext-L", "PLA", "76D9F4FF", "PLA Basic")],
+});
+// The app was closed through the end: no end time, no duration.
+export const JOURNAL_UNKNOWN = journalEntry({
+  id: 5,
+  job_key: "local:Cable clip x12|/data/Metadata/plate_1.gcode",
+  name: "Cable clip x12",
+  gcode_file: "/data/Metadata/plate_1.gcode",
+  plate: 1,
+  started_at: JOURNAL_NOW - 6 * DAY,
+  outcome: "unknown",
+  trays: [usedTray(0, 3, "A4", "TPU", "1A1A1AFF", "TPU for AMS")],
+});
+export const JOURNAL_ENTRIES = [JOURNAL_PRINTING, JOURNAL_FINISHED, JOURNAL_FAILED, JOURNAL_GOOD, JOURNAL_UNKNOWN];
+// What the backend counts for JOURNAL_ENTRIES: a verdict counts first, the
+// unknown and printing entries only in the total, and the hours only where
+// an end was seen (7080 + 2400 + 5400 s).
+export const JOURNAL_SUMMARY = { prints: 5, good: 1, usable: 0, finished: 1, failed: 1, printing_seconds: 14880 };
+
 export const FIXTURES = {
   // -- boot --
   get_preference: null,
@@ -878,6 +986,17 @@ export const FIXTURES = {
   printer_remove: null,
   printer_assign_slot: withSlot("A3", A3_ASSIGNED),
   printer_clear_slot: PRINTER_VIEW,
+
+  // -- print journal --
+  journal_list: JOURNAL_ENTRIES,
+  journal_month_summary: JOURNAL_SUMMARY,
+  journal_get: JOURNAL_FINISHED,
+  journal_last: JOURNAL_FINISHED,
+  journal_update: JOURNAL_FINISHED,
+  journal_add_photo: { ...JOURNAL_FINISHED, photos: [...JOURNAL_FINISHED.photos, { id: 8, file_name: "9a1e.jpg", added_at: JOURNAL_NOW }] },
+  journal_remove_photo: { ...JOURNAL_FINISHED, photos: [] },
+  journal_delete: null,
+  journal_image: PNG_1X1,
 };
 
 // -- test images ------------------------------------------------------------

@@ -187,7 +187,7 @@ pub fn reset_to_clean_install(app: AppHandle) -> Result<(), String> {
     {
         use tauri::Manager;
         if let Some(service) = app.try_state::<crate::printer::service::PrinterService>() {
-            service.stop();
+            service.remove();
         }
     }
 

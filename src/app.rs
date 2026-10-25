@@ -10,6 +10,7 @@ use crate::agent::drawer::{AgentDrawer, AgentEvents, AgentRefresh, AgentShared};
 use crate::commands::{self, FeatureFlags, UpdateInfo};
 use crate::components::patterns::{StateKind, StateText};
 use crate::components::sidebar::Sidebar;
+use crate::journal::{JournalEvents, JournalShared};
 use crate::pages::about::AboutPage;
 use crate::pages::advise::AdvisePage;
 use crate::pages::batch_generate::BatchGeneratePage;
@@ -17,8 +18,9 @@ use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
 use crate::pages::home::HomePage;
 use crate::pages::hub::HubPage;
+use crate::pages::journal::JournalPage;
 use crate::pages::print_analysis::PrintAnalysisPage;
-use crate::pages::printer::PrinterPage;
+use crate::pages::printer::{PrinterHub, PrinterPage};
 use crate::pages::profile_diff::ProfileDiffPage;
 use crate::pages::profile_management::ProfileManagementPage;
 use crate::pages::settings::SettingsPage;
@@ -90,6 +92,7 @@ pub fn App() -> impl IntoView {
     provide_context(AgentRefresh(RwSignal::new(0)));
     provide_context(AgentShared::default());
     provide_context(PrinterShared::new());
+    provide_context(JournalShared::new());
     provide_context(SlicerShared::default());
     provide_context(PendingCatalogPick::new());
 
@@ -155,6 +158,7 @@ pub fn App() -> impl IntoView {
             // Mounted once, outside the Shows below: its listeners can't be removed.
             <AgentEvents />
             <PrinterEvents />
+            <JournalEvents />
             <SlicerEvents />
 
             // Show wizard overlay if setup is not complete
@@ -169,7 +173,10 @@ pub fn App() -> impl IntoView {
                     <main class="content">
                         <Routes fallback=|| view! { <NoRoute /> }>
                             <Route path=path!("/") view=HomePage />
-                            <Route path=path!("/printer") view=PrinterPage />
+                            <ParentRoute path=path!("/printer") view=PrinterHub>
+                                <Route path=path!("") view=PrinterPage />
+                                <Route path=path!("journal") view=JournalPage />
+                            </ParentRoute>
                             <ParentRoute path=path!("/filament") view=|| view! { <HubPage title="Filament" tabs=FILAMENT_TABS /> }>
                                 <Route path=path!("") view=FilamentSearchPage />
                                 <Route path=path!("advise") view=AdvisePage />

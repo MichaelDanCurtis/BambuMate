@@ -10,6 +10,8 @@ pub const FILAMENT_TABS: &[Tab] = &[
     ("Batch", "/filament/batch"),
 ];
 
+pub const PRINTER_TABS: &[Tab] = &[("Live", "/printer"), ("Journal", "/printer/journal")];
+
 pub const PROFILES_TABS: &[Tab] = &[("Library", "/profiles"), ("Compare", "/profiles/compare")];
 
 pub const SETTINGS_TABS: &[Tab] = &[
@@ -42,6 +44,7 @@ pub fn legacy_target(path: &str) -> Option<&'static str> {
 pub const PAGE_ROUTES: &[&str] = &[
     "/",
     "/printer",
+    "/printer/journal",
     "/filament",
     "/filament/advise",
     "/filament/batch",
@@ -82,6 +85,7 @@ mod tests {
     #[test]
     fn every_tab_is_served_and_the_hub_itself_is_a_tab() {
         for (hub, tabs) in [
+            ("/printer", PRINTER_TABS),
             ("/filament", FILAMENT_TABS),
             ("/profiles", PROFILES_TABS),
             ("/settings", SETTINGS_TABS),
@@ -101,5 +105,11 @@ mod tests {
     fn filament_tabs_read_advise_search_batch() {
         let labels: Vec<&str> = FILAMENT_TABS.iter().map(|(l, _)| *l).collect();
         assert_eq!(labels, ["Advise", "Search", "Batch"]);
+    }
+
+    #[test]
+    fn printer_tabs_read_live_journal() {
+        let labels: Vec<&str> = PRINTER_TABS.iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels, ["Live", "Journal"]);
     }
 }

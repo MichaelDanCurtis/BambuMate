@@ -11,6 +11,8 @@ pub mod health_view;
 pub mod home;
 pub mod home_state;
 pub mod hub;
+pub mod journal;
+pub mod journal_detail;
 pub mod print_analysis;
 pub mod printer;
 pub mod profile_diff;

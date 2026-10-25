@@ -186,6 +186,8 @@ const RAIL_WIDTH_VIEWPORT = { width: 900, height: 800 };
 // to surface a page-level z-indexed element near the rail (some need a click
 // to open), and that element's selector.
 const TAB_ROUTES = [
+  ["/printer", "/printer"],
+  ["/printer", "/printer/journal"],
   ["/filament", "/filament"],
   ["/filament", "/filament/advise"],
   ["/filament", "/filament/batch"],

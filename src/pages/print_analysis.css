@@ -175,6 +175,10 @@
 
 .profile-select {
     width: 100%;
+    min-width: 0;
+    /* WebKit counts the clipped text of a long option as page overflow. */
+    overflow: hidden;
+    text-overflow: ellipsis;
     padding: 0.5rem;
     background: var(--bg-tertiary);
     border: 1px solid var(--border-primary);
@@ -288,5 +292,19 @@
 }
 
 .an-model > .nd-label {
+    margin: 0 0 var(--nd-space-md);
+}
+
+.an-journal {
+    margin: 0 0 var(--nd-space-md);
+    font-size: 13px;
+    color: var(--nd-text-secondary);
+}
+
+.an-journal a {
+    color: var(--nd-interactive);
+}
+
+.an-journal-note {
     margin: 0 0 var(--nd-space-md);
 }

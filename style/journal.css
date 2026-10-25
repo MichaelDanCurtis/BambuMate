@@ -1,0 +1,467 @@
+/* Printer → Journal (spec 2026-10-24). Nothing tokens only. */
+
+.journal-page {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-lg);
+}
+
+.jr-no-printer {
+    margin: 0;
+    color: var(--nd-text-secondary);
+}
+
+.jr-setup-link {
+    color: var(--nd-interactive);
+}
+
+.jr-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--nd-space-md);
+}
+
+.jr-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--nd-space-sm);
+}
+
+/* .nd-tab is styled for links; these are buttons. */
+.jr-filter {
+    background-color: transparent;
+    cursor: pointer;
+}
+
+.jr-filter[aria-pressed="true"] {
+    background-color: var(--nd-text-display);
+    border-color: var(--nd-text-display);
+    color: var(--nd-black);
+}
+
+.jr-search {
+    flex: 1 1 240px;
+    max-width: 360px;
+    box-sizing: border-box;
+    padding: var(--nd-space-xs) var(--nd-space-md);
+    border: 1px solid var(--nd-border-visible);
+    border-radius: var(--nd-radius-input);
+    background-color: var(--nd-surface);
+    color: var(--nd-text-primary);
+    font-family: var(--nd-font-body);
+    font-size: 14px;
+}
+
+.jr-search::placeholder {
+    color: var(--nd-text-secondary);
+}
+
+.jr-search:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+.jr-now-list,
+.jr-list {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.jr-now-list {
+    gap: var(--nd-space-sm);
+}
+
+.jr-now-list:empty {
+    display: none;
+}
+
+.jr-now-link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--nd-space-xs) var(--nd-space-md);
+    padding: var(--nd-space-sm) var(--nd-space-md);
+    border: 1px solid var(--nd-signal);
+    border-radius: var(--nd-radius-card);
+    color: var(--nd-text-primary);
+    text-decoration: none;
+}
+
+.jr-now-link:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+.jr-now-link .nd-label {
+    color: var(--nd-signal);
+}
+
+/* Identical rows, so a plain list with hairlines between them; the
+   "Printing now" bar above is the one boxed element. */
+.jr-row {
+    border-bottom: 1px solid var(--nd-border);
+}
+
+.jr-row:first-child {
+    border-top: 1px solid var(--nd-border);
+}
+
+/* The row is a button that opens its detail under it. A row with a plate
+   thumbnail gets a column for it; the others start at the left edge. */
+.jr-row-main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+        "name outcome"
+        "when verdict"
+        "chips chips";
+    align-items: center;
+    column-gap: var(--nd-space-md);
+    row-gap: var(--nd-space-xs);
+    width: 100%;
+    box-sizing: border-box;
+    padding: var(--nd-space-md) 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.jr-row-main.jr-has-thumb {
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+    grid-template-areas:
+        "thumb name outcome"
+        "thumb when verdict"
+        "thumb chips chips";
+}
+
+.jr-row-main:hover .jr-name {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.jr-row-main:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+.jr-thumb {
+    grid-area: thumb;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    overflow: hidden;
+    border-radius: var(--nd-radius-input);
+    background-color: var(--nd-surface-raised);
+}
+
+.jr-thumb img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* The required wording, in the fixed box: split across lines if need be. */
+.jr-thumb-missing {
+    padding: 2px;
+    font-size: 11px;
+    line-height: 1.15;
+    text-align: center;
+    hyphens: auto;
+    -webkit-hyphens: auto;
+    overflow-wrap: anywhere;
+    color: var(--nd-text-secondary);
+}
+
+.jr-name {
+    grid-area: name;
+    color: var(--nd-text-display);
+    overflow-wrap: anywhere;
+}
+
+.jr-when {
+    grid-area: when;
+    font-family: var(--nd-font-mono);
+    font-size: 12px;
+    color: var(--nd-text-secondary);
+}
+
+.jr-chips {
+    grid-area: chips;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--nd-space-xs) var(--nd-space-md);
+}
+
+.jr-chips:empty {
+    display: none;
+}
+
+.jr-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--nd-space-xs);
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    color: var(--nd-text-secondary);
+}
+
+.jr-swatch {
+    width: 10px;
+    height: 10px;
+    border: 1px solid var(--nd-border-visible);
+    border-radius: 50%;
+}
+
+.jr-outcome {
+    grid-area: outcome;
+    justify-self: end;
+    max-width: 18em;
+    text-align: right;
+    color: var(--nd-text-secondary);
+}
+
+.jr-outcome[data-outcome="finished"] {
+    color: var(--nd-success);
+}
+
+.jr-outcome[data-outcome="failed"] {
+    color: var(--nd-accent);
+}
+
+.jr-verdict-tag {
+    grid-area: verdict;
+    justify-self: end;
+    font-family: var(--nd-font-mono);
+    font-size: 12px;
+    color: var(--nd-text-primary);
+}
+
+.jr-verdict-label {
+    color: var(--nd-text-secondary);
+}
+
+/* The detail opens under the row's line, inside its hairlines: padding
+   only, no card. */
+.jr-detail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--nd-space-lg);
+    padding: 0 0 var(--nd-space-lg);
+}
+
+.jr-facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--nd-space-sm) var(--nd-space-lg);
+    margin: 0;
+}
+
+.jr-fact {
+    min-width: 0;
+}
+
+.jr-fact dt {
+    font-family: var(--nd-font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--nd-text-secondary);
+}
+
+.jr-fact dd {
+    margin: 0;
+    color: var(--nd-text-primary);
+    overflow-wrap: anywhere;
+}
+
+/* Each part: a label, its controls, then a status line that is empty
+   (and takes no room) until a save answers. */
+.jr-section {
+    min-width: 0;
+}
+
+.jr-section > .nd-label {
+    display: block;
+    margin: 0 0 var(--nd-space-sm);
+}
+
+.jr-rate > .nd-label + .jr-verdicts {
+    margin-bottom: var(--nd-space-md);
+}
+
+.jr-status {
+    margin: 0;
+}
+
+.jr-status:not(:empty) {
+    margin-top: var(--nd-space-sm);
+}
+
+.jr-status[data-kind="saved"] {
+    color: var(--nd-success);
+}
+
+.jr-verdicts,
+.jr-tags,
+.jr-photo-strip,
+.jr-photo-actions,
+.jr-actions,
+.jr-confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--nd-space-sm);
+}
+
+/* .nd-tab is styled for links; these are buttons. */
+.jr-verdict,
+.jr-tag {
+    background-color: transparent;
+    cursor: pointer;
+}
+
+.jr-verdict[aria-pressed="true"],
+.jr-tag[aria-pressed="true"] {
+    background-color: var(--nd-text-display);
+    border-color: var(--nd-text-display);
+    color: var(--nd-black);
+}
+
+.jr-notes {
+    display: block;
+    width: 100%;
+    max-width: 640px;
+    box-sizing: border-box;
+    padding: var(--nd-space-sm) var(--nd-space-md);
+    border: 1px solid var(--nd-border-visible);
+    border-radius: var(--nd-radius-input);
+    background-color: var(--nd-surface);
+    color: var(--nd-text-primary);
+    font-family: var(--nd-font-body);
+    font-size: 14px;
+    line-height: 1.5;
+    resize: vertical;
+}
+
+.jr-notes:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}
+
+/* The whole part takes a dropped photo; a dashed outline marks it while a
+   file is dragged over, without moving anything. */
+.jr-photos.jr-drop-over {
+    outline: 1px dashed var(--nd-text-secondary);
+    outline-offset: var(--nd-space-xs);
+    border-radius: var(--nd-radius-input);
+}
+
+.jr-photo-strip {
+    align-items: flex-start;
+    margin-bottom: var(--nd-space-sm);
+}
+
+.jr-photo-strip:empty {
+    display: none;
+}
+
+.jr-photo {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--nd-space-xs);
+    margin: 0;
+}
+
+.jr-photo img,
+.jr-photo-missing {
+    display: block;
+    width: 96px;
+    height: 96px;
+    box-sizing: border-box;
+    border-radius: var(--nd-radius-input);
+    object-fit: cover;
+}
+
+.jr-photo-missing {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--nd-space-xs);
+    background-color: var(--nd-surface-raised);
+    font-size: 11px;
+    line-height: 1.2;
+    text-align: center;
+    color: var(--nd-text-secondary);
+}
+
+/* A quiet control under each thumbnail, smaller than the page's buttons. */
+.jr-photo-remove {
+    padding: 2px var(--nd-space-sm);
+    font-size: 11px;
+}
+
+.jr-photo-hint {
+    font-size: 12px;
+    color: var(--nd-text-secondary);
+}
+
+.jr-confirm span {
+    color: var(--nd-text-primary);
+}
+
+@media (max-width: 720px) {
+    .jr-row-main {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas:
+            "name"
+            "when"
+            "chips"
+            "outcome"
+            "verdict";
+    }
+
+    .jr-row-main.jr-has-thumb {
+        grid-template-columns: 48px minmax(0, 1fr);
+        grid-template-areas:
+            "thumb name"
+            "thumb when"
+            "chips chips"
+            "outcome outcome"
+            "verdict verdict";
+    }
+
+    /* An unrated print has no verdict: its row takes no room. */
+    .jr-verdict-tag:empty {
+        display: none;
+    }
+
+    .jr-thumb {
+        width: 48px;
+        height: 48px;
+    }
+
+    .jr-outcome,
+    .jr-verdict-tag {
+        justify-self: start;
+        max-width: none;
+        text-align: left;
+    }
+
+    .jr-search {
+        max-width: none;
+        font-size: 13px;
+    }
+}

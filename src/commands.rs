@@ -1301,6 +1301,9 @@ struct AnalyzeRequest {
     image_base64: String,
     profile_path: Option<String>,
     material_type: Option<String>,
+    /// The journal entry this photo is analysed for; left out when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_id: Option<i64>,
 }
 
 /// Wrapper to provide the `request` key expected by the Tauri command.
@@ -1309,17 +1312,20 @@ struct AnalyzePrintArgs {
     request: AnalyzeRequest,
 }
 
-/// Analyze a print photo for defects.
+/// Analyze a print photo for defects. `journal_id` links the analysis to
+/// the journal entry the photo came from.
 pub async fn analyze_print(
     image_base64: String,
     profile_path: Option<String>,
     material_type: Option<String>,
+    journal_id: Option<i64>,
 ) -> Result<crate::pages::print_analysis::AnalyzeResponse, String> {
     let args = AnalyzePrintArgs {
         request: AnalyzeRequest {
             image_base64,
             profile_path,
             material_type,
+            journal_id,
         },
     };
 
@@ -1873,6 +1879,20 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analyze_requests_name_the_journal_entry_only_when_there_is_one() {
+        let request = |journal_id| AnalyzeRequest {
+            image_base64: "QUJD".into(),
+            profile_path: None,
+            material_type: None,
+            journal_id,
+        };
+        let without = serde_json::to_string(&request(None)).unwrap();
+        assert!(!without.contains("journal_id"), "{without}");
+        let with = serde_json::to_string(&request(Some(4))).unwrap();
+        assert!(with.contains(r#""journal_id":4"#), "{with}");
+    }
 
     #[test]
     fn check_reports_without_an_action_still_parse() {

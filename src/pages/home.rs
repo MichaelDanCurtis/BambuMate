@@ -12,6 +12,9 @@ use crate::agent::drawer::{AgentRefresh, AgentShared};
 use crate::app::FeatureFlagsContext;
 use crate::commands::{self, GeneratedPreset};
 use crate::components::patterns::{Hero, SegmentedBar, StateKind, StateText, Tone};
+use crate::journal::format::{rate_href, RATE_LAST};
+use crate::journal::types::PrintEntry;
+use crate::journal::{bridge as journal_bridge, next_revision, JournalShared};
 use crate::pages::home_state::{
     active_slot, ask_about, attention_detail, attention_label, attention_word, home_mode,
     idle_label, idle_word, last_print_detail, mode_key, no_printer_label, percent_text,
@@ -31,7 +34,25 @@ const MATERIAL_MAX: usize = 16;
 pub fn HomePage() -> impl IntoView {
     let printer = expect_context::<PrinterShared>();
     let view = printer.view;
-    let last_print = printer.last_print;
+    // The newest ended print, from the journal, so it survives a restart.
+    // Nothing is shown for it until the first answer arrives.
+    let journal_changes = expect_context::<JournalShared>().changes;
+    let last_print = RwSignal::new(None::<PrintEntry>);
+    // The newest request already applied, so an older answer arriving late
+    // can't put an earlier print (or an unrated one) back.
+    let applied = StoredValue::new(0_u64);
+    Effect::new(move |_| {
+        journal_changes.track();
+        let revision = next_revision();
+        spawn_local(async move {
+            if let Ok(entry) = journal_bridge::last().await {
+                if applied.try_get_value().is_some_and(|a| a < revision) {
+                    applied.try_set_value(revision);
+                    last_print.try_set(entry);
+                }
+            }
+        });
+    });
     let flags = expect_context::<FeatureFlagsContext>().flags;
     let agent = expect_context::<AgentShared>();
     let refresh = expect_context::<AgentRefresh>().0;
@@ -138,6 +159,9 @@ pub fn HomePage() -> impl IntoView {
                     <a href="/analysis" class="btn btn-secondary">"Analyze last print"</a>
                 </Show>
             </div>
+            {move || last_print.with(|p| p.as_ref().and_then(rate_href)).map(|href| view! {
+                <a href=href class="hm-rate">{RATE_LAST}</a>
+            })}
         }
         .into_any(),
         HomeMode::NoPrinter { disconnected } => view! {

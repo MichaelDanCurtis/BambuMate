@@ -3,13 +3,11 @@
 
 pub mod bridge;
 pub mod hms_history;
-pub mod last_print;
 pub mod types;
 
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-use last_print::{track_print, LastPrint, PrintTracker};
 use types::{ConnectionState, PrinterView};
 
 /// The latest printer view, shared by the rail dot, the Printer page and
@@ -17,11 +15,11 @@ use types::{ConnectionState, PrinterView};
 #[derive(Clone, Copy)]
 pub struct PrinterShared {
     pub view: RwSignal<PrinterView>,
-    /// The print the app last watched finish; `None` until one does.
-    /// Session only.
-    pub last_print: RwSignal<Option<LastPrint>>,
     /// HMS codes reported this session, newest first. Session only.
     pub seen_errors: RwSignal<Vec<hms_history::SeenError>>,
+    /// False until a view arrives from the backend: until then `view` is
+    /// the default, which reads as "no printer configured".
+    pub known: RwSignal<bool>,
     /// Counts delivered events, so a refresh that started before one can't
     /// overwrite what it brought.
     events: StoredValue<Seen>,
@@ -65,8 +63,8 @@ impl PrinterShared {
     pub fn new() -> Self {
         Self {
             view: RwSignal::new(PrinterView::default()),
-            last_print: RwSignal::new(None),
             seen_errors: RwSignal::new(Vec::new()),
+            known: RwSignal::new(false),
             events: StoredValue::new(Seen::default()),
             config_changes: RwSignal::new(0),
         }
@@ -114,6 +112,7 @@ impl PrinterShared {
         };
         if let Some(v) = refreshed(ticket.0, now, fetched, &current) {
             self.view.try_set(v);
+            self.known.try_set(true);
         }
     }
 }
@@ -132,36 +131,11 @@ pub fn PrinterEvents() -> impl IntoView {
     crate::agent::bridge::listen::<PrinterView>("printer://state", move |v| {
         shared.events.try_update_value(|n| n.views += 1);
         shared.view.try_set(v);
+        shared.known.try_set(true);
     });
     crate::agent::bridge::listen::<ConnectionState>("printer://connection", move |c| {
         shared.events.try_update_value(|n| n.connections += 1);
         shared.view.try_update(|v| v.connection = c);
-    });
-    // Notices a print finishing; see last_print::track_print. A missing
-    // status report leaves the tracker as it was.
-    let tracker = StoredValue::new(PrintTracker::default());
-    let job = Memo::new(move |_| {
-        shared.view.with(|v| {
-            v.state
-                .as_ref()
-                .map(|s| (s.gcode_state.clone(), s.subtask_name.clone(), s.mc_percent))
-        })
-    });
-    Effect::new(move |_| {
-        let Some((gcode, name, percent)) = job.get() else {
-            return;
-        };
-        let (next, finished) = track_print(
-            tracker.get_value(),
-            gcode.as_deref(),
-            name.as_deref(),
-            percent,
-            js_sys::Date::now(),
-        );
-        tracker.set_value(next);
-        if let Some(p) = finished {
-            shared.last_print.set(Some(p));
-        }
     });
     // Remembers every HMS code the printer reports, for Printer's "Earlier
     // this session" list. An empty report leaves the history as it was.

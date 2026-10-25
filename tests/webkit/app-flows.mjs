@@ -27,6 +27,11 @@ import {
   ADVICE,
   FIXTURES,
   GIF_1X1,
+  JOURNAL_FAILED,
+  JOURNAL_FINISHED,
+  JOURNAL_GOOD,
+  JOURNAL_PRINTING,
+  JOURNAL_UNKNOWN,
   makePng,
   PETG,
   PRINTER_FINGERPRINT,
@@ -2206,6 +2211,849 @@ async function driveApp(browserType, engine, baseUrl) {
     });
   });
 
+  // -- print journal -----------------------------------------------------------
+  // Printer → Journal. Waits are on the invoke log or the DOM, never a clock.
+  const JR = ".journal-page";
+  const journalEmit = (name, payload) => page.evaluate(([n, p]) => window.__emit(n, p), [name, payload]);
+  const journalRow = (id) => `${JR} .jr-row[data-entry="${id}"]`;
+  const openJournal = async () => {
+    await openTab("/printer", "/printer/journal");
+    await page.waitForSelector(`${JR} .jr-row`, { timeout: 15000 });
+  };
+  const rowNames = () => page.locator(`${JR} .jr-row .jr-name`).allInnerTexts();
+  const rowsRead = (names) =>
+    page.waitForFunction(
+      (n) => [...document.querySelectorAll(".journal-page .jr-row .jr-name")].map((e) => e.textContent).join("|") === n,
+      names.join("|"),
+      { timeout: 5000 }
+    );
+  const ALL_ROWS = [JOURNAL_FINISHED.name, JOURNAL_FAILED.name, JOURNAL_GOOD.name, JOURNAL_UNKNOWN.name];
+
+  await step(run, page, "the journal lists prints newest first under this month's hero", async () => {
+    await setFixture("printer_view", PRINTER_VIEW);
+    await openJournal();
+    const tabs = await page.locator('.hub[data-hub="printer"] .nd-tabs a').evaluateAll((as) => as.map((a) => a.textContent.trim()));
+    if (tabs.join("|") !== "Live|Journal") throw new Error(`tabs: ${tabs.join("|")}`);
+    if ((await page.locator('.hub[data-hub="printer"] h1').count()) !== 1) throw new Error("expected one page title");
+    if ((await page.locator(`${JR} .nd-hero`).count()) !== 1) throw new Error("expected one hero");
+    const text = (sel) => page.locator(`${JR} ${sel}`).evaluate((el) => el.textContent.trim());
+    if ((await text(".nd-hero-label")) !== "This month") throw new Error("hero label");
+    if ((await text(".nd-hero-number")) !== "5" || (await text(".nd-hero-unit")) !== "prints") throw new Error("hero value");
+    const detail = await text(".nd-hero-detail");
+    if (detail !== "1 good · 1 finished · 1 failed · 4 h printing") throw new Error(`hero detail "${detail}"`);
+    const now = await page.locator(`${JR} .jr-now`).evaluate((el) => el.textContent);
+    if (!now.includes("Printing now") || !now.includes(JOURNAL_PRINTING.name)) throw new Error(`printing now reads "${now}"`);
+    if ((await page.locator(`${JR} .jr-now a[href="/printer"]`).count()) !== 1) throw new Error("printing now doesn't link to Live");
+    const names = await rowNames();
+    if (names.join("|") !== ALL_ROWS.join("|")) throw new Error(`rows: ${names.join("|")}`);
+    const chips = await page.locator(`${journalRow(2)} .jr-chip`).allInnerTexts();
+    if (chips.map((c) => c.trim()).join("|") !== "PLA · A2|PETG-CF · B3") throw new Error(`chips: ${chips.join("|")}`);
+    const swatch = await page.locator(`${journalRow(2)} .jr-swatch`).first().evaluate((el) => getComputedStyle(el).backgroundColor);
+    if (swatch !== "rgb(255, 255, 255)") throw new Error(`the A2 swatch is ${swatch}`);
+    if ((await page.locator(`${journalRow(2)} .jr-outcome`).getAttribute("data-outcome")) !== "finished") throw new Error("outcome");
+    if ((await page.locator(`${journalRow(2)} .jr-verdict-tag`).innerText()).trim() !== "") throw new Error("an unrated print shows a verdict");
+    const verdictOf = (id) => page.locator(`${journalRow(id)} .jr-verdict-tag`).evaluate((el) => el.textContent.replace(/\s+/g, " ").trim());
+    if ((await verdictOf(1)) !== "Verdict Failed") throw new Error(`verdict reads "${await verdictOf(1)}"`);
+    if ((await verdictOf(4)) !== "Verdict Good") throw new Error(`the good verdict reads "${await verdictOf(4)}"`);
+    if ((await page.locator(`${journalRow(2)} .jr-thumb`).count()) !== 1 || (await page.locator(`${JR} .jr-row-main.jr-has-thumb`).count()) !== 1) throw new Error("only the linked print has a thumbnail column");
+    const unknown = (await page.locator(`${journalRow(5)} .jr-outcome`).innerText()).trim();
+    if (unknown.toLowerCase() !== "ended while bambumate wasn't watching") throw new Error(`unknown reads "${unknown}"`);
+    const approx = await page.locator(`${journalRow(1)} .jr-when`).innerText();
+    if (!approx.includes("(approximate)")) throw new Error(`an approximate start reads "${approx}"`);
+    if ((await page.locator(`${journalRow(2)} .jr-when`).innerText()).includes("(approximate)")) throw new Error("an exact start is marked approximate");
+    await page.waitForSelector(`${journalRow(2)} .jr-thumb img`, { timeout: 5000 });
+    const thumbs = await callsOf("journal_image");
+    if (!thumbs.length || thumbs.some((c) => c.args.id !== 2 || c.args.photoId != null)) throw new Error(`thumbnails asked for: ${JSON.stringify(thumbs.map((c) => c.args))}`);
+    if ((await page.locator(`${journalRow(1)} .jr-thumb`).count()) !== 0) throw new Error("a thumbnail without a slice");
+    const sidebarActive = await page.locator('nav.sidebar a[href="/printer"]').getAttribute("aria-current");
+    if (sidebarActive !== "page") throw new Error("the rail doesn't mark Printer");
+  });
+
+  await step(run, page, "a journal row opens its detail in place, one at a time", async () => {
+    const path = await page.evaluate(() => location.pathname);
+    const main = (id) => page.locator(`${journalRow(id)} .jr-row-main`);
+    if ((await main(2).evaluate((el) => el.tagName)) !== "BUTTON") throw new Error("the row is not a button");
+    if ((await main(2).getAttribute("aria-expanded")) !== "false") throw new Error("a row starts open");
+    await main(2).click();
+    await page.waitForSelector(`${journalRow(2)} .jr-detail`, { timeout: 5000 });
+    if ((await main(2).getAttribute("aria-expanded")) !== "true") throw new Error("not marked expanded");
+    const controls = await main(2).getAttribute("aria-controls");
+    if (!controls || (await page.locator(`${journalRow(2)} .jr-detail`).getAttribute("id")) !== controls) throw new Error("aria-controls names no detail");
+    if (await page.locator('[role="dialog"]').count()) throw new Error("the detail opened a dialog");
+    if ((await page.evaluate(() => location.pathname)) !== path) throw new Error("the detail changed the page");
+    await main(1).click();
+    await page.waitForSelector(`${journalRow(1)} .jr-detail`, { timeout: 5000 });
+    if (await page.locator(`${journalRow(2)} .jr-detail`).count()) throw new Error("two entries open at once");
+    if ((await main(2).getAttribute("aria-expanded")) !== "false") throw new Error("the closed row is still marked expanded");
+    await main(1).click();
+    await page.waitForSelector(`${journalRow(1)} .jr-detail`, { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "journal filters and search ask the backend for what was picked", async () => {
+    const lastFilter = async () => (await callsOf("journal_list")).at(-1).args.filter;
+    await withFixtures({ journal_list: [JOURNAL_FINISHED] }, async () => {
+      const before = await countOf("journal_list");
+      await page.click(`${JR} .jr-filter[data-kind="needs_verdict"]`);
+      await pastCalls("journal_list", before);
+      await page.waitForFunction(() => document.querySelectorAll(".journal-page .jr-row").length === 1, null, { timeout: 5000 });
+      if (!sameArgs(await lastFilter(), { kind: "needs_verdict", query: "" })) throw new Error(JSON.stringify(await lastFilter()));
+      if ((await page.locator(`${JR} .jr-filter[data-kind="needs_verdict"]`).getAttribute("aria-pressed")) !== "true") throw new Error("pill not pressed");
+      if ((await page.locator(`${JR} .jr-filter[data-kind="all"]`).getAttribute("aria-pressed")) !== "false") throw new Error("All still pressed");
+    });
+    await withFixtures({ journal_list: [JOURNAL_FAILED] }, async () => {
+      const months = await countOf("journal_month_summary");
+      await page.click(`${JR} .jr-filter[data-kind="failed"]`);
+      await page.fill(`${JR} .jr-search`, "petg");
+      await page.waitForFunction(
+        () => window.__ipc.calls.filter((c) => c.cmd === "journal_list").at(-1)?.args.filter.query === "petg",
+        null,
+        { timeout: 5000 }
+      );
+      if (!sameArgs(await lastFilter(), { kind: "failed", query: "petg" })) throw new Error(JSON.stringify(await lastFilter()));
+      await rowsRead([JOURNAL_FAILED.name]);
+      if ((await countOf("journal_month_summary")) !== months) throw new Error("a filter or search recounted the month");
+    });
+    await withFixtures({ journal_list: [] }, async () => {
+      await page.fill(`${JR} .jr-search`, "nothing like this");
+      await page.waitForFunction(() => document.querySelector(".journal-page .nd-state")?.textContent === "[EMPTY: No prints match]", null, { timeout: 5000 });
+    });
+    await page.fill(`${JR} .jr-search`, "");
+    await page.click(`${JR} .jr-filter[data-kind="all"]`);
+    await page.waitForFunction(() => document.querySelectorAll(".journal-page .jr-row").length === 4, null, { timeout: 5000 });
+  });
+
+  await step(run, page, "a journal answer overtaken by a newer search is dropped", async () => {
+    // The first search's answer is held back until the second one has landed.
+    const slow = { __hold: "journal-stale", answer: [JOURNAL_GOOD] };
+    await withFixtures({ journal_list: { __sequence: [slow, [JOURNAL_FAILED]] } }, async () => {
+      const lists = await countOf("journal_list");
+      await page.fill(`${JR} .jr-search`, "swatch");
+      await pastCalls("journal_list", lists);
+      await page.fill(`${JR} .jr-search`, "bracket");
+      await pastCalls("journal_list", lists + 1);
+      await rowsRead([JOURNAL_FAILED.name]);
+      await page.evaluate(() => window.__release("journal-stale"));
+      // Wait for the held answer to be out, then let its continuation run
+      // before reading the rows again.
+      await page.waitForFunction(
+        (n) => window.__ipc.settled.filter((c) => c === "journal_list").length >= n,
+        lists + 2,
+        { timeout: 5000 }
+      );
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      const names = await rowNames();
+      if (names.join("|") !== JOURNAL_FAILED.name) throw new Error(`the stale answer landed: ${names.join("|")}`);
+    });
+    await page.fill(`${JR} .jr-search`, "");
+    await rowsRead(ALL_ROWS);
+  });
+
+  await step(run, page, "the journal reloads when the backend says it changed", async () => {
+    await withFixtures({ journal_list: [JOURNAL_GOOD] }, async () => {
+      const before = await countOf("journal_list");
+      const months = await countOf("journal_month_summary");
+      await journalEmit("journal://changed", null);
+      await pastCalls("journal_list", before);
+      await pastCalls("journal_month_summary", months);
+      await rowsRead([JOURNAL_GOOD.name]);
+    });
+    await journalEmit("journal://changed", null);
+    await rowsRead(ALL_ROWS);
+  });
+
+  await step(run, page, "a thumbnail that can't be read, or can't be decoded, says so", async () => {
+    // The backend refuses it, or sends a PNG cut off after its signature.
+    for (const unreadable of [{ __reject: "Photo unavailable" }, "data:image/png;base64,iVBORw0KGgo="]) {
+      await withFixtures({ journal_image: unreadable }, async () => {
+        await page.click('.nd-tabs a[href="/printer"]');
+        await page.waitForSelector(".printer-page", { timeout: 15000 });
+        await page.click('.nd-tabs a[href="/printer/journal"]');
+        await page.waitForFunction(
+          () => document.querySelector('.journal-page .jr-row[data-entry="2"] .jr-thumb')?.textContent === "Photo unavailable",
+          null,
+          { timeout: 5000 }
+        );
+        if (await page.locator(`${journalRow(2)} .jr-thumb img`).count()) throw new Error("an image beside the placeholder");
+        const box = await page.locator(`${journalRow(2)} .jr-thumb`).boundingBox();
+        if (Math.round(box.width) !== 56 || Math.round(box.height) !== 56) throw new Error(`the placeholder is ${box.width}x${box.height}`);
+      });
+    }
+  });
+
+  await step(run, page, "thumbnails load only as their rows come near the visible list", async () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({ ...JOURNAL_FINISHED, id: 100 + i, name: `Plate ${i + 1}` }));
+    await withFixtures({ journal_list: many }, async () => {
+      await page.click('.nd-tabs a[href="/printer"]');
+      await page.waitForSelector(".printer-page", { timeout: 15000 });
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+      const before = await countOf("journal_image");
+      await page.click('.nd-tabs a[href="/printer/journal"]');
+      await page.waitForSelector(`${journalRow(100)} .jr-thumb img`, { timeout: 5000 });
+      const asked = (await callsOf("journal_image")).slice(before).map((c) => c.args.id);
+      if (asked.includes(139) || asked.length >= many.length) throw new Error(`asked for ${asked.length} thumbnails: ${asked.join(",")}`);
+      await page.locator(journalRow(139)).scrollIntoViewIfNeeded();
+      await page.waitForSelector(`${journalRow(139)} .jr-thumb img`, { timeout: 5000 });
+      const again = (await callsOf("journal_image")).slice(before).map((c) => c.args.id);
+      if (new Set(again).size !== again.length) throw new Error("a thumbnail was asked for twice");
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+    });
+  });
+
+  await step(run, page, "an empty journal says prints appear as the printer runs them", async () => {
+    await withFixtures({ journal_list: [] }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await openTab("/printer", "/printer/journal");
+      await page.waitForFunction(
+        () => document.querySelector(".journal-page .nd-state")?.textContent === "[EMPTY: Prints appear here as your printer runs them]",
+        null,
+        { timeout: 5000 }
+      );
+    });
+  });
+
+  await step(run, page, "without a printer the journal says it fills in by itself", async () => {
+    await journalEmit("printer://state", PRINTER_UNCONFIGURED);
+    await page.waitForSelector(`${JR} .jr-no-printer`, { timeout: 5000 });
+    const note = await page.locator(`${JR} .jr-no-printer`).innerText();
+    if (!note.includes("The journal fills in by itself once a printer is set up.")) throw new Error(`note reads "${note}"`);
+    if (!note.includes("Set one up in Settings → Printer")) throw new Error(`note reads "${note}"`);
+    if ((await page.locator(`${JR} .jr-no-printer a[href="/settings#printer"]`).count()) !== 1) throw new Error("no Settings link");
+    await journalEmit("printer://state", PRINTER_VIEW);
+    await page.waitForSelector(`${JR} .jr-no-printer`, { state: "detached", timeout: 5000 });
+  });
+
+  // -- the entry detail: verdict, tags, notes, photos, Analyze, delete ------
+  const journalDetail = (id) => `${journalRow(id)} .jr-detail`;
+  const expand = async (id) => {
+    if (!(await page.locator(journalDetail(id)).count())) await page.click(`${journalRow(id)} .jr-row-main`);
+    await page.waitForSelector(journalDetail(id), { timeout: 5000 });
+  };
+  const collapse = async (id) => {
+    if (await page.locator(journalDetail(id)).count()) await page.click(`${journalRow(id)} .jr-row-main`);
+    await page.waitForSelector(journalDetail(id), { state: "detached", timeout: 5000 });
+  };
+  // The status line of one part of the open detail.
+  const statusIs = (scope, text) =>
+    page.waitForFunction(([s, t]) => document.querySelector(`${s} .jr-status`)?.textContent === t, [scope, text], { timeout: 5000 });
+  const pressedTags = (id) =>
+    page.locator(`${journalDetail(id)} .jr-tag[aria-pressed="true"]`).evaluateAll((bs) => bs.map((b) => b.dataset.tag).join("|"));
+  const pngBase64 = png.toString("base64");
+  // Hands files to the page the way a drop or a pick does, built in the page
+  // so a 25 MB file doesn't cross the wire.
+  const dropFiles = (selector, files) =>
+    page.evaluate(([sel, list]) => {
+      const dt = new DataTransfer();
+      for (const f of list) {
+        const bytes = f.base64 ? Uint8Array.from(atob(f.base64), (c) => c.charCodeAt(0)) : new Uint8Array(f.size);
+        dt.items.add(new File([bytes], f.name, { type: f.type }));
+      }
+      const target = document.querySelector(sel);
+      target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: dt }));
+      target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+    }, [selector, files]);
+  const pickFiles = (selector, files) =>
+    page.evaluate(([sel, list]) => {
+      const dt = new DataTransfer();
+      for (const f of list) dt.items.add(new File([new Uint8Array(f.size)], f.name, { type: f.type }));
+      const input = document.querySelector(sel);
+      input.files = dt.files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }, [selector, files]);
+  const SAVE_FAILED = "The print journal couldn't be saved.";
+
+  await step(run, page, "an entry expands in place with its facts", async () => {
+    await openJournal();
+    const path = await page.evaluate(() => location.pathname);
+    await expand(1);
+    if ((await page.locator(`${journalRow(1)} .jr-row-main`).getAttribute("aria-expanded")) !== "true") throw new Error("not marked expanded");
+    if ((await page.locator(journalDetail(1)).getAttribute("role")) !== "region") throw new Error("the detail is not a region");
+    if (!(await page.locator(journalDetail(1)).getAttribute("aria-label"))) throw new Error("the region has no name");
+    if (await page.locator('[role="dialog"]').count()) throw new Error("the detail opened a dialog");
+    if ((await page.evaluate(() => location.pathname)) !== path) throw new Error("the detail changed the page");
+    const facts = (await page.locator(`${journalDetail(1)} dl.jr-facts`).textContent()).replace(/\s+/g, " ");
+    for (const want of ["(approximate)", "0300-400C", "0300-0100-0001-0007", "H2D", "Plate"]) {
+      if (!facts.includes(want)) throw new Error(`facts lack ${want}: ${facts}`);
+    }
+    if (facts.includes("0300_0100")) throw new Error(`an HMS code kept its underscores: ${facts}`);
+    if (facts.includes("Slice estimate")) throw new Error("an estimate without a linked slice");
+    await expand(2);
+    if (await page.locator(journalDetail(1)).count()) throw new Error("two entries open at once");
+    const linked = (await page.locator(`${journalDetail(2)} .jr-facts`).textContent()).replace(/\s+/g, " ");
+    if (!linked.includes("Slice estimate") || !linked.includes("14 m · 3.7 g")) throw new Error(`facts: ${linked}`);
+    const pressed = await page.locator(`${journalDetail(2)} .jr-verdict`).evaluateAll((bs) => bs.map((b) => `${b.textContent}:${b.getAttribute("aria-pressed")}`).join("|"));
+    if (pressed !== "Good:false|Usable:false|Failed:false") throw new Error(`verdict pills: ${pressed}`);
+  });
+
+  await step(run, page, "the verdict and issue tags save, and a failed save puts them back", async () => {
+    await expand(1);
+    const rate = `${journalDetail(1)} .jr-rate`;
+    await withFixtures({ journal_update: { ...JOURNAL_FAILED, verdict: "usable" } }, async () => {
+      const before = await countOf("journal_update");
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="usable"]`);
+      await pastCalls("journal_update", before);
+      const args = (await callsOf("journal_update")).at(-1).args;
+      if (args.id !== 1 || !sameArgs(args.update, { verdict: "usable" })) throw new Error(JSON.stringify(args));
+      await page.waitForSelector(`${journalDetail(1)} .jr-verdict[data-verdict="usable"][aria-pressed="true"]`, { timeout: 5000 });
+      if ((await page.locator(`${journalDetail(1)} .jr-verdict[data-verdict="failed"]`).getAttribute("aria-pressed")) !== "false") throw new Error("two verdicts pressed");
+      await statusIs(rate, "[SAVED]");
+      // The row's own line follows the saved verdict.
+      await page.waitForFunction(() => document.querySelector('.journal-page .jr-row[data-entry="1"] .jr-verdict-value')?.textContent === "Usable", null, { timeout: 5000 });
+    });
+    await withFixtures({ journal_update: { ...JOURNAL_FAILED, verdict: "usable", tags: ["warping", "stringing"] } }, async () => {
+      const before = await countOf("journal_update");
+      await page.click(`${journalDetail(1)} .jr-tag[data-tag="stringing"]`);
+      await pastCalls("journal_update", before);
+      const args = (await callsOf("journal_update")).at(-1).args;
+      if (!sameArgs(args.update, { tags: ["warping", "stringing"] })) throw new Error(JSON.stringify(args.update));
+      await page.waitForSelector(`${journalDetail(1)} .jr-tag[data-tag="stringing"][aria-pressed="true"]`, { timeout: 5000 });
+      const label = (await page.locator(`${journalDetail(1)} .jr-tag[data-tag="stringing"]`).textContent()).trim();
+      if (label !== "Stringing/Oozing") throw new Error(`the tag reads "${label}", not Analyze's name`);
+    });
+    await withFixtures({ journal_update: { __reject: "disk I/O error: /Users/me/Library" } }, async () => {
+      await page.click(`${journalDetail(1)} .jr-tag[data-tag="z_banding"]`);
+      await page.waitForFunction(
+        (t) => document.querySelector('.journal-page .jr-detail .nd-state[data-kind="error"]')?.textContent === t,
+        `[ERROR: ${SAVE_FAILED}]`,
+        { timeout: 5000 }
+      );
+      if ((await pressedTags(1)) !== "stringing|warping") throw new Error(`a failed tag stayed pressed: ${await pressedTags(1)}`);
+      if ((await page.locator(journalDetail(1)).innerText()).includes("disk I/O")) throw new Error("the raw error reached the page");
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="good"]`);
+      await page.waitForSelector(`${journalDetail(1)} .jr-verdict[data-verdict="usable"][aria-pressed="true"]`, { timeout: 5000 });
+      if ((await page.locator(`${journalDetail(1)} .jr-verdict[data-verdict="good"]`).getAttribute("aria-pressed")) !== "false") throw new Error("a failed verdict stayed pressed");
+      await statusIs(rate, `[ERROR: ${SAVE_FAILED}]`);
+    });
+  });
+
+  await step(run, page, "rating saves go out one at a time and the last click is what is stored", async () => {
+    const before = await countOf("journal_update");
+    const settled = await settledCount("journal_update");
+    const rated = { ...JOURNAL_FAILED, tags: ["warping", "stringing"] };
+    // Good's answer is held back; Failed, clicked meanwhile, waits for it.
+    const seq = [{ __hold: "jr-good", answer: { ...rated, verdict: "good" } }, { ...rated, verdict: "failed" }];
+    const verdictPressed = () =>
+      page.locator(`${journalDetail(1)} .jr-verdict[aria-pressed="true"]`).evaluateAll((bs) => bs.map((b) => b.dataset.verdict).join("|"));
+    await withFixtures({ journal_update: { __sequence: seq } }, async () => {
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="good"]`);
+      await pastCalls("journal_update", before);
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="failed"]`);
+      if ((await verdictPressed()) !== "failed") throw new Error(`shown at once: ${await verdictPressed()}`);
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await countOf("journal_update")) !== before + 1) throw new Error("a second save went out while the first was out");
+      await page.evaluate(() => window.__release("jr-good"));
+      await pastCalls("journal_update", before + 1);
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_update", settled + 2], { timeout: 5000 });
+      await statusIs(`${journalDetail(1)} .jr-rate`, "[SAVED]");
+    });
+    const sent = (await callsOf("journal_update")).slice(before).map((c) => JSON.stringify(c.args.update));
+    if (sent.join("|") !== '{"verdict":"good"}|{"verdict":"failed"}') throw new Error(`sent ${sent.join("|")}`);
+    // What the last answer stored is what the pills and the row show.
+    if ((await verdictPressed()) !== "failed") throw new Error(`settled on ${await verdictPressed()}`);
+    await page.waitForFunction(() => document.querySelector('.journal-page .jr-row[data-entry="1"] .jr-verdict-value')?.textContent === "Failed", null, { timeout: 5000 });
+  });
+
+  await step(run, page, "a click waiting behind a save still goes out after the row closes", async () => {
+    const before = await countOf("journal_update");
+    const settled = await settledCount("journal_update");
+    const rated = { ...JOURNAL_FAILED, tags: ["warping", "stringing"] };
+    const seq = [{ __hold: "jr-close", answer: { ...rated, verdict: "good" } }, { ...rated, verdict: "failed" }];
+    const verdictPressed = () =>
+      page.locator(`${journalDetail(1)} .jr-verdict[aria-pressed="true"]`).evaluateAll((bs) => bs.map((b) => b.dataset.verdict).join("|"));
+    await withFixtures({ journal_update: { __sequence: seq } }, async () => {
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="good"]`);
+      await pastCalls("journal_update", before);
+      await page.click(`${journalDetail(1)} .jr-verdict[data-verdict="failed"]`);
+      await collapse(1);
+      // Opened again while Good is still out: it shows the click, and a
+      // click now doesn't start a second save.
+      await expand(1);
+      if ((await verdictPressed()) !== "failed") throw new Error(`reopened on ${await verdictPressed()}`);
+      if ((await countOf("journal_update")) !== before + 1) throw new Error("a second save went out for the entry");
+      await collapse(1);
+      await page.evaluate(() => window.__release("jr-close"));
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_update", settled + 2], { timeout: 5000 });
+    });
+    const sent = (await callsOf("journal_update")).slice(before).map((c) => JSON.stringify(c.args.update));
+    if (sent.join("|") !== '{"verdict":"good"}|{"verdict":"failed"}') throw new Error(`sent ${sent.join("|")}`);
+    await expand(1);
+    if ((await verdictPressed()) !== "failed") throw new Error(`reopened on ${await verdictPressed()}`);
+    await page.waitForFunction(() => document.querySelector('.journal-page .jr-row[data-entry="1"] .jr-verdict-value')?.textContent === "Failed", null, { timeout: 5000 });
+  });
+
+  await step(run, page, "notes save when the box loses focus, not while typing, and not unchanged", async () => {
+    const text = "Lifted at the front corner. Try a brim.";
+    const notes = `${journalDetail(1)} .jr-notes-field`;
+    const box = `${journalDetail(1)} .jr-notes`;
+    await withFixtures({ journal_update: { ...JOURNAL_FAILED, verdict: "usable", tags: ["warping", "stringing"], notes: text } }, async () => {
+      const before = await countOf("journal_update");
+      await page.fill(box, text);
+      if ((await countOf("journal_update")) !== before) throw new Error("saved while typing");
+      await page.locator(box).blur();
+      await pastCalls("journal_update", before);
+      const args = (await callsOf("journal_update")).at(-1).args;
+      if (args.id !== 1 || !sameArgs(args.update, { notes: text })) throw new Error(JSON.stringify(args.update));
+      // Focus and leave again at once, before or after the answer: nothing changed.
+      await page.click(box);
+      await page.locator(box).blur();
+      await statusIs(notes, "[SAVED]");
+      await page.click(box);
+      await page.locator(box).blur();
+      if ((await countOf("journal_update")) !== before + 1) throw new Error("an unchanged note was saved again");
+    });
+    await withFixtures({ journal_update: { __reject: SAVE_FAILED } }, async () => {
+      const before = await countOf("journal_update");
+      await page.fill(box, `${text} Failed again.`);
+      await page.locator(box).blur();
+      await statusIs(notes, `[ERROR: ${SAVE_FAILED}]`);
+      if ((await page.locator(box).inputValue()) !== `${text} Failed again.`) throw new Error("a failed save threw the text away");
+      // The text isn't stored, so the next blur tries again.
+      await page.click(box);
+      await page.locator(box).blur();
+      await pastCalls("journal_update", before + 1);
+    });
+  });
+
+  await step(run, page, "a reopened notes box follows newer notes and never saves stale text over them", async () => {
+    const box = `${journalDetail(1)} .jr-notes`;
+    // What the list holds from the notes step (its last save failed).
+    const old = "Lifted at the front corner. Try a brim.";
+    const settled = await settledCount("journal_update");
+    const late = { __hold: "jr-notes-late", answer: { ...JOURNAL_FAILED, notes: "Use a brim." } };
+    await withFixtures({ journal_update: late }, async () => {
+      const before = await countOf("journal_update");
+      await page.fill(box, "Use a brim.");
+      // Closing the row takes focus from the box, which sends the save; the
+      // row opens again before the answer.
+      await page.click(`${journalRow(1)} .jr-row-main`);
+      await page.waitForSelector(journalDetail(1), { state: "detached", timeout: 5000 });
+      await pastCalls("journal_update", before);
+      await expand(1);
+      if ((await page.locator(box).inputValue()) !== old) throw new Error("the reopened box doesn't show the list's notes");
+      // The user is back in the box when the answer and the reload land.
+      await page.focus(box);
+      await page.evaluate(() => window.__release("jr-notes-late"));
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length > n, ["journal_update", settled], { timeout: 5000 });
+    });
+    // The backend says it changed; the reload brings the saved notes.
+    const saved = FIXTURES.journal_list.map((e) => (e.id === 1 ? { ...e, notes: "Use a brim." } : e));
+    await withFixtures({ journal_list: saved }, async () => {
+      const lists = await countOf("journal_list");
+      const answered = await settledCount("journal_list");
+      await journalEmit("journal://changed", null);
+      await pastCalls("journal_list", lists);
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length > n, ["journal_list", answered], { timeout: 5000 });
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await page.locator(box).inputValue()) !== old) throw new Error("the box changed under the user's cursor");
+    });
+    // Leaving the box with nothing typed takes the newer notes, and saves nothing.
+    const before = await countOf("journal_update");
+    await page.locator(box).blur();
+    await page.waitForFunction((b) => document.querySelector(b)?.value === "Use a brim.", box, { timeout: 5000 });
+    await page.click(box);
+    await page.locator(box).blur();
+    for (let i = 0; i < 2; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+    if ((await countOf("journal_update")) !== before) throw new Error("leaving the followed box saved again");
+  });
+
+  await step(run, page, "note saves go out one at a time and the newest text is what is stored", async () => {
+    const box = `${journalDetail(1)} .jr-notes`;
+    const notes = `${journalDetail(1)} .jr-notes-field`;
+    const before = await countOf("journal_update");
+    const settled = await settledCount("journal_update");
+    // The first save's answer is held back; the second blur waits for it.
+    const seq = [
+      { __hold: "jr-notes-first", answer: { ...JOURNAL_FAILED, notes: "first" } },
+      { ...JOURNAL_FAILED, notes: "second" },
+    ];
+    await withFixtures({ journal_update: { __sequence: seq } }, async () => {
+      await page.fill(box, "first");
+      await page.locator(box).blur();
+      await pastCalls("journal_update", before);
+      await page.fill(box, "second");
+      await page.locator(box).blur();
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await countOf("journal_update")) !== before + 1) throw new Error("a second note save went out while the first was out");
+      await page.evaluate(() => window.__release("jr-notes-first"));
+      await pastCalls("journal_update", before + 1);
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_update", settled + 2], { timeout: 5000 });
+      await statusIs(notes, "[SAVED]");
+    });
+    const sent = (await callsOf("journal_update")).slice(before).map((c) => c.args.update.notes);
+    if (sent.join("|") !== "first|second") throw new Error(`sent ${sent.join("|")}`);
+    if ((await page.locator(box).inputValue()) !== "second") throw new Error(`the box settled on ${await page.locator(box).inputValue()}`);
+    // The list holds the last answer: a reopened box shows it.
+    await collapse(1);
+    await expand(1);
+    if ((await page.locator(box).inputValue()) !== "second") throw new Error(`the list holds ${await page.locator(box).inputValue()}`);
+  });
+
+  await step(run, page, "a photo can be added by picking or dropping it, one upload at a time", async () => {
+    await expand(2);
+    await page.waitForSelector(`${journalDetail(2)} .jr-photo img`, { timeout: 5000 });
+    if ((await page.locator(`${journalDetail(2)} .jr-photo-add`).evaluate((el) => el.tagName)) !== "BUTTON") throw new Error("Add photo is not a button");
+    const before = await countOf("journal_add_photo");
+    await page.setInputFiles(`${journalDetail(2)} .jr-photo-input`, { name: "print.png", mimeType: "image/png", buffer: png });
+    await pastCalls("journal_add_photo", before);
+    const args = (await callsOf("journal_add_photo")).at(-1).args;
+    if (args.id !== 2 || typeof args.dataBase64 !== "string" || args.dataBase64 !== pngBase64) throw new Error(`args: ${JSON.stringify({ ...args, dataBase64: args.dataBase64?.length })}`);
+    await page.waitForFunction(() => document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo').length === 2, null, { timeout: 5000 });
+    // Photos go up one after the other: two dropped together, and a third
+    // dropped while the first is still going up.
+    const two = { ...JOURNAL_FINISHED, photos: [...JOURNAL_FINISHED.photos, { id: 8, file_name: "9a1e.jpg", added_at: 0 }] };
+    await withFixtures({ journal_add_photo: { __sequence: [{ __hold: "jr-photo-1", answer: two }, two] } }, async () => {
+      const sent = await countOf("journal_add_photo");
+      const done = await settledCount("journal_add_photo");
+      const file = { name: "a.png", type: "image/png", base64: pngBase64 };
+      await dropFiles(`${journalDetail(2)} .jr-photos`, [file, { ...file, name: "b.png" }]);
+      await pastCalls("journal_add_photo", sent);
+      await statusIs(`${journalDetail(2)} .jr-photos`, "[LOADING: Adding the photo]");
+      await dropFiles(`${journalDetail(2)} .jr-photos`, [{ ...file, name: "c.png" }]);
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await countOf("journal_add_photo")) !== sent + 1) throw new Error("a photo went up before the first answered");
+      await page.evaluate(() => window.__release("jr-photo-1"));
+      await pastCalls("journal_add_photo", sent + 1);
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_add_photo", done + 3], { timeout: 5000 });
+      if ((await countOf("journal_add_photo")) !== sent + 3) throw new Error(`${(await countOf("journal_add_photo")) - sent} photos went up, not 3`);
+      await statusIs(`${journalDetail(2)} .jr-photos`, "");
+      if (await page.locator(`${journalDetail(2)} .jr-photos.jr-drop-over`).count()) throw new Error("the drop outline stayed");
+    });
+    // Each photo and its Remove are named apart.
+    await page.waitForFunction(() => document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo img').length === 2, null, { timeout: 5000 });
+    const alts = await page.locator(`${journalDetail(2)} .jr-photo img`).evaluateAll((is) => is.map((i) => i.alt));
+    if (!/^Photo 1 of 2, added \d+ \w{3} \d{4}$/.test(alts[0]) || !alts[1].startsWith("Photo 2 of 2, added ")) throw new Error(`alts: ${alts.join("|")}`);
+    const removes = await page.locator(`${journalDetail(2)} .jr-photo-remove`).evaluateAll((bs) => bs.map((b) => b.getAttribute("aria-label")));
+    if (removes.join("|") !== "Remove photo 1|Remove photo 2") throw new Error(`remove labels: ${removes.join("|")}`);
+  });
+
+  await step(run, page, "photos queued before the detail closes still go up, one at a time", async () => {
+    const two = { ...JOURNAL_FINISHED, photos: [...JOURNAL_FINISHED.photos, { id: 8, file_name: "9a1e.jpg", added_at: 0 }] };
+    await withFixtures({ journal_add_photo: { __sequence: [{ __hold: "jr-photo-close", answer: two }, two] } }, async () => {
+      const sent = await countOf("journal_add_photo");
+      const done = await settledCount("journal_add_photo");
+      const file = { name: "a.png", type: "image/png", base64: pngBase64 };
+      await dropFiles(`${journalDetail(2)} .jr-photos`, [file, { ...file, name: "b.png" }]);
+      await pastCalls("journal_add_photo", sent);
+      await collapse(2);
+      await page.evaluate(() => window.__release("jr-photo-close"));
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length >= n, ["journal_add_photo", done + 2], { timeout: 5000 });
+      if ((await countOf("journal_add_photo")) !== sent + 2) throw new Error(`${(await countOf("journal_add_photo")) - sent} photos went up, not 2`);
+    });
+    await expand(2);
+    await page.waitForFunction(() => document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo').length === 2, null, { timeout: 5000 });
+    await statusIs(`${journalDetail(2)} .jr-photos`, "");
+  });
+
+  await step(run, page, "a photo over 25 MB, or a file that isn't one, is refused before it is sent", async () => {
+    const photos = `${journalDetail(2)} .jr-photos`;
+    const before = await countOf("journal_add_photo");
+    await pickFiles(`${journalDetail(2)} .jr-photo-input`, [{ name: "huge.png", type: "image/png", size: 25 * 1024 * 1024 + 1 }]);
+    await statusIs(photos, "[ERROR: That photo is over 25 MB. Choose a smaller one.]");
+    if ((await page.locator(`${photos} .jr-status`).getAttribute("data-kind")) !== "error") throw new Error("the refusal is not marked as an error");
+    await page.setInputFiles(`${journalDetail(2)} .jr-photo-input`, { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello") });
+    await page.waitForFunction(
+      () => document.querySelector('.journal-page .jr-row[data-entry="2"] .nd-state[data-kind="error"]')?.textContent ===
+        "[ERROR: That file isn't a photo BambuMate can read. Choose a JPEG, PNG or WebP image.]",
+      null,
+      { timeout: 5000 }
+    );
+    if ((await countOf("journal_add_photo")) !== before) throw new Error("a refused file was sent");
+  });
+
+  await step(run, page, "a photo that can't be read shows a placeholder and can be removed", async () => {
+    for (const unreadable of [{ __reject: "Photo unavailable" }, null]) {
+      await withFixtures({ journal_image: unreadable }, async () => {
+        await collapse(2);
+        await expand(2);
+        await page.waitForFunction(
+          () => {
+            const missing = [...document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo-missing')];
+            return missing.length === 2 && missing.every((e) => e.textContent === "Photo unavailable");
+          },
+          null,
+          { timeout: 5000 }
+        );
+        if (await page.locator(`${journalDetail(2)} .jr-photo img`).count()) throw new Error("an image beside the placeholder");
+      });
+    }
+    await withFixtures({ journal_remove_photo: { __reject: SAVE_FAILED } }, async () => {
+      await page.locator(`${journalDetail(2)} .jr-photo-remove`).first().click();
+      await statusIs(`${journalDetail(2)} .jr-photos`, `[ERROR: ${SAVE_FAILED}]`);
+      if ((await page.locator(`${journalDetail(2)} .jr-photo`).count()) !== 2) throw new Error("a photo went though its removal failed");
+    });
+    const placeholder = await page.locator(`${journalDetail(2)} .jr-photo-missing`).first().getAttribute("aria-label");
+    if (!placeholder?.startsWith("Photo 1 of 2, added ")) throw new Error(`the placeholder is named "${placeholder}"`);
+    const before = await countOf("journal_remove_photo");
+    const left = { ...JOURNAL_FINISHED, photos: [{ id: 8, file_name: "9a1e.jpg", added_at: 0 }] };
+    await withFixtures({ journal_remove_photo: left }, async () => {
+      await page.locator(`${journalDetail(2)} .jr-photo-remove`).first().click();
+      await pastCalls("journal_remove_photo", before);
+      const args = (await callsOf("journal_remove_photo")).at(-1).args;
+      if (args.id !== 2 || args.photoId !== 7) throw new Error(JSON.stringify(args));
+      // Focus goes to the next photo's Remove.
+      await page.waitForFunction(() => document.activeElement?.closest('.jr-photo[data-photo="8"]') && document.activeElement.classList.contains("jr-photo-remove"), null, { timeout: 5000 });
+    });
+    if ((await page.locator(`${journalDetail(2)} .jr-photo-remove`).getAttribute("aria-label")) !== "Remove photo 1") throw new Error("the remaining photo isn't renumbered");
+    await page.locator(`${journalDetail(2)} .jr-photo-remove`).click();
+    await pastCalls("journal_remove_photo", before + 1);
+    await page.waitForFunction(() => document.querySelectorAll('.journal-page .jr-row[data-entry="2"] .jr-photo').length === 0, null, { timeout: 5000 });
+    // The last photo gone, focus goes to Add photo.
+    await page.waitForFunction(() => document.activeElement?.classList.contains("jr-photo-add"), null, { timeout: 5000 });
+  });
+
+  await step(run, page, "Analyze a photo links to Analyze with the entry", async () => {
+    const link = page.locator(`${journalDetail(2)} a.jr-analyze`);
+    if ((await link.count()) !== 1) throw new Error("no Analyze link while AI is on");
+    if ((await link.getAttribute("href")) !== "/analysis?journal=2") throw new Error(`href ${await link.getAttribute("href")}`);
+    if ((await link.innerText()).trim().toLowerCase() !== "analyze a photo") throw new Error(`reads "${await link.innerText()}"`);
+  });
+
+  await step(run, page, "deleting an entry asks inline, Keep cancels and Delete removes it", async () => {
+    await expand(1);
+    const before = await countOf("journal_delete");
+    await page.click(`${journalDetail(1)} .jr-delete`);
+    const confirm = await page.locator(`${journalDetail(1)} .jr-confirm`).innerText();
+    if (!confirm.includes("Delete this entry and its photos?")) throw new Error(`confirm reads "${confirm}"`);
+    const buttons = await page.locator(`${journalDetail(1)} .jr-confirm button`).allInnerTexts();
+    if (buttons.map((b) => b.trim().toLowerCase()).join("|") !== "delete|keep") throw new Error(`buttons ${buttons.join("|")}`);
+    if (await page.locator('[role="dialog"], [role="alertdialog"], dialog').count()) throw new Error("the confirmation is a dialog");
+    if ((await countOf("journal_delete")) !== before) throw new Error("deleted before confirming");
+    await page.waitForFunction(() => document.activeElement?.classList.contains("jr-confirm-keep"), null, { timeout: 5000 });
+    await page.click(`${journalDetail(1)} .jr-confirm-keep`);
+    await page.waitForSelector(`${journalDetail(1)} .jr-confirm`, { state: "detached", timeout: 5000 });
+    await page.waitForFunction(() => document.activeElement?.classList.contains("jr-delete"), null, { timeout: 5000 });
+    await withFixtures({ journal_delete: { __reject: SAVE_FAILED } }, async () => {
+      await page.click(`${journalDetail(1)} .jr-delete`);
+      await page.click(`${journalDetail(1)} .jr-confirm-delete`);
+      await page.waitForFunction(
+        (t) => document.querySelector('.journal-page .jr-row[data-entry="1"] .nd-state[data-kind="error"]')?.textContent === t,
+        `[ERROR: ${SAVE_FAILED}]`,
+        { timeout: 5000 }
+      );
+      if (await page.locator(`${journalDetail(1)} .jr-confirm`).count()) throw new Error("the confirmation stayed after a failed delete");
+      await page.waitForFunction(() => document.activeElement?.classList.contains("jr-delete"), null, { timeout: 5000 });
+    });
+    const failed = await countOf("journal_delete");
+    await page.click(`${journalDetail(1)} .jr-delete`);
+    await page.click(`${journalDetail(1)} .jr-confirm-delete`);
+    await pastCalls("journal_delete", failed);
+    if ((await callsOf("journal_delete")).at(-1).args.id !== 1) throw new Error("deleted the wrong entry");
+    await page.waitForSelector(journalRow(1), { state: "detached", timeout: 5000 });
+    if (await page.locator(`${JR} .jr-detail`).count()) throw new Error("a detail is still open");
+    // Focus moves to the row that followed the deleted one.
+    await page.waitForFunction(() => document.activeElement?.closest('.jr-row[data-entry="4"]') && document.activeElement.classList.contains("jr-row-main"), null, { timeout: 5000 });
+  });
+
+  await step(run, page, "the journal opens the entry a link names and brings it into view", async () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({ ...JOURNAL_FINISHED, id: 100 + i, name: `Plate ${i + 1}` }));
+    await withFixtures({ journal_list: many }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+      await goTo("/printer/journal?entry=139", "/printer/journal");
+      await page.waitForSelector(journalDetail(139), { timeout: 15000 });
+      await page.waitForFunction(
+        () => {
+          const row = document.querySelector('.journal-page .jr-row[data-entry="139"]').getBoundingClientRect();
+          const view = document.querySelector(".content").getBoundingClientRect();
+          return row.top >= view.top - 1 && row.top < view.bottom;
+        },
+        null,
+        { timeout: 5000 }
+      );
+      if ((await page.locator(`${journalRow(139)} .jr-row-main`).getAttribute("aria-expanded")) !== "true") throw new Error("the linked row isn't marked open");
+      // A link followed while the journal is open scrolls there at once.
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+      await goTo("/printer/journal?entry=110", "/printer/journal");
+      await page.waitForSelector(journalDetail(110), { timeout: 5000 });
+      await page.waitForFunction(
+        () => {
+          const row = document.querySelector('.journal-page .jr-row[data-entry="110"]').getBoundingClientRect();
+          const view = document.querySelector(".content").getBoundingClientRect();
+          return row.top >= view.top - 1 && row.top < view.bottom;
+        },
+        null,
+        { timeout: 5000 }
+      );
+      // The reveal is used up: a later reload doesn't scroll again.
+      await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+      const lists = await countOf("journal_list");
+      const answered = await settledCount("journal_list");
+      await journalEmit("journal://changed", null);
+      await pastCalls("journal_list", lists);
+      await page.waitForFunction(([c, n]) => window.__ipc.settled.filter((x) => x === c).length > n, ["journal_list", answered], { timeout: 5000 });
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      const top = await page.evaluate(() => document.querySelector(".content").scrollTop);
+      if (top !== 0) throw new Error(`a reload scrolled the journal to ${top}`);
+    });
+    await page.click('nav.sidebar a[href="/"]');
+    await goTo("/printer/journal?entry=2", "/printer/journal");
+    await page.waitForSelector(journalDetail(2), { timeout: 15000 });
+    // A link followed while the journal is open opens that entry too.
+    await goTo("/printer/journal?entry=4", "/printer/journal");
+    await page.waitForSelector(journalDetail(4), { timeout: 5000 });
+    if (await page.locator(journalDetail(2)).count()) throw new Error("two entries open at once");
+    await page.evaluate(() => document.querySelector(".content").scrollTo(0, 0));
+  });
+
+  // -- analyze from the journal --------------------------------------------------
+  // `/analysis?journal=<id>` fills Analyze from an entry and links the result.
+  const AN = ".print-analysis-page";
+  const filamentPreset = FIXTURES.list_profiles[1].path;
+  const journalNote = `${AN} .an-journal-note`;
+  const lastAnalyze = async () => (await callsOf("analyze_print")).at(-1).args.request;
+  const analyzeNow = async () => {
+    const before = await countOf("analyze_print");
+    await page.click("text=Analyze Print");
+    await pastCalls("analyze_print", before);
+    await page.waitForSelector(".analysis-results", { timeout: 15000 });
+    return lastAnalyze();
+  };
+
+  await step(run, page, "Analyze a photo opens Analyze with the entry's photo, model and preset", async () => {
+    await openJournal();
+    await expand(2);
+    await page.click(`${journalDetail(2)} .jr-analyze`);
+    await page.waitForFunction(() => location.pathname === "/analysis" && location.search === "?journal=2", null, { timeout: 5000 });
+    await page.waitForSelector(".analysis-preview img.preview-image", { timeout: 15000 });
+    const link = page.locator('.an-journal a[href="/printer/journal?entry=2"]');
+    if ((await link.innerText()).trim() !== JOURNAL_FINISHED.name) throw new Error("no link back to the entry");
+    if (!(await page.locator(".an-journal").innerText()).startsWith("From the journal:")) throw new Error("the link line doesn't say where it is from");
+    await page.waitForFunction((p) => document.querySelector(".profile-select")?.value === p, filamentPreset, { timeout: 5000 });
+    if ((await page.locator(".material-selector select").inputValue()) !== "PLA") throw new Error("material not picked");
+    if ((await page.locator(".an-model-name").innerText()).trim() !== "cube.stl") throw new Error("model not picked");
+    const photos = (await callsOf("journal_image")).filter((c) => c.args.photoId === 7);
+    if (!photos.length) throw new Error("the entry's newest photo wasn't asked for");
+    const req = await analyzeNow();
+    if (req.journal_id !== 2) throw new Error(`journal_id ${req.journal_id}`);
+    if (req.profile_path !== filamentPreset || req.material_type !== "PLA") throw new Error(JSON.stringify({ ...req, image_base64: req.image_base64.length }));
+    if (!req.image_base64 || req.image_base64.startsWith("data:")) throw new Error("the photo wasn't sent as bare base64");
+    await page.click("text=Analyze Another Photo");
+    await page.waitForSelector(".drop-zone", { timeout: 5000 });
+    if (await page.locator(".an-journal").count()) throw new Error("the journal link outlived a reset");
+    // A photo chosen after the reset isn't linked to the entry.
+    await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+    await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+    const own = await analyzeNow();
+    if (own.journal_id != null) throw new Error(`a photo of its own was linked to entry ${own.journal_id}`);
+  });
+
+  await step(run, page, "an entry with no photo still fills in the model, material and preset", async () => {
+    await withFixtures({ journal_get: { ...JOURNAL_FINISHED, photos: [] } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await goTo("/analysis?journal=2", "/analysis");
+      await page.waitForSelector(".an-journal a", { timeout: 15000 });
+      await page.waitForSelector(".drop-zone", { timeout: 5000 });
+      if (await page.locator(".analysis-preview").count()) throw new Error("a photo was invented");
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+      await page.waitForFunction((p) => document.querySelector(".profile-select")?.value === p, filamentPreset, { timeout: 5000 });
+      if ((await page.locator(".material-selector select").inputValue()) !== "PLA") throw new Error("material not picked");
+      if ((await page.locator(".an-model-name").innerText()).trim() !== "cube.stl") throw new Error("model not picked");
+      const req = await analyzeNow();
+      if (req.journal_id !== 2) throw new Error(`journal_id ${req.journal_id}`);
+    });
+  });
+
+  await step(run, page, "a photo that can't be read leaves the drop zone", async () => {
+    await withFixtures({ journal_image: { __reject: "Photo unavailable" } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      const asked = await countOf("journal_image");
+      const answered = await settledCount("journal_image");
+      await goTo("/analysis?journal=2", "/analysis");
+      await pastCalls("journal_image", asked);
+      await settledPast("journal_image", answered);
+      await page.waitForSelector(".an-journal a", { timeout: 15000 });
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      await page.waitForSelector(".drop-zone", { timeout: 5000 });
+      if (await page.locator(".analysis-preview").count()) throw new Error("a photo was shown for an unreadable file");
+    });
+  });
+
+  await step(run, page, "an entry that is gone says so and leaves Analyze usable", async () => {
+    await withFixtures({ journal_get: null }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await goTo("/analysis?journal=99", "/analysis");
+      await page.waitForFunction(
+        ([sel, text]) => document.querySelector(sel)?.innerText.includes(text),
+        [journalNote, "That print isn't in the journal any more."],
+        { timeout: 5000 }
+      );
+      if (await page.locator(".an-journal").count()) throw new Error("a link to a gone entry");
+      await page.waitForSelector(".drop-zone", { timeout: 5000 });
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+      const req = await analyzeNow();
+      if (req.journal_id != null) throw new Error(`journal_id ${req.journal_id} for a gone entry`);
+    });
+  });
+
+  await step(run, page, "an older ?journal answer doesn't land over a newer link", async () => {
+    const slow = { __hold: "an-journal-stale", answer: JOURNAL_FINISHED };
+    await withFixtures({ journal_get: { __sequence: [slow, JOURNAL_GOOD] } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      const asked = await countOf("journal_get");
+      const answered = await settledCount("journal_get");
+      await goTo("/analysis?journal=2", "/analysis");
+      await pastCalls("journal_get", asked);
+      // The link changes in place while entry 2 is still being read.
+      await goTo("/analysis?journal=4", "/analysis");
+      await pastCalls("journal_get", asked + 1);
+      await page.waitForFunction((name) => document.querySelector(".an-journal a")?.textContent === name, JOURNAL_GOOD.name, { timeout: 5000 });
+      await page.evaluate(() => window.__release("an-journal-stale"));
+      await page.waitForFunction((n) => window.__ipc.settled.filter((x) => x === "journal_get").length >= n, answered + 2, { timeout: 5000 });
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      const name = (await page.locator(".an-journal a").innerText()).trim();
+      if (name !== JOURNAL_GOOD.name) throw new Error(`the older answer landed: "${name}"`);
+      if (await page.locator(".analysis-preview").count()) throw new Error("the older entry's photo landed");
+      if (await page.locator('.an-journal a[href="/printer/journal?entry=2"]').count()) throw new Error("the older entry is linked");
+    });
+  });
+
+  await step(run, page, "Try Again after a failed analysis keeps the journal photo and link", async () => {
+    await page.click('nav.sidebar a[href="/"]');
+    await goTo("/analysis?journal=2", "/analysis");
+    await page.waitForSelector(".analysis-preview img.preview-image", { timeout: 15000 });
+    await withFixtures({ analyze_print: { __reject: "The analysis service is unavailable." } }, async () => {
+      const before = await countOf("analyze_print");
+      await page.click("text=Analyze Print");
+      await pastCalls("analyze_print", before);
+      await page.waitForSelector(".error-state", { timeout: 5000 });
+    });
+    await page.click("text=Try Again");
+    await page.waitForSelector(".analysis-preview img.preview-image", { timeout: 5000 });
+    if (!(await page.locator('.an-journal a[href="/printer/journal?entry=2"]').count())) throw new Error("the journal link was dropped");
+    const req = await analyzeNow();
+    if (req.journal_id !== 2) throw new Error(`journal_id ${req.journal_id} after a retry`);
+    if (!req.image_base64) throw new Error("the retry sent no photo");
+    // Choosing a different photo is still an explicit reset.
+    await page.click("text=Analyze Another Photo");
+    await page.waitForSelector(".drop-zone", { timeout: 5000 });
+    if (await page.locator(".an-journal").count()) throw new Error("the link outlived a reset");
+  });
+
+  await step(run, page, "an entry's prefill doesn't overwrite what the user already chose", async () => {
+    const other = { ...JOURNAL_FINISHED, photos: [], slice: { ...JOURNAL_FINISHED.slice, model_path: "/Users/runner/models/other.stl" } };
+    await withFixtures({ journal_get: { __hold: "an-journal-late", answer: other } }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await goTo("/analysis?journal=2", "/analysis");
+      // The user gets on while the entry is still being read.
+      await page.setInputFiles("#photo-file-input", { name: "print.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(".analysis-preview", { timeout: 20000 });
+      await page.waitForSelector(".profile-select option:nth-child(2)", { state: "attached", timeout: 10000 });
+      await page.selectOption(".material-selector select", "PETG");
+      await page.selectOption(".profile-select", FIXTURES.list_profiles[0].path);
+      await page.click(".an-pick-model");
+      await page.waitForSelector(".an-model-name", { timeout: 5000 });
+      const answered = await settledCount("journal_get");
+      await page.evaluate(() => window.__release("an-journal-late"));
+      await page.waitForFunction((n) => window.__ipc.settled.filter((x) => x === "journal_get").length > n, answered, { timeout: 5000 });
+      await page.waitForSelector(".an-journal a", { timeout: 5000 });
+      for (let i = 0; i < 3; i++) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      if ((await page.locator(".an-model-name").innerText()).trim() !== "cube.stl") throw new Error("the entry's model replaced the user's");
+      if ((await page.locator(".material-selector select").inputValue()) !== "PETG") throw new Error("the entry's material replaced the user's");
+      if ((await page.locator(".profile-select").inputValue()) !== FIXTURES.list_profiles[0].path) throw new Error("the entry's preset replaced the user's");
+    });
+  });
+
   // -- settings --------------------------------------------------------------
   await step(run, page, "navigate to Settings", async () => {
     await page.click('a[href="/settings"]');
@@ -2715,6 +3563,17 @@ async function driveApp(browserType, engine, baseUrl) {
     return `lock at x=${Math.round(box.x)} within ${Math.round(rail.width)}px rail`;
   });
 
+  await step(run, page, "with AI off a journal entry offers no Analyze link", async () => {
+    await page.click('nav.sidebar a[href="/printer"]');
+    await page.click('.nd-tabs a[href="/printer/journal"]');
+    await page.waitForSelector('.journal-page .jr-row[data-entry="2"]', { timeout: 15000 });
+    if (!(await page.locator('.journal-page .jr-row[data-entry="2"] .jr-detail').count())) await page.click('.journal-page .jr-row[data-entry="2"] .jr-row-main');
+    await page.waitForSelector('.journal-page .jr-row[data-entry="2"] .jr-detail .jr-delete', { timeout: 5000 });
+    if (await page.locator(".journal-page .jr-analyze").count()) throw new Error("an Analyze link without AI");
+    await page.click('a[href="/settings"]');
+    await page.waitForSelector(".settings-page", { timeout: 15000 });
+  });
+
   await page.screenshot({ path: `flow-${engine}-settings.png`, fullPage: false });
 
   {
@@ -2936,6 +3795,7 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "activating a tab from the keyboard keeps focus on that tab", async () => {
     // The header must stay mounted across a tab switch, or focus falls to <body>.
     for (const [hub, page_, tab, selector] of [
+      ["/printer", ".printer-page", "/printer/journal", ".journal-page"],
       ["/settings", ".settings-page", "/settings/about", ".about-page"],
       ["/filament", ".filament-search-page", "/filament/batch", ".batch-generate-page"],
       ["/profiles", ".profile-management-page", "/profiles/compare", ".profile-diff-page"],
@@ -3194,7 +4054,7 @@ async function driveApp(browserType, engine, baseUrl) {
   });
 
   await step(run, page, "the printer page has the shared header and lists HMS codes seen earlier", async () => {
-    const title = (await page.locator(".printer-page h1.nd-page-title").innerText()).trim();
+    const title = (await page.locator('.hub[data-hub="printer"] h1.nd-page-title').innerText()).trim();
     if (title !== "Printer") throw new Error(`page title reads "${title}"`);
     const code = PRINTER_VIEW.errors[0].code;
     // While active, the code sits in the active list and not under Earlier.
@@ -3333,7 +4193,7 @@ async function driveApp(browserType, engine, baseUrl) {
     if (!ident.includes(`<b>N</b>${"N".repeat(56)} · `)) throw new Error(`ident: ${ident}`);
     const preset = await slotCard("A2").locator(".pr-preset").innerText();
     if (preset !== `<u>S</u>${"S".repeat(56)}`) throw new Error(`A2 preset: ${preset}`);
-    if ((await page.locator(".printer-page b, .printer-page i, .printer-page u").count()) !== 0) {
+    if ((await page.locator('.hub[data-hub="printer"] :is(b, i, u)').count()) !== 0) {
       throw new Error("a printer-supplied name was rendered as HTML");
     }
     await emitEvent("printer://state", PRINTER_VIEW);
@@ -3446,13 +4306,35 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForSelector(".pr-picker", { state: "detached", timeout: 5000 });
   });
 
-  await step(run, page, "home is ready after a print finishes", async () => {
+  await step(run, page, "home is ready after a print finishes and offers to rate it", async () => {
+    const ended = { ...JOURNAL_FINISHED, ended_at: Math.floor(Date.now() / 1000) };
+    await withFixtures({ journal_last: ended }, async () => {
+      await emitEvent("printer://state", FINISHED);
+      await emitEvent("journal://changed", null);
+      await homeMode("idle");
+      const number = await homeText(".home-page .nd-hero-number");
+      if (number !== "READY") throw new Error(`hero number "${number}"`);
+      await page.waitForFunction(
+        (n) => document.querySelector(".home-page .nd-hero")?.textContent.includes(`Last print finished just now · ${n}`),
+        JOURNAL_FINISHED.name,
+        { timeout: 5000 }
+      );
+      const rate = page.locator(".home-page .hm-rate");
+      if ((await rate.innerText()).trim() !== "Rate your last print") throw new Error("no rate link");
+      if ((await rate.getAttribute("href")) !== "/printer/journal?entry=2") throw new Error("rate link goes elsewhere");
+    });
+    await withFixtures({ journal_last: { ...JOURNAL_FINISHED, verdict: "good" } }, async () => {
+      await emitEvent("journal://changed", null);
+      await page.waitForSelector(".home-page .hm-rate", { state: "detached", timeout: 5000 });
+    });
+    await emitEvent("journal://changed", null);
+    await page.waitForSelector(".home-page .hm-rate", { timeout: 5000 });
+    await page.click(".home-page .hm-rate");
+    await page.waitForSelector('.journal-page .jr-row[data-entry="2"] .jr-detail', { timeout: 15000 });
+    // Home re-reads the printer on mount; the event puts the finished print back.
+    await page.click('nav.sidebar a[href="/"]');
     await emitEvent("printer://state", FINISHED);
     await homeMode("idle");
-    const number = await homeText(".home-page .nd-hero-number");
-    if (number !== "READY") throw new Error(`hero number "${number}"`);
-    const hero = await homeText(".home-page .nd-hero");
-    if (!hero.includes("Last print finished just now · T-pose - slim H2D dual AMS riser")) throw new Error(hero);
   });
 
   await step(run, page, "home never shows a stale percentage after a disconnect", async () => {

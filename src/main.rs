@@ -3,6 +3,7 @@ mod agent;
 mod app;
 mod commands;
 mod components;
+mod journal;
 mod pages;
 mod printer;
 mod routes;

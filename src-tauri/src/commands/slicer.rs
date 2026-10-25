@@ -240,14 +240,14 @@ fn job_file_error(message: &str) -> ErrorView {
     }
 }
 
-/// Plate `plate`'s thumbnail as a `data:` URL. Only `plate_<plate>.png` next
-/// to the job's own output is read, and only up to `max` bytes; `None`
-/// when the plate has no thumbnail (or it is too large).
-pub(crate) fn plate_thumbnail(
+/// Plate `plate`'s PNG thumbnail. Only `plate_<plate>.png` next to the
+/// job's own output is read, and only up to `max` bytes; `None` when the
+/// plate has no thumbnail (or it is too large, or not a PNG).
+pub(crate) fn plate_thumbnail_bytes(
     view: &JobView,
     plate: u32,
     max: u64,
-) -> Result<Option<String>, &'static str> {
+) -> Result<Option<Vec<u8>>, &'static str> {
     let output = finished_output(view)?;
     let JobState::Done { result, .. } = &view.state else {
         return Err(NOT_FINISHED);
@@ -304,10 +304,21 @@ pub(crate) fn plate_thumbnail(
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Ok(None);
     }
-    Ok(Some(format!(
-        "data:image/png;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )))
+    Ok(Some(bytes))
+}
+
+/// Plate `plate`'s thumbnail as a `data:` URL; see [`plate_thumbnail_bytes`].
+pub(crate) fn plate_thumbnail(
+    view: &JobView,
+    plate: u32,
+    max: u64,
+) -> Result<Option<String>, &'static str> {
+    Ok(plate_thumbnail_bytes(view, plate, max)?.map(|bytes| {
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    }))
 }
 
 /// A plate thumbnail as a `data:` URL, or `None` when the plate has none.
@@ -353,6 +364,29 @@ pub async fn slicer_open_in_bambu_studio(
     .map_err(|e| job_file_error(&e))
 }
 
+/// The name `copy_for_opening` gives job `job_id`'s copy:
+/// `<job-id>-<cache key>.gcode.3mf`, where the key is the output folder's
+/// name (its first 16 ASCII letters and digits), or `<job-id>.gcode.3mf`.
+/// The print journal matches prints of the copy by this name.
+pub(crate) fn opened_name(job_id: u64, output: &Path) -> String {
+    let key: String = output
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| {
+            n.to_string_lossy()
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .take(16)
+                .collect()
+        })
+        .unwrap_or_default();
+    if key.is_empty() {
+        format!("{job_id}.gcode.3mf")
+    } else {
+        format!("{job_id}-{key}.gcode.3mf")
+    }
+}
+
 /// Copies a job's sliced file into `opened` as
 /// `<job-id>-<cache key>.gcode.3mf` and returns the copy, then keeps only the
 /// `keep` most recently opened copies. Job ids start again with each launch,
@@ -366,22 +400,7 @@ fn copy_for_opening(
     keep: usize,
 ) -> Result<PathBuf, String> {
     let fail = |e: std::io::Error| format!("BambuMate couldn't copy the sliced file: {e}");
-    let key: String = output
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|n| {
-            n.to_string_lossy()
-                .chars()
-                .filter(char::is_ascii_alphanumeric)
-                .take(16)
-                .collect()
-        })
-        .unwrap_or_default();
-    let name = if key.is_empty() {
-        format!("{job_id}.gcode.3mf")
-    } else {
-        format!("{job_id}-{key}.gcode.3mf")
-    };
+    let name = opened_name(job_id, output);
     std::fs::create_dir_all(opened).map_err(fail)?;
     let dest = opened.join(&name);
     let same = |a: &Path, b: &Path| match (std::fs::metadata(a), std::fs::metadata(b)) {
@@ -993,6 +1012,33 @@ mod tests {
             result.plates[0].thumbnail = Some("../secret.png".into());
         }
         assert_eq!(plate_thumbnail(&odd, 1, MAX_THUMBNAIL_BYTES).unwrap(), None);
+    }
+
+    #[test]
+    fn thumbnail_bytes_are_the_png_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = done_job(dir.path());
+        let bytes = plate_thumbnail_bytes(&job, 1, MAX_THUMBNAIL_BYTES)
+            .unwrap()
+            .unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(
+            bytes,
+            std::fs::read(dir.path().join("plate_1.png")).unwrap()
+        );
+        assert_eq!(
+            plate_thumbnail_bytes(&job, 9, MAX_THUMBNAIL_BYTES).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn opened_copies_are_named_after_the_job_and_its_cache_folder() {
+        let out = Path::new("/cache/slices/ab-3f/output.gcode.3mf");
+        assert_eq!(opened_name(12, out), "12-ab3f.gcode.3mf");
+        assert_eq!(opened_name(3, Path::new("output.gcode.3mf")), "3.gcode.3mf");
+        let long = Path::new("/c/0123456789abcdef0123/output.gcode.3mf");
+        assert_eq!(opened_name(4, long), "4-0123456789abcdef.gcode.3mf");
     }
 
     #[test]
