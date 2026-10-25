@@ -8,6 +8,13 @@ use crate::slicer::types::SliceResult;
 /// Most characters shown of a material the printer reports.
 const MATERIAL_MAX: usize = 16;
 
+/// Most characters shown of the filament the job needs: a type, else a
+/// preset name, both read from the slice output.
+const NEEDS_MAX: usize = 64;
+
+/// Most characters shown of a slot label.
+const LABEL_MAX: usize = 16;
+
 /// The filament a job was sliced with, as the AMS check needs it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct JobFilament {
@@ -112,10 +119,19 @@ impl AmsMatch {
                 slot,
                 material,
                 other_colour,
-            } => format!(
-                "~ {material} in {slot}, different profile: check temperatures{}",
-                colour(*other_colour)
-            ),
+            } => {
+                let material = if material.is_empty() {
+                    "Same material"
+                } else {
+                    material
+                };
+                format!(
+                    "~ {material} in {slot}, different profile: check temperatures{}",
+                    colour(*other_colour)
+                )
+            }
+            // A job with neither a type nor a preset can't name what to load.
+            Self::NotLoaded { material } if material.is_empty() => "✗ Not loaded".to_string(),
             Self::NotLoaded { material } => {
                 format!("✗ Not loaded: load {material} before printing")
             }
@@ -187,7 +203,7 @@ pub fn ams_match(job: &JobFilament, view: &PrinterView) -> AmsMatch {
     let exact_slots: Vec<&SlotView> = loaded.iter().copied().filter(exact).collect();
     if let Some(s) = pick(exact_slots, &other_colour) {
         return AmsMatch::Loaded {
-            slot: s.label.clone(),
+            slot: untrusted_text(&s.label, LABEL_MAX),
             other_colour: other_colour(s),
         };
     }
@@ -201,13 +217,13 @@ pub fn ams_match(job: &JobFilament, view: &PrinterView) -> AmsMatch {
     let same_slots: Vec<&SlotView> = loaded.iter().copied().filter(same).collect();
     if let Some(s) = pick(same_slots, &other_colour) {
         return AmsMatch::SameMaterial {
-            slot: s.label.clone(),
-            material: untrusted_text(&s.tray.tray_type, MATERIAL_MAX),
+            slot: untrusted_text(&s.label, LABEL_MAX),
+            material: untrusted_text(s.tray.tray_type.trim(), MATERIAL_MAX),
             other_colour: other_colour(s),
         };
     }
     AmsMatch::NotLoaded {
-        material: job.needs(),
+        material: untrusted_text(job.needs().trim(), NEEDS_MAX),
     }
 }
 
@@ -517,6 +533,44 @@ mod tests {
                 other_colour: false
             },
             "the printer still reports the job's filament ID"
+        );
+    }
+
+    #[test]
+    fn what_the_slice_output_names_is_cleaned_and_capped() {
+        let long = "x".repeat(200);
+        let job = JobFilament {
+            filament_type: format!("PE\u{7}T\u{202e}G{long}"),
+            ..Default::default()
+        };
+        let m = ams_match(&job, &connected(vec![pla_a1()]));
+        let AmsMatch::NotLoaded { material } = &m else {
+            panic!("{m:?}")
+        };
+        assert!(!material.contains('\u{7}') && !material.contains('\u{202e}'));
+        assert_eq!(material.chars().count(), NEEDS_MAX);
+        assert!(!m.line().contains('\u{202e}'));
+        // A slot label from the printer is cleaned the same way.
+        let v = connected(vec![slot("A\u{202e}1", "PETG-CF", "", "", Some("pet_cf"))]);
+        let AmsMatch::SameMaterial { slot, .. } = ams_match(&petg_cf(), &v) else {
+            panic!()
+        };
+        assert!(!slot.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn a_job_that_names_nothing_gets_a_line_without_a_material_or_double_space() {
+        let nameless = JobFilament::default();
+        let m = ams_match(&nameless, &connected(vec![pla_a1()]));
+        assert_eq!(m.line(), "✗ Not loaded");
+        assert!(!m.line().contains("  "));
+        let blank = JobFilament {
+            preset: "   ".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            ams_match(&blank, &connected(vec![pla_a1()])).line(),
+            "✗ Not loaded"
         );
     }
 }

@@ -293,7 +293,11 @@ pub fn recent_line(p: &GeneratedPreset, now_ms: f64) -> Option<String> {
 /// profile in B1`. `None` when it is loaded or the AMS can't be checked.
 pub fn ams_line(model_name: &str, job: &JobFilament, m: &AmsMatch) -> Option<String> {
     let name = untrusted_text(model_stem(model_name), FILE_MAX);
-    let needs = untrusted_text(&job.needs(), PRESET_MAX);
+    let needs = untrusted_text(job.needs().trim(), PRESET_MAX);
+    // Nothing to name: "Gear needs  · not loaded" would read as broken.
+    if needs.is_empty() {
+        return None;
+    }
     match m {
         AmsMatch::NotLoaded { .. } => Some(format!("{name} needs {needs} · not loaded")),
         AmsMatch::SameMaterial { slot, .. } => Some(format!(
@@ -699,6 +703,20 @@ mod tests {
             ams_line("gear", &untyped, &not_loaded).as_deref(),
             Some("gear needs Bambu PETG-CF @BBL H2D · not loaded")
         );
+    }
+
+    #[test]
+    fn home_hides_the_line_when_the_job_names_no_filament() {
+        let nameless = JobFilament::default();
+        let not_loaded = AmsMatch::NotLoaded {
+            material: String::new(),
+        };
+        assert_eq!(ams_line("Gear.stl", &nameless, &not_loaded), None);
+        let blank = JobFilament {
+            preset: "  ".into(),
+            ..Default::default()
+        };
+        assert_eq!(ams_line("Gear.stl", &blank, &not_loaded), None);
     }
 
     #[test]
