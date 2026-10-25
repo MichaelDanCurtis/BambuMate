@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod discovery;
+pub mod filament_index;
 pub mod hms;
 pub mod service;
 pub mod settings;
