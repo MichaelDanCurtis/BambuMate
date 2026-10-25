@@ -20,7 +20,7 @@ use crate::pages::home_state::{
     idle_label, idle_word, last_print_detail, mode_key, no_printer_label, percent_text,
     presets_unit, printing_detail, printing_label, recent_line, sync_line, HomeMode, HOME_SEGMENTS,
 };
-use crate::pages::printer::SlotPicker;
+use crate::pages::printer::{SlotDetection, SlotPicker};
 use crate::printer::types::{swatch_color, untrusted_text, ConnectionState, SlotView};
 use crate::printer::PrinterShared;
 
@@ -291,6 +291,7 @@ fn HomeSlot(
                     <span class="hm-in-use nd-label">"In use"</span>
                 </Show>
             </button>
+            <SlotDetection item=item />
         </div>
     }
 }

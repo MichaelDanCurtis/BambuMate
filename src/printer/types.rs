@@ -239,9 +239,20 @@ pub struct SlotView {
     pub material: Option<String>,
 }
 
+impl Tray {
+    /// The filament ID the printer reports, trimmed. A blank one, or the
+    /// "0" a spool without a profile reports, is no ID: it reads as "".
+    pub fn reported_id(&self) -> &str {
+        match self.tray_info_idx.trim() {
+            "0" => "",
+            id => id,
+        }
+    }
+}
+
 impl SlotView {
     /// The preset name a card shows: the assigned one, else what the
-    /// printer reports.
+    /// printer reports (its sub-brand, else its filament ID if it has one).
     pub fn preset_name(&self) -> String {
         if let Some(p) = &self.assigned_preset {
             return p.clone();
@@ -249,7 +260,7 @@ impl SlotView {
         if !self.tray.tray_sub_brands.is_empty() {
             return self.tray.tray_sub_brands.clone();
         }
-        self.tray.tray_info_idx.clone()
+        self.tray.reported_id().to_string()
     }
 }
 
@@ -430,6 +441,27 @@ mod tests {
         assert_eq!(s.preset_name(), "PLA Basic");
         s.assigned_preset = Some("Acme PLA".into());
         assert_eq!(s.preset_name(), "Acme PLA");
+    }
+
+    #[test]
+    fn a_tray_id_of_zero_is_no_name() {
+        let mut s = SlotView {
+            tray: Tray {
+                tray_info_idx: "0".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(s.tray.reported_id(), "");
+        assert_eq!(s.preset_name(), "", "a bare 0 is not shown as a name");
+        s.tray.tray_info_idx = " 0 ".into();
+        assert_eq!(s.preset_name(), "");
+        s.tray.tray_info_idx = "  GFA00 ".into();
+        assert_eq!(s.tray.reported_id(), "GFA00");
+        assert_eq!(s.preset_name(), "GFA00");
+        s.tray.tray_info_idx = "0".into();
+        s.tray.tray_sub_brands = "PLA Basic".into();
+        assert_eq!(s.preset_name(), "PLA Basic");
     }
 
     #[test]
