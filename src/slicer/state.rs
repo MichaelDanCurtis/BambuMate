@@ -117,6 +117,15 @@ pub fn newest_source(jobs: &[JobView]) -> Option<&str> {
         .find(|p| !p.trim().is_empty())
 }
 
+/// The newest finished job and its result, for Home's AMS line. Jobs are in
+/// ascending id order.
+pub fn newest_done(jobs: &[JobView]) -> Option<(&JobView, &SliceResult)> {
+    jobs.iter().rev().find_map(|j| match &j.state {
+        JobState::Done { result, .. } => Some((j, result)),
+        _ => None,
+    })
+}
+
 /// The STL indicator's per-file state: "Slicing…", "2h 14m · 38 g" or
 /// "Slice failed". `None` for a cancelled job.
 pub fn badge_text(job: &JobView) -> Option<String> {
@@ -326,6 +335,23 @@ mod tests {
         assert_eq!(newest_source(&jobs), Some("/w/b.stl"));
         let blank = vec![job(1, "", JobState::Cancelled)];
         assert_eq!(newest_source(&blank), None);
+    }
+
+    #[test]
+    fn the_newest_finished_job_is_the_last_done_one() {
+        let done = |id| {
+            job(
+                id,
+                "/a.stl",
+                JobState::Done {
+                    result: result(1, 1.0, None, 0),
+                    cached: false,
+                },
+            )
+        };
+        let jobs = vec![done(1), done(2), job(3, "/b.stl", JobState::Cancelled)];
+        assert_eq!(newest_done(&jobs).map(|(j, _)| j.id), Some(2));
+        assert_eq!(newest_done(&[]).map(|(j, _)| j.id), None);
     }
 
     #[test]

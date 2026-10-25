@@ -147,13 +147,15 @@
     color: var(--nd-warning);
 }
 
-/* A quiet link under the idle hero's actions. */
-.hm-rate {
+/* Quiet links under the idle hero's actions. */
+.hm-rate,
+.hm-ams-line {
     align-self: flex-start;
     font-size: 13px;
     color: var(--nd-text-secondary);
 }
 
-.hm-rate:hover {
+.hm-rate:hover,
+.hm-ams-line:hover {
     color: var(--nd-text-primary);
 }
