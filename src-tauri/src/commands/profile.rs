@@ -598,6 +598,7 @@ pub async fn install_generated_profile(
         .map_err(|e| format!("Failed to write profile: {}", e))?;
     // Best effort: a ledger failure is logged and never fails the install.
     crate::history::ledger::note_new_preset_write(&outcome, &target_path);
+    crate::profile::note_presets_changed();
 
     let profile_name = profile.name().unwrap_or("<unnamed>").to_string();
 

@@ -381,8 +381,9 @@ fn made_for(compatible: &[String], printers: &[String]) -> bool {
 }
 
 /// The user preset folders [`PresetIndex::load`] reads: `user/<preset_folder>`
-/// when it exists, else every folder under `user/`.
-fn user_folders(config_root: &Path, preset_folder: Option<&str>) -> Vec<PathBuf> {
+/// when it exists, else every folder under `user/`. "Use this" accepts
+/// presets from the same folders (`commands::printer::filament_folders`).
+pub(crate) fn user_folders(config_root: &Path, preset_folder: Option<&str>) -> Vec<PathBuf> {
     let user_root = config_root.join("user");
     match preset_folder {
         Some(f) if user_root.join(f).is_dir() => vec![user_root.join(f)],

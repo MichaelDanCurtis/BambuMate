@@ -217,13 +217,15 @@ pub async fn printer_remove(
     .await
 }
 
-/// The current view. Also re-checks assigned presets' cloud-sync state, and
-/// looks up the filament id of any assigned preset stored without one.
+/// The current view. Also re-checks assigned presets' cloud-sync state,
+/// looks up the filament id of any assigned preset stored without one, and
+/// starts a filament ID index refresh in the background when one is due.
 #[tauri::command]
 pub async fn printer_view(service: State<'_, PrinterService>) -> Result<PrinterView, String> {
     let service = service.inner().clone();
     blocking(move || {
         service.refresh_assignments_with(&mut missing_filament_ids());
+        service.schedule_filament_refresh();
         Ok(service.view())
     })
     .await
@@ -276,7 +278,7 @@ impl PresetIndex {
         if let Some(dir) = &user_dir {
             let _ = registry.discover_user_profiles(dir);
         }
-        let allowed = std::iter::once(system_dir).chain(user_dir).collect();
+        let allowed = filament_folders(&paths);
         Some(Self { allowed, registry })
     }
 
@@ -313,12 +315,14 @@ fn missing_filament_ids() -> impl FnMut(&SlotAssignment) -> Option<String> {
 /// or user filament folders are read.
 fn resolve_preset(path: &Path) -> Result<(String, Option<String>), String> {
     let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {e}"))?;
+    resolve_preset_in(path, &paths)
+}
+
+/// [`resolve_preset`] against explicit Bambu Studio `paths`.
+fn resolve_preset_in(path: &Path, paths: &BambuPaths) -> Result<(String, Option<String>), String> {
     let system_dir = paths.system_filament_dir();
     let user_dir = paths.user_filament_dir();
-    let allowed: Vec<PathBuf> = std::iter::once(system_dir.clone())
-        .chain(user_dir.clone())
-        .collect();
-    if !is_within_any(path, &allowed) {
+    if !is_within_any(path, &filament_folders(paths)) {
         return Err("That preset isn't in Bambu Studio's filament folders.".into());
     }
     let profile =
@@ -333,6 +337,20 @@ fn resolve_preset(path: &Path) -> Result<(String, Option<String>), String> {
         }
     }
     Ok((name, slots::resolve_filament_id(&profile, &registry)))
+}
+
+/// The folders a slot's preset may come from: Bambu Studio's system filament
+/// folder, and the user's whole filament folder, which the filament ID index
+/// reads too (the same account folders as the slicer's `PresetIndex::load`).
+/// Bambu Studio keeps user presets in both `filament/` and `filament/base/`.
+fn filament_folders(paths: &BambuPaths) -> Vec<PathBuf> {
+    let user =
+        crate::slicer::settings::user_folders(&paths.config_root, paths.preset_folder.as_deref())
+            .into_iter()
+            .map(|account| account.join("filament"));
+    std::iter::once(paths.system_filament_dir())
+        .chain(user)
+        .collect()
 }
 
 fn is_within_any(path: &Path, dirs: &[PathBuf]) -> bool {
@@ -457,5 +475,114 @@ mod tests {
         assert!(!is_within_any(&outside, &dirs));
         assert!(!is_within_any(&inside_dir.join("../../../B.json"), &dirs));
         assert!(!is_within_any(&inside_dir.join("missing.json"), &dirs));
+    }
+
+    fn paths_in(root: &Path, preset_folder: Option<&str>) -> BambuPaths {
+        BambuPaths {
+            config_root: root.into(),
+            system_filaments: root.join("system/BBL/filament"),
+            user_root: root.join("user"),
+            preset_folder: preset_folder.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_slot_may_take_any_preset_in_the_user_filament_folder() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("user/1881310893/filament/base")).unwrap();
+        let paths = BambuPaths {
+            config_root: root.path().into(),
+            system_filaments: root.path().join("system/BBL/filament"),
+            user_root: root.path().join("user"),
+            preset_folder: Some("1881310893".into()),
+        };
+        assert_eq!(
+            filament_folders(&paths),
+            vec![
+                root.path().join("system/BBL/filament"),
+                root.path().join("user/1881310893/filament"),
+            ],
+            "the whole user filament folder, which the filament ID index reads"
+        );
+    }
+
+    /// A preset file at `rel` under `root`.
+    fn preset(root: &Path, rel: &str, name: &str) -> PathBuf {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(r#"{{"name":"{name}","from":"User","filament_id":"P1234567"}}"#),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn use_this_accepts_every_preset_the_index_can_detect() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let paths = paths_in(r, Some("1881310893"));
+        for (rel, name) in [
+            ("system/BBL/filament/Bambu PLA Basic @BBL H2C.json", "Sys"),
+            ("user/1881310893/filament/base/Acme @H2C.json", "Base"),
+            ("user/1881310893/filament/Acme Top @H2C.json", "Top"),
+        ] {
+            let path = preset(r, rel, name);
+            assert_eq!(
+                resolve_preset_in(&path, &paths),
+                Ok((name.to_string(), Some("P1234567".to_string()))),
+                "{rel}"
+            );
+        }
+    }
+
+    #[test]
+    fn use_this_refuses_files_outside_the_filament_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let paths = paths_in(r, Some("1881310893"));
+        preset(r, "user/1881310893/filament/base/Ok.json", "Ok");
+        let refused = [
+            preset(r, "user/1881310893/process/Fine.json", "Process"),
+            preset(r, "user/1881310893/machine/H2C.json", "Machine"),
+            preset(r, "user/9999999999/filament/Other.json", "Other account"),
+            preset(r, "user/1881310893/Loose.json", "Loose"),
+            preset(r, "Outside.json", "Outside"),
+            r.join("user/1881310893/filament/../../../Outside.json"),
+            r.join("user/1881310893/filament/base/../../process/Fine.json"),
+            r.join("user/1881310893/filament/Missing.json"),
+        ];
+        for path in &refused {
+            assert_eq!(
+                resolve_preset_in(path, &paths),
+                Err("That preset isn't in Bambu Studio's filament folders.".to_string()),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn use_this_refuses_a_link_out_of_the_filament_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let paths = paths_in(r, Some("1881310893"));
+        let target = preset(elsewhere.path(), "Secret.json", "Secret");
+        let link = r.join("user/1881310893/filament/Link.json");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let dir_link = r.join("user/1881310893/filament/away");
+        std::os::unix::fs::symlink(elsewhere.path(), &dir_link).unwrap();
+        for path in [link, dir_link.join("Secret.json")] {
+            assert_eq!(
+                resolve_preset_in(&path, &paths),
+                Err("That preset isn't in Bambu Studio's filament folders.".to_string()),
+                "{}",
+                path.display()
+            );
+        }
     }
 }

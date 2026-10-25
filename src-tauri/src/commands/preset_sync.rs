@@ -63,6 +63,9 @@ pub async fn repair_preset_sync(paths: Vec<String>) -> Result<RepairResult, Stri
                 .to_string()
         })?;
         let result = sync::repair_presets(&user_dir, &paths, &ledger, running)?;
+        if !result.repaired.is_empty() {
+            crate::profile::note_presets_changed();
+        }
         // A repaired preset is now "written new": once the cloud assigns its
         // id it must not be flagged again. Best effort.
         for p in &result.repaired {
