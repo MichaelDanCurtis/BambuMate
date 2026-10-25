@@ -102,7 +102,16 @@ export function sliceResult({ time = 843, weight = 3.69, cost = 0.07, warnings =
     printer_model: "Bambu Lab H2C",
     process: H2C_PROCESS,
     filaments: [
-      { slot: 1, preset: PLA, filament_type: "PLA", color: "#00AE42", cost_per_kg: 19.99, density: 1.26 },
+      {
+        slot: 1,
+        preset: PLA,
+        filament_type: "PLA",
+        color: "#00AE42",
+        cost_per_kg: 19.99,
+        density: 1.26,
+        filament_id: "GFA00",
+        material: "pla",
+      },
     ],
     bed_type: "Textured PEI Plate",
     bambu_studio_version: "02.08.02.61",
@@ -141,6 +150,21 @@ export const PRINTER_SERIAL = "0948AB000000001";
 export const PRINTER_FINGERPRINT =
   "3A:7F:10:C2:9B:44:E1:08:5D:6A:0F:92:B7:31:CE:04:88:1B:F6:2D:73:A9:50:E3:1C:47:DA:6E:02:B5:98:FF";
 
+const SYSTEM_FILAMENTS = "/Users/runner/Library/Application Support/BambuStudio/system/BBL/filament";
+const USER_FILAMENTS = "/Users/runner/Library/Application Support/BambuStudio/user/00000001/filament/base";
+
+// What src-tauri/src/printer/filament_index.rs Detected serializes to.
+const detectedAs = (preset_name, dir = SYSTEM_FILAMENTS, is_user = false) => ({
+  preset_name,
+  path: `${dir}/${preset_name}.json`,
+  is_user,
+  variants: [preset_name],
+});
+
+/** A3 reports GFG99: this is the preset the index names for it. */
+export const A3_DETECTED = "Generic PETG @BBL H2D 0.4 nozzle";
+export const A3_DETECTED_PATH = `${SYSTEM_FILAMENTS}/${A3_DETECTED}.json`;
+
 const tray = (type, color, idx, sub = "", remain = null) => ({
   id: 0,
   empty: !type && !idx,
@@ -162,23 +186,53 @@ const slotOf = (ams_id, tray_id, label, t, extra = {}) => ({
   status: "unassigned",
   needs_cloud_sync: false,
   preset_has_no_id: false,
+  detected: null,
+  not_installed: false,
+  other_nozzle: null,
+  material: null,
   ...extra,
 });
 
 export const PRINTER_SLOTS = [
-  slotOf(0, 0, "A1", tray("PLA-S", "FFFFFFFF", "GFS02", "Support for PLA", 1), { rfid: true, status: "rfid" }),
-  slotOf(0, 1, "A2", tray("PLA", "FFFFFFFF", "GFA00", "PLA Basic", 31), { rfid: true, status: "rfid" }),
-  slotOf(0, 2, "A3", tray("PETG", "1F7A3DFF", "GFG99")),
-  slotOf(0, 3, "A4", tray("PLA", "FFFFFFFF", "GFA00", "PLA Basic", 100), { rfid: true, status: "rfid" }),
-  slotOf(1, 0, "B1", tray("PLA", "000000FF", "GFA00", "PLA Basic", 55), { rfid: true, status: "rfid" }),
+  slotOf(0, 0, "A1", tray("PLA-S", "FFFFFFFF", "GFS02", "Support for PLA", 1), {
+    rfid: true,
+    status: "rfid",
+    detected: detectedAs("Bambu Support For PLA @BBL H2D"),
+  }),
+  slotOf(0, 1, "A2", tray("PLA", "FFFFFFFF", "GFA00", "PLA Basic", 31), {
+    rfid: true,
+    status: "rfid",
+    material: "pla",
+    detected: detectedAs("Bambu PLA Basic @BBL H2D"),
+  }),
+  slotOf(0, 2, "A3", tray("PETG", "1F7A3DFF", "GFG99"), { material: "petg", detected: detectedAs(A3_DETECTED) }),
+  slotOf(0, 3, "A4", tray("PLA", "FFFFFFFF", "GFA00", "PLA Basic", 100), {
+    rfid: true,
+    status: "rfid",
+    material: "pla",
+    detected: detectedAs("Bambu PLA Basic @BBL H2D"),
+  }),
+  slotOf(1, 0, "B1", tray("PLA", "000000FF", "GFA00", "PLA Basic", 55), {
+    rfid: true,
+    status: "rfid",
+    material: "pla",
+    detected: detectedAs("Bambu PLA Basic @BBL H2D"),
+  }),
   slotOf(1, 1, "B2", tray("PLA", "F95959FF", "P4d6ae04"), {
     assigned_preset: "Acme Matte PLA",
     assigned_filament_id: "P4d6ae04",
     status: "matches",
+    material: "pla",
+    detected: detectedAs("Acme Matte PLA", USER_FILAMENTS, true),
   }),
-  slotOf(1, 2, "B3", tray("PETG-CF", "000000FF", "GFG50", "PETG-CF", 100), { rfid: true, status: "rfid" }),
+  slotOf(1, 2, "B3", tray("PETG-CF", "000000FF", "GFG50", "PETG-CF", 100), {
+    rfid: true,
+    status: "rfid",
+    material: "pet_cf",
+    detected: detectedAs("Bambu PETG-CF @BBL H2D"),
+  }),
   slotOf(1, 3, "B4", tray("", "00000000", ""), { status: "empty" }),
-  slotOf(255, 254, "Ext-L", tray("PLA", "76D9F4FF", "GFA01")),
+  slotOf(255, 254, "Ext-L", tray("PLA", "76D9F4FF", "GFA01"), { material: "pla", not_installed: true }),
   slotOf(255, 255, "Ext-R", tray("", "00000000", ""), { status: "empty" }),
 ];
 

@@ -24,6 +24,8 @@ import { deflateSync } from "node:zlib";
 import { extname, join, resolve } from "node:path";
 import {
   A3_ASSIGNED,
+  A3_DETECTED,
+  A3_DETECTED_PATH,
   ADVICE,
   FIXTURES,
   GIF_1X1,
@@ -1459,6 +1461,54 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "Open in Bambu Studio hands over the sliced file", async () => {
     await page.click(".sl-open");
     await page.waitForFunction(() => window.__ipc.calls.some((c) => c.cmd === "slicer_open_in_bambu_studio" && c.args.jobId === 1), null, { timeout: 5000 });
+  });
+
+  // The line under the plate's filament follows the printer's trays.
+  const emitView = (v) => page.evaluate((x) => window.__emit("printer://state", x), v);
+  const amsLine = (text) =>
+    page.waitForFunction((t) => document.querySelector(".sl-ams")?.innerText.trim() === t, text, { timeout: 5000 });
+  const amsTone = () => page.locator(".sl-ams").first().getAttribute("data-match");
+  /** PRINTER_VIEW with some slots patched; a `tray` patch merges into the tray. */
+  const slotsWith = (patch) => ({
+    ...PRINTER_VIEW,
+    slots: PRINTER_SLOTS.map((s) =>
+      patch[s.label] ? { ...s, ...patch[s.label], tray: { ...s.tray, ...(patch[s.label].tray ?? {}) } } : s
+    ),
+  });
+
+  await step(run, page, "the result says whether the job's filament is in the AMS", async () => {
+    // GFA00 is in A2, A4 and B1, none of them the job's green.
+    await emitView(PRINTER_VIEW);
+    await amsLine("✓ Loaded in A2 · different colour");
+    if ((await amsTone()) !== "loaded") throw new Error("not marked loaded");
+    const otherPla = { tray: { tray_info_idx: "GFA01" }, detected: null };
+    await emitView(slotsWith({ A2: otherPla, A4: otherPla, B1: otherPla }));
+    await amsLine("~ PLA in A2, different profile: check temperatures · different colour");
+    if ((await amsTone()) !== "same") throw new Error("not marked same material");
+    const petg = { tray: { tray_type: "PETG", tray_info_idx: "GFG99" }, material: "petg", detected: null };
+    await emitView(slotsWith({ A2: petg, A4: petg, B1: petg, B2: petg, "Ext-L": petg }));
+    await amsLine("✗ Not loaded: load PLA before printing");
+    if ((await amsTone()) !== "missing") throw new Error("not marked missing");
+    // A filament that isn't loaded is not an error: plain text, never the accent.
+    const [line, plain, accent] = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--nd-accent)";
+      document.body.append(probe);
+      const out = [
+        getComputedStyle(document.querySelector(".sl-ams")).color,
+        getComputedStyle(document.querySelector(".sl-filament")).color,
+        getComputedStyle(probe).color,
+      ];
+      probe.remove();
+      return out;
+    });
+    if (line !== plain || line === accent) throw new Error(`not loaded drawn in ${line}`);
+    // Disconnected: the stale trays are not used.
+    await page.evaluate(() => window.__emit("printer://connection", { state: "unreachable" }));
+    await amsLine("Can't check the AMS: printer not connected");
+    if ((await amsTone()) !== "unknown") throw new Error("not marked unknown");
+    await emitView(PRINTER_VIEW);
+    await amsLine("✓ Loaded in A2 · different colour");
   });
 
   await page.screenshot({ path: `flow-${engine}-slice.png`, fullPage: false });
@@ -3896,6 +3946,41 @@ async function driveApp(browserType, engine, baseUrl) {
     if (!href.startsWith("https://wiki.bambulab.com/")) throw new Error(`wiki link: ${href}`);
   });
 
+  const detectedText = async (label) =>
+    (await slotCard(label).locator(".pr-detected-text").innerText()).replace(/\s+/g, " ").trim();
+  const a3Detected = (want) =>
+    page.waitForFunction(
+      (t) => document.querySelector('.pr-slot[data-label="A3"] .pr-detected-text')?.innerText.trim() === t,
+      want,
+      { timeout: 5000 }
+    );
+
+  await step(run, page, "slot cards name the detected profile, or say it isn't installed", async () => {
+    if ((await detectedText("A2")) !== "Detected: Bambu PLA Basic") throw new Error(`A2 reads "${await detectedText("A2")}"`);
+    const title = await slotCard("A2").locator(".pr-detected-text").getAttribute("title");
+    if (title !== "Bambu PLA Basic @BBL H2D") throw new Error(`A2 tooltip "${title}"`);
+    const spoken = (await slotCard("A2").locator(".pr-detected .nd-visually-hidden").textContent()).trim();
+    if (spoken !== "Detected: Bambu PLA Basic @BBL H2D") throw new Error(`A2 label "${spoken}"`);
+    if ((await detectedText("Ext-L")) !== "GFA01 — not installed") throw new Error(`Ext-L reads "${await detectedText("Ext-L")}"`);
+    if ((await slotCard("Ext-L").locator(".pr-use-detected").count()) !== 0) throw new Error("Ext-L offers Use this");
+    if ((await slotCard("B2").locator(".pr-use-detected").count()) !== 0) throw new Error("an assigned slot offers Use this");
+    if ((await slotCard("A3").locator(".pr-use-detected").innerText()).trim() !== "Use this") throw new Error("A3 offers nothing");
+    if ((await slotCard("B4").locator(".pr-detected").count()) !== 0) throw new Error("an empty slot shows a line");
+    // No ID but a material: the material alone, never a guess.
+    await emitEvent("printer://state", withSlot("A3", { tray: { ...PRINTER_VIEW.slots[2].tray, tray_info_idx: "" }, detected: null }));
+    await a3Detected("PETG, no profile ID");
+    // A raw ID of "0" is no ID either.
+    await emitEvent("printer://state", withSlot("A3", { tray: { ...PRINTER_VIEW.slots[2].tray, tray_info_idx: "0" }, detected: null }));
+    await a3Detected("PETG, no profile ID");
+    // The ID names presets for this printer, but none for the nozzle in use.
+    await emitEvent("printer://state", withSlot("A3", { detected: null, other_nozzle: 0.6 }));
+    await a3Detected("No preset for the 0.6 mm nozzle");
+    if ((await slotCard("A3").locator(".pr-detected").getAttribute("data-detected")) !== "other-nozzle") throw new Error("not marked other-nozzle");
+    if ((await slotCard("A3").locator(".pr-use-detected").count()) !== 0) throw new Error("other nozzle offers Use this");
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await a3Detected("Detected: Generic PETG");
+  });
+
   await page.screenshot({ path: `flow-${engine}-printer.png`, fullPage: true });
 
   await step(run, page, "assigning a preset shows the steps to set it on the printer", async () => {
@@ -4175,6 +4260,47 @@ async function driveApp(browserType, engine, baseUrl) {
     await setFixture("list_system_profiles", FIXTURES.list_system_profiles);
   });
 
+  await step(run, page, "Use this assigns the detected profile and opens no steps", async () => {
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await a3Detected("Detected: Generic PETG");
+    const matched = withSlot("A3", { assigned_preset: A3_DETECTED, assigned_filament_id: "GFG99", status: "matches" });
+    await withFixtures({ printer_assign_slot: matched }, async () => {
+      const before = (await callsOf("printer_assign_slot")).length;
+      await slotCard("A3").locator(".pr-use-detected").click();
+      await page.waitForFunction(
+        (n) => window.__ipc.calls.filter((c) => c.cmd === "printer_assign_slot").length > n,
+        before,
+        { timeout: 5000 }
+      );
+      const last = (await callsOf("printer_assign_slot")).at(-1);
+      if (!sameArgs(last.args, { amsId: 0, trayId: 2, presetPath: A3_DETECTED_PATH })) throw new Error(JSON.stringify(last.args));
+      await page.waitForFunction(
+        () => document.querySelector('.pr-slot[data-label="A3"] .pr-status')?.innerText.trim() === "✓ Set",
+        null,
+        { timeout: 5000 }
+      );
+      if ((await slotCard("A3").locator(".pr-steps").count()) !== 0) throw new Error("the steps opened");
+      if ((await page.locator(".pr-picker").count()) !== 0) throw new Error("the picker opened");
+      if ((await slotCard("A3").locator(".pr-use-detected").count()) !== 0) throw new Error("Use this still offered");
+    });
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await page.waitForFunction(
+      () => document.querySelector('.pr-slot[data-label="A3"] .pr-status')?.innerText.trim() === "Not set",
+      null,
+      { timeout: 5000 }
+    );
+  });
+
+  await step(run, page, "a different assignment shows Yours and Detected and keeps the steps", async () => {
+    await emitEvent("printer://state", withSlot("A3", A3_ASSIGNED));
+    await a3Detected("Yours: Polymaker PolyLite PLA · Detected: Generic PETG");
+    if ((await badgeOf("A3")) !== "Set on printer") throw new Error(`A3 shows "${await badgeOf("A3")}"`);
+    if ((await slotCard("A3").locator(".pr-steps").count()) !== 1) throw new Error("the steps went away");
+    if ((await slotCard("A3").locator(".pr-use-detected").count()) !== 0) throw new Error("Use this offered over an assignment");
+    await emitEvent("printer://state", PRINTER_VIEW);
+    await a3Detected("Detected: Generic PETG");
+  });
+
   await step(run, page, "printer-supplied names are shortened and shown as plain text", async () => {
     const odd = {
       ...withSlot("A2", {
@@ -4335,6 +4461,41 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click('nav.sidebar a[href="/"]');
     await emitEvent("printer://state", FINISHED);
     await homeMode("idle");
+  });
+
+  await step(run, page, "home names the newest sliced job's filament until it is loaded", async () => {
+    const gear = sliceResult();
+    gear.filaments = [
+      { ...gear.filaments[0], preset: "Bambu PETG HF @BBL H2C", filament_type: "PETG", filament_id: "GFG02", material: "petg", color: "#1F7A3D" },
+    ];
+    gear.plates[0].filaments = [{ ...gear.plates[0].filaments[0], filament_type: "PETG", color: "#1F7A3D" }];
+    await page.evaluate(
+      (v) => window.__emit("slicer://job", v),
+      sliceJob(900, { state: "done", result: gear, cached: false }, { model_name: "Gear.stl", filament: "Bambu PETG HF @BBL H2C" })
+    );
+    const line = (text) =>
+      page.waitForFunction(
+        (t) => document.querySelector(".home-page .hm-ams-line")?.textContent.trim() === t,
+        text,
+        { timeout: 5000 }
+      );
+    // A3 holds PETG with another profile.
+    await line("Gear needs PETG · different profile in A3");
+    if ((await page.locator(".home-page .hm-ams-line").getAttribute("href")) !== "/slice") throw new Error("the line doesn't link to Slice");
+    if ((await page.locator(".home-page .nd-hero").count()) !== 1) throw new Error("a second hero");
+    const without = (label, patch) => ({ ...FINISHED, slots: FINISHED.slots.map((s) => (s.label === label ? { ...s, ...patch, tray: { ...s.tray, ...(patch.tray ?? {}) } } : s)) });
+    await emitEvent("printer://state", without("A3", { tray: { empty: true, tray_type: "", tray_info_idx: "" }, material: null, detected: null, status: "empty" }));
+    await line("Gear needs PETG · not loaded");
+    // Loaded exactly: the line goes.
+    await emitEvent("printer://state", without("A3", { tray: { tray_info_idx: "GFG02" } }));
+    await page.waitForSelector(".home-page .hm-ams-line", { state: "detached", timeout: 5000 });
+    // While printing there is no idle hero, so no line.
+    await emitEvent("printer://state", RUNNING_CLEAN);
+    await homeMode("printing");
+    if ((await page.locator(".home-page .hm-ams-line").count()) !== 0) throw new Error("line shown while printing");
+    await emitEvent("printer://state", FINISHED);
+    await homeMode("idle");
+    await line("Gear needs PETG · different profile in A3");
   });
 
   await step(run, page, "home never shows a stale percentage after a disconnect", async () => {
