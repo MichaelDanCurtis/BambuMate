@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use super::materials::MaterialId;
 use crate::printer::slots::SlotView;
+use crate::printer::state::Tray;
 use crate::scraper::catalog::CatalogEntry;
 
 /// The `preferences.json` key holding the preferred brands, a JSON array.
@@ -148,12 +149,17 @@ pub fn material_of_entry(entry: &CatalogEntry) -> Option<MaterialId> {
     classify(&format!("{} {}", entry.material, entry.name))
 }
 
-pub fn material_of_tray(slot: &SlotView) -> Option<MaterialId> {
-    let t = &slot.tray;
-    if t.empty || t.tray_type.trim().is_empty() {
+/// The material a tray reports. `None` for an empty tray or one the advisor
+/// has no row for.
+pub fn material_of(tray: &Tray) -> Option<MaterialId> {
+    if tray.empty || tray.tray_type.trim().is_empty() {
         return None;
     }
-    classify(&format!("{} {}", t.tray_type, t.tray_sub_brands))
+    classify(&format!("{} {}", tray.tray_type, tray.tray_sub_brands))
+}
+
+pub fn material_of_tray(slot: &SlotView) -> Option<MaterialId> {
+    material_of(&slot.tray)
 }
 
 /// The link behind "Where to buy": in v1, the entry's own manufacturer or
@@ -355,6 +361,10 @@ pub(crate) mod test_support {
             status: SlotStatus::Unassigned,
             needs_cloud_sync: false,
             preset_has_no_id: false,
+            detected: None,
+            not_installed: false,
+            other_nozzle: None,
+            material: None,
         }
     }
 

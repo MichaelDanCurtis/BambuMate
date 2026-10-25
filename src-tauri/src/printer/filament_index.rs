@@ -58,6 +58,8 @@ pub struct FilamentIndex {
     /// IDs with presets for this printer but not for the configured nozzle,
     /// and the nozzles those are for.
     other_nozzle: HashMap<String, Vec<f64>>,
+    /// The nozzle (mm) the index was built for. `None` when unknown.
+    nozzle: Option<f64>,
 }
 
 struct Candidate {
@@ -124,6 +126,7 @@ impl FilamentIndex {
         Self {
             by_id,
             other_nozzle,
+            nozzle: target.nozzle,
         }
     }
 
@@ -150,6 +153,11 @@ impl FilamentIndex {
             },
             _ => Lookup::NotInstalled,
         }
+    }
+
+    /// The nozzle diameter (mm) the index was built for.
+    pub fn nozzle(&self) -> Option<f64> {
+        self.nozzle
     }
 
     pub fn is_empty(&self) -> bool {
