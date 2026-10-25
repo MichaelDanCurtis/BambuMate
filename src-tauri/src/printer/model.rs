@@ -53,7 +53,12 @@ fn without_nozzle(model: &str) -> String {
 /// and H2D Pro stay different printers.
 pub(crate) fn model_key(model: &str) -> String {
     let cleaned = clean_model(&without_nozzle(&clean_model(model)));
-    let key = squash(&model_name(&cleaned));
+    // Codes are upper-case; a hand-typed "o1c2" is the same code.
+    let mut named = model_name(&cleaned);
+    if named == cleaned {
+        named = model_name(&cleaned.to_ascii_uppercase());
+    }
+    let key = squash(&named);
     match key.as_str() {
         "X1C" => "X1CARBON".to_string(),
         "A1M" => "A1MINI".to_string(),
@@ -76,7 +81,7 @@ mod tests {
                 "x1carbon",
                 "BL-P001",
             ][..],
-            &["A1M", "A1 mini", "Bambu Lab A1 mini 0.4 nozzle", "N1"],
+            &["A1M", "A1 mini", "Bambu Lab A1 mini 0.4 nozzle", "N1", "n1"],
             &[
                 "H2C",
                 "Bambu Lab H2C",
@@ -84,14 +89,17 @@ mod tests {
                 "O1C2",
                 "H2C 0.6 nozzle",
             ],
-            &["H2D Pro", "H2DP", "Bambu Lab H2D Pro", "O1E"],
-            &["P1S", "P1S Combo", "Bambu Lab P1S", "C12"],
+            &["H2D Pro", "H2DP", "Bambu Lab H2D Pro", "O1E", "o1e"],
+            &["P1S", "P1S Combo", "Bambu Lab P1S", "C12", "c12"],
+            &["X1 Carbon", "bl-p001", "BL-P001"],
         ] {
             let keys: Vec<String> = same.iter().map(|m| model_key(m)).collect();
             assert!(keys.iter().all(|k| *k == keys[0]), "{same:?} -> {keys:?}");
         }
         assert_ne!(model_key("H2D"), model_key("H2D Pro"));
         assert_ne!(model_key("A1"), model_key("A1 mini"));
+        assert_ne!(model_key("H2S"), model_key("H2C"));
+        assert_ne!(model_key("o1s"), model_key("o1c2"));
         assert_eq!(model_key(""), "");
     }
 }
