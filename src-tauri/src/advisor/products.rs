@@ -149,20 +149,29 @@ pub fn material_of_entry(entry: &CatalogEntry) -> Option<MaterialId> {
     classify(&format!("{} {}", entry.material, entry.name))
 }
 
-/// The material a tray reports. `None` for an empty tray or one the advisor
-/// has no row for.
-pub fn material_of(tray: &Tray) -> Option<MaterialId> {
-    if tray.empty || tray.tray_type.trim().is_empty() {
+/// The material a filament type and name describe: `material_of` for
+/// anything that isn't a tray (a sliced job's `filament_type` and preset).
+/// Bambu's support spools use a type like "PLA-S" or "PA-S": a material word
+/// plus a lone "S". They are not that material, so a PLA job must not count
+/// one as "same material". ("Support …" is `classify`'s job.)
+pub fn material_of_filament(filament_type: &str, name: &str) -> Option<MaterialId> {
+    if filament_type.trim().is_empty() {
         return None;
     }
-    // Bambu's support spools report a type like "PLA-S" or "PA-S": a material
-    // word plus a lone "S". They are not that material, so a PLA job must
-    // not count one as "same material". ("Support …" is `classify`'s job.)
-    let words = tokens(&tray.tray_type);
+    let words = tokens(filament_type);
     if words.len() >= 2 && words.last().is_some_and(|w| w == "S") {
         return None;
     }
-    classify(&format!("{} {}", tray.tray_type, tray.tray_sub_brands))
+    classify(&format!("{filament_type} {name}"))
+}
+
+/// The material a tray reports. `None` for an empty tray or one the advisor
+/// has no row for.
+pub fn material_of(tray: &Tray) -> Option<MaterialId> {
+    if tray.empty {
+        return None;
+    }
+    material_of_filament(&tray.tray_type, &tray.tray_sub_brands)
 }
 
 pub fn material_of_tray(slot: &SlotView) -> Option<MaterialId> {
