@@ -217,13 +217,15 @@ pub async fn printer_remove(
     .await
 }
 
-/// The current view. Also re-checks assigned presets' cloud-sync state, and
-/// looks up the filament id of any assigned preset stored without one.
+/// The current view. Also re-checks assigned presets' cloud-sync state,
+/// looks up the filament id of any assigned preset stored without one, and
+/// starts a filament ID index refresh in the background when one is due.
 #[tauri::command]
 pub async fn printer_view(service: State<'_, PrinterService>) -> Result<PrinterView, String> {
     let service = service.inner().clone();
     blocking(move || {
         service.refresh_assignments_with(&mut missing_filament_ids());
+        service.schedule_filament_refresh();
         Ok(service.view())
     })
     .await
@@ -238,13 +240,13 @@ pub async fn printer_assign_slot(
 ) -> Result<PrinterView, String> {
     let service = service.inner().clone();
     blocking(move || {
-        let (name, filament_id) = resolve_preset(Path::new(&preset_path))?;
+        let (name, filament_id, path) = resolve_preset(Path::new(&preset_path))?;
         service.assign_slot(
             ams_id,
             tray_id,
             &name,
             filament_id.as_deref(),
-            Some(&preset_path),
+            Some(&path.to_string_lossy()),
         )
     })
     .await
@@ -268,16 +270,14 @@ struct PresetIndex {
 
 impl PresetIndex {
     fn load() -> Option<Self> {
-        let paths = BambuPaths::detect().ok()?;
-        let system_dir = paths.system_filament_dir();
-        let user_dir = paths.user_filament_dir();
-        let mut registry = ProfileRegistry::discover_system_profiles(&system_dir)
-            .unwrap_or_else(|_| ProfileRegistry::new());
-        if let Some(dir) = &user_dir {
-            let _ = registry.discover_user_profiles(dir);
+        Some(Self::load_in(&BambuPaths::detect().ok()?))
+    }
+
+    fn load_in(paths: &BambuPaths) -> Self {
+        Self {
+            allowed: filament_folders(paths),
+            registry: filament_registry(paths),
         }
-        let allowed = std::iter::once(system_dir).chain(user_dir).collect();
-        Some(Self { allowed, registry })
     }
 
     /// The assigned preset's filament id: from its file when that is still
@@ -286,9 +286,8 @@ impl PresetIndex {
         let from_file = a
             .preset_path
             .as_deref()
-            .map(Path::new)
-            .filter(|p| is_within_any(p, &self.allowed))
-            .and_then(|p| reader::read_profile(p).ok())
+            .and_then(|p| within_any(Path::new(p), &self.allowed))
+            .and_then(|p| reader::read_profile(&p).ok())
             .and_then(|profile| slots::resolve_filament_id(&profile, &self.registry));
         from_file.or_else(|| {
             let profile = self.registry.get_by_name(&a.preset_name)?;
@@ -309,39 +308,72 @@ fn missing_filament_ids() -> impl FnMut(&SlotAssignment) -> Option<String> {
     }
 }
 
-/// A preset's name and filament id. Only presets in Bambu Studio's system
-/// or user filament folders are read.
-fn resolve_preset(path: &Path) -> Result<(String, Option<String>), String> {
+/// A preset's name, its filament id, and its file as checked: the canonical
+/// path, which is the one read and the one to store. Only presets in Bambu
+/// Studio's system or user filament folders are read.
+fn resolve_preset(path: &Path) -> Result<(String, Option<String>, PathBuf), String> {
     let paths = BambuPaths::detect().map_err(|e| format!("Bambu Studio not found: {e}"))?;
-    let system_dir = paths.system_filament_dir();
-    let user_dir = paths.user_filament_dir();
-    let allowed: Vec<PathBuf> = std::iter::once(system_dir.clone())
-        .chain(user_dir.clone())
-        .collect();
-    if !is_within_any(path, &allowed) {
-        return Err("That preset isn't in Bambu Studio's filament folders.".into());
-    }
-    let profile =
-        reader::read_profile(path).map_err(|e| format!("Could not read the preset: {e}"))?;
-    let name = profile.name().ok_or("The preset has no name")?.to_string();
-    let mut registry = ProfileRegistry::new();
-    if profile.filament_id().is_none_or(|id| id.trim().is_empty()) {
-        registry = ProfileRegistry::discover_system_profiles(&system_dir)
-            .unwrap_or_else(|_| ProfileRegistry::new());
-        if let Some(dir) = &user_dir {
-            let _ = registry.discover_user_profiles(dir);
-        }
-    }
-    Ok((name, slots::resolve_filament_id(&profile, &registry)))
+    resolve_preset_in(path, &paths)
 }
 
-fn is_within_any(path: &Path, dirs: &[PathBuf]) -> bool {
-    let Ok(path) = path.canonicalize() else {
-        return false;
+/// [`resolve_preset`] against explicit Bambu Studio `paths`.
+fn resolve_preset_in(
+    path: &Path,
+    paths: &BambuPaths,
+) -> Result<(String, Option<String>, PathBuf), String> {
+    // Read the path that was checked, so a link swapped after the check
+    // can't lead the read out of the folders.
+    let path = within_any(path, &filament_folders(paths))
+        .ok_or("That preset isn't in Bambu Studio's filament folders.")?;
+    let profile =
+        reader::read_profile(&path).map_err(|e| format!("Could not read the preset: {e}"))?;
+    let name = profile.name().ok_or("The preset has no name")?.to_string();
+    let registry = if profile.filament_id().is_none_or(|id| id.trim().is_empty()) {
+        filament_registry(paths)
+    } else {
+        ProfileRegistry::new()
     };
+    let filament_id = slots::resolve_filament_id(&profile, &registry);
+    Ok((name, filament_id, path))
+}
+
+/// Every preset in the folders a slot's preset may come from, by name, for
+/// resolving `inherits`: the system folder, then the user filament folders.
+fn filament_registry(paths: &BambuPaths) -> ProfileRegistry {
+    let mut registry = ProfileRegistry::discover_system_profiles(&paths.system_filament_dir())
+        .unwrap_or_else(|_| ProfileRegistry::new());
+    for dir in user_filament_folders(paths) {
+        let _ = registry.discover_user_profiles(&dir);
+    }
+    registry
+}
+
+/// The folders a slot's preset may come from: Bambu Studio's system filament
+/// folder, and the user's whole filament folder, which the filament ID index
+/// reads too (the same account folders as the slicer's `PresetIndex::load`).
+/// Bambu Studio keeps user presets in both `filament/` and `filament/base/`.
+fn filament_folders(paths: &BambuPaths) -> Vec<PathBuf> {
+    std::iter::once(paths.system_filament_dir())
+        .chain(user_filament_folders(paths))
+        .collect()
+}
+
+/// The user's filament folders: `filament/` in each account folder the
+/// slicer reads.
+fn user_filament_folders(paths: &BambuPaths) -> Vec<PathBuf> {
+    crate::slicer::settings::user_folders(&paths.config_root, paths.preset_folder.as_deref())
+        .into_iter()
+        .map(|account| account.join("filament"))
+        .collect()
+}
+
+/// `path` made canonical, when it lies inside one of `dirs`.
+fn within_any(path: &Path, dirs: &[PathBuf]) -> Option<PathBuf> {
+    let path = path.canonicalize().ok()?;
     dirs.iter()
         .filter_map(|d| d.canonicalize().ok())
         .any(|d| path.starts_with(d))
+        .then_some(path)
 }
 
 #[cfg(test)]
@@ -453,9 +485,183 @@ mod tests {
         let outside = root.path().join("B.json");
         std::fs::write(&outside, "{}").unwrap();
         let dirs = vec![inside_dir.clone()];
-        assert!(is_within_any(&inside, &dirs));
-        assert!(!is_within_any(&outside, &dirs));
-        assert!(!is_within_any(&inside_dir.join("../../../B.json"), &dirs));
-        assert!(!is_within_any(&inside_dir.join("missing.json"), &dirs));
+        assert_eq!(within_any(&inside, &dirs), inside.canonicalize().ok());
+        assert_eq!(within_any(&outside, &dirs), None);
+        assert_eq!(within_any(&inside_dir.join("../../../B.json"), &dirs), None);
+        assert_eq!(within_any(&inside_dir.join("missing.json"), &dirs), None);
+    }
+
+    fn paths_in(root: &Path, preset_folder: Option<&str>) -> BambuPaths {
+        BambuPaths {
+            config_root: root.into(),
+            system_filaments: root.join("system/BBL/filament"),
+            user_root: root.join("user"),
+            preset_folder: preset_folder.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_slot_may_take_any_preset_in_the_user_filament_folder() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("user/1881310893/filament/base")).unwrap();
+        let paths = BambuPaths {
+            config_root: root.path().into(),
+            system_filaments: root.path().join("system/BBL/filament"),
+            user_root: root.path().join("user"),
+            preset_folder: Some("1881310893".into()),
+        };
+        assert_eq!(
+            filament_folders(&paths),
+            vec![
+                root.path().join("system/BBL/filament"),
+                root.path().join("user/1881310893/filament"),
+            ],
+            "the whole user filament folder, which the filament ID index reads"
+        );
+    }
+
+    /// A preset file at `rel` under `root`.
+    fn preset(root: &Path, rel: &str, name: &str) -> PathBuf {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(r#"{{"name":"{name}","from":"User","filament_id":"P1234567"}}"#),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn use_this_accepts_every_preset_the_index_can_detect() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let paths = paths_in(r, Some("1881310893"));
+        for (rel, name) in [
+            ("system/BBL/filament/Bambu PLA Basic @BBL H2C.json", "Sys"),
+            ("user/1881310893/filament/base/Acme @H2C.json", "Base"),
+            ("user/1881310893/filament/Acme Top @H2C.json", "Top"),
+        ] {
+            let path = preset(r, rel, name);
+            assert_eq!(
+                resolve_preset_in(&path, &paths),
+                Ok((
+                    name.to_string(),
+                    Some("P1234567".to_string()),
+                    path.canonicalize().unwrap()
+                )),
+                "{rel}"
+            );
+        }
+    }
+
+    #[test]
+    fn use_this_refuses_files_outside_the_filament_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let paths = paths_in(r, Some("1881310893"));
+        preset(r, "user/1881310893/filament/base/Ok.json", "Ok");
+        let refused = [
+            preset(r, "user/1881310893/process/Fine.json", "Process"),
+            preset(r, "user/1881310893/machine/H2C.json", "Machine"),
+            preset(r, "user/9999999999/filament/Other.json", "Other account"),
+            preset(r, "user/1881310893/Loose.json", "Loose"),
+            preset(r, "Outside.json", "Outside"),
+            r.join("user/1881310893/filament/../../../Outside.json"),
+            r.join("user/1881310893/filament/base/../../process/Fine.json"),
+            r.join("user/1881310893/filament/Missing.json"),
+        ];
+        for path in &refused {
+            assert_eq!(
+                resolve_preset_in(path, &paths),
+                Err("That preset isn't in Bambu Studio's filament folders.".to_string()),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn use_this_refuses_a_link_out_of_the_filament_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let paths = paths_in(r, Some("1881310893"));
+        let target = preset(elsewhere.path(), "Secret.json", "Secret");
+        let link = r.join("user/1881310893/filament/Link.json");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let dir_link = r.join("user/1881310893/filament/away");
+        std::os::unix::fs::symlink(elsewhere.path(), &dir_link).unwrap();
+        for path in [link, dir_link.join("Secret.json")] {
+            assert_eq!(
+                resolve_preset_in(&path, &paths),
+                Err("That preset isn't in Bambu Studio's filament folders.".to_string()),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn use_this_reads_and_returns_the_path_it_checked() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let paths = paths_in(r, Some("1881310893"));
+        let file = preset(r, "user/1881310893/filament/Acme @H2C.json", "Acme");
+        std::fs::create_dir_all(r.join("user/1881310893/filament/base")).unwrap();
+        let via = r.join("user/1881310893/filament/base/../Acme @H2C.json");
+        let (_, _, checked) = resolve_preset_in(&via, &paths).unwrap();
+        assert_eq!(checked, file.canonicalize().unwrap());
+        assert!(!checked
+            .components()
+            .any(|c| c == std::path::Component::ParentDir));
+    }
+
+    #[test]
+    fn a_top_level_user_preset_gets_its_id_from_a_sibling_it_inherits() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let paths = paths_in(r, Some("1881310893"));
+        // `filament/base` exists, so it alone is `user_filament_dir()`.
+        std::fs::create_dir_all(r.join("user/1881310893/filament/base")).unwrap();
+        let write = |rel: &str, body: &str| {
+            let path = r.join(rel);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        write(
+            "user/1881310893/filament/Acme Parent.json",
+            r#"{"name":"Acme Parent","from":"User","filament_id":"P7654321","instantiation":"false"}"#,
+        );
+        let child = write(
+            "user/1881310893/filament/Acme Child @H2C.json",
+            r#"{"name":"Acme Child @H2C","inherits":"Acme Parent","from":"User"}"#,
+        );
+        let (name, id, _) = resolve_preset_in(&child, &paths).unwrap();
+        assert_eq!(name, "Acme Child @H2C");
+        assert_eq!(id.as_deref(), Some("P7654321"));
+
+        // `missing_filament_ids` fills in an assignment stored without one.
+        let index = PresetIndex::load_in(&paths);
+        let assignment = |path: Option<&Path>| SlotAssignment {
+            serial: "S".into(),
+            ams_id: 0,
+            tray_id: 0,
+            preset_name: "Acme Child @H2C".into(),
+            filament_id: None,
+            preset_path: path.map(|p| p.to_string_lossy().into_owned()),
+            assigned_at: String::new(),
+        };
+        assert_eq!(
+            index.filament_id(&assignment(Some(&child))).as_deref(),
+            Some("P7654321")
+        );
+        assert_eq!(
+            index.filament_id(&assignment(None)).as_deref(),
+            Some("P7654321"),
+            "by name, when the file is gone"
+        );
     }
 }

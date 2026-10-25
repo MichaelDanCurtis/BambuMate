@@ -16,13 +16,16 @@ use crate::journal::format::{rate_href, RATE_LAST};
 use crate::journal::types::PrintEntry;
 use crate::journal::{bridge as journal_bridge, next_revision, JournalShared};
 use crate::pages::home_state::{
-    active_slot, ask_about, attention_detail, attention_label, attention_word, home_mode,
+    active_slot, ams_line, ask_about, attention_detail, attention_label, attention_word, home_mode,
     idle_label, idle_word, last_print_detail, mode_key, no_printer_label, percent_text,
     presets_unit, printing_detail, printing_label, recent_line, sync_line, HomeMode, HOME_SEGMENTS,
 };
-use crate::pages::printer::SlotPicker;
+use crate::pages::printer::{SlotDetection, SlotPicker};
+use crate::printer::ams::{ams_match, JobFilament};
 use crate::printer::types::{swatch_color, untrusted_text, ConnectionState, SlotView};
 use crate::printer::PrinterShared;
+use crate::slicer::state::newest_done;
+use crate::slicer::SlicerShared;
 
 /// How often the relative times ("3h ago") are brought up to date.
 const CLOCK_TICK: Duration = Duration::from_secs(30);
@@ -109,6 +112,21 @@ pub fn HomePage() -> impl IntoView {
         agent.open.set(true);
     };
 
+    // The newest finished slice job, while its filament isn't loaded
+    // exactly. Slice jobs last only for the session, so only the newest.
+    let slicer_jobs = expect_context::<SlicerShared>().jobs;
+    let ams_note = Memo::new(move |_| {
+        let (name, filament) = slicer_jobs.with(|jobs| {
+            newest_done(jobs).map(|(job, result)| {
+                (
+                    job.model_name.clone(),
+                    JobFilament::main(result, &job.filament),
+                )
+            })
+        })?;
+        view.with(|v| ams_line(&name, &filament, &ams_match(&filament, v)))
+    });
+
     let hero = move || match mode.get() {
         HomeMode::Attention => view! {
             <Hero
@@ -161,6 +179,9 @@ pub fn HomePage() -> impl IntoView {
             </div>
             {move || last_print.with(|p| p.as_ref().and_then(rate_href)).map(|href| view! {
                 <a href=href class="hm-rate">{RATE_LAST}</a>
+            })}
+            {move || ams_note.get().map(|line| view! {
+                <a href="/slice" class="hm-ams-line">{line}</a>
             })}
         }
         .into_any(),
@@ -291,6 +312,7 @@ fn HomeSlot(
                     <span class="hm-in-use nd-label">"In use"</span>
                 </Show>
             </button>
+            <SlotDetection item=item />
         </div>
     }
 }

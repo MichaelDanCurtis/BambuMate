@@ -17,6 +17,8 @@ use crate::agent::drawer::AgentShared;
 use crate::agent::types::SliceContext;
 use crate::commands::{self, StlFile};
 use crate::components::patterns::{PageHeader, SegmentedBar};
+use crate::printer::ams::{ams_match, JobFilament};
+use crate::printer::PrinterShared;
 use crate::slicer::state::{
     compare_rows, format_cost, format_duration, format_grams, insert_if_absent, keyed_rows,
     remember_choices, status_line, swatch_color, totals, Totals,
@@ -695,6 +697,10 @@ fn ResultView(
     plate_selection: RwSignal<Option<(u64, u32)>>,
 ) -> impl IntoView {
     let job = expect_context::<SlicerShared>().job(id);
+    let printer_view = expect_context::<PrinterShared>().view;
+    let job_preset = Memo::new(move |_| {
+        job.with(|j| j.as_ref().map(|j| j.filament.clone()).unwrap_or_default())
+    });
     let result = Memo::new(move |_| {
         job.with(|j| match j.as_ref().map(|j| &j.state) {
             Some(JobState::Done { result, .. }) => Some(result.clone()),
@@ -809,11 +815,23 @@ fn ResultView(
                         <For each=move || filaments.get() key=|(k, _)| k.clone() let:row>
                             {
                                 let (_, f) = row;
+                                let slot = f.slot;
+                                // Follows the trays through `printer://state`.
+                                let ams = Memo::new(move |_| {
+                                    let filament = result.with(|r| {
+                                        r.as_ref()
+                                            .map(|r| JobFilament::of(r, slot, &job_preset.get()))
+                                    })?;
+                                    Some(printer_view.with(|v| ams_match(&filament, v)))
+                                });
                                 view! {
                                     <li class="sl-filament">
                                         <span class="sl-swatch" style:background=swatch_color(&f.color).unwrap_or_default()></span>
                                         {format!("Slot {} · {} · {} · {:.2} m", f.slot, f.filament_type, format_grams(f.used_g), f.used_m)}
                                     </li>
+                                    {move || ams.get().map(|m| view! {
+                                        <li class="sl-ams" data-match=m.tone()>{m.line()}</li>
+                                    })}
                                 }
                             }
                         </For>

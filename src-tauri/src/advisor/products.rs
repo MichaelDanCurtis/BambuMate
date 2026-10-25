@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use super::materials::MaterialId;
 use crate::printer::slots::SlotView;
+use crate::printer::state::Tray;
 use crate::scraper::catalog::CatalogEntry;
 
 /// The `preferences.json` key holding the preferred brands, a JSON array.
@@ -148,12 +149,46 @@ pub fn material_of_entry(entry: &CatalogEntry) -> Option<MaterialId> {
     classify(&format!("{} {}", entry.material, entry.name))
 }
 
-pub fn material_of_tray(slot: &SlotView) -> Option<MaterialId> {
-    let t = &slot.tray;
-    if t.empty || t.tray_type.trim().is_empty() {
+/// The material a filament type and name describe: `material_of` for
+/// anything that isn't a tray (a sliced job's `filament_type` and preset).
+/// Bambu's support spools use a type like "PLA-S" or "PA-S": a material word
+/// plus a lone "S". They are not that material, so a PLA job must not count
+/// one as "same material". ("Support …" is `classify`'s job.)
+pub fn material_of_filament(filament_type: &str, name: &str) -> Option<MaterialId> {
+    if filament_type.trim().is_empty() {
         return None;
     }
-    classify(&format!("{} {}", t.tray_type, t.tray_sub_brands))
+    let words = tokens(filament_type);
+    if words.len() >= 2 && words.last().is_some_and(|w| w == "S") {
+        return None;
+    }
+    let by_name = classify(&format!("{filament_type} {name}"));
+    // The type is authoritative; the free-text name may only refine within
+    // the type's family (PLA to PLA+, PETG to PETG-CF), never switch family
+    // ("my PLA profile" on a PETG type is still PETG).
+    match (classify(filament_type), by_name) {
+        (Some(t), Some(n)) if family(t) != family(n) => Some(t),
+        _ => by_name,
+    }
+}
+
+/// The base family a material belongs to (PLA, PLA+ and PLA-CF are all
+/// "PLA"), as the materials table records it.
+fn family(id: MaterialId) -> &'static str {
+    super::materials::material(id).base
+}
+
+/// The material a tray reports. `None` for an empty tray or one the advisor
+/// has no row for.
+pub fn material_of(tray: &Tray) -> Option<MaterialId> {
+    if tray.empty {
+        return None;
+    }
+    material_of_filament(&tray.tray_type, &tray.tray_sub_brands)
+}
+
+pub fn material_of_tray(slot: &SlotView) -> Option<MaterialId> {
+    material_of(&slot.tray)
 }
 
 /// The link behind "Where to buy": in v1, the entry's own manufacturer or
@@ -355,6 +390,10 @@ pub(crate) mod test_support {
             status: SlotStatus::Unassigned,
             needs_cloud_sync: false,
             preset_has_no_id: false,
+            detected: None,
+            not_installed: false,
+            other_nozzle: None,
+            material: None,
         }
     }
 
@@ -380,6 +419,62 @@ mod tests {
     use super::ProductStatus::*;
     use super::*;
     use crate::advisor::materials::MaterialId::*;
+    use crate::printer::state::Tray;
+
+    fn material(tray_type: &str, sub: &str) -> Option<MaterialId> {
+        material_of(&Tray {
+            tray_type: tray_type.into(),
+            tray_sub_brands: sub.into(),
+            empty: tray_type.is_empty(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_tray_material_is_classified_from_its_type_and_sub_brand() {
+        assert_eq!(material("PA-CF", ""), Some(PaCf));
+        assert_eq!(material("TPU", "TPU 95A HF"), Some(Tpu));
+        assert_eq!(material("PETG", "PETG HF"), Some(Petg));
+        assert_eq!(material("PETG", "PETG-CF"), Some(PetCf));
+        assert_eq!(material("PLA", "PLA Basic"), Some(Pla));
+        assert_eq!(material("", ""), None, "an empty string");
+        assert_eq!(material("  ", "PLA"), None, "a blank type");
+    }
+
+    #[test]
+    fn the_type_decides_the_family_and_the_name_only_refines_it() {
+        let f = material_of_filament;
+        assert_eq!(f("PETG", "my PLA profile"), Some(Petg));
+        assert_eq!(f("PLA", "Bambu PLA Tough"), Some(PlaPlus));
+        assert_eq!(f("PLA", "Polymaker PLA Pro"), Some(PlaPlus));
+        assert_eq!(f("PETG", "PETG HF"), Some(Petg));
+        assert_eq!(f("PETG", "Bambu PETG-CF"), Some(PetCf));
+        assert_eq!(f("TPU", "PLA lookalike"), Some(Tpu));
+        assert_eq!(f("PLA", "Bambu Support for PLA"), None);
+        assert_eq!(f("PLA-S", "Bambu Support for PLA"), None);
+        assert_eq!(
+            f("Custom", "My PLA Basic"),
+            Some(Pla),
+            "an unknown type falls back to the name"
+        );
+    }
+
+    #[test]
+    fn support_materials_are_not_the_material_they_support() {
+        for (ty, sub) in [
+            ("PLA-S", ""),
+            ("PLA-S", "Support for PLA"),
+            ("PA-S", "Support for PA/PET"),
+            ("PLA", "Support for PLA"),
+            ("PVA", "PVA"),
+            ("Support W", ""),
+            ("Support G", "Support for PLA/PETG"),
+        ] {
+            assert_eq!(material(ty, sub), None, "{ty} / {sub}");
+        }
+        // A lone S is only a suffix after a material word.
+        assert_eq!(material("PLA", "Silk"), Some(Pla));
+    }
 
     #[test]
     fn product_names_classify_to_materials() {

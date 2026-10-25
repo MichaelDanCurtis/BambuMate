@@ -6,7 +6,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use super::filament_index::{Detected, FilamentIndex, Lookup};
 use super::state::{PrinterState, Tray};
+use crate::advisor::materials::MaterialId;
+use crate::advisor::products::material_of;
 use crate::history::SlotAssignment;
 use crate::profile::{reader, FilamentProfile, ProfileRegistry};
 
@@ -51,6 +54,25 @@ pub struct SlotView {
     /// has no filament id. Set it on the printer and confirm by eye."
     #[serde(default)]
     pub preset_has_no_id: bool,
+    /// The installed preset the reported filament ID names. `None` for an
+    /// empty slot, a slot that reports no ID, an ID no installed preset for
+    /// this printer has, or while the filament ID index is unavailable.
+    #[serde(default)]
+    pub detected: Option<Detected>,
+    /// The slot reports a filament ID that no installed preset has: "GFL99 —
+    /// not installed". Only ever set while the index is available.
+    #[serde(default)]
+    pub not_installed: bool,
+    /// The slot reports a filament ID with presets installed for this
+    /// printer, but none for its configured nozzle: the nozzle's diameter in
+    /// mm ("No preset for the 0.6 mm nozzle"). Exclusive with `detected` and
+    /// `not_installed`.
+    #[serde(default)]
+    pub other_nozzle: Option<f64>,
+    /// The tray's material by the advisor's classifier. The AMS check
+    /// compares it with the job's.
+    #[serde(default)]
+    pub material: Option<MaterialId>,
 }
 
 /// `A1`…`D4` for AMS units (lettered by id), `HT1`… for AMS HT units
@@ -107,6 +129,18 @@ pub fn compute_slots(
     assignments: &[SlotAssignment],
     needs_cloud_sync: &dyn Fn(&str) -> bool,
 ) -> Vec<SlotView> {
+    compute_slots_with(state, assignments, needs_cloud_sync, None)
+}
+
+/// [`compute_slots`], with each reported filament ID looked up in `index`.
+/// Without an index no slot is detected, marked not installed or marked as
+/// lacking a preset for the nozzle.
+pub fn compute_slots_with(
+    state: &PrinterState,
+    assignments: &[SlotAssignment],
+    needs_cloud_sync: &dyn Fn(&str) -> bool,
+    index: Option<&FilamentIndex>,
+) -> Vec<SlotView> {
     let find = |ams_id: u32, tray_id: u32| {
         assignments
             .iter()
@@ -123,6 +157,19 @@ pub fn compute_slots(
         let assigned = find(ams_id, tray.id);
         let status = slot_status(tray, assigned);
         let is_different = status == SlotStatus::Different;
+        let reported = tray.tray_info_idx.trim();
+        // "0" is how some firmware writes "no ID".
+        let has_id = !tray.empty && !reported.is_empty() && reported != "0";
+        let outcome = index
+            .filter(|_| has_id)
+            .map(|i| (i, i.lookup_outcome(reported)));
+        let (mut detected, mut not_installed, mut other_nozzle) = (None, false, None);
+        match outcome {
+            Some((_, Lookup::Found(d))) => detected = Some(d),
+            Some((i, Lookup::OtherNozzle { .. })) => other_nozzle = i.nozzle(),
+            Some((_, Lookup::NotInstalled)) => not_installed = true,
+            None => {}
+        }
         out.push(SlotView {
             ams_id,
             tray_id: tray.id,
@@ -143,6 +190,10 @@ pub fn compute_slots(
                         .map(str::trim)
                         .is_none_or(str::is_empty)
                 }),
+            detected,
+            not_installed,
+            other_nozzle,
+            material: material_of(tray),
         });
     }
     out
@@ -479,5 +530,195 @@ mod tests {
             resolve_filament_id(&leaf, &registry).as_deref(),
             Some("GFA00")
         );
+    }
+
+    use crate::advisor::materials::MaterialId;
+    use crate::printer::filament_index::{FilamentIndex, PrinterTarget};
+
+    /// The test presets, indexed for an H2C with the given nozzle.
+    fn h2c_index_for(nozzle: Option<f64>) -> FilamentIndex {
+        let root = crate::slicer::settings::tests::fake_bambu_root();
+        let presets = crate::slicer::settings::PresetIndex::load(root.path(), Some("1881310893"));
+        FilamentIndex::build(
+            &presets,
+            &PrinterTarget {
+                model: "H2C".into(),
+                nozzle,
+            },
+        )
+    }
+
+    /// The test presets, indexed for an H2C with a 0.4 nozzle.
+    fn h2c_index() -> FilamentIndex {
+        h2c_index_for(Some(0.4))
+    }
+
+    #[test]
+    fn slots_name_the_detected_preset_or_say_it_is_not_installed() {
+        let state = state_after(&[H2D_FULL]);
+        let index = h2c_index();
+        let slots = compute_slots_with(&state, &[], &|_| false, Some(&index));
+        let a2 = &slots[1];
+        assert_eq!(
+            a2.detected.as_ref().map(|d| d.preset_name.as_str()),
+            Some("Bambu PLA Basic @BBL H2C")
+        );
+        assert!(!a2.not_installed);
+        assert_eq!(a2.other_nozzle, None);
+        // A3 reports GFG99, which the test presets don't have.
+        assert_eq!(slots[2].detected, None);
+        assert!(slots[2].not_installed);
+        assert_eq!(slots[2].other_nozzle, None);
+        // B4 is empty.
+        assert_eq!(
+            (
+                slots[7].detected.clone(),
+                slots[7].not_installed,
+                slots[7].other_nozzle
+            ),
+            (None, false, None)
+        );
+    }
+
+    #[test]
+    fn a_preset_for_another_nozzle_is_neither_detected_nor_not_installed() {
+        let state = state_after(&[H2D_FULL]);
+        // GFA00 exists for this printer, but only for the 0.4 nozzle.
+        let index = h2c_index_for(Some(0.6));
+        let slots = compute_slots_with(&state, &[], &|_| false, Some(&index));
+        let a2 = &slots[1];
+        assert_eq!(a2.tray.tray_info_idx, "GFA00");
+        assert_eq!(a2.detected, None);
+        assert!(!a2.not_installed);
+        assert_eq!(a2.other_nozzle, Some(0.6), "the configured nozzle");
+        // An ID no preset has stays "not installed", whatever the nozzle.
+        assert!(slots[2].not_installed);
+        assert_eq!(slots[2].other_nozzle, None);
+    }
+
+    #[test]
+    fn the_three_outcomes_are_exclusive_on_every_slot() {
+        for nozzle in [None, Some(0.4), Some(0.6)] {
+            let index = h2c_index_for(nozzle);
+            let slots =
+                compute_slots_with(&state_after(&[H2D_FULL]), &[], &|_| false, Some(&index));
+            for s in &slots {
+                let set = [
+                    s.detected.is_some(),
+                    s.not_installed,
+                    s.other_nozzle.is_some(),
+                ];
+                assert!(
+                    set.iter().filter(|b| **b).count() <= 1,
+                    "{} has more than one outcome",
+                    s.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn without_the_index_no_slot_is_detected_or_marked_not_installed() {
+        let slots = compute_slots(&state_after(&[H2D_FULL]), &[], &|_| false);
+        assert!(slots
+            .iter()
+            .all(|s| s.detected.is_none() && !s.not_installed && s.other_nozzle.is_none()));
+        let slots = compute_slots_with(&state_after(&[H2D_FULL]), &[], &|_| false, None);
+        assert!(slots
+            .iter()
+            .all(|s| s.detected.is_none() && !s.not_installed && s.other_nozzle.is_none()));
+    }
+
+    #[test]
+    fn a_tray_with_a_material_but_no_id_is_neither_detected_nor_not_installed() {
+        let mut state = state_after(&[H2D_FULL]);
+        state.ams_units[0].trays[2].tray_info_idx.clear();
+        let slots = compute_slots_with(&state, &[], &|_| false, Some(&h2c_index()));
+        assert_eq!(slots[2].tray.tray_type, "PETG");
+        assert_eq!(
+            (
+                slots[2].detected.clone(),
+                slots[2].not_installed,
+                slots[2].other_nozzle
+            ),
+            (None, false, None)
+        );
+    }
+
+    #[test]
+    fn each_slot_carries_its_classified_material() {
+        let slots = compute_slots(&state_after(&[H2D_FULL]), &[], &|_| false);
+        assert_eq!(slots[1].material, Some(MaterialId::Pla));
+        assert_eq!(slots[2].material, Some(MaterialId::Petg));
+        assert_eq!(slots[6].material, Some(MaterialId::PetCf));
+        assert_eq!(slots[7].material, None, "an empty slot");
+        assert_eq!(
+            slots[8].material,
+            Some(MaterialId::Pla),
+            "the external spool too"
+        );
+    }
+
+    #[test]
+    fn the_new_fields_serialize_by_name_and_default_when_absent() {
+        let index = h2c_index_for(Some(0.6));
+        let slots = compute_slots_with(&state_after(&[H2D_FULL]), &[], &|_| false, Some(&index));
+        let v = serde_json::to_value(&slots[1]).unwrap();
+        assert_eq!(v["other_nozzle"], 0.6);
+        assert_eq!(v["not_installed"], false);
+        assert_eq!(v["material"], "pla");
+        assert!(v["detected"].is_null());
+        // An older payload without the fields still reads.
+        let mut old = v.clone();
+        for k in ["detected", "not_installed", "material", "other_nozzle"] {
+            old.as_object_mut().unwrap().remove(k);
+        }
+        let back: SlotView = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            (
+                back.detected,
+                back.not_installed,
+                back.material,
+                back.other_nozzle
+            ),
+            (None, false, None, None)
+        );
+    }
+
+    #[test]
+    fn a_tray_id_of_zero_means_no_id() {
+        let mut state = state_after(&[H2D_FULL]);
+        for id in ["0", " 0 "] {
+            state.ams_units[0].trays[2].tray_info_idx = id.into();
+            let slots = compute_slots_with(&state, &[], &|_| false, Some(&h2c_index()));
+            assert_eq!(slots[2].tray.tray_type, "PETG");
+            assert_eq!(
+                (
+                    slots[2].detected.clone(),
+                    slots[2].not_installed,
+                    slots[2].other_nozzle
+                ),
+                (None, false, None),
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_external_spool_is_detected_like_an_ams_slot() {
+        let mut state = state_after(&[H2D_FULL]);
+        let index = h2c_index();
+        // Ext-L reports GFA01, which the test presets don't have.
+        let slots = compute_slots_with(&state, &[], &|_| false, Some(&index));
+        assert_eq!(slots[8].ams_id, EXTERNAL_AMS_ID);
+        assert!(slots[8].not_installed);
+        state.external_spools[0].tray_info_idx = "GFA00".into();
+        let slots = compute_slots_with(&state, &[], &|_| false, Some(&index));
+        assert_eq!(slots[8].label, "Ext-L");
+        assert_eq!(
+            slots[8].detected.as_ref().map(|d| d.preset_name.as_str()),
+            Some("Bambu PLA Basic @BBL H2C")
+        );
+        assert!(!slots[8].not_installed);
     }
 }

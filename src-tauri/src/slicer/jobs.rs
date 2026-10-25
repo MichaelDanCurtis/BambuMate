@@ -15,7 +15,8 @@ use super::binary::SlicerBinary;
 use super::cache::{cache_key, SliceCache};
 use super::command::{build_args, Progress, SliceCommand, OUTPUT_FILE, RESULT_FILE};
 use super::result::{
-    cli_error_message, cli_reported_error, parse_cli_result, parse_output, SliceResult,
+    cli_error_message, cli_reported_error, complete_filaments, config_filament_id,
+    parse_cli_result, parse_output, SliceResult,
 };
 use super::run::{RunError, RunOutput, RunSpec};
 use super::settings::{write_configs, PresetCache, PresetChoice, PresetIndex};
@@ -261,6 +262,12 @@ fn model_name(path: &Path) -> String {
 fn internal_error(cause: impl std::fmt::Display) -> SlicerError {
     tracing::debug!("slicing job stopped by an internal error: {cause}");
     SlicerError::Io(INTERNAL_ERROR.into())
+}
+
+/// `result` with each filament's ID and material filled where it lacks them.
+fn completed(mut result: SliceResult, preset_ids: &[Option<String>]) -> SliceResult {
+    complete_filaments(&mut result, preset_ids);
+    result
 }
 
 /// Removes job folders a crash left in `work_root`. Only a folder named
@@ -663,6 +670,13 @@ impl SlicerService {
             .await
             .map_err(|e| Some(internal_error(e)))??
         };
+        // Each filament preset's own ID, for an output (or an older cached
+        // result) that doesn't name the one it was sliced with.
+        let preset_ids: Vec<Option<String>> = prepared
+            .filaments
+            .iter()
+            .map(|text| config_filament_id(text))
+            .collect();
         if *cancel.borrow() {
             return Err(None);
         }
@@ -690,7 +704,7 @@ impl SlicerService {
         };
         let configs = match prepared_files {
             Ok(configs) => configs,
-            Err(hit) => return Ok((hit, true)),
+            Err(hit) => return Ok((completed(hit, &preset_ids), true)),
         };
         let cmd = SliceCommand {
             model,
@@ -776,7 +790,7 @@ impl SlicerService {
         .await
         .map_err(|e| Some(internal_error(e)))??;
         drop(work);
-        Ok((stored, false))
+        Ok((completed(stored, &preset_ids), false))
     }
 }
 
@@ -1028,6 +1042,7 @@ mod tests {
         };
         assert!(!cached);
         assert_eq!(result.plates[0].time_seconds, 843);
+        assert_eq!(result.filaments[0].filament_id.as_deref(), Some("GFA00"));
         assert!(Path::new(&result.output_path).is_file());
         let thumb = Path::new(&result.output_path).with_file_name("plate_1.png");
         assert!(thumb.is_file());

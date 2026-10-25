@@ -4,6 +4,7 @@
 use crate::commands::GeneratedPreset;
 use crate::journal::format::{duration_text, UNWATCHED};
 use crate::journal::types::{Outcome, PrintEntry};
+use crate::printer::ams::{AmsMatch, JobFilament};
 use crate::printer::types::{
     format_remaining, untrusted_text, ConnectionState, ErrorView, PrinterView,
 };
@@ -285,6 +286,33 @@ pub fn recent_line(p: &GeneratedPreset, now_ms: f64) -> Option<String> {
         "Recent · {name} · {}",
         format_ago(now_ms, p.created_at as f64 * 1000.0)
     ))
+}
+
+/// Home's quiet line for the newest sliced job when its filament isn't
+/// loaded exactly: `Gear needs PETG-CF · not loaded`, or `… · different
+/// profile in B1`. `None` when it is loaded or the AMS can't be checked.
+pub fn ams_line(model_name: &str, job: &JobFilament, m: &AmsMatch) -> Option<String> {
+    let name = untrusted_text(model_stem(model_name), FILE_MAX);
+    let needs = untrusted_text(job.needs().trim(), PRESET_MAX);
+    // Nothing to name: "Gear needs  · not loaded" would read as broken.
+    if needs.is_empty() {
+        return None;
+    }
+    match m {
+        AmsMatch::NotLoaded { .. } => Some(format!("{name} needs {needs} · not loaded")),
+        AmsMatch::SameMaterial { slot, .. } => Some(format!(
+            "{name} needs {needs} · different profile in {slot}"
+        )),
+        AmsMatch::Loaded { .. } | AmsMatch::NoPrinter => None,
+    }
+}
+
+/// `Gear.stl` → `Gear`.
+fn model_stem(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => name,
+    }
 }
 
 /// What BambuMate can say about sync. It sees only presets stuck out of
@@ -636,6 +664,59 @@ mod tests {
             profile_name: name.into(),
             created_at,
         }
+    }
+
+    #[test]
+    fn home_names_a_sliced_filament_that_is_not_loaded_exactly() {
+        let job = JobFilament {
+            preset: "Bambu PETG-CF @BBL H2D".into(),
+            filament_type: "PETG-CF".into(),
+            ..Default::default()
+        };
+        let not_loaded = AmsMatch::NotLoaded {
+            material: "PETG-CF".into(),
+        };
+        assert_eq!(
+            ams_line("Gear.stl", &job, &not_loaded).as_deref(),
+            Some("Gear needs PETG-CF · not loaded")
+        );
+        let same = AmsMatch::SameMaterial {
+            slot: "B1".into(),
+            material: "PETG-CF".into(),
+            other_colour: false,
+        };
+        assert_eq!(
+            ams_line("Gear.stl", &job, &same).as_deref(),
+            Some("Gear needs PETG-CF · different profile in B1")
+        );
+        let loaded = AmsMatch::Loaded {
+            slot: "B3".into(),
+            other_colour: true,
+        };
+        assert_eq!(ams_line("Gear.stl", &job, &loaded), None);
+        assert_eq!(ams_line("Gear.stl", &job, &AmsMatch::NoPrinter), None);
+        let untyped = JobFilament {
+            filament_type: String::new(),
+            ..job
+        };
+        assert_eq!(
+            ams_line("gear", &untyped, &not_loaded).as_deref(),
+            Some("gear needs Bambu PETG-CF @BBL H2D · not loaded")
+        );
+    }
+
+    #[test]
+    fn home_hides_the_line_when_the_job_names_no_filament() {
+        let nameless = JobFilament::default();
+        let not_loaded = AmsMatch::NotLoaded {
+            material: String::new(),
+        };
+        assert_eq!(ams_line("Gear.stl", &nameless, &not_loaded), None);
+        let blank = JobFilament {
+            preset: "  ".into(),
+            ..Default::default()
+        };
+        assert_eq!(ams_line("Gear.stl", &blank, &not_loaded), None);
     }
 
     #[test]

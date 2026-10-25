@@ -93,7 +93,13 @@
 .sl-filaments,
 .sl-warnings { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--nd-space-xs); }
 .sl-filament { display: flex; align-items: center; gap: var(--nd-space-sm); font-family: var(--nd-font-mono); font-size: 13px; }
-.sl-swatch { width: 12px; height: 12px; border: 1px solid var(--nd-border-visible); }
+.sl-filaments { --sl-swatch-size: 12px; }
+.sl-swatch { width: var(--sl-swatch-size); height: var(--sl-swatch-size); border: 1px solid var(--nd-border-visible); }
+/* Whether the filament is in the AMS. Signal marks only a loaded filament;
+   red is kept for real errors, so not loaded stays plain text. */
+.sl-ams { padding-left: calc(var(--sl-swatch-size) + var(--nd-space-sm)); font-family: var(--nd-font-mono); font-size: 12px; color: var(--nd-text-primary); }
+.sl-ams[data-match="loaded"] { color: var(--nd-signal); }
+.sl-ams[data-match="same"] { color: var(--nd-warning); }
 .sl-warning { padding: var(--nd-space-sm); border-left: 2px solid var(--nd-border-visible); color: var(--nd-text-primary); }
 .sl-warning-warning { border-left-color: var(--nd-warning); }
 .sl-open { justify-self: start; }

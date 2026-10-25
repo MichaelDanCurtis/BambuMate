@@ -38,6 +38,12 @@ const NAME_MAX: usize = 64;
 /// Most characters shown of the file name the printer reports.
 const FILE_MAX: usize = 120;
 
+/// Most characters shown of a filament ID the printer reports.
+const ID_MAX: usize = 32;
+
+/// Most characters of a full preset name in a tooltip or label.
+const FULL_MAX: usize = 256;
+
 /// Printer's hub: the one header (with `Name · Model · Serial`) over the
 /// Live and Journal tabs. The tabs render in the `Outlet`.
 #[component]
@@ -180,8 +186,9 @@ fn unit_meta(v: &PrinterView, ams_id: u32) -> String {
 /// empty slot).
 fn card_preset(s: &SlotView) -> (String, Option<String>) {
     let reported = || {
+        // A "0" ID is no ID: it is never shown as a name.
         let name = if s.tray.tray_sub_brands.is_empty() {
-            &s.tray.tray_info_idx
+            s.tray.reported_id()
         } else {
             &s.tray.tray_sub_brands
         };
@@ -223,6 +230,206 @@ fn slot_guide(s: &SlotView) -> SlotGuide {
             needs_sync: s.needs_cloud_sync,
         },
         _ => SlotGuide::None,
+    }
+}
+
+/// A preset name without its printer suffix: `Bambu PETG HF @BBL H2D` is
+/// `Bambu PETG HF`. A name with nothing before the `@` is kept whole.
+pub(crate) fn short_preset(name: &str) -> String {
+    match name.find(" @") {
+        Some(i) if i > 0 => name[..i].trim_end().to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// The line under a slot card about the profile its filament ID names.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DetectedLine {
+    None,
+    /// `Detected: Bambu PETG HF`. `full` is the whole preset name; `offer`
+    /// adds "Use this".
+    Detected {
+        short: String,
+        full: String,
+        offer: bool,
+    },
+    /// `Yours: Acme PETG · Detected: Bambu PETG HF`. The user's assignment
+    /// differs and is kept.
+    Both {
+        yours: String,
+        short: String,
+        full: String,
+    },
+    /// `No preset for the 0.6 mm nozzle`: the ID names presets for this
+    /// printer, but none for the configured nozzle. `nozzle` is in mm.
+    OtherNozzle {
+        nozzle: String,
+    },
+    /// `GFL99 — not installed`.
+    NotInstalled {
+        id: String,
+    },
+    /// `PLA, no profile ID`: a spool that reports no filament ID.
+    NoId {
+        material: String,
+    },
+}
+
+impl DetectedLine {
+    /// What the card shows.
+    pub(crate) fn text(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::Detected { short, .. } => Some(format!("Detected: {short}")),
+            Self::Both { yours, short, .. } => Some(format!("Yours: {yours} · Detected: {short}")),
+            Self::OtherNozzle { nozzle } => Some(format!("No preset for the {nozzle} mm nozzle")),
+            Self::NotInstalled { id } => Some(format!("{id} — not installed")),
+            Self::NoId { material } => Some(format!("{material}, no profile ID")),
+        }
+    }
+
+    /// The tooltip: the full detected preset name.
+    pub(crate) fn title(&self) -> Option<String> {
+        match self {
+            Self::Detected { full, .. } | Self::Both { full, .. } => Some(full.clone()),
+            Self::OtherNozzle { .. } => self.text(),
+            _ => None,
+        }
+    }
+
+    /// What a screen reader hears, with the full preset name.
+    pub(crate) fn label(&self) -> Option<String> {
+        match self {
+            Self::Detected { full, .. } => Some(format!("Detected: {full}")),
+            Self::Both { yours, full, .. } => Some(format!("Yours: {yours} · Detected: {full}")),
+            _ => self.text(),
+        }
+    }
+
+    /// `data-detected` on the line.
+    pub(crate) fn key(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Detected { .. } => "detected",
+            Self::Both { .. } => "both",
+            Self::OtherNozzle { .. } => "other-nozzle",
+            Self::NotInstalled { .. } => "not-installed",
+            Self::NoId { .. } => "no-id",
+        }
+    }
+
+    fn offers(&self) -> bool {
+        matches!(self, Self::Detected { offer: true, .. })
+    }
+}
+
+/// The rules: nothing for an empty slot. A detected preset is offered when
+/// the slot has no assignment. It is shown beside the user's own when that
+/// differs (status `Different`), and alone otherwise. With nothing detected:
+/// "no preset for the nozzle" (the ID is known, but not for this nozzle),
+/// then "not installed" (only when the backend's index says so), else the
+/// material when no ID is reported. A "0" ID is no ID.
+pub(crate) fn detected_line(s: &SlotView) -> DetectedLine {
+    if s.tray.empty {
+        return DetectedLine::None;
+    }
+    if let Some(d) = &s.detected {
+        let short = untrusted_text(&short_preset(&d.preset_name), NAME_MAX);
+        let full = untrusted_text(&d.preset_name, FULL_MAX);
+        return match (&s.assigned_preset, s.status) {
+            (None, _) => DetectedLine::Detected {
+                short,
+                full,
+                offer: true,
+            },
+            (Some(yours), SlotStatus::Different) if *yours != d.preset_name => DetectedLine::Both {
+                yours: untrusted_text(&short_preset(yours), NAME_MAX),
+                short,
+                full,
+            },
+            (Some(_), _) => DetectedLine::Detected {
+                short,
+                full,
+                offer: false,
+            },
+        };
+    }
+    if let Some(mm) = s.other_nozzle {
+        return DetectedLine::OtherNozzle {
+            nozzle: format!("{mm}"),
+        };
+    }
+    let id = s.tray.reported_id();
+    if s.not_installed && !id.is_empty() {
+        return DetectedLine::NotInstalled {
+            id: untrusted_text(id, ID_MAX),
+        };
+    }
+    let material = s.tray.tray_type.trim();
+    if id.is_empty() && !material.is_empty() {
+        return DetectedLine::NoId {
+            material: untrusted_text(material, NAME_MAX),
+        };
+    }
+    DetectedLine::None
+}
+
+/// The detected profile under a slot card, on Printer and Home, with "Use
+/// this" for a slot that has no assignment. "Use this" saves the detected
+/// preset through `printer_assign_slot`. It opens neither the picker nor the
+/// steps: the printer already reports this filament, so the slot becomes ✓ Set.
+#[component]
+pub(crate) fn SlotDetection(item: Memo<SlotView>) -> impl IntoView {
+    let shared = expect_context::<PrinterShared>();
+    let line = Memo::new(move |_| item.with(detected_line));
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let use_detected = move |_| {
+        let slot = item.get_untracked();
+        let Some(path) = slot.detected.as_ref().map(|d| d.path.clone()) else {
+            return;
+        };
+        let label = slot.label.clone();
+        busy.set(true);
+        error.set(None);
+        let ticket = shared.ticket();
+        // The card can go away while this is in flight: only `try_*` after
+        // the await.
+        spawn_local(async move {
+            let result = bridge::assign_slot(slot.ams_id, slot.tray_id, &path).await;
+            busy.try_set(false);
+            match result {
+                Ok(view) => {
+                    if let Some(ticket) = ticket {
+                        shared.apply(ticket, view);
+                    }
+                    // The button goes away on success: put focus back on
+                    // the card so keyboard users keep their place.
+                    refocus_card(label);
+                }
+                Err(e) => {
+                    error.try_set(Some(e));
+                }
+            }
+        });
+    };
+    move || {
+        let l = line.get();
+        let text = l.text()?;
+        let offer = l
+            .offers()
+            .then(|| format!("Use this: {}", l.title().unwrap_or_default()));
+        Some(view! {
+            <p class="pr-detected nd-mono" data-detected=l.key()>
+                <span class="pr-detected-text" title=l.title() aria-hidden="true">{text}</span>
+                <span class="nd-visually-hidden">{l.label()}</span>
+                {offer.map(|name| view! {
+                    <button type="button" class="pr-use-detected" aria-label=name
+                        disabled=move || busy.get() on:click=use_detected>"Use this"</button>
+                })}
+                {move || error.get().map(|e| view! { <span class="pr-detected-error">{e}</span> })}
+            </p>
+        })
     }
 }
 
@@ -424,6 +631,7 @@ fn SlotCard(item: Memo<SlotView>, picking: RwSignal<Option<SlotView>>) -> impl I
                 title="Choose the preset loaded here">
                 {body}
             </button>
+            <SlotDetection item=item />
             {guide}
         </div>
     }
@@ -701,7 +909,7 @@ pub(crate) fn SlotPicker(item: SlotView, picking: RwSignal<Option<SlotView>>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::printer::types::{AmsUnit, PrinterState, PrinterSummary, Tray};
+    use crate::printer::types::{AmsUnit, Detected, PrinterState, PrinterSummary, Tray};
 
     fn slot(ams_id: u32, tray_id: u32) -> SlotView {
         SlotView {
@@ -879,5 +1087,183 @@ mod tests {
         v.state = None;
         v.connection = ConnectionState::Unreachable;
         assert!(!waiting_for_report(&v));
+    }
+
+    fn detected_slot() -> SlotView {
+        SlotView {
+            label: "A2".into(),
+            tray: Tray {
+                tray_type: "PETG".into(),
+                tray_info_idx: "GFG02".into(),
+                ..Default::default()
+            },
+            detected: Some(Detected {
+                preset_name: "Bambu PETG HF @BBL H2D".into(),
+                path: "/s/Bambu PETG HF @BBL H2D.json".into(),
+                is_user: false,
+                variants: vec![],
+            }),
+            status: SlotStatus::Unassigned,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_detected_profile_is_named_without_its_printer_suffix_and_offered() {
+        let line = detected_line(&detected_slot());
+        assert_eq!(
+            line,
+            DetectedLine::Detected {
+                short: "Bambu PETG HF".into(),
+                full: "Bambu PETG HF @BBL H2D".into(),
+                offer: true,
+            }
+        );
+        assert_eq!(line.text().as_deref(), Some("Detected: Bambu PETG HF"));
+        assert_eq!(line.title().as_deref(), Some("Bambu PETG HF @BBL H2D"));
+        assert_eq!(
+            line.label().as_deref(),
+            Some("Detected: Bambu PETG HF @BBL H2D")
+        );
+        assert_eq!(line.key(), "detected");
+    }
+
+    #[test]
+    fn a_different_assignment_shows_both_and_offers_nothing() {
+        let mut s = detected_slot();
+        s.assigned_preset = Some("Acme PETG @Bambu Lab H2D 0.4 nozzle".into());
+        s.status = SlotStatus::Different;
+        let line = detected_line(&s);
+        assert_eq!(
+            line.text().as_deref(),
+            Some("Yours: Acme PETG · Detected: Bambu PETG HF")
+        );
+        assert_eq!(line.key(), "both");
+        // The detected preset itself is assigned: no second name, no offer.
+        s.assigned_preset = Some("Bambu PETG HF @BBL H2D".into());
+        s.status = SlotStatus::Matches;
+        assert_eq!(
+            detected_line(&s),
+            DetectedLine::Detected {
+                short: "Bambu PETG HF".into(),
+                full: "Bambu PETG HF @BBL H2D".into(),
+                offer: false,
+            }
+        );
+    }
+
+    #[test]
+    fn an_unknown_id_says_not_installed_and_a_missing_id_names_the_material() {
+        let mut s = detected_slot();
+        s.detected = None;
+        s.not_installed = true;
+        s.tray.tray_info_idx = "GFL99".into();
+        let line = detected_line(&s);
+        assert_eq!(line.text().as_deref(), Some("GFL99 — not installed"));
+        assert_eq!(line.label().as_deref(), Some("GFL99 — not installed"));
+        assert_eq!(line.key(), "not-installed");
+        s.not_installed = false;
+        s.tray.tray_info_idx.clear();
+        s.tray.tray_type = "PLA".into();
+        let line = detected_line(&s);
+        assert_eq!(line.text().as_deref(), Some("PLA, no profile ID"));
+        assert_eq!(line.key(), "no-id");
+        // The index is unavailable: an ID with nothing detected shows nothing.
+        s.tray.tray_info_idx = "GFL99".into();
+        assert_eq!(detected_line(&s), DetectedLine::None);
+        s.tray = Tray {
+            empty: true,
+            ..Default::default()
+        };
+        assert_eq!(detected_line(&s), DetectedLine::None);
+    }
+
+    #[test]
+    fn an_id_with_no_preset_for_the_nozzle_says_so_and_offers_nothing() {
+        let mut s = detected_slot();
+        s.detected = None;
+        s.other_nozzle = Some(0.6);
+        let line = detected_line(&s);
+        assert_eq!(
+            line,
+            DetectedLine::OtherNozzle {
+                nozzle: "0.6".into()
+            }
+        );
+        assert_eq!(
+            line.text().as_deref(),
+            Some("No preset for the 0.6 mm nozzle")
+        );
+        assert_eq!(line.title().as_deref(), line.text().as_deref());
+        assert_eq!(line.label().as_deref(), line.text().as_deref());
+        assert_eq!(line.key(), "other-nozzle");
+        assert!(!line.offers(), "there is nothing to assign");
+        for (mm, shown) in [(0.4, "0.4"), (0.2, "0.2")] {
+            s.other_nozzle = Some(mm);
+            assert_eq!(
+                detected_line(&s).text(),
+                Some(format!("No preset for the {shown} mm nozzle"))
+            );
+        }
+        // It comes after a detected preset and before "not installed".
+        s.not_installed = true;
+        assert_eq!(detected_line(&s).key(), "other-nozzle");
+        s.other_nozzle = None;
+        assert_eq!(detected_line(&s).key(), "not-installed");
+        s.other_nozzle = Some(0.4);
+        s.detected = detected_slot().detected;
+        assert_eq!(detected_line(&s).key(), "detected");
+        // An empty slot shows nothing, whatever it once reported.
+        s.detected = None;
+        s.tray.empty = true;
+        assert_eq!(detected_line(&s), DetectedLine::None);
+    }
+
+    #[test]
+    fn a_tray_id_of_zero_is_no_id_on_the_line_and_the_card() {
+        let mut s = detected_slot();
+        s.detected = None;
+        s.tray.tray_info_idx = "0".into();
+        s.tray.tray_type = "PLA".into();
+        assert_eq!(
+            detected_line(&s),
+            DetectedLine::NoId {
+                material: "PLA".into()
+            }
+        );
+        // The backend's `not_installed` cannot make a "0" an unknown ID.
+        s.not_installed = true;
+        assert_eq!(detected_line(&s).key(), "no-id");
+        s.tray.tray_info_idx = " 0 ".into();
+        assert_eq!(detected_line(&s).key(), "no-id");
+        s.tray.tray_type.clear();
+        assert_eq!(detected_line(&s), DetectedLine::None);
+        // The card does not show the raw "0" as the preset's name.
+        s.not_installed = false;
+        s.tray.tray_info_idx = "0".into();
+        assert_eq!(card_preset(&s), (String::new(), None));
+        s.tray.tray_info_idx = "GFL99".into();
+        assert_eq!(card_preset(&s), ("GFL99".to_string(), None));
+        s.tray.tray_sub_brands = "PLA Basic".into();
+        s.tray.tray_info_idx = "0".into();
+        assert_eq!(card_preset(&s), ("PLA Basic".to_string(), None));
+    }
+
+    #[test]
+    fn the_printer_suffix_is_cut_at_the_at_sign() {
+        assert_eq!(
+            short_preset("Bambu PLA Basic @BBL H2C 0.2 nozzle"),
+            "Bambu PLA Basic"
+        );
+        assert_eq!(
+            short_preset("SUNLU PETG @Bambu Lab H2C 0.4 nozzle"),
+            "SUNLU PETG"
+        );
+        assert_eq!(short_preset("My PLA"), "My PLA");
+        assert_eq!(
+            short_preset("@BBL H2D"),
+            "@BBL H2D",
+            "nothing before it: keep the name"
+        );
     }
 }

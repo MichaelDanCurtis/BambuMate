@@ -255,6 +255,12 @@ pub fn run() {
                     printer::hms::HMS_URL,
                     printer::client::Timing::default(),
                 );
+                // The filament ID index reads the slicer's cached presets,
+                // so they are loaded once and reloaded only when they change.
+                if let Some(slicer) = app.try_state::<slicer::jobs::SlicerService>() {
+                    let slicer = slicer.inner().clone();
+                    service.use_presets(move || slicer.presets().ok());
+                }
                 // The print journal records what the printer runs. Its
                 // writes go to their own thread; a broken journal only logs.
                 // The slicer is managed above (`commands::slicer::start`).

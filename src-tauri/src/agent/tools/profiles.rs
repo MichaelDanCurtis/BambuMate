@@ -213,13 +213,18 @@ async fn write(reg: &ToolRegistry, args: &Value) -> ToolOutput {
         raw.insert(k, v);
     }
     match write_profile_edit(&profile, &path) {
-        Ok(outcome) => note_new_preset_write(&outcome, &path),
+        Ok(outcome) => {
+            note_new_preset_write(&outcome, &path);
+            // The printer's filament ID index rebuilds at once.
+            crate::profile::note_presets_changed();
+        }
         Err(e) => return ToolOutput::error(format!("write failed: {e:#}")),
     }
     if let Err(reason) = crate::agent::validate::validate_profile_file(&path) {
         return match restore_from_backup(&backup, &path) {
             Ok(outcome) => {
                 note_new_preset_write(&outcome, &path);
+                crate::profile::note_presets_changed();
                 ToolOutput::error(format!(
                     "change rejected: {reason}; profile restored from backup"
                 ))
@@ -298,6 +303,7 @@ async fn rollback(reg: &ToolRegistry, args: &Value) -> ToolOutput {
     match restore_from_backup(&backup, &path) {
         Ok(outcome) => {
             note_new_preset_write(&outcome, &path);
+            crate::profile::note_presets_changed();
             reg.host().emit_ui(UiCommand::Refresh {
                 what: "profiles".into(),
             });
@@ -497,6 +503,32 @@ mod tests {
         assert!(out.ok, "{}", out.summary());
         let body = fs::read_to_string(h.user_dir.path().join("My PLA.json")).unwrap();
         assert!(body.contains("220"));
+    }
+
+    #[tokio::test]
+    async fn a_write_and_a_rollback_note_a_preset_change() {
+        let h = Arc::new(FakeHost::new());
+        let (reg, _rx) = registry_with(h.clone());
+        let out = reg
+            .call("bm_install_profile", json!({"staged_id":"stg1"}))
+            .await;
+        assert!(out.ok, "{}", out.summary());
+        // The counter is process-wide and only ever moves on.
+        let before = crate::profile::presets_generation();
+        let out = reg
+            .call(
+                "bm_write_profile",
+                json!({"path":"Polymaker PLA.json","changes":{"filament_flow_ratio":["0.97"]}}),
+            )
+            .await;
+        assert!(out.ok, "{}", out.summary());
+        assert!(crate::profile::presets_generation() > before, "a write");
+        let before = crate::profile::presets_generation();
+        let out = reg
+            .call("bm_rollback", json!({"path":"Polymaker PLA.json"}))
+            .await;
+        assert!(out.ok, "{}", out.summary());
+        assert!(crate::profile::presets_generation() > before, "a rollback");
     }
 
     #[tokio::test]

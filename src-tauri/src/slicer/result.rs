@@ -16,6 +16,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use super::SlicerError;
+use crate::advisor::materials::MaterialId;
+use crate::advisor::products::material_of_filament;
 
 /// More entries than any real Bambu Studio output (a 3-plate project has ~45).
 const MAX_ENTRIES: usize = 4096;
@@ -80,6 +82,15 @@ pub struct FilamentInfo {
     /// `filament_cost`, per kilogram. `None` when unset (Bambu Studio's 0).
     pub cost_per_kg: Option<f64>,
     pub density: Option<f64>,
+    /// The filament ID it was sliced with: `tray_info_idx` in
+    /// `slice_info.config`, else `filament_ids` in the project settings, else
+    /// (filled by the job) the preset's own.
+    #[serde(default)]
+    pub filament_id: Option<String>,
+    /// `filament_type` by the advisor's classifier (support filaments have
+    /// none). The AMS check compares it with each tray's.
+    #[serde(default)]
+    pub material: Option<MaterialId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,7 +302,8 @@ fn parse_output_inner(
     }
     let mut extracted = 0;
 
-    let filaments = filament_info(&settings);
+    let mut filaments = filament_info(&settings);
+    apply_slice_ids(&mut filaments, &info.plates);
     let cost_by_slot: HashMap<u32, f64> = filaments
         .iter()
         .filter_map(|f| f.cost_per_kg.map(|c| (f.slot, c)))
@@ -495,22 +507,77 @@ fn finite_non_negative(s: &str) -> Option<f64> {
         .filter(|v| v.is_finite() && *v >= 0.0)
 }
 
+/// A filament ID of "" or "0" means none (as on the tray side).
+fn real_id(id: &str) -> Option<String> {
+    let id = id.trim();
+    (!id.is_empty() && id != "0").then(|| id.to_string())
+}
+
 fn filament_info(settings: &Value) -> Vec<FilamentInfo> {
     let presets = setting_list(settings, "filament_settings_id");
     let types = setting_list(settings, "filament_type");
     let colours = setting_list(settings, "filament_colour");
     let costs = setting_list(settings, "filament_cost");
     let densities = setting_list(settings, "filament_density");
+    let ids = setting_list(settings, "filament_ids");
     (0..presets.len().max(types.len()))
-        .map(|i| FilamentInfo {
-            slot: i as u32 + 1,
-            preset: presets.get(i).cloned().unwrap_or_default(),
-            filament_type: types.get(i).cloned().unwrap_or_default(),
-            color: colours.get(i).cloned().unwrap_or_default(),
-            cost_per_kg: positive(costs.get(i)),
-            density: positive(densities.get(i)),
+        .map(|i| {
+            let preset = presets.get(i).cloned().unwrap_or_default();
+            let filament_type = types.get(i).cloned().unwrap_or_default();
+            FilamentInfo {
+                slot: i as u32 + 1,
+                material: material_of_filament(&filament_type, &preset),
+                preset,
+                filament_type,
+                color: colours.get(i).cloned().unwrap_or_default(),
+                cost_per_kg: positive(costs.get(i)),
+                density: positive(densities.get(i)),
+                filament_id: ids.get(i).and_then(|s| real_id(s)),
+            }
         })
         .collect()
+}
+
+/// `slice_info.config` says what each slot was sliced with, so its IDs
+/// beat the project settings.
+fn apply_slice_ids(filaments: &mut [FilamentInfo], plates: &[RawPlate]) {
+    for f in filaments.iter_mut() {
+        if let Some((_, id)) = plates
+            .iter()
+            .flat_map(|p| &p.filament_ids)
+            .find(|(slot, _)| *slot == f.slot)
+        {
+            f.filament_id = Some(id.clone());
+        }
+    }
+}
+
+/// Fills what an output without IDs, or an older cached result, lacks:
+/// each filament's ID from the job's flattened filament configs (in slot
+/// order), and its material from its type.
+pub fn complete_filaments(result: &mut SliceResult, preset_ids: &[Option<String>]) {
+    for f in &mut result.filaments {
+        if f.filament_id.is_none() {
+            f.filament_id = preset_ids
+                .get(f.slot.saturating_sub(1) as usize)
+                .cloned()
+                .flatten();
+        }
+        if f.material.is_none() {
+            f.material = material_of_filament(&f.filament_type, &f.preset);
+        }
+    }
+}
+
+/// The `filament_id` of a flattened filament config, as
+/// `PreparedConfigs::filaments` holds it.
+pub fn config_filament_id(text: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    match v.get("filament_id")? {
+        Value::String(s) => real_id(s),
+        Value::Array(a) => a.first().and_then(Value::as_str).and_then(real_id),
+        _ => None,
+    }
 }
 
 #[derive(Default)]
@@ -521,6 +588,8 @@ struct RawPlate {
     filaments: Vec<FilamentUse>,
     warnings: Vec<SliceWarning>,
     objects: Vec<SliceObject>,
+    /// `(slot, tray_info_idx)` for each `<filament>` that names one.
+    filament_ids: Vec<(u32, String)>,
 }
 
 #[derive(Default)]
@@ -575,20 +644,26 @@ fn parse_slice_info(xml: &str) -> Result<SliceInfo, String> {
                         id: a.get("identify_id").cloned().unwrap_or_default(),
                         name: a.get("name").cloned().unwrap_or_default(),
                     }),
-                    ("filament", Some(p)) => p.filaments.push(FilamentUse {
-                        slot: a.get("id").and_then(|v| v.parse().ok()).unwrap_or(0),
-                        filament_type: a.get("type").cloned().unwrap_or_default(),
-                        color: a.get("color").cloned().unwrap_or_default(),
-                        used_g: a
-                            .get("used_g")
-                            .and_then(|v| finite_non_negative(v))
-                            .unwrap_or(0.0),
-                        used_m: a
-                            .get("used_m")
-                            .and_then(|v| finite_non_negative(v))
-                            .unwrap_or(0.0),
-                        cost: None,
-                    }),
+                    ("filament", Some(p)) => {
+                        let slot = a.get("id").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        if let Some(id) = a.get("tray_info_idx").and_then(|v| real_id(v)) {
+                            p.filament_ids.push((slot, id));
+                        }
+                        p.filaments.push(FilamentUse {
+                            slot,
+                            filament_type: a.get("type").cloned().unwrap_or_default(),
+                            color: a.get("color").cloned().unwrap_or_default(),
+                            used_g: a
+                                .get("used_g")
+                                .and_then(|v| finite_non_negative(v))
+                                .unwrap_or(0.0),
+                            used_m: a
+                                .get("used_m")
+                                .and_then(|v| finite_non_negative(v))
+                                .unwrap_or(0.0),
+                            cost: None,
+                        });
+                    }
                     ("warning", Some(p)) => {
                         let key = a.get("msg").cloned().unwrap_or_default();
                         let level: u8 = a.get("level").and_then(|v| v.parse().ok()).unwrap_or(1);
@@ -654,6 +729,7 @@ fn warning_text(key: &str) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::advisor::materials::MaterialId;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -717,6 +793,8 @@ pub(crate) mod tests {
                 color: "#00AE42".into(),
                 cost_per_kg: Some(19.99),
                 density: Some(1.26),
+                filament_id: Some("GFA00".into()),
+                material: Some(MaterialId::Pla),
             }]
         );
     }
@@ -1238,5 +1316,101 @@ pub(crate) mod tests {
         let r = parse_cli_result(r#"{"return_code": "x", "sliced_plates": {}}"#).unwrap();
         assert_eq!((r.return_code, r.sliced_plates.len()), (0, 0));
         assert_eq!(parse_cli_result("not json"), None);
+    }
+
+    #[test]
+    fn the_h2c_slice_info_names_its_filament_id() {
+        // Straight from slice_info.config, not the project settings.
+        let file = std::fs::File::open(fixture("cube_h2c.gcode.3mf")).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(
+            &mut zip.by_name("Metadata/slice_info.config").unwrap(),
+            &mut xml,
+        )
+        .unwrap();
+        let info = parse_slice_info(&xml).unwrap();
+        assert_eq!(info.plates[0].filament_ids, vec![(1, "GFA00".to_string())]);
+    }
+
+    #[test]
+    fn slice_info_ids_beat_the_project_settings() {
+        let settings = serde_json::json!({
+            "filament_settings_id": ["A", "B", "C"],
+            "filament_type": ["PLA", "PETG", "PVA"],
+            "filament_ids": ["GFL99", "", "GFS04"]
+        });
+        let mut filaments = filament_info(&settings);
+        let plates = vec![RawPlate {
+            filament_ids: vec![(1, "GFA00".into())],
+            ..Default::default()
+        }];
+        apply_slice_ids(&mut filaments, &plates);
+        let ids: Vec<Option<&str>> = filaments.iter().map(|f| f.filament_id.as_deref()).collect();
+        assert_eq!(ids, vec![Some("GFA00"), None, Some("GFS04")]);
+        assert_eq!(filaments[0].material, Some(MaterialId::Pla));
+        assert_eq!(filaments[1].material, Some(MaterialId::Petg));
+        assert_eq!(
+            filaments[2].material, None,
+            "the advisor has no row for PVA"
+        );
+    }
+
+    #[test]
+    fn a_job_fills_a_missing_id_from_its_preset_and_classifies_old_results() {
+        let mut r = parse_output(&fixture("cube_h2c.gcode.3mf"), None, None).unwrap();
+        r.filaments[0].filament_id = None;
+        r.filaments[0].material = None;
+        complete_filaments(&mut r, &[Some("GFA00".into())]);
+        assert_eq!(r.filaments[0].filament_id.as_deref(), Some("GFA00"));
+        assert_eq!(r.filaments[0].material, Some(MaterialId::Pla));
+        // An ID the output gave is kept.
+        r.filaments[0].filament_id = Some("GFA01".into());
+        complete_filaments(&mut r, &[Some("GFA00".into())]);
+        assert_eq!(r.filaments[0].filament_id.as_deref(), Some("GFA01"));
+    }
+
+    #[test]
+    fn a_flattened_config_names_its_filament_id() {
+        assert_eq!(
+            config_filament_id(r#"{"filament_id":"GFA00"}"#).as_deref(),
+            Some("GFA00")
+        );
+        assert_eq!(
+            config_filament_id(r#"{"filament_id":["P1234567"]}"#).as_deref(),
+            Some("P1234567")
+        );
+        assert_eq!(config_filament_id(r#"{"filament_id":" "}"#), None);
+        assert_eq!(config_filament_id(r#"{"name":"x"}"#), None);
+        assert_eq!(config_filament_id("not json"), None);
+    }
+
+    #[test]
+    fn an_older_cached_result_without_ids_still_reads() {
+        let old = r##"{"slot":1,"preset":"P","filament_type":"PLA","color":"#fff","cost_per_kg":null,"density":null}"##;
+        let f: FilamentInfo = serde_json::from_str(old).unwrap();
+        assert_eq!((f.filament_id, f.material), (None, None));
+    }
+
+    #[test]
+    fn a_zero_id_is_no_id_and_a_support_filament_has_no_material() {
+        assert_eq!(config_filament_id(r#"{"filament_id":"0"}"#), None);
+        let settings = serde_json::json!({
+            "filament_settings_id": ["Bambu Support For PLA @BBL H2C", "Bambu PLA Basic"],
+            "filament_type": ["PLA-S", "PLA"],
+            "filament_ids": ["0", "GFA00"]
+        });
+        let filaments = filament_info(&settings);
+        assert_eq!(
+            (filaments[0].filament_id.as_deref(), filaments[0].material),
+            (None, None)
+        );
+        assert_eq!(filaments[1].material, Some(MaterialId::Pla));
+        // A support type is still None when completing an old result.
+        let mut r = parse_output(&fixture("cube_h2c.gcode.3mf"), None, None).unwrap();
+        r.filaments[0].filament_type = "PA-S".into();
+        r.filaments[0].material = None;
+        complete_filaments(&mut r, &[]);
+        assert_eq!(r.filaments[0].material, None);
     }
 }

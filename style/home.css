@@ -119,6 +119,13 @@
     color: var(--nd-warning);
 }
 
+/* The detected profile under a Home slot: the Printer line, tighter. */
+.hm-slot .pr-detected {
+    padding: 2px 10px 0;
+    border-top: 0;
+    font-size: 11px;
+}
+
 .hm-foot {
     display: flex;
     justify-content: space-between;
@@ -140,13 +147,15 @@
     color: var(--nd-warning);
 }
 
-/* A quiet link under the idle hero's actions. */
-.hm-rate {
+/* Quiet links under the idle hero's actions. */
+.hm-rate,
+.hm-ams-line {
     align-self: flex-start;
     font-size: 13px;
     color: var(--nd-text-secondary);
 }
 
-.hm-rate:hover {
+.hm-rate:hover,
+.hm-ams-line:hover {
     color: var(--nd-text-primary);
 }

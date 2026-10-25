@@ -86,6 +86,8 @@ pub fn normalize_bed_type(raw: Option<&str>) -> String {
 struct KindIndex {
     registry: ProfileRegistry,
     sources: HashMap<String, PresetSource>,
+    /// Each preset's JSON file.
+    paths: HashMap<String, PathBuf>,
     selectable: HashSet<String>,
 }
 
@@ -93,6 +95,14 @@ struct KindIndex {
 /// presets from `system/BBL/<kind>` and the user's from `user/<id>/<kind>`.
 pub struct PresetIndex {
     kinds: HashMap<PresetKind, KindIndex>,
+}
+
+/// One selectable filament preset: its name, its file, and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub source: PresetSource,
 }
 
 /// A flattened preset, ready to be written for the CLI.
@@ -146,6 +156,7 @@ impl PresetIndex {
             let mut idx = KindIndex {
                 registry: ProfileRegistry::new(),
                 sources: HashMap::new(),
+                paths: HashMap::new(),
                 selectable: HashSet::new(),
             };
             let system_dir = config_root.join("system").join("BBL").join(kind.as_str());
@@ -169,6 +180,25 @@ impl PresetIndex {
 
     pub fn contains(&self, kind: PresetKind, name: &str) -> bool {
         self.kind(kind).registry.get_by_name(name).is_some()
+    }
+
+    /// Every selectable filament preset, by name. The filament ID index is
+    /// built from these.
+    pub fn filament_entries(&self) -> Vec<PresetEntry> {
+        let idx = self.kind(PresetKind::Filament);
+        let mut out: Vec<PresetEntry> = idx
+            .selectable
+            .iter()
+            .filter_map(|name| {
+                Some(PresetEntry {
+                    name: name.clone(),
+                    path: idx.paths.get(name)?.clone(),
+                    source: *idx.sources.get(name)?,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
     }
 
     /// Flattens one preset by name.
@@ -203,7 +233,7 @@ impl PresetIndex {
 
     /// `compatible_printers` of a preset, from the nearest level that sets a
     /// non-empty list. Empty means "every printer".
-    fn compatible_printers(&self, kind: PresetKind, name: &str) -> Vec<String> {
+    pub(crate) fn compatible_printers(&self, kind: PresetKind, name: &str) -> Vec<String> {
         let reg = &self.kind(kind).registry;
         let mut current = reg.get_by_name(name);
         let mut depth = 0;
@@ -351,8 +381,9 @@ fn made_for(compatible: &[String], printers: &[String]) -> bool {
 }
 
 /// The user preset folders [`PresetIndex::load`] reads: `user/<preset_folder>`
-/// when it exists, else every folder under `user/`.
-fn user_folders(config_root: &Path, preset_folder: Option<&str>) -> Vec<PathBuf> {
+/// when it exists, else every folder under `user/`. "Use this" accepts
+/// presets from the same folders (`commands::printer::filament_folders`).
+pub(crate) fn user_folders(config_root: &Path, preset_folder: Option<&str>) -> Vec<PathBuf> {
     let user_root = config_root.join("user");
     match preset_folder {
         Some(f) if user_root.join(f).is_dir() => vec![user_root.join(f)],
@@ -470,9 +501,12 @@ fn add_dir(idx: &mut KindIndex, dir: &Path, source: PresetSource, kind: PresetKi
             tracing::warn!("user preset {name:?} has a system preset's name; skipped");
             continue;
         }
+        // A later file with the same name replaces the registry entry and the
+        // path, but a name once selectable stays so: a quirk kept as is.
         if is_selectable(&profile, source, kind) {
             idx.selectable.insert(name.clone());
         }
+        idx.paths.insert(name.clone(), path.to_path_buf());
         idx.sources.insert(name, source);
         idx.registry.insert(profile);
     }
@@ -928,6 +962,34 @@ pub(crate) mod tests {
                 "Bambu PLA Basic @BBL H2C",
                 "Bambu PLA Basic @BBL H2S"
             ]
+        );
+    }
+
+    #[test]
+    fn filament_entries_list_the_selectable_filaments_with_their_files() {
+        let root = fake_bambu_root();
+        let idx = PresetIndex::load(root.path(), Some("1881310893"));
+        let entries = idx.filament_entries();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Bambu PLA Basic @BBL H2C",
+                "Bambu PLA Basic @BBL H2S",
+                "SUNLU PETG @Bambu Lab H2C 0.4 nozzle"
+            ],
+            "by name; @base, templates and backups left out"
+        );
+        assert_eq!(entries[0].source, PresetSource::System);
+        assert_eq!(
+            entries[0].path,
+            root.path()
+                .join("system/BBL/filament/Bambu PLA Basic @BBL H2C.json")
+        );
+        assert_eq!(entries[2].source, PresetSource::User);
+        assert_eq!(
+            idx.compatible_printers(PresetKind::Filament, "Bambu PLA Basic @BBL H2C"),
+            vec!["Bambu Lab H2C 0.4 nozzle"]
         );
     }
 

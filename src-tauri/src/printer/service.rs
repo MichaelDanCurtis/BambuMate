@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,14 +36,16 @@ use tokio::sync::{mpsc, oneshot, watch};
 use super::client::{
     self, Backoff, ClientEvent, ClientParams, ConnectionState, TestOutcome, Timing,
 };
+use super::filament_index::{FilamentIndex, PrinterTarget};
 use super::hms::{ErrorView, HmsCatalog};
 use super::settings::{valid_serial, PrinterConfig};
-use super::slots::{compute_slots, preset_needs_cloud_sync, SlotView, EXTERNAL_AMS_ID};
+use super::slots::{compute_slots_with, preset_needs_cloud_sync, SlotView, EXTERNAL_AMS_ID};
 use super::state::{parse_report, PrinterState, Report, ReportMerger};
 use super::tls::{client_config, normalize_fingerprint, PrinterCertVerifier, RejectionSlot};
 use crate::history::{RefinementHistory, SlotAssignment};
 use crate::journal::recorder::Recorder;
 use crate::journal::watch::{observe, unwatched, Fresh, JournalEvent, WatchState};
+use crate::slicer::settings::PresetIndex;
 
 pub const STATE_EVENT: &str = "printer://state";
 pub const CONNECTION_EVENT: &str = "printer://connection";
@@ -59,6 +61,157 @@ const JOURNAL_FLUSH: Duration = Duration::from_secs(2);
 /// How often a Test connection against the running printer re-reads the
 /// live connection while it waits for a result.
 const LIVE_TEST_POLL: Duration = Duration::from_millis(100);
+/// The preset folders are checked for changes at most this often.
+const INDEX_RECHECK: Duration = Duration::from_secs(60);
+
+/// Where the filament ID index gets Bambu Studio's presets: in the app, the
+/// slicer's cached [`PresetIndex`]. `None` when Bambu Studio isn't found.
+/// Blocking: it may read the preset folders.
+pub type PresetSource = Arc<dyn Fn() -> Option<Arc<PresetIndex>> + Send + Sync>;
+
+/// The filament ID index and what it was built for. Locked only briefly,
+/// never together with `live`, and never while presets load or the index
+/// builds.
+struct FilamentCache {
+    source: Option<PresetSource>,
+    index: Option<Arc<FilamentIndex>>,
+    /// The printer and the install/sync generation the index was built for.
+    built_for: Option<(PrinterTarget, u64)>,
+    /// The presets it was built from. The slicer's cache hands back the same
+    /// `Arc` until a preset folder changes.
+    built_from: Option<Arc<PresetIndex>>,
+    /// When the preset folders were last checked.
+    checked: Option<Instant>,
+    /// A refresh runs. At most one does.
+    building: bool,
+    /// A refresh was asked for while one ran: that one checks again before
+    /// it ends, so the request isn't lost.
+    pending: bool,
+    /// The index couldn't be built and that was logged. Cleared by the next
+    /// build that succeeds, so a failure is logged once, not every minute.
+    warned: bool,
+    /// The install/sync generation: [`crate::profile::presets_generation`]
+    /// in the app.
+    generation: fn() -> u64,
+}
+
+impl FilamentCache {
+    fn new() -> Self {
+        Self {
+            source: None,
+            index: None,
+            built_for: None,
+            built_from: None,
+            checked: None,
+            building: false,
+            pending: false,
+            warned: false,
+            generation: crate::profile::presets_generation,
+        }
+    }
+
+    /// Whether a refresh should run now. Never while one runs or without
+    /// presets. Otherwise, when the printer, its nozzle or the install
+    /// generation changed, or a minute has passed since the folders were
+    /// checked.
+    fn due(&self, target: &PrinterTarget, generation: u64, now: Instant) -> bool {
+        if self.building || self.source.is_none() {
+            return false;
+        }
+        self.stale(target, generation, now)
+    }
+
+    /// Whether the index is out of date for `target` and `generation`, or
+    /// the folders are due a check. Only the folder check waits a minute.
+    fn stale(&self, target: &PrinterTarget, generation: u64, now: Instant) -> bool {
+        self.built_for.as_ref() != Some(&(target.clone(), generation))
+            || self
+                .checked
+                .is_none_or(|t| now.saturating_duration_since(t) >= INDEX_RECHECK)
+    }
+
+    /// Asks for a refresh. `true` when the caller is to start one: it is
+    /// then marked as running. A request while one runs is remembered
+    /// instead, and the running one checks again before it ends.
+    fn request(&mut self, target: &PrinterTarget, now: Instant) -> bool {
+        if self.source.is_none() {
+            return false;
+        }
+        if self.building {
+            self.pending = true;
+            return false;
+        }
+        if !self.due(target, (self.generation)(), now) {
+            return false;
+        }
+        self.building = true;
+        true
+    }
+
+    /// Stores what a refresh found: the new index, or, when there is none,
+    /// no index at all, so slots carry no detection. `failure` is logged
+    /// once until a build succeeds again.
+    fn store(
+        &mut self,
+        target: PrinterTarget,
+        generation: u64,
+        presets: Option<Arc<PresetIndex>>,
+        built: Result<FilamentIndex, &'static str>,
+    ) {
+        match built {
+            Ok(index) => {
+                self.index = Some(Arc::new(index));
+                self.warned = false;
+            }
+            Err(why) => {
+                self.index = None;
+                if !std::mem::replace(&mut self.warned, true) {
+                    tracing::warn!("the filament ID index couldn't be built: {why}");
+                }
+            }
+        }
+        self.built_for = Some((target, generation));
+        self.built_from = presets;
+    }
+}
+
+/// Clears `building` if a refresh ends by panicking. A refresh that ends
+/// normally clears it itself and forgets this guard.
+struct Building<'a>(&'a Mutex<FilamentCache>);
+
+impl Drop for Building<'_> {
+    fn drop(&mut self) {
+        let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        cache.building = false;
+        cache.pending = false;
+    }
+}
+
+/// The printer the filament ID index picks variants for: the model from
+/// `get_version` or settings, and the active nozzle's diameter. `None`
+/// unless the printer is connected and has reported: slot data is only
+/// trusted while connected.
+fn target_of(live: &Live) -> Option<PrinterTarget> {
+    if live.connection != ConnectionState::Connected {
+        return None;
+    }
+    let state = live.state.as_ref()?;
+    let model = live
+        .model
+        .clone()
+        .or_else(|| live.config.as_ref().map(|c| c.model.clone()))
+        .unwrap_or_default();
+    let nozzle = state
+        .nozzles
+        .iter()
+        .find(|n| state.active_nozzle == Some(n.id))
+        .or_else(|| state.nozzles.first())
+        .and_then(|n| n.diameter);
+    Some(PrinterTarget {
+        model: model.trim().to_string(),
+        nozzle,
+    })
+}
 
 /// Where the service's events go: the webview in the app, a recorder in tests.
 pub trait PrinterEvents: Send + Sync + 'static {
@@ -355,6 +508,8 @@ struct Inner {
     hms_url: String,
     timing: Timing,
     live: Mutex<Live>,
+    /// Never locked together with `live`.
+    filament: Mutex<FilamentCache>,
     dirty: watch::Sender<u64>,
     /// To the sequencer, the only task that starts and ends clients.
     commands: mpsc::UnboundedSender<Command>,
@@ -419,6 +574,7 @@ impl PrinterService {
             hms_url: hms_url.to_string(),
             timing,
             live: Mutex::new(Live::empty(0)),
+            filament: Mutex::new(FilamentCache::new()),
             dirty,
             commands,
         });
@@ -658,7 +814,22 @@ impl PrinterService {
     }
 
     pub fn view(&self) -> PrinterView {
+        // Read before `live` is locked: the two are never held together.
+        let built = {
+            let cache = self.filament();
+            cache
+                .index
+                .clone()
+                .zip(cache.built_for.as_ref().map(|(t, _)| t.clone()))
+        };
         let live = self.inner.live.lock().unwrap();
+        // Only while connected, and only an index built for this printer
+        // and nozzle: stale slots and another printer's presets detect
+        // nothing.
+        let target = target_of(&live);
+        let index = built
+            .filter(|(_, built_for)| target.as_ref() == Some(built_for))
+            .map(|(index, _)| index);
         let model = live
             .model
             .clone()
@@ -668,9 +839,12 @@ impl PrinterService {
             .state
             .as_ref()
             .map(|s| {
-                compute_slots(s, &live.assignments, &|path| {
-                    live.cloud_sync.get(path).copied().unwrap_or(false)
-                })
+                compute_slots_with(
+                    s,
+                    &live.assignments,
+                    &|path| live.cloud_sync.get(path).copied().unwrap_or(false),
+                    index.as_deref(),
+                )
             })
             .unwrap_or_default();
         let errors = match (&live.state, &live.hms) {
@@ -819,6 +993,118 @@ impl PrinterService {
         });
     }
 
+    /// Gives the filament ID index its presets. Call once at startup; until
+    /// then no slot shows a detected profile.
+    pub fn use_presets(
+        &self,
+        source: impl Fn() -> Option<Arc<PresetIndex>> + Send + Sync + 'static,
+    ) {
+        self.filament().source = Some(Arc::new(source));
+    }
+
+    fn filament(&self) -> MutexGuard<'_, FilamentCache> {
+        self.inner
+            .filament
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn filament_target(&self) -> Option<PrinterTarget> {
+        target_of(&self.inner.live.lock().unwrap())
+    }
+
+    /// The cached index, whatever printer it was built for. `view` reads the
+    /// cache itself, with what it was built for, in one lock.
+    #[cfg(test)]
+    pub(crate) fn filament_index(&self) -> Option<Arc<FilamentIndex>> {
+        self.filament().index.clone()
+    }
+
+    /// Rebuilds the filament ID index on a blocking thread when it is due.
+    /// Cheap enough to call on every report: it only compares the printer
+    /// and the install generation, and reads the clock.
+    pub fn schedule_filament_refresh(&self) {
+        let Some(target) = self.filament_target() else {
+            return;
+        };
+        if !self.filament().request(&target, Instant::now()) {
+            return;
+        }
+        let service = self.clone();
+        tauri::async_runtime::spawn_blocking(move || service.run_filament_refresh());
+    }
+
+    /// The refresh [`schedule_filament_refresh`](Self::schedule_filament_refresh)
+    /// started, which is marked as running. Refreshes again while requests
+    /// came in during the last one, then clears the mark.
+    fn run_filament_refresh(&self) {
+        let guard = Building(&self.inner.filament);
+        loop {
+            if let Some(target) = self.filament_target() {
+                self.refresh_filament_index(target);
+            }
+            let mut cache = self.filament();
+            if !std::mem::take(&mut cache.pending) {
+                cache.building = false;
+                drop(cache);
+                std::mem::forget(guard);
+                return;
+            }
+        }
+    }
+
+    /// Checks the presets and rebuilds the index if the printer, the
+    /// presets or the install generation changed. Blocking: it may read the
+    /// preset folders. No lock is held while presets load or the index
+    /// builds, and a panic in either leaves no index rather than a stuck one.
+    fn refresh_filament_index(&self, target: PrinterTarget) {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let (source, generation) = {
+            let cache = self.filament();
+            let generation = (cache.generation)();
+            if !cache.stale(&target, generation, Instant::now()) {
+                return;
+            }
+            (cache.source.clone(), generation)
+        };
+        let Some(source) = source else {
+            return;
+        };
+        let presets = match catch_unwind(AssertUnwindSafe(|| source())) {
+            Ok(presets) => presets,
+            Err(_) => {
+                let mut cache = self.filament();
+                cache.checked = Some(Instant::now());
+                cache.store(target, generation, None, Err("reading the presets failed"));
+                drop(cache);
+                self.mark_dirty();
+                return;
+            }
+        };
+        {
+            let mut cache = self.filament();
+            cache.checked = Some(Instant::now());
+            let same_presets = match (&cache.built_from, &presets) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            if same_presets && cache.built_for.as_ref() == Some(&(target.clone(), generation)) {
+                return;
+            }
+        }
+        let built = match presets.as_deref() {
+            None => Err("Bambu Studio's presets weren't found"),
+            Some(p) if p.filament_entries().is_empty() => {
+                Err("no Bambu Studio filament presets were found")
+            }
+            Some(p) => catch_unwind(AssertUnwindSafe(|| FilamentIndex::build(p, &target)))
+                .map_err(|_| "building it failed"),
+        };
+        self.filament().store(target, generation, presets, built);
+        self.mark_dirty();
+    }
+
     fn mark_dirty(&self) {
         self.inner.dirty.send_modify(|n| *n = n.wrapping_add(1));
     }
@@ -878,6 +1164,7 @@ impl PrinterService {
             }
         }
         self.mark_dirty();
+        self.schedule_filament_refresh();
         if let Some(hms) = load_hms {
             let service = self.clone();
             tauri::async_runtime::spawn(async move {
@@ -1115,6 +1402,8 @@ mod tests {
     use crate::printer::state::fixtures::{GET_VERSION_H2D, H2D_DELTA_PROGRESS, H2D_FULL};
     use crate::printer::testbroker::FakeBroker;
     use crate::printer::tls::testpki::TestCa;
+    use crate::slicer::settings::{tests::fake_bambu_root, PresetCache};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     // The pushall limit is process-wide per serial, and the client tests
     // number their serials `0948AB…`; a separate prefix keeps these tests
@@ -2269,5 +2558,382 @@ mod tests {
         wait_for(|| last_entry(&paths).is_some()).await;
         let e = last_entry(&paths).unwrap();
         assert_eq!((e.outcome, e.ended_at), (Outcome::Unknown, None));
+    }
+
+    /// The test presets, as the slicer's cache hands them out.
+    fn presets_from(
+        root: &tempfile::TempDir,
+    ) -> impl Fn() -> Option<Arc<PresetIndex>> + Send + Sync + 'static {
+        let path = root.path().to_path_buf();
+        let cache = PresetCache::default();
+        move || Some(cache.load(&path, Some("1881310893")))
+    }
+
+    /// `presets_from`, counting how often the presets are read.
+    fn counted_presets(
+        root: &tempfile::TempDir,
+    ) -> (
+        impl Fn() -> Option<Arc<PresetIndex>> + Send + Sync + 'static,
+        Arc<AtomicUsize>,
+    ) {
+        let load = presets_from(root);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let source = move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            load()
+        };
+        (source, calls)
+    }
+
+    /// The install generation, held still: other tests note preset changes
+    /// on the process-wide counter at any time.
+    fn no_installs() -> u64 {
+        0
+    }
+
+    fn with_model(model: &str) -> PrinterConfig {
+        PrinterConfig {
+            model: model.into(),
+            ..config()
+        }
+    }
+
+    fn connected(svc: &PrinterService, generation: u64) {
+        svc.handle_event(
+            generation,
+            ClientEvent::Connection(ConnectionState::Connected),
+        );
+    }
+
+    fn slot<'a>(v: &'a PrinterView, label: &str) -> &'a SlotView {
+        v.slots.iter().find(|s| s.label == label).unwrap()
+    }
+
+    fn detected(v: &PrinterView, label: &str) -> Option<String> {
+        slot(v, label)
+            .detected
+            .as_ref()
+            .map(|d| d.preset_name.clone())
+    }
+
+    fn no_detection(v: &PrinterView) -> bool {
+        v.slots
+            .iter()
+            .all(|s| s.detected.is_none() && !s.not_installed && s.other_nozzle.is_none())
+    }
+
+    fn building(svc: &PrinterService) -> bool {
+        svc.filament().building
+    }
+
+    #[tokio::test]
+    async fn a_report_builds_the_filament_index_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_bambu_root();
+        let (svc, rec) = service(&dir);
+        svc.use_presets(presets_from(&root));
+        let generation = svc.configure_for_test(with_model("H2C"));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| detected(&svc.view(), "A2").is_some()).await;
+        let view = svc.view();
+        assert_eq!(
+            detected(&view, "A2").as_deref(),
+            Some("Bambu PLA Basic @BBL H2C")
+        );
+        assert!(
+            slot(&view, "A3").not_installed,
+            "GFG99 isn't in the test presets"
+        );
+        assert!(!slot(&view, "B4").not_installed, "B4 is empty");
+        // The new index reaches the page through `printer://state`.
+        wait_for(|| {
+            rec.states
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|v| detected(v, "A2").is_some())
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_index_follows_a_new_printer_model_without_waiting_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_bambu_root();
+        let (svc, _rec) = service(&dir);
+        svc.use_presets(presets_from(&root));
+        let generation = svc.configure_for_test(with_model("H2C"));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| detected(&svc.view(), "A2").is_some()).await;
+        // Same serial: the state is kept, only the model changes.
+        let generation = svc.configure_for_test(with_model("H2S"));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_DELTA_PROGRESS);
+        wait_for(|| detected(&svc.view(), "A2").as_deref() == Some("Bambu PLA Basic @BBL H2S"))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_index_built_for_another_printer_is_never_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_bambu_root();
+        let (svc, _rec) = service(&dir);
+        svc.use_presets(presets_from(&root));
+        let generation = svc.configure_for_test(with_model("H2C"));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| detected(&svc.view(), "A2").is_some()).await;
+        // Before any report from the H2S, the H2C's index doesn't apply.
+        let generation = svc.configure_for_test(with_model("H2S"));
+        connected(&svc, generation);
+        assert!(no_detection(&svc.view()));
+    }
+
+    #[tokio::test]
+    async fn an_installed_preset_is_picked_up_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_bambu_root();
+        let (svc, _rec) = service(&dir);
+        svc.use_presets(presets_from(&root));
+        let generation = svc.configure_for_test(with_model("H2C"));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| detected(&svc.view(), "A2").is_some()).await;
+        // B2 reports P4d6ae04, which no preset has yet.
+        assert!(slot(&svc.view(), "B2").not_installed);
+        std::fs::write(
+            root.path().join(
+                "user/1881310893/filament/base/Acme Matte PLA @Bambu Lab H2C 0.4 nozzle.json",
+            ),
+            r#"{"name":"Acme Matte PLA @Bambu Lab H2C 0.4 nozzle","inherits":"","from":"User",
+               "filament_id":"P4d6ae04","compatible_printers":["Bambu Lab H2C 0.4 nozzle"]}"#,
+        )
+        .unwrap();
+        crate::profile::note_presets_changed();
+        report(&svc, generation, H2D_DELTA_PROGRESS);
+        wait_for(|| {
+            detected(&svc.view(), "B2").as_deref()
+                == Some("Acme Matte PLA @Bambu Lab H2C 0.4 nozzle")
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn without_presets_no_slot_is_detected_or_marked_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let generation = svc.configure_for_test(config());
+        connected(&svc, generation);
+        report(&svc, generation, H2D_FULL);
+        let view = svc.view();
+        assert_eq!(view.slots.len(), 10);
+        assert!(no_detection(&view));
+        assert!(svc.filament_index().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_disconnected_printer_s_slots_carry_no_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_bambu_root();
+        let (svc, _rec) = service(&dir);
+        svc.use_presets(presets_from(&root));
+        let generation = svc.configure_for_test(with_model("H2C"));
+        // Reports while connecting build nothing and detect nothing.
+        report(&svc, generation, H2D_FULL);
+        assert!(!building(&svc));
+        assert!(svc.filament_index().is_none());
+        assert!(no_detection(&svc.view()));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_DELTA_PROGRESS);
+        wait_for(|| detected(&svc.view(), "A2").is_some()).await;
+        svc.handle_event(
+            generation,
+            ClientEvent::Connection(ConnectionState::Disconnected),
+        );
+        let view = svc.view();
+        assert_eq!(view.slots.len(), 10, "the last state is kept");
+        assert!(no_detection(&view), "but stale slots detect nothing");
+        connected(&svc, generation);
+        assert!(detected(&svc.view(), "A2").is_some());
+    }
+
+    #[tokio::test]
+    async fn reports_within_a_minute_read_the_presets_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_bambu_root();
+        let (svc, _rec) = service(&dir);
+        let (source, calls) = counted_presets(&root);
+        svc.use_presets(source);
+        svc.filament().generation = no_installs;
+        let generation = svc.configure_for_test(with_model("H2C"));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| detected(&svc.view(), "A2").is_some() && !building(&svc)).await;
+        for _ in 0..20 {
+            report(&svc, generation, H2D_DELTA_PROGRESS);
+            svc.schedule_filament_refresh();
+        }
+        wait_for(|| !building(&svc)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_build_that_panics_detects_nothing_and_waits_for_the_next_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        svc.use_presets(move || -> Option<Arc<PresetIndex>> {
+            counted.fetch_add(1, Ordering::SeqCst);
+            panic!("unreadable presets")
+        });
+        svc.filament().generation = no_installs;
+        let generation = svc.configure_for_test(with_model("H2C"));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| calls.load(Ordering::SeqCst) == 1 && !building(&svc)).await;
+        for _ in 0..5 {
+            report(&svc, generation, H2D_DELTA_PROGRESS);
+        }
+        wait_for(|| !building(&svc)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "not retried on every report"
+        );
+        assert!(svc.filament().warned, "the failure is logged");
+        assert!(svc.filament_index().is_none());
+        let view = svc.view();
+        assert_eq!(view.slots.len(), 10, "the printer view keeps working");
+        assert!(no_detection(&view));
+    }
+
+    #[tokio::test]
+    async fn a_bambu_studio_without_filament_presets_detects_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let (svc, _rec) = service(&dir);
+        svc.use_presets(presets_from(&empty));
+        let generation = svc.configure_for_test(with_model("H2C"));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_FULL);
+        wait_for(|| svc.filament().built_for.is_some() && !building(&svc)).await;
+        assert!(svc.filament().warned);
+        assert!(svc.filament_index().is_none());
+        assert!(
+            no_detection(&svc.view()),
+            "never \"not installed\" for every slot"
+        );
+    }
+
+    static COALESCED_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+    fn coalesced_generation() -> u64 {
+        COALESCED_GENERATION.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn a_refresh_asked_for_during_a_build_runs_once_it_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_bambu_root();
+        let (svc, _rec) = service(&dir);
+        let load = presets_from(&root);
+        let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let entered_tx = Mutex::new(entered_tx);
+        let (active, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (active2, most2) = (active.clone(), most.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        svc.use_presets(move || {
+            let now = active2.fetch_add(1, Ordering::SeqCst) + 1;
+            most2.fetch_max(now, Ordering::SeqCst);
+            calls2.fetch_add(1, Ordering::SeqCst);
+            let _ = entered_tx.lock().unwrap().send(());
+            let _ = release_rx.lock().unwrap().recv();
+            let presets = load();
+            active2.fetch_sub(1, Ordering::SeqCst);
+            presets
+        });
+        svc.filament().generation = coalesced_generation;
+        let generation = svc.configure_for_test(with_model("H2C"));
+        connected(&svc, generation);
+        report(&svc, generation, H2D_FULL);
+        tokio::task::spawn_blocking(move || entered.recv().unwrap())
+            .await
+            .unwrap();
+        // A preset is installed while the first build reads the presets.
+        COALESCED_GENERATION.fetch_add(1, Ordering::SeqCst);
+        for _ in 0..10 {
+            report(&svc, generation, H2D_DELTA_PROGRESS);
+        }
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+        wait_for(|| {
+            !building(&svc)
+                && svc
+                    .filament()
+                    .built_for
+                    .as_ref()
+                    .is_some_and(|(_, g)| *g == 1)
+        })
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "ten requests, one rerun");
+        assert_eq!(most.load(Ordering::SeqCst), 1, "one build at a time");
+        assert!(detected(&svc.view(), "A2").is_some());
+    }
+
+    #[test]
+    fn a_refresh_is_started_only_when_none_runs() {
+        let target = PrinterTarget {
+            model: "H2C".into(),
+            nozzle: Some(0.4),
+        };
+        let now = Instant::now();
+        let mut cache = FilamentCache::new();
+        cache.generation = no_installs;
+        assert!(!cache.request(&target, now), "nothing to build from yet");
+        cache.source = Some(Arc::new(|| None::<Arc<PresetIndex>>));
+        assert!(cache.request(&target, now));
+        assert!(cache.building);
+        assert!(!cache.request(&target, now), "one refresh at a time");
+        assert!(cache.pending, "the running one checks again before it ends");
+    }
+
+    #[test]
+    fn the_preset_folders_are_checked_at_most_once_a_minute() {
+        let target = PrinterTarget {
+            model: "H2C".into(),
+            nozzle: Some(0.4),
+        };
+        let now = Instant::now();
+        let mut cache = FilamentCache::new();
+        assert!(!cache.due(&target, 0, now), "nothing to build from yet");
+        cache.source = Some(Arc::new(|| None::<Arc<PresetIndex>>));
+        assert!(cache.due(&target, 0, now), "never built");
+        cache.built_for = Some((target.clone(), 0));
+        cache.checked = Some(now);
+        assert!(!cache.due(&target, 0, now + Duration::from_secs(59)));
+        assert!(cache.due(&target, 0, now + INDEX_RECHECK));
+        assert!(
+            cache.due(&target, 1, now),
+            "a preset was installed or synced"
+        );
+        let other_nozzle = PrinterTarget {
+            nozzle: Some(0.2),
+            ..target.clone()
+        };
+        assert!(cache.due(&other_nozzle, 0, now));
+        let other_model = PrinterTarget {
+            model: "H2S".into(),
+            ..target.clone()
+        };
+        assert!(cache.due(&other_model, 0, now));
+        cache.building = true;
+        assert!(!cache.due(&target, 1, now), "one refresh at a time");
     }
 }

@@ -203,6 +203,16 @@ impl SlotStatus {
     }
 }
 
+/// The installed preset a slot's filament ID names (`filament_index::Detected`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Detected {
+    pub preset_name: String,
+    pub path: String,
+    pub is_user: bool,
+    pub variants: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SlotView {
@@ -217,11 +227,32 @@ pub struct SlotView {
     pub needs_cloud_sync: bool,
     /// The assigned preset has no filament id, so the slot can't be checked.
     pub preset_has_no_id: bool,
+    /// The installed preset the reported filament ID names.
+    pub detected: Option<Detected>,
+    /// The reported filament ID matches no installed preset.
+    pub not_installed: bool,
+    /// The ID names presets for this printer, but none for its configured
+    /// nozzle: that nozzle's diameter in mm ("No preset for the 0.6 mm
+    /// nozzle"). Exclusive with `detected` and `not_installed`.
+    pub other_nozzle: Option<f64>,
+    /// The tray's material as the advisor classifies it (`pla`, `pet_cf`, …).
+    pub material: Option<String>,
+}
+
+impl Tray {
+    /// The filament ID the printer reports, trimmed. A blank one, or the
+    /// "0" a spool without a profile reports, is no ID: it reads as "".
+    pub fn reported_id(&self) -> &str {
+        match self.tray_info_idx.trim() {
+            "0" => "",
+            id => id,
+        }
+    }
 }
 
 impl SlotView {
     /// The preset name a card shows: the assigned one, else what the
-    /// printer reports.
+    /// printer reports (its sub-brand, else its filament ID if it has one).
     pub fn preset_name(&self) -> String {
         if let Some(p) = &self.assigned_preset {
             return p.clone();
@@ -229,7 +260,7 @@ impl SlotView {
         if !self.tray.tray_sub_brands.is_empty() {
             return self.tray.tray_sub_brands.clone();
         }
-        self.tray.tray_info_idx.clone()
+        self.tray.reported_id().to_string()
     }
 }
 
@@ -413,6 +444,27 @@ mod tests {
     }
 
     #[test]
+    fn a_tray_id_of_zero_is_no_name() {
+        let mut s = SlotView {
+            tray: Tray {
+                tray_info_idx: "0".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(s.tray.reported_id(), "");
+        assert_eq!(s.preset_name(), "", "a bare 0 is not shown as a name");
+        s.tray.tray_info_idx = " 0 ".into();
+        assert_eq!(s.preset_name(), "");
+        s.tray.tray_info_idx = "  GFA00 ".into();
+        assert_eq!(s.tray.reported_id(), "GFA00");
+        assert_eq!(s.preset_name(), "GFA00");
+        s.tray.tray_info_idx = "0".into();
+        s.tray.tray_sub_brands = "PLA Basic".into();
+        assert_eq!(s.preset_name(), "PLA Basic");
+    }
+
+    #[test]
     fn only_auth_certificate_and_serial_failures_need_the_user() {
         assert!(ConnectionState::AuthFailed.needs_user());
         assert!(ConnectionState::CertUntrusted {
@@ -458,5 +510,29 @@ mod tests {
         let p: DiscoveredPrinter =
             serde_json::from_str(r#"{"ip":"1.2.3.4","serial":"A","name":"","model":""}"#).unwrap();
         assert!(!p.conflict);
+    }
+
+    #[test]
+    fn a_slot_carries_its_detected_preset_and_material() {
+        let s: SlotView = serde_json::from_str(
+            r#"{"label":"A2","tray":{"tray_type":"PLA","tray_info_idx":"GFA00"},
+                "detected":{"preset_name":"Bambu PLA Basic @BBL H2D","path":"/s/a.json","is_user":false,"variants":["Bambu PLA Basic @BBL H2D"]},
+                "not_installed":false,"other_nozzle":null,"material":"pla"}"#,
+        )
+        .unwrap();
+        assert_eq!(s.detected.unwrap().preset_name, "Bambu PLA Basic @BBL H2D");
+        assert_eq!(s.material.as_deref(), Some("pla"));
+        let old: SlotView = serde_json::from_str(r#"{"label":"A1"}"#).unwrap();
+        assert_eq!(
+            (
+                old.detected,
+                old.not_installed,
+                old.other_nozzle,
+                old.material
+            ),
+            (None, false, None, None)
+        );
+        let other: SlotView = serde_json::from_str(r#"{"label":"A1","other_nozzle":0.6}"#).unwrap();
+        assert_eq!(other.other_nozzle, Some(0.6));
     }
 }

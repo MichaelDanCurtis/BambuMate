@@ -188,6 +188,8 @@ pub async fn batch_generate_brand(
                         let target_path = ud.join(&filename);
                         match write_profile_new(&profile, &target_path, &metadata.user_id) {
                             Ok(outcome) => {
+                                // The printer's filament ID index rebuilds at once.
+                                crate::profile::note_presets_changed();
                                 // Best effort: never fails the batch entry. Reuse the
                                 // AppHandle we already have to avoid a second, possibly
                                 // divergent, resolution of the app data directory; fall
