@@ -162,7 +162,20 @@ pub fn material_of_filament(filament_type: &str, name: &str) -> Option<MaterialI
     if words.len() >= 2 && words.last().is_some_and(|w| w == "S") {
         return None;
     }
-    classify(&format!("{filament_type} {name}"))
+    let by_name = classify(&format!("{filament_type} {name}"));
+    // The type is authoritative; the free-text name may only refine within
+    // the type's family (PLA to PLA+, PETG to PETG-CF), never switch family
+    // ("my PLA profile" on a PETG type is still PETG).
+    match (classify(filament_type), by_name) {
+        (Some(t), Some(n)) if family(t) != family(n) => Some(t),
+        _ => by_name,
+    }
+}
+
+/// The base family a material belongs to (PLA, PLA+ and PLA-CF are all
+/// "PLA"), as the materials table records it.
+fn family(id: MaterialId) -> &'static str {
+    super::materials::material(id).base
 }
 
 /// The material a tray reports. `None` for an empty tray or one the advisor
@@ -426,6 +439,24 @@ mod tests {
         assert_eq!(material("PLA", "PLA Basic"), Some(Pla));
         assert_eq!(material("", ""), None, "an empty string");
         assert_eq!(material("  ", "PLA"), None, "a blank type");
+    }
+
+    #[test]
+    fn the_type_decides_the_family_and_the_name_only_refines_it() {
+        let f = material_of_filament;
+        assert_eq!(f("PETG", "my PLA profile"), Some(Petg));
+        assert_eq!(f("PLA", "Bambu PLA Tough"), Some(PlaPlus));
+        assert_eq!(f("PLA", "Polymaker PLA Pro"), Some(PlaPlus));
+        assert_eq!(f("PETG", "PETG HF"), Some(Petg));
+        assert_eq!(f("PETG", "Bambu PETG-CF"), Some(PetCf));
+        assert_eq!(f("TPU", "PLA lookalike"), Some(Tpu));
+        assert_eq!(f("PLA", "Bambu Support for PLA"), None);
+        assert_eq!(f("PLA-S", "Bambu Support for PLA"), None);
+        assert_eq!(
+            f("Custom", "My PLA Basic"),
+            Some(Pla),
+            "an unknown type falls back to the name"
+        );
     }
 
     #[test]

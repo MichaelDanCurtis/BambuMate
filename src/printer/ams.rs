@@ -207,12 +207,16 @@ pub fn ams_match(job: &JobFilament, view: &PrinterView) -> AmsMatch {
             other_colour: other_colour(s),
         };
     }
+    // The same raw type is the same material even when a preset name or
+    // sub-brand lifts one side to PLA+ ("PLA Tough" on a plain PLA spool).
+    // A support spool classifies to None and has a different type ("PLA-S").
+    let same_type = |s: &SlotView| {
+        let (a, b) = (job.filament_type.trim(), s.tray.tray_type.trim());
+        !a.is_empty() && a.eq_ignore_ascii_case(b)
+    };
     let same = |s: &&SlotView| match (&job.material, &s.material) {
-        (Some(a), Some(b)) => a == b,
-        _ => {
-            let (a, b) = (job.filament_type.trim(), s.tray.tray_type.trim());
-            !a.is_empty() && a.eq_ignore_ascii_case(b)
-        }
+        (Some(a), Some(b)) => a == b || same_type(s),
+        _ => same_type(s),
     };
     let same_slots: Vec<&SlotView> = loaded.iter().copied().filter(same).collect();
     if let Some(s) = pick(same_slots, &other_colour) {
@@ -354,6 +358,55 @@ mod tests {
             "~ PETG-CF in B1, different profile: check temperatures"
         );
         assert_eq!(m.tone(), "same");
+    }
+
+    fn pla_job(material: &str) -> JobFilament {
+        JobFilament {
+            preset: "Some PLA @BBL H2D".into(),
+            filament_id: Some("GFZZZ".into()),
+            filament_type: "PLA".into(),
+            material: Some(material.into()),
+            color: "#ffffff".into(),
+        }
+    }
+
+    #[test]
+    fn a_pla_plus_job_against_a_plain_pla_spool_is_the_same_material() {
+        let v = connected(vec![slot("A2", "PLA", "GFA00", "FFFFFFFF", Some("pla"))]);
+        assert_eq!(
+            ams_match(&pla_job("pla_plus"), &v),
+            AmsMatch::SameMaterial {
+                slot: "A2".into(),
+                material: "PLA".into(),
+                other_colour: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_plain_pla_job_against_a_pla_plus_spool_is_the_same_material() {
+        let v = connected(vec![slot(
+            "A2",
+            " pla ",
+            "GFA11",
+            "FFFFFFFF",
+            Some("pla_plus"),
+        )]);
+        assert!(matches!(
+            ams_match(&pla_job("pla"), &v),
+            AmsMatch::SameMaterial { .. }
+        ));
+    }
+
+    #[test]
+    fn a_support_spool_is_never_the_jobs_material() {
+        let v = connected(vec![slot("A2", "PLA-S", "GFS00", "FFFFFFFF", None)]);
+        assert_eq!(
+            ams_match(&pla_job("pla"), &v),
+            AmsMatch::NotLoaded {
+                material: "PLA".into()
+            }
+        );
     }
 
     #[test]

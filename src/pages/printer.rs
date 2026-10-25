@@ -389,6 +389,7 @@ pub(crate) fn SlotDetection(item: Memo<SlotView>) -> impl IntoView {
         let Some(path) = slot.detected.as_ref().map(|d| d.path.clone()) else {
             return;
         };
+        let label = slot.label.clone();
         busy.set(true);
         error.set(None);
         let ticket = shared.ticket();
@@ -402,6 +403,9 @@ pub(crate) fn SlotDetection(item: Memo<SlotView>) -> impl IntoView {
                     if let Some(ticket) = ticket {
                         shared.apply(ticket, view);
                     }
+                    // The button goes away on success: put focus back on
+                    // the card so keyboard users keep their place.
+                    refocus_card(label);
                 }
                 Err(e) => {
                     error.try_set(Some(e));
