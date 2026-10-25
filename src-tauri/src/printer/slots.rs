@@ -158,8 +158,10 @@ pub fn compute_slots_with(
         let status = slot_status(tray, assigned);
         let is_different = status == SlotStatus::Different;
         let reported = tray.tray_info_idx.trim();
+        // "0" is how some firmware writes "no ID".
+        let has_id = !tray.empty && !reported.is_empty() && reported != "0";
         let outcome = index
-            .filter(|_| !tray.empty && !reported.is_empty())
+            .filter(|_| has_id)
             .map(|i| (i, i.lookup_outcome(reported)));
         let (mut detected, mut not_installed, mut other_nozzle) = (None, false, None);
         match outcome {
@@ -681,5 +683,42 @@ mod tests {
             ),
             (None, false, None, None)
         );
+    }
+
+    #[test]
+    fn a_tray_id_of_zero_means_no_id() {
+        let mut state = state_after(&[H2D_FULL]);
+        for id in ["0", " 0 "] {
+            state.ams_units[0].trays[2].tray_info_idx = id.into();
+            let slots = compute_slots_with(&state, &[], &|_| false, Some(&h2c_index()));
+            assert_eq!(slots[2].tray.tray_type, "PETG");
+            assert_eq!(
+                (
+                    slots[2].detected.clone(),
+                    slots[2].not_installed,
+                    slots[2].other_nozzle
+                ),
+                (None, false, None),
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_external_spool_is_detected_like_an_ams_slot() {
+        let mut state = state_after(&[H2D_FULL]);
+        let index = h2c_index();
+        // Ext-L reports GFA01, which the test presets don't have.
+        let slots = compute_slots_with(&state, &[], &|_| false, Some(&index));
+        assert_eq!(slots[8].ams_id, EXTERNAL_AMS_ID);
+        assert!(slots[8].not_installed);
+        state.external_spools[0].tray_info_idx = "GFA00".into();
+        let slots = compute_slots_with(&state, &[], &|_| false, Some(&index));
+        assert_eq!(slots[8].label, "Ext-L");
+        assert_eq!(
+            slots[8].detected.as_ref().map(|d| d.preset_name.as_str()),
+            Some("Bambu PLA Basic @BBL H2C")
+        );
+        assert!(!slots[8].not_installed);
     }
 }

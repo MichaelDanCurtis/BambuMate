@@ -155,6 +155,13 @@ pub fn material_of(tray: &Tray) -> Option<MaterialId> {
     if tray.empty || tray.tray_type.trim().is_empty() {
         return None;
     }
+    // Bambu's support spools report a type like "PLA-S" or "PA-S": a material
+    // word plus a lone "S". They are not that material, so a PLA job must
+    // not count one as "same material". ("Support …" is `classify`'s job.)
+    let words = tokens(&tray.tray_type);
+    if words.len() >= 2 && words.last().is_some_and(|w| w == "S") {
+        return None;
+    }
     classify(&format!("{} {}", tray.tray_type, tray.tray_sub_brands))
 }
 
@@ -390,6 +397,44 @@ mod tests {
     use super::ProductStatus::*;
     use super::*;
     use crate::advisor::materials::MaterialId::*;
+    use crate::printer::state::Tray;
+
+    fn material(tray_type: &str, sub: &str) -> Option<MaterialId> {
+        material_of(&Tray {
+            tray_type: tray_type.into(),
+            tray_sub_brands: sub.into(),
+            empty: tray_type.is_empty(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_tray_material_is_classified_from_its_type_and_sub_brand() {
+        assert_eq!(material("PA-CF", ""), Some(PaCf));
+        assert_eq!(material("TPU", "TPU 95A HF"), Some(Tpu));
+        assert_eq!(material("PETG", "PETG HF"), Some(Petg));
+        assert_eq!(material("PETG", "PETG-CF"), Some(PetCf));
+        assert_eq!(material("PLA", "PLA Basic"), Some(Pla));
+        assert_eq!(material("", ""), None, "an empty string");
+        assert_eq!(material("  ", "PLA"), None, "a blank type");
+    }
+
+    #[test]
+    fn support_materials_are_not_the_material_they_support() {
+        for (ty, sub) in [
+            ("PLA-S", ""),
+            ("PLA-S", "Support for PLA"),
+            ("PA-S", "Support for PA/PET"),
+            ("PLA", "Support for PLA"),
+            ("PVA", "PVA"),
+            ("Support W", ""),
+            ("Support G", "Support for PLA/PETG"),
+        ] {
+            assert_eq!(material(ty, sub), None, "{ty} / {sub}");
+        }
+        // A lone S is only a suffix after a material word.
+        assert_eq!(material("PLA", "Silk"), Some(Pla));
+    }
 
     #[test]
     fn product_names_classify_to_materials() {
