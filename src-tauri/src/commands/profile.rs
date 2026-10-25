@@ -778,6 +778,7 @@ fn duplicate_into(
 
     let outcome = write_profile_new(&profile, &target_path, fallback_user_id)
         .map_err(|e| format!("Failed to write duplicated profile: {}", e))?;
+    crate::profile::note_presets_changed();
     info!("Duplicated profile to {:?} as '{}'", target_path, name);
     Ok((target_path, outcome))
 }
