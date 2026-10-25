@@ -208,17 +208,27 @@ pub fn ams_match(job: &JobFilament, view: &PrinterView) -> AmsMatch {
         };
     }
     // The same raw type is the same material even when a preset name or
-    // sub-brand lifts one side to PLA+ ("PLA Tough" on a plain PLA spool).
-    // A support spool classifies to None and has a different type ("PLA-S").
+    // sub-brand lifts one side to PLA+ ("PLA Tough" on a plain PLA spool),
+    // but never across carbon fibre. A support spool has no material, so it
+    // only ever matches a job that has none either.
     let same_type = |s: &SlotView| {
         let (a, b) = (job.filament_type.trim(), s.tray.tray_type.trim());
         !a.is_empty() && a.eq_ignore_ascii_case(b)
     };
+    let cf = |m: &str| m.ends_with("_cf");
+    let same_material = |s: &&SlotView| job.material.is_some() && job.material == s.material;
     let same = |s: &&SlotView| match (&job.material, &s.material) {
-        (Some(a), Some(b)) => a == b || same_type(s),
-        _ => same_type(s),
+        (Some(a), Some(b)) => a == b || (cf(a) == cf(b) && same_type(s)),
+        (None, None) => same_type(s),
+        _ => false,
     };
-    let same_slots: Vec<&SlotView> = loaded.iter().copied().filter(same).collect();
+    // A slot of the very same material beats one that only shares a type.
+    let same_slots: Vec<&SlotView> = loaded.iter().copied().filter(same_material).collect();
+    let same_slots = if same_slots.is_empty() {
+        loaded.iter().copied().filter(same).collect()
+    } else {
+        same_slots
+    };
     if let Some(s) = pick(same_slots, &other_colour) {
         return AmsMatch::SameMaterial {
             slot: untrusted_text(&s.label, LABEL_MAX),
@@ -625,5 +635,46 @@ mod tests {
             ams_match(&blank, &connected(vec![pla_a1()])).line(),
             "✗ Not loaded"
         );
+    }
+
+    fn typed(filament_type: &str, material: Option<&str>) -> JobFilament {
+        JobFilament {
+            preset: "Some Preset".into(),
+            filament_type: filament_type.into(),
+            material: material.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_support_spool_typed_pla_is_not_the_same_material() {
+        // Type "PLA", sub-brand "Support for PLA": the tray has no material.
+        let support = slot("A1", "PLA", "", "", None);
+        let m = ams_match(&typed("PLA", Some("pla")), &connected(vec![support]));
+        assert!(matches!(m, AmsMatch::NotLoaded { .. }), "{m:?}");
+    }
+
+    #[test]
+    fn carbon_fibre_is_never_the_same_material_as_plain() {
+        let plain = slot("A1", "PLA", "", "", Some("pla"));
+        let m = ams_match(&typed("PLA", Some("pla_cf")), &connected(vec![plain]));
+        assert!(matches!(m, AmsMatch::NotLoaded { .. }), "{m:?}");
+        let cf = slot("A1", "PLA", "", "", Some("pla_cf"));
+        let m = ams_match(&typed("PLA", Some("pla")), &connected(vec![cf]));
+        assert!(matches!(m, AmsMatch::NotLoaded { .. }), "{m:?}");
+    }
+
+    #[test]
+    fn the_very_same_material_beats_one_that_only_shares_a_type() {
+        let plain = slot("A1", "PLA", "", "", Some("pla"));
+        let tough = slot("B1", "PLA", "", "", Some("pla_plus"));
+        let m = ams_match(
+            &typed("PLA", Some("pla_plus")),
+            &connected(vec![plain, tough]),
+        );
+        let AmsMatch::SameMaterial { slot, .. } = &m else {
+            panic!("{m:?}")
+        };
+        assert_eq!(slot, "B1");
     }
 }
