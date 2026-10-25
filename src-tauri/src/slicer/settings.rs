@@ -500,6 +500,8 @@ fn add_dir(idx: &mut KindIndex, dir: &Path, source: PresetSource, kind: PresetKi
             tracing::warn!("user preset {name:?} has a system preset's name; skipped");
             continue;
         }
+        // A later file with the same name replaces the registry entry and the
+        // path, but a name once selectable stays so: a quirk kept as is.
         if is_selectable(&profile, source, kind) {
             idx.selectable.insert(name.clone());
         }

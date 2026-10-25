@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::model::model_key;
 use crate::slicer::settings::{PresetEntry, PresetIndex, PresetKind, PresetSource};
 
 /// The installed preset a slot's filament ID names.
@@ -20,17 +21,20 @@ pub struct Detected {
     pub path: String,
     /// A user preset rather than one of Bambu Studio's system presets.
     pub is_user: bool,
-    /// Every installed preset with this ID from the same source (one per
-    /// printer or nozzle), by name.
+    /// Every preset with this ID from the same source that fits this printer
+    /// and nozzle (one per nozzle when the nozzle is unknown), by name.
     pub variants: Vec<String>,
 }
 
 /// The printer the index picks variants for.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PrinterTarget {
-    /// `H2D`, `X1 Carbon`: the model without "Bambu Lab". Empty when unknown.
+    /// The model as the user or the printer wrote it: `H2D`, `X1C`,
+    /// `Bambu Lab X1 Carbon`, a discovery code. Any spelling is accepted
+    /// ([`model_key`]). Empty when unknown.
     pub model: String,
-    /// The active nozzle's diameter in mm.
+    /// The active nozzle's diameter in mm. When known, only presets for that
+    /// nozzle count; when `None`, the standard 0.4 is preferred.
     pub nozzle: Option<f64>,
 }
 
@@ -70,15 +74,20 @@ impl FilamentIndex {
                 .push(Candidate { entry, compatible });
         }
         // A model no preset names (a code, a typo, nothing) filters nothing.
-        let model_known = !target.model.is_empty()
+        let model = model_key(&target.model);
+        let model_known = !model.is_empty()
             && groups.values().flatten().any(|c| {
                 c.compatible
                     .iter()
-                    .any(|p| machine(p).is_some_and(|(m, _)| m.eq_ignore_ascii_case(&target.model)))
+                    .any(|p| machine(p).is_some_and(|(m, _)| model_key(m) == model))
             });
+        let want = Want {
+            model: model_known.then_some(model),
+            nozzle: target.nozzle,
+        };
         let by_id = groups
             .into_iter()
-            .filter_map(|(id, c)| choose(c, target, model_known).map(|d| (id, d)))
+            .filter_map(|(id, c)| choose(c, &want).map(|d| (id, d)))
             .collect();
         Self { by_id }
     }
@@ -114,46 +123,69 @@ fn machine(name: &str) -> Option<(&str, f64)> {
     Some((model, diameter.parse().ok()?))
 }
 
-/// How well a preset fits: 2 for the configured nozzle, 1 for the
-/// configured printer (or every printer), `None` for another printer.
-fn fit(compatible: &[String], target: &PrinterTarget, model_known: bool) -> Option<u8> {
-    if compatible.is_empty() || !model_known {
+/// What a preset has to fit.
+struct Want {
+    /// The printer's [`model_key`]. `None` when no preset names the printer
+    /// (a code, a typo, nothing): the printer then filters nothing.
+    model: Option<String>,
+    /// The configured nozzle; `None` is read as the standard 0.4 when ranking.
+    nozzle: Option<f64>,
+}
+
+/// The nozzle every printer ships with.
+const DEFAULT_NOZZLE: f64 = 0.4;
+
+/// How well a preset fits: 2 for the nozzle (the configured one, else 0.4),
+/// 1 for the configured printer with another nozzle (only while the nozzle
+/// is unknown), `None` for another printer, or for a known nozzle the preset
+/// isn't made for. A preset for every printer fits at 1.
+fn fit(compatible: &[String], want: &Want) -> Option<u8> {
+    if compatible.is_empty() {
         return Some(1);
     }
+    let diameter = want.nozzle.unwrap_or(DEFAULT_NOZZLE);
     let mut best = None;
-    for (model, diameter) in compatible.iter().filter_map(|p| machine(p)) {
-        if !model.eq_ignore_ascii_case(&target.model) {
+    let mut parsed = false;
+    for (model, d) in compatible.iter().filter_map(|p| machine(p)) {
+        parsed = true;
+        if want.model.as_deref().is_some_and(|m| model_key(model) != m) {
             continue;
         }
-        let nozzle = target.nozzle.is_some_and(|n| (n - diameter).abs() < 1e-6);
-        best = best.max(Some(if nozzle { 2 } else { 1 }));
+        if (diameter - d).abs() < 1e-6 {
+            best = best.max(Some(2));
+        } else if want.model.is_some() && want.nozzle.is_none() {
+            best = best.max(Some(1));
+        }
     }
-    best
+    match (want.model.as_ref(), parsed) {
+        // The printer is unknown: nothing is excluded, the nozzle only ranks.
+        (None, _) => best.or(Some(1)),
+        // Names this code can't read (a custom printer): not ours to judge.
+        (Some(_), false) => Some(1),
+        _ => best,
+    }
 }
 
 /// System presets first, user presets only when no system preset fits.
-/// Within a source: the best fit, then the first by name.
-fn choose(
-    mut candidates: Vec<Candidate>,
-    target: &PrinterTarget,
-    model_known: bool,
-) -> Option<Detected> {
+/// Within a source: the best fit, then the first by name. `variants` are the
+/// presets of that source that fit at all.
+fn choose(mut candidates: Vec<Candidate>, want: &Want) -> Option<Detected> {
     candidates.sort_by(|a, b| a.entry.name.cmp(&b.entry.name));
     for source in [PresetSource::System, PresetSource::User] {
-        let tier: Vec<&Candidate> = candidates
+        let fitting: Vec<(u8, &Candidate)> = candidates
             .iter()
             .filter(|c| c.entry.source == source)
+            .filter_map(|c| fit(&c.compatible, want).map(|f| (f, c)))
             .collect();
-        let best = tier
+        let best = fitting
             .iter()
-            .filter_map(|c| fit(&c.compatible, target, model_known).map(|f| (f, *c)))
             .max_by(|(fa, a), (fb, b)| fa.cmp(fb).then_with(|| b.entry.name.cmp(&a.entry.name)));
         if let Some((_, c)) = best {
             return Some(Detected {
                 preset_name: c.entry.name.clone(),
                 path: c.entry.path.to_string_lossy().into_owned(),
                 is_user: source == PresetSource::User,
-                variants: tier.iter().map(|c| c.entry.name.clone()).collect(),
+                variants: fitting.iter().map(|(_, c)| c.entry.name.clone()).collect(),
             });
         }
     }
@@ -200,7 +232,8 @@ mod tests {
         );
         assert_eq!(
             d.variants,
-            vec!["Bambu PLA Basic @BBL H2C", "Bambu PLA Basic @BBL H2S"]
+            vec!["Bambu PLA Basic @BBL H2C"],
+            "the H2S variant is for another printer"
         );
         assert_eq!(
             idx.lookup(" gfa00 "),
@@ -234,12 +267,291 @@ mod tests {
             "Bambu PLA Basic @BBL H2C 0.2 nozzle",
             "the nozzle's own variant wins"
         );
-        assert_eq!(
-            name("H2C", Some(0.6)),
-            "Bambu PLA Basic @BBL H2C",
-            "no variant for the nozzle: the first by name for the printer"
-        );
         assert_eq!(name("H2C", None), "Bambu PLA Basic @BBL H2C");
+    }
+
+    /// A system filament preset made for the listed machines.
+    fn sys(root: &Path, name: &str, id: &str, compatible: &[&str]) {
+        write(
+            root,
+            &format!("system/BBL/filament/{name}.json"),
+            json!({
+                "type":"filament","name":name,"from":"system","instantiation":"true",
+                "filament_id":id,"filament_type":["PLA"],"compatible_printers":compatible
+            }),
+        );
+    }
+
+    fn picked(idx: &FilamentIndex, id: &str) -> Option<String> {
+        idx.lookup(id).map(|d| d.preset_name)
+    }
+
+    #[test]
+    fn a_known_nozzle_without_a_variant_is_not_installed() {
+        let root = fake_bambu_root();
+        sys(
+            root.path(),
+            "Bambu TPU 85A @BBL H2C",
+            "GFU04",
+            &["Bambu Lab H2C 0.6 nozzle", "Bambu Lab H2C 0.8 nozzle"],
+        );
+        assert_eq!(picked(&index(root.path(), "H2C", Some(0.4)), "GFU04"), None);
+        assert_eq!(
+            picked(&index(root.path(), "H2C", Some(0.6)), "GFU04"),
+            Some("Bambu TPU 85A @BBL H2C".into())
+        );
+        assert_eq!(
+            picked(&index(root.path(), "H2C", None), "GFU04"),
+            Some("Bambu TPU 85A @BBL H2C".into()),
+            "an unknown nozzle excludes nothing"
+        );
+        let idx = index(root.path(), "H2C", Some(0.6));
+        assert_eq!(
+            picked(&idx, "GFA00"),
+            None,
+            "the 0.4-only PLA is not installed for a 0.6 nozzle"
+        );
+    }
+
+    #[test]
+    fn an_unknown_nozzle_prefers_the_standard_04_over_a_smaller_name() {
+        let root = fake_bambu_root();
+        for (name, nozzle) in [
+            ("Aaa PETG @BBL H2D 0.2 nozzle", "0.2"),
+            ("Bbb PETG @BBL H2D 0.6 nozzle", "0.6"),
+            ("Ccc PETG @BBL H2D", "0.4"),
+            ("Ddd PETG @BBL H2D 0.8 nozzle", "0.8"),
+        ] {
+            sys(
+                root.path(),
+                name,
+                "GFG00",
+                &[&format!("Bambu Lab H2D {nozzle} nozzle")],
+            );
+        }
+        let idx = index(root.path(), "H2D", None);
+        let d = idx.lookup("GFG00").unwrap();
+        assert_eq!(d.preset_name, "Ccc PETG @BBL H2D");
+        assert_eq!(
+            d.variants.len(),
+            4,
+            "every nozzle's variant fits while the nozzle is unknown"
+        );
+        assert_eq!(
+            picked(&index(root.path(), "H2D", Some(0.6)), "GFG00"),
+            Some("Bbb PETG @BBL H2D 0.6 nozzle".into())
+        );
+    }
+
+    #[test]
+    fn only_variants_that_fit_the_printer_and_nozzle_are_listed() {
+        let root = fake_bambu_root();
+        sys(
+            root.path(),
+            "Bambu PLA Basic @BBL H2C 0.2 nozzle",
+            "GFA00",
+            &["Bambu Lab H2C 0.2 nozzle"],
+        );
+        let d = index(root.path(), "H2C", Some(0.4))
+            .lookup("GFA00")
+            .unwrap();
+        assert_eq!(d.variants, vec!["Bambu PLA Basic @BBL H2C"]);
+        let d = index(root.path(), "H2C", Some(0.2))
+            .lookup("GFA00")
+            .unwrap();
+        assert_eq!(d.variants, vec!["Bambu PLA Basic @BBL H2C 0.2 nozzle"]);
+    }
+
+    #[test]
+    fn the_nozzle_beats_the_name_order_for_04_too() {
+        let root = fake_bambu_root();
+        sys(
+            root.path(),
+            "Aaa PLA @BBL H2C 0.2 nozzle",
+            "GFA00",
+            &["Bambu Lab H2C 0.2 nozzle"],
+        );
+        assert_eq!(
+            picked(&index(root.path(), "H2C", Some(0.4)), "GFA00"),
+            Some("Bambu PLA Basic @BBL H2C".into())
+        );
+        assert_eq!(
+            picked(&index(root.path(), "H2C", Some(0.2)), "GFA00"),
+            Some("Aaa PLA @BBL H2C 0.2 nozzle".into())
+        );
+    }
+
+    #[test]
+    fn a_nozzle_matches_inside_a_list_of_machines() {
+        let root = fake_bambu_root();
+        sys(
+            root.path(),
+            "Bambu ABS @BBL X1C",
+            "GFB00",
+            &[
+                "Bambu Lab X1 Carbon 0.4 nozzle",
+                "Bambu Lab X1E 0.4 nozzle",
+                "Bambu Lab X1 Carbon 0.6 nozzle",
+            ],
+        );
+        sys(
+            root.path(),
+            "Aaa ABS @BBL X1C 0.2 nozzle",
+            "GFB00",
+            &["Bambu Lab X1 Carbon 0.2 nozzle"],
+        );
+        for (model, nozzle, want) in [
+            ("X1 Carbon", Some(0.6), Some("Bambu ABS @BBL X1C")),
+            ("X1E", Some(0.4), Some("Bambu ABS @BBL X1C")),
+            ("X1E", Some(0.6), None),
+            ("X1C", Some(0.2), Some("Aaa ABS @BBL X1C 0.2 nozzle")),
+        ] {
+            assert_eq!(
+                picked(&index(root.path(), model, nozzle), "GFB00").as_deref(),
+                want,
+                "{model} {nozzle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn any_spelling_of_the_model_finds_its_presets() {
+        let root = fake_bambu_root();
+        sys(
+            root.path(),
+            "PLA @X1C",
+            "GFA01",
+            &["Bambu Lab X1 Carbon 0.4 nozzle"],
+        );
+        sys(
+            root.path(),
+            "PLA @A1M",
+            "GFA01",
+            &["Bambu Lab A1 mini 0.4 nozzle"],
+        );
+        sys(
+            root.path(),
+            "PLA @H2D",
+            "GFA01",
+            &["Bambu Lab H2D 0.4 nozzle"],
+        );
+        sys(
+            root.path(),
+            "PLA @H2DP",
+            "GFA01",
+            &["Bambu Lab H2D Pro 0.4 nozzle"],
+        );
+        for (model, want) in [
+            ("X1C", "PLA @X1C"),
+            ("X1 Carbon", "PLA @X1C"),
+            ("Bambu Lab X1 Carbon", "PLA @X1C"),
+            ("x1c combo", "PLA @X1C"),
+            ("A1 mini", "PLA @A1M"),
+            ("A1M", "PLA @A1M"),
+            ("Bambu Lab A1 mini", "PLA @A1M"),
+            ("N1", "PLA @A1M"),
+            ("H2D", "PLA @H2D"),
+            ("Bambu Lab H2D", "PLA @H2D"),
+            ("H2D Pro", "PLA @H2DP"),
+            ("H2DP", "PLA @H2DP"),
+            ("O1E", "PLA @H2DP"),
+            ("Bambu Lab H2D Pro 0.4 nozzle", "PLA @H2DP"),
+        ] {
+            assert_eq!(
+                picked(&index(root.path(), model, Some(0.4)), "GFA01").as_deref(),
+                Some(want),
+                "{model}"
+            );
+        }
+        for model in ["Bambu Lab H2C", "H2C Combo"] {
+            assert_eq!(
+                index(root.path(), model, Some(0.4))
+                    .lookup("GFA00")
+                    .unwrap()
+                    .preset_name,
+                "Bambu PLA Basic @BBL H2C",
+                "{model}"
+            );
+        }
+        assert_eq!(
+            picked(&index(root.path(), "H2S", Some(0.4)), "GFA00"),
+            Some("Bambu PLA Basic @BBL H2S".into())
+        );
+    }
+
+    #[test]
+    fn a_user_preset_stands_in_when_no_system_preset_fits_the_printer() {
+        let root = fake_bambu_root();
+        sys(
+            root.path(),
+            "Bambu PETG @BBL H2S",
+            "GFG09",
+            &["Bambu Lab H2S 0.4 nozzle"],
+        );
+        write(
+            root.path(),
+            &format!("user/{USER}/filament/My PETG @Bambu Lab H2C 0.4 nozzle.json"),
+            json!({
+                "name":"My PETG @Bambu Lab H2C 0.4 nozzle","inherits":"","from":"User",
+                "filament_id":"GFG09","filament_type":["PETG"],
+                "compatible_printers":["Bambu Lab H2C 0.4 nozzle"]
+            }),
+        );
+        let d = index(root.path(), "H2C", Some(0.4))
+            .lookup("GFG09")
+            .unwrap();
+        assert_eq!(d.preset_name, "My PETG @Bambu Lab H2C 0.4 nozzle");
+        assert!(d.is_user);
+        assert_eq!(d.variants, vec!["My PETG @Bambu Lab H2C 0.4 nozzle"]);
+        let d = index(root.path(), "H2S", Some(0.4))
+            .lookup("GFG09")
+            .unwrap();
+        assert_eq!(d.preset_name, "Bambu PETG @BBL H2S");
+        assert!(!d.is_user);
+    }
+
+    #[test]
+    fn several_user_variants_of_one_id_pick_the_one_for_the_printer_and_nozzle() {
+        let root = fake_bambu_root();
+        for (name, machine) in [
+            ("Acme PLA @Bambu Lab H2C 0.2 nozzle", "H2C 0.2"),
+            ("Acme PLA @Bambu Lab H2C 0.4 nozzle", "H2C 0.4"),
+            ("Acme PLA @Bambu Lab H2S 0.4 nozzle", "H2S 0.4"),
+            ("Acme PLA @Bambu Lab H2C 0.6 nozzle", "H2C 0.6"),
+        ] {
+            write(
+                root.path(),
+                &format!("user/{USER}/filament/base/{name}.json"),
+                json!({
+                    "name":name,"inherits":"","from":"User","filament_id":"P1a2b3c4",
+                    "filament_type":["PLA"],
+                    "compatible_printers":[format!("Bambu Lab {machine} nozzle")]
+                }),
+            );
+        }
+        let h2c = |nozzle| {
+            index(root.path(), "H2C", nozzle)
+                .lookup("p1a2b3c4")
+                .unwrap()
+        };
+        assert_eq!(
+            h2c(Some(0.4)).preset_name,
+            "Acme PLA @Bambu Lab H2C 0.4 nozzle"
+        );
+        assert_eq!(
+            h2c(Some(0.6)).preset_name,
+            "Acme PLA @Bambu Lab H2C 0.6 nozzle"
+        );
+        assert_eq!(h2c(None).preset_name, "Acme PLA @Bambu Lab H2C 0.4 nozzle");
+        assert_eq!(
+            h2c(Some(0.4)).variants,
+            vec!["Acme PLA @Bambu Lab H2C 0.4 nozzle"]
+        );
+        assert_eq!(h2c(None).variants.len(), 3, "the H2S one is left out");
+        assert_eq!(
+            picked(&index(root.path(), "H2S", Some(0.4)), "P1A2B3C4"),
+            Some("Acme PLA @Bambu Lab H2S 0.4 nozzle".into())
+        );
     }
 
     #[test]

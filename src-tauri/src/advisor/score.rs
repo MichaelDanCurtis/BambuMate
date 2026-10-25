@@ -9,6 +9,7 @@ use super::needs::{with_default, Need};
 use crate::model::risks::RiskKind;
 use crate::model::view::ModelView;
 use crate::printer::discovery::model_name;
+use crate::printer::model::{clean_model, squash};
 use crate::printer::service::PrinterView;
 use crate::printer::state::Nozzle;
 
@@ -84,35 +85,6 @@ impl PrinterFacts {
             nozzle,
         }
     }
-}
-
-/// Letters and digits only, uppercased: "A1 mini" and "A1MINI" compare equal.
-fn squash(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_uppercase()
-}
-
-/// A hand-typed model with the maker and bundle words removed:
-/// "Bambu Lab X1 Carbon" becomes "X1 Carbon", "P1S Combo" becomes "P1S".
-fn clean_model(model: &str) -> String {
-    const LEADING: &[&str] = &["bambu", "lab", "bambulab"];
-    const TRAILING: &[&str] = &["combo", "ams", "with", "printer", "lite"];
-    let mut words: Vec<&str> = model.split_whitespace().collect();
-    while words
-        .first()
-        .is_some_and(|w| LEADING.contains(&w.to_ascii_lowercase().as_str()))
-    {
-        words.remove(0);
-    }
-    while words
-        .last()
-        .is_some_and(|w| TRAILING.contains(&w.to_ascii_lowercase().as_str()))
-    {
-        words.pop();
-    }
-    words.join(" ")
 }
 
 /// The name shown to the user: a discovery code such as `N2S` becomes "A1".
