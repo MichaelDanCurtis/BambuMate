@@ -72,6 +72,12 @@ pub struct FilamentInfo {
     pub cost_per_kg: Option<f64>,
     #[serde(default)]
     pub density: Option<f64>,
+    /// The filament ID it was sliced with, when known.
+    #[serde(default)]
+    pub filament_id: Option<String>,
+    /// The advisor's material id for its type (`pla`, `pet_cf`, …).
+    #[serde(default)]
+    pub material: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

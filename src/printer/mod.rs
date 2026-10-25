@@ -1,6 +1,7 @@
 //! Frontend side of the live printer connection: shared state fed by the
 //! `printer://state` and `printer://connection` events.
 
+pub mod ams;
 pub mod bridge;
 pub mod hms_history;
 pub mod types;
