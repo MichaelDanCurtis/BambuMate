@@ -13,7 +13,8 @@
 //! disconnect, and a diff never repeats a state that didn't change, so
 //! trusting it would turn an end the app missed into a watched finish. A
 //! push without a `gcode_state` only refreshes what is known about the job
-//! already confirmed (its progress, its trays, a key that firmed up). Only a
+//! already confirmed (its progress, its trays, a key, name, file or plate
+//! that firmed up). Only a
 //! fresh `print_type` marks a calibration, for the same reason.
 //!
 //! The merged percent and layer a job shows before it prints are left over
@@ -83,6 +84,29 @@ pub struct WatchedJob {
     /// while the job is in PREPARE or SLICING and hasn't printed yet; `None`
     /// for a job joined while printing, whose values are its own.
     pub inherited: Option<Progress>,
+    /// The name, file and plate last sent for this job (in `Started` or
+    /// `Rekeyed`). `None` for a resumed job until it is confirmed: the
+    /// stored entry's name may be the user's own, so what the printer shows
+    /// then is adopted without a write.
+    pub meta: Option<JobMeta>,
+}
+
+/// What the journal shows of a job: its name, file and plate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobMeta {
+    pub name: String,
+    pub gcode_file: Option<String>,
+    pub plate: Option<u32>,
+}
+
+impl JobMeta {
+    fn of(report: &PrinterState) -> Self {
+        JobMeta {
+            name: display_name(report),
+            gcode_file: report.gcode_file.clone().filter(|f| !f.trim().is_empty()),
+            plate: report.plate(),
+        }
+    }
 }
 
 /// A print the watcher saw start (or join).
@@ -103,8 +127,10 @@ pub struct StartedPrint {
 pub enum JournalEvent {
     Started(StartedPrint),
     /// The open entry `old` is the same job, now identified as `new` (a
-    /// `task_id` arrived, or the file name caught up). The recorder updates
-    /// the entry's key, name, file and plate in place.
+    /// `task_id` arrived, or the file name caught up), or still `old` with a
+    /// new name, file or plate (a cloud job's `task_id` arrives before
+    /// them, and its key never changes). The recorder updates the entry's
+    /// key, name, file and plate in place, and matches its slice again.
     Rekeyed {
         old: String,
         new: String,
@@ -259,11 +285,12 @@ fn started(report: &PrinterState, key: &str, state: &str, now: i64) -> StartedPr
     } else {
         0
     };
+    let meta = JobMeta::of(report);
     StartedPrint {
         key: key.to_string(),
-        name: display_name(report),
-        gcode_file: report.gcode_file.clone().filter(|f| !f.trim().is_empty()),
-        plate: report.plate(),
+        name: meta.name,
+        gcode_file: meta.gcode_file,
+        plate: meta.plate,
         printer_model: None,
         started_at: now - elapsed,
         approx: midway,
@@ -431,14 +458,26 @@ fn follow(
     note_tray(job, report, own.layer, state, events)
 }
 
+/// Follows a confirmed job's key to `new`, and its name, file and plate to
+/// what `report` shows: one `Rekeyed` when any of them changed since they
+/// were last sent (`old == new` when only the name, file or plate did). A
+/// resumed job's first values are adopted without one (see
+/// [`WatchedJob::meta`]).
 fn rekey(job: &mut WatchedJob, new: String, report: &PrinterState, events: &mut Vec<JournalEvent>) {
+    let meta = JobMeta::of(report);
+    let known = job.meta.as_ref().is_none_or(|m| *m == meta);
+    if new == job.key && known {
+        job.meta = Some(meta);
+        return;
+    }
     events.push(JournalEvent::Rekeyed {
         old: std::mem::replace(&mut job.key, new.clone()),
         new,
-        name: display_name(report),
-        gcode_file: report.gcode_file.clone().filter(|f| !f.trim().is_empty()),
-        plate: report.plate(),
+        name: meta.name.clone(),
+        gcode_file: meta.gcode_file.clone(),
+        plate: meta.plate,
     });
+    job.meta = Some(meta);
 }
 
 /// One report in, the next state and what to record out.
@@ -516,7 +555,8 @@ pub fn observe(
 
 /// A push with no `gcode_state`. It can't start, confirm or end anything;
 /// for the confirmed job it refreshes progress and trays, and follows a key
-/// that firmed up (the name or `task_id` arriving after PREPARE).
+/// that firmed up (the name or `task_id` arriving after PREPARE) or a name,
+/// file or plate that arrived after a `task_id`.
 fn carry(prev: &WatchState, report: &PrinterState, events: &mut Vec<JournalEvent>) -> WatchState {
     let Some(mut job) = prev.job.clone().filter(|j| j.confirmed) else {
         return prev.clone();
@@ -527,9 +567,7 @@ fn carry(prev: &WatchState, report: &PrinterState, events: &mut Vec<JournalEvent
     // N6 (deferred): a key change with a progress drop seen only in diffs is rekeyed, not split.
     // S2 (deferred): a calibration whose file arrives after its PREPARE is rekeyed into a phantom.
     if let Some(key) = job_key(report) {
-        if key != job.key {
-            rekey(&mut job, key, report, events);
-        }
+        rekey(&mut job, key, report, events);
     }
     WatchState {
         job: Some(follow(job, report, state, events)),
@@ -576,9 +614,7 @@ fn active(
         }
         let (own, _) = own_progress(&job, report, state);
         if same && !restarted(&job, own, state) {
-            if job.key != key {
-                rekey(&mut job, key, report, events);
-            }
+            rekey(&mut job, key, report, events);
             job.confirmed = true;
             return WatchState {
                 job: Some(follow(job, report, state, events)),
@@ -596,6 +632,11 @@ fn active(
         started_at: Some(print.started_at),
         progress: None,
         inherited: None,
+        meta: Some(JobMeta {
+            name: print.name.clone(),
+            gcode_file: print.gcode_file.clone(),
+            plate: print.plate,
+        }),
     };
     join(&mut job, report, state);
     events.push(JournalEvent::Started(print));
@@ -627,6 +668,7 @@ pub fn resume(open: &[OpenEntry]) -> (WatchState, Vec<i64>) {
                 started_at: Some(newest.started_at),
                 progress: (stored != Progress::default()).then_some(stored),
                 inherited: None,
+                meta: None,
             }),
             system_key: None,
         },
@@ -1595,6 +1637,80 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, JournalEvent::Lost { .. })));
+    }
+
+    #[test]
+    fn a_cloud_jobs_name_and_file_arriving_after_its_task_id_update_the_entry() {
+        let mut s = Sim::new();
+        // The task id comes first; the key `task:<id>` is final already.
+        s.full(full("PREPARE", "", "4242", "", 0, 0, "255"), 0);
+        let JournalEvent::Started(p) = &s.events[0] else {
+            panic!("{:?}", s.events)
+        };
+        assert_eq!(
+            (p.key.as_str(), p.name.as_str()),
+            ("task:4242", "Untitled print")
+        );
+        assert_eq!((&p.gcode_file, p.plate), (&None, None));
+        let events = s.diff(
+            json!({"subtask_name": "Cube", "gcode_file": "/data/Metadata/plate_2.gcode"}),
+            10,
+        );
+        assert_eq!(
+            events,
+            vec![JournalEvent::Rekeyed {
+                old: "task:4242".into(),
+                new: "task:4242".into(),
+                name: "Cube".into(),
+                gcode_file: Some("/data/Metadata/plate_2.gcode".into()),
+                plate: Some(2),
+            }],
+            "one update, under the same key"
+        );
+        // Nothing new shown: nothing more sent, fresh or not.
+        assert!(s.diff(json!({"mc_percent": 1}), 20).is_empty());
+        let events = s.diff(
+            json!({"gcode_state": "RUNNING", "layer_num": 1, "ams": {"tray_now": "0"}}),
+            30,
+        );
+        assert_eq!(kinds(&events), ["tray"]);
+        s.diff(json!({"gcode_state": "FINISH"}), 40);
+        assert_eq!(s.kinds(), ["started", "rekeyed", "tray", "ended"]);
+    }
+
+    #[test]
+    fn a_name_seen_only_in_stale_state_updates_nothing() {
+        let mut s = Sim::new();
+        s.full(full("RUNNING", "", "4242", "", 40, 20, "0"), 0);
+        s.disconnect();
+        // Unconfirmed: the merged state may be hours old.
+        assert!(s.diff(json!({"subtask_name": "Cube"}), 100).is_empty());
+        // A fresh active state confirms the job, and what it shows is sent.
+        let events = s.diff(json!({"gcode_state": "RUNNING"}), 200);
+        assert_eq!(kinds(&events), ["rekeyed"]);
+        let JournalEvent::Rekeyed { old, new, name, .. } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            (old.as_str(), new.as_str(), name.as_str()),
+            ("task:4242", "task:4242", "Cube")
+        );
+    }
+
+    #[test]
+    fn a_resumed_job_adopts_what_the_printer_shows_without_an_update() {
+        let (watch, _) = resume(&[open_entry(1, "task:4242".into(), 0)]);
+        let mut s = Sim::from(watch);
+        // The stored name may be the user's own: confirming writes nothing.
+        let events = s.full(
+            full("RUNNING", "Cube", "4242", "plate_1.gcode", 40, 20, "0"),
+            100,
+        );
+        assert_eq!(kinds(&events), ["tray"], "no update");
+        assert!(s.watch.job.as_ref().unwrap().confirmed);
+        // A change seen after that is sent.
+        let events = s.diff(json!({"gcode_file": "plate_3.gcode"}), 200);
+        assert_eq!(kinds(&events), ["rekeyed"]);
     }
 
     #[test]

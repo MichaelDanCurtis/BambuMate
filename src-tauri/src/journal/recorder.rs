@@ -926,6 +926,54 @@ mod tests {
         assert!(slice.has_thumbnail);
     }
 
+    #[test]
+    fn a_cloud_jobs_late_name_updates_its_entry_under_the_same_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(&dir);
+        let slices = FakeSlices(vec![done_job(1, "cube.stl", 800)]);
+        let mut keys = HashMap::new();
+        // The task id came first: no name or file yet, so no slice.
+        let first = JournalEvent::Started(StartedPrint {
+            key: "task:4242".into(),
+            name: "Untitled print".into(),
+            gcode_file: None,
+            plate: None,
+            printer_model: Some("H2D".into()),
+            started_at: 1_000,
+            approx: false,
+        });
+        apply(&s, &mut keys, &slices, &first, 1_000).unwrap();
+        let id = keys["task:4242"];
+        assert_eq!(s.get(id).unwrap().unwrap().slice, None);
+        let update = JournalEvent::Rekeyed {
+            old: "task:4242".into(),
+            new: "task:4242".into(),
+            name: "Cube".into(),
+            gcode_file: Some("/data/Metadata/plate_2.gcode".into()),
+            plate: Some(2),
+        };
+        assert!(apply(&s, &mut keys, &slices, &update, 1_100).unwrap());
+        assert_eq!(keys, HashMap::from([("task:4242".to_string(), id)]));
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.job_key, "task:4242");
+        assert_eq!(e.name, "Cube");
+        assert_eq!(
+            e.gcode_file.as_deref(),
+            Some("/data/Metadata/plate_2.gcode")
+        );
+        assert_eq!(e.plate, Some(2));
+        let slice = e.slice.unwrap();
+        assert_eq!(slice.model_name, "cube.stl");
+        assert_eq!((slice.plate, slice.time_seconds), (2, 801));
+        assert!(slice.has_thumbnail);
+        assert_eq!(std::fs::read(s.thumbnail_path(id)).unwrap(), PNG);
+        assert_eq!(
+            s.list(&Default::default()).unwrap().len(),
+            1,
+            "no new entry"
+        );
+    }
+
     /// Slice jobs whose thumbnails tell them apart: `PNG` and the job id.
     struct ThumbPerJob(Vec<JobView>);
 
