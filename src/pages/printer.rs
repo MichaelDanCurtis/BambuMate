@@ -711,7 +711,7 @@ fn Errors(view: RwSignal<PrinterView>) -> impl IntoView {
 
 /// Filters presets by a case-insensitive search, keeping the first
 /// `PICKER_LIMIT`.
-fn matching(list: &[ProfileInfo], query: &str) -> Vec<ProfileInfo> {
+pub(crate) fn matching(list: &[ProfileInfo], query: &str) -> Vec<ProfileInfo> {
     let q = query.trim().to_lowercase();
     list.iter()
         .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q))
@@ -721,7 +721,7 @@ fn matching(list: &[ProfileInfo], query: &str) -> Vec<ProfileInfo> {
 }
 
 /// More presets match than `matching` shows.
-fn more_than_shown(list: &[ProfileInfo], query: &str) -> bool {
+pub(crate) fn more_than_shown(list: &[ProfileInfo], query: &str) -> bool {
     let q = query.trim().to_lowercase();
     list.iter()
         .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q))
