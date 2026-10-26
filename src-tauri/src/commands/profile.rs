@@ -712,7 +712,10 @@ pub fn update_profile_field(
 /// is appended to the name (and so to the file), so a duplicate never
 /// overwrites a preset or shares its name. Path separators become `_` in the
 /// file name only.
-fn duplicate_target(user_dir: &std::path::Path, new_name: &str) -> (String, std::path::PathBuf) {
+pub(crate) fn duplicate_target(
+    user_dir: &std::path::Path,
+    new_name: &str,
+) -> (String, std::path::PathBuf) {
     let file_for = |name: &str| user_dir.join(format!("{}.json", name.replace(['/', '\\'], "_")));
     let mut name = new_name.to_string();
     let mut n = 2;
@@ -760,12 +763,26 @@ fn duplicate_into(
     new_name: &str,
     fallback_user_id: &str,
 ) -> Result<(std::path::PathBuf, crate::profile::sync::NewPresetWrite), String> {
+    if new_name.trim().is_empty() {
+        return Err("Enter a name for the copy".to_string());
+    }
+    let profile = read_profile(source).map_err(|e| e.to_string())?;
+    duplicate_profile_into(profile, user_dir, new_name, fallback_user_id)
+}
+
+/// The body of [`duplicate_into`] for a profile already in memory.
+/// Calibration hands it a flattened system preset to copy as
+/// "<name> (calibrated)".
+pub(crate) fn duplicate_profile_into(
+    mut profile: FilamentProfile,
+    user_dir: &std::path::Path,
+    new_name: &str,
+    fallback_user_id: &str,
+) -> Result<(std::path::PathBuf, crate::profile::sync::NewPresetWrite), String> {
     let new_name = new_name.trim();
     if new_name.is_empty() {
         return Err("Enter a name for the copy".to_string());
     }
-    let mut profile = read_profile(source).map_err(|e| e.to_string())?;
-
     let (name, target_path) = duplicate_target(user_dir, new_name);
     // Even though we construct target_path ourselves from user_dir, run it
     // through the shared guard so any future refactor that lets a caller
