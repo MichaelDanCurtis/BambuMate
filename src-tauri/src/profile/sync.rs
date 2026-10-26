@@ -911,9 +911,10 @@ mod tests {
         ];
         // (file, raw calls allowed, why). Keep this narrow.
         let raw_io_allowed: [(&str, usize, &str); 7] = [
-            // backup_profile copies into `.backups/`; the conf backup copies
-            // BambuStudio.conf. Neither writes a preset.
-            ("profile/writer.rs", 2, "backups, not presets"),
+            // backup_profile copies into `.backups/`, and retire_profile
+            // copies a retired preset's `.info` beside its backup there; the
+            // conf backup copies BambuStudio.conf. None writes a preset.
+            ("profile/writer.rs", 3, "backups, not presets"),
             // Scratch checks in a temp directory.
             ("diagnostics/checks.rs", 7, "scratch dir only"),
             // `copy_verbatim`: copies into the snapshot store, and back out

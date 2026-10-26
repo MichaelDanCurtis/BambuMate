@@ -130,6 +130,83 @@ pub fn restore_from_backup(
     Ok(outcome)
 }
 
+/// Moves a preset out of its folder into the same `.backups` folder
+/// [`backup_profile`] uses: the JSON is copied there first, its `.info`
+/// beside it, and only then are the originals removed. Returns the JSON's
+/// backup path.
+///
+/// Fails, with the preset still in place, when the backup can't be made or
+/// the JSON can't be removed. A `.info` left behind after the JSON is gone
+/// is only logged: without its JSON, Bambu Studio has no preset to show.
+pub fn retire_profile(profile_path: &Path) -> Result<PathBuf> {
+    let backup = backup_profile(profile_path)?;
+    let info = profile_path.with_extension("info");
+    let had_info = info.is_file();
+    if had_info {
+        std::fs::copy(&info, backup.with_extension("info"))?;
+    }
+    std::fs::remove_file(profile_path)
+        .map_err(|e| anyhow::anyhow!("couldn't remove {}: {e}", profile_path.display()))?;
+    if had_info {
+        if let Err(e) = std::fs::remove_file(&info) {
+            warn!("Removed {:?} but not its .info: {}", profile_path, e);
+        }
+    }
+    info!("Retired profile {:?} to {:?}", profile_path, backup);
+    Ok(backup)
+}
+
+/// Takes a filament name out of BambuStudio.conf's "filaments" array, the
+/// reverse of [`register_filament_in_conf`]. A missing conf, or a name it
+/// doesn't list, is not an error.
+pub fn unregister_filament_in_conf(config_root: &Path, profile_name: &str) -> Result<()> {
+    let conf_path = config_root.join("BambuStudio.conf");
+    if !conf_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&conf_path)?;
+    let mut conf: serde_json::Value = serde_json::from_str(strip_md5_checksum(&content))
+        .map_err(|e| anyhow::anyhow!("Failed to parse BambuStudio.conf as JSON: {}", e))?;
+    let Some(filaments) = conf
+        .get_mut("filaments")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    let before = filaments.len();
+    filaments.retain(|v| v.as_str() != Some(profile_name));
+    if filaments.len() == before {
+        return Ok(());
+    }
+    write_conf(config_root, &conf_path, &conf)?;
+    info!(
+        "Unregistered profile '{}' from BambuStudio.conf filaments section",
+        profile_name
+    );
+    Ok(())
+}
+
+/// Writes `conf` to `conf_path` atomically, as Bambu Studio writes it (with
+/// its MD5 line on Windows).
+fn write_conf(config_root: &Path, conf_path: &Path, conf: &serde_json::Value) -> Result<()> {
+    // serde_json::to_string_pretty uses 2-space indentation
+    let output = serde_json::to_string_pretty(conf)?;
+    let mut temp = NamedTempFile::new_in(config_root)?;
+    temp.write_all(output.as_bytes())?;
+    temp.write_all(b"\n")?;
+
+    // On Windows, BambuStudio expects an MD5 checksum appended after the JSON
+    #[cfg(target_os = "windows")]
+    {
+        let md5_line = compute_md5_checksum_line(&output);
+        temp.write_all(md5_line.as_bytes())?;
+    }
+
+    temp.flush()?;
+    temp.persist(conf_path)?;
+    Ok(())
+}
+
 /// Register a filament profile name in BambuStudio.conf's "filaments" array.
 ///
 /// BambuStudio.conf is a JSON file that contains a "filaments" section which is
@@ -205,23 +282,8 @@ pub fn register_filament_in_conf(config_root: &Path, profile_name: &str) -> Resu
         }
     }
 
-    // Write back (serde_json::to_string_pretty uses 2-space indentation)
-    let output = serde_json::to_string_pretty(&conf)?;
-
-    // Write atomically using temp file
-    let mut temp = NamedTempFile::new_in(config_root)?;
-    temp.write_all(output.as_bytes())?;
-    temp.write_all(b"\n")?;
-
-    // On Windows, BambuStudio expects an MD5 checksum appended after the JSON
-    #[cfg(target_os = "windows")]
-    {
-        let md5_line = compute_md5_checksum_line(&output);
-        temp.write_all(md5_line.as_bytes())?;
-    }
-
-    temp.flush()?;
-    temp.persist(&conf_path)?;
+    // Write back atomically.
+    write_conf(config_root, &conf_path, &conf)?;
 
     info!("Updated BambuStudio.conf at {:?}", conf_path);
     Ok(())
@@ -455,5 +517,58 @@ mod tests {
             "a revert is an edit Bambu Studio must push"
         );
         assert_eq!(meta.setting_id, "PFUS0123456789abcd");
+    }
+
+    #[test]
+    fn unregistering_a_filament_takes_only_its_name_out_of_the_conf() {
+        let dir = TempDir::new().unwrap();
+        let conf_path = dir.path().join("BambuStudio.conf");
+        std::fs::write(
+            &conf_path,
+            "{\n  \"filaments\": [\"Keep\", \"Gone\"],\n  \"app\": {\"x\": \"1\"}\n}\n",
+        )
+        .unwrap();
+        unregister_filament_in_conf(dir.path(), "Gone").unwrap();
+        unregister_filament_in_conf(dir.path(), "Never there").unwrap();
+        let content = std::fs::read_to_string(&conf_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(strip_md5_checksum(&content)).unwrap();
+        assert_eq!(parsed["filaments"], serde_json::json!(["Keep"]));
+        assert_eq!(parsed["app"]["x"], serde_json::json!("1"));
+        // No conf at all is not an error.
+        unregister_filament_in_conf(&dir.path().join("nowhere"), "Gone").unwrap();
+    }
+
+    #[test]
+    fn retiring_a_preset_moves_its_json_and_info_into_backups() {
+        let dir = TempDir::new().unwrap();
+        let profile_path = create_test_profile_file(dir.path(), "Copy.json");
+        let info = profile_path.with_extension("info");
+        std::fs::write(&info, "sync_info = \nuser_id = 1\n").unwrap();
+        let json_before = std::fs::read_to_string(&profile_path).unwrap();
+
+        let backup = retire_profile(&profile_path).unwrap();
+
+        assert!(!profile_path.exists() && !info.exists());
+        assert_eq!(backup.parent().unwrap(), dir.path().join(".backups"));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), json_before);
+        assert_eq!(
+            std::fs::read_to_string(backup.with_extension("info")).unwrap(),
+            "sync_info = \nuser_id = 1\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retiring_a_preset_that_cant_be_removed_fails_and_keeps_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let folder = dir.path().join("base");
+        std::fs::create_dir_all(folder.join(".backups")).unwrap();
+        let profile_path = create_test_profile_file(&folder, "Copy.json");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = retire_profile(&profile_path);
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+        assert!(profile_path.is_file(), "the preset is still there");
     }
 }

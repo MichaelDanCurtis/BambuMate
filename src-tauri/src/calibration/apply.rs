@@ -7,10 +7,16 @@
 //!   fresh `filament_id`, through the existing duplicate path. The copy is
 //!   fully flattened, like BambuMate's generated presets.
 //! - Per-variant arrays: only the chosen nozzle variant's element is
-//!   written, never every variant. A write that would change any other
-//!   element of the flattened preset is refused before anything is
-//!   written, and read back whole afterwards.
-//! - Undo never writes or deletes a system preset.
+//!   written, never every variant. The preset is read the way Bambu Studio
+//!   reads it (`profile::inheritance`: "nil" in a variant array is the
+//!   parent's element, in a retraction override the printer's value). A
+//!   write whose result BambuMate can't line up with what Studio would
+//!   read is refused before anything is written, and every write is read
+//!   back whole.
+//! - Undo puts back exactly what the save changed, and refuses when the
+//!   preset has changed since. It never writes or deletes a system preset,
+//!   and a created copy is moved into `.backups` only while it is provably
+//!   the copy that save made, unchanged.
 //! - Every write bumps `profile::note_presets_changed()`. Ledger notes go
 //!   back to the command layer, which owns the app's history database.
 
@@ -23,7 +29,10 @@ use super::tests::{format_value, TestKind};
 use crate::printer::state::{decode_extruder_tray, PrinterState, TrayRef};
 use crate::profile::reader::read_profile;
 use crate::profile::sync::{write_profile_edit, NewPresetWrite};
-use crate::profile::writer::{backup_profile, register_filament_in_conf, restore_from_backup};
+use crate::profile::writer::{
+    backup_profile, register_filament_in_conf, restore_from_backup, retire_profile,
+    unregister_filament_in_conf,
+};
 use crate::profile::{BambuPaths, FilamentProfile};
 use crate::slicer::settings::{PresetIndex, PresetKind};
 
@@ -35,10 +44,16 @@ pub const CHANGED_SINCE: &str =
     "The preset has changed since this was saved, so Undo would overwrite that change.";
 pub const NOT_A_PRESET_FOLDER: &str = "That preset isn't in Bambu Studio's filament folders.";
 pub const RECORD_ONLY: &str = "Pressure advance is recorded only: K stays on the printer.";
-pub const OTHER_VARIANTS: &str = "Saving this would change the preset's other nozzle variants too, so nothing was written. Change it in Bambu Studio.";
+/// BambuMate's reading of the preset doesn't line up with what the write
+/// would leave (for example, the preset lists its nozzle variants in
+/// another order than its parent).
+pub const UNREADABLE: &str = "BambuMate can't read this preset's current value reliably, so nothing was written. Change it in Bambu Studio.";
 /// Undo is handed a system preset: calibration never writes or deletes one.
 pub const SYSTEM_UNDO: &str =
     "That is a Bambu Studio system preset, which calibration never changes, so there is nothing to undo there.";
+/// Undo of a created copy was handed a file that isn't that copy.
+pub const NOT_THE_COPY: &str =
+    "That file isn't the calibrated copy this save made, so Undo left it alone.";
 pub const NO_COPY_DIR: &str = "There's no user filament folder to save a calibrated copy in. Sign in to Bambu Studio once first.";
 const CALIBRATED: &str = " (calibrated)";
 
@@ -66,12 +81,13 @@ impl PresetFolders {
         .into_iter()
         .map(|account| account.join("filament"))
         .collect();
-        // `user_filament_dir` falls back to any account's folder. A copy
-        // there could never be edited or undone ([`Self::checked`] refuses
-        // it), so only a folder calibration reads is used.
+        // `user_filament_dir` falls back to any account's folder, and its
+        // `base` may be a symlink out of the account. A copy there could
+        // never be edited or undone ([`Self::checked`] refuses it), so only
+        // a folder calibration reads is used.
         let copy_dir = paths
             .user_filament_dir()
-            .filter(|dir| users.iter().any(|u| dir.starts_with(u)));
+            .filter(|dir| usable_copy_dir(dir, &users).is_some());
         Self {
             config_root: paths.config_root.clone(),
             system: paths.system_filament_dir(),
@@ -103,6 +119,24 @@ impl PresetFolders {
         }
         Err(NOT_A_PRESET_FOLDER.to_string())
     }
+
+    /// The folder a calibrated copy goes in, checked again now: canonically
+    /// inside one of `users`, so a symlink can't send the copy elsewhere.
+    pub fn copy_dir(&self) -> Result<&Path, String> {
+        let dir = self.copy_dir.as_deref().ok_or(NO_COPY_DIR)?;
+        usable_copy_dir(dir, &self.users).ok_or(NO_COPY_DIR)?;
+        Ok(dir)
+    }
+}
+
+/// `dir` made canonical, when that lies inside a canonical `users` folder.
+fn usable_copy_dir(dir: &Path, users: &[PathBuf]) -> Option<PathBuf> {
+    let dir = dir.canonicalize().ok()?;
+    users
+        .iter()
+        .filter_map(|u| u.canonicalize().ok())
+        .any(|u| dir.starts_with(u))
+        .then_some(dir)
 }
 
 /// The value to save, and to which nozzle variant.
@@ -241,6 +275,11 @@ pub fn variant_index(
     if names.len() != len {
         return Err(UNLABELLED.to_string());
     }
+    // A name listed twice would leave the element to write a guess.
+    let mut seen = std::collections::HashSet::new();
+    if !names.iter().all(|n| seen.insert(n.trim().to_lowercase())) {
+        return Err(UNLABELLED.to_string());
+    }
     let variant = variant.ok_or(PICK_VARIANT)?;
     names
         .iter()
@@ -265,7 +304,7 @@ pub fn calibrated_name(name: &str) -> String {
 
 /// The name a calibrated copy of `name` would get now, collisions included.
 pub fn copy_name(folders: &PresetFolders, name: &str) -> Result<String, String> {
-    let dir = folders.copy_dir.as_ref().ok_or(NO_COPY_DIR)?;
+    let dir = folders.copy_dir()?;
     Ok(crate::commands::profile::duplicate_target(dir, &calibrated_name(name)).0)
 }
 
@@ -300,6 +339,7 @@ fn plan_changes(
         old: old.clone(),
         new: new.clone(),
         had_key: false,
+        ..Default::default()
     }];
     if test == TestKind::Temperature {
         let first = element(config, INITIAL_LAYER_KEY, index);
@@ -320,6 +360,7 @@ fn plan_changes(
                 old: first,
                 new: new_first.to_string(),
                 had_key: false,
+                ..Default::default()
             });
         }
     }
@@ -328,7 +369,8 @@ fn plan_changes(
 
 /// Sets each change's element in `profile`: in the file's own array when
 /// it has one of the flattened length, else in the flattened array. Only
-/// the changed element differs. Records `had_key`.
+/// the changed element differs. Records `had_key`, the file's own array
+/// before (`before`) and the array written (`written`).
 fn write_elements(
     profile: &mut FilamentProfile,
     config: &Map<String, Value>,
@@ -338,6 +380,7 @@ fn write_elements(
         let flat = string_array(config, &c.key);
         let own = string_array(profile.raw(), &c.key);
         c.had_key = profile.raw().contains_key(&c.key);
+        c.before = if c.had_key { own.clone() } else { Vec::new() };
         let mut values = if c.had_key && own.len() == flat.len() {
             own
         } else {
@@ -346,8 +389,35 @@ fn write_elements(
         if let Some(slot) = values.get_mut(c.index) {
             *slot = c.new.clone();
         }
+        c.written = values.clone();
         profile.set_string_array(&c.key, values);
     }
+}
+
+/// The SHA-256 of a preset's content: its JSON with keys sorted, so a file
+/// that only reads the same compares the same.
+fn content_sha256(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    fn sorted(v: &Value) -> Value {
+        match v {
+            Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                Value::Object(
+                    keys.into_iter()
+                        .map(|k| (k.clone(), sorted(&map[k])))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+    let value: Value = serde_json::from_str(&text).map_err(|e| format!("not JSON: {e}"))?;
+    let canonical = serde_json::to_string(&sorted(&value)).map_err(|e| e.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
 }
 
 /// Each changed key's flattened array as a save must leave it: as it is in
@@ -411,12 +481,13 @@ fn plan_read(
     let index = variant_index(&read.config, key, change.variant)?;
     let changes = plan_changes(&read.config, change.test, change.value, index)?;
     if !read.is_system {
-        // Written in memory first: the flattened result must differ from
-        // now only in the changed elements. It wouldn't when the file's own
-        // array is all "nil" over a parent with real values, which the
-        // flattened preset reads instead: one element written into that
-        // array would turn the other variants into "nil". (A copy is fully
-        // flattened, so its arrays are the flattened ones.)
+        // Written in memory first: read back the way Bambu Studio reads it,
+        // the result must differ from now only in the changed elements. It
+        // wouldn't when BambuMate's element for the variant isn't the one
+        // Studio reads (a preset listing its variants in another order than
+        // its parent), so the current value can't be read reliably. "nil"
+        // elements are fine: the resolver reads them as Studio does. (A
+        // copy is fully flattened, so its arrays are the flattened ones.)
         let mut edited = FilamentProfile::from_map(read.profile.raw().clone());
         let mut trial = changes.clone();
         write_elements(&mut edited, &read.config, &mut trial);
@@ -424,7 +495,7 @@ fn plan_read(
             .flatten_profile(PresetKind::Filament, &edited)
             .map_err(|e| e.to_string())?;
         if holds(&after, &expected_arrays(&read.config, &changes)).is_err() {
-            return Err(OTHER_VARIANTS.to_string());
+            return Err(UNREADABLE.to_string());
         }
     }
     let source_name = read.profile.name().unwrap_or_default().to_string();
@@ -508,11 +579,27 @@ fn restore(backup: &Path, path: &Path, ledger: &mut Vec<LedgerNote>, reason: &st
             ledger.push(LedgerNote::Wrote(outcome, path.to_path_buf()));
             format!("The preset was left unchanged: {reason}.")
         }
+        // `restore_from_backup` writes the JSON before the `.info`: say
+        // which of them is back.
+        Err(e) if same_json(backup, path) => {
+            crate::profile::note_presets_changed();
+            format!(
+                "The preset's settings were put back ({reason}), but its .info couldn't be restored: {e:#}. Bambu Studio may not sync it until it is saved again."
+            )
+        }
         Err(e) => format!(
-            "The preset was refused ({reason}), and restoring its backup failed too: {e}. The backup is at {}.",
+            "The preset was refused ({reason}), and restoring its backup failed too: {e:#}. The backup is at {}.",
             backup.display()
         ),
     }
+}
+
+/// Both files read as the same JSON.
+fn same_json(a: &Path, b: &Path) -> bool {
+    let read = |p: &Path| -> Option<Value> {
+        serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+    };
+    matches!((read(a), read(b)), (Some(x), Some(y)) if x == y)
 }
 
 fn save_in_place(
@@ -582,7 +669,7 @@ fn save_copy(
     presets: &PresetIndex,
     ledger: &mut Vec<LedgerNote>,
 ) -> Result<Saved, String> {
-    let dir = folders.copy_dir.clone().ok_or(NO_COPY_DIR)?;
+    let dir = folders.copy_dir()?.to_path_buf();
     let mut copy = FilamentProfile::from_map(read.config.clone());
     copy.set_string("inherits", String::new());
     copy.set_string("from", "User".to_string());
@@ -612,14 +699,20 @@ fn save_copy(
         }
     };
     ledger.push(LedgerNote::Wrote(outcome, path.clone()));
-    if let Err(reason) = check_written(&path, presets, &expected) {
-        let known_as = remove_preset_files(&path);
-        crate::profile::note_presets_changed();
-        ledger.push(LedgerNote::Forgot(known_as));
-        return Err(format!(
-            "The calibrated copy was refused and removed: {reason}."
-        ));
-    }
+    // The proof undo needs that the file is still this copy as saved.
+    let sha256 = match check_written(&path, presets, &expected).and_then(|()| content_sha256(&path))
+    {
+        Ok(sha256) => sha256,
+        Err(reason) => {
+            let known_as = remove_preset_files(&path);
+            crate::profile::note_presets_changed();
+            ledger.push(LedgerNote::Forgot(known_as));
+            return Err(format!(
+                "The calibrated copy was refused and removed: {reason}."
+            ));
+        }
+    };
+    changes[0].copy_sha256 = Some(sha256);
     // Best effort, as for an installed profile: Bambu Studio lists it at once.
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
         if let Err(e) = register_filament_in_conf(&folders.config_root, stem) {
@@ -640,9 +733,9 @@ fn save_copy(
 }
 
 /// Takes back exactly what a save wrote, only while the file still holds
-/// the written value. A created copy is deleted; otherwise each changed
-/// element gets its old text back, or the key goes again when the file
-/// didn't have it before.
+/// what the save left there. A created copy is moved into `.backups`;
+/// otherwise each changed key gets its own array from before the save
+/// back, or goes again when the file didn't have it.
 pub fn undo(
     target: &Path,
     changes: &[KeyChange],
@@ -668,24 +761,50 @@ pub fn undo(
         return Err(CHANGED_SINCE.to_string());
     }
     if created_copy {
-        let known_as = remove_preset_files(&path);
-        crate::profile::note_presets_changed();
-        ledger.push(LedgerNote::Forgot(known_as));
-        return Ok(());
+        return undo_copy(&path, &profile, changes, folders, ledger);
     }
+    let mut restored: Vec<(String, Option<Vec<String>>)> = Vec::new();
     for c in changes {
+        let own = profile
+            .raw()
+            .contains_key(&c.key)
+            .then(|| string_array(profile.raw(), &c.key));
         if !c.had_key {
+            // The key goes only while it holds exactly what the save wrote:
+            // removing it would also take back a later edit to another
+            // variant.
+            let written = if c.written.is_empty() {
+                rebuilt_written(&profile, presets, c)?
+            } else {
+                c.written.clone()
+            };
+            if own.as_ref() != Some(&written) {
+                return Err(CHANGED_SINCE.to_string());
+            }
             profile.raw_mut().remove(&c.key);
+            restored.push((c.key.clone(), None));
             continue;
         }
-        let mut values = string_array(profile.raw(), &c.key);
-        // The save left the key in the file with this element: a file that
-        // no longer has it has changed since.
-        let Some(slot) = values.get_mut(c.index) else {
+        let Some(mut values) = own else {
             return Err(CHANGED_SINCE.to_string());
         };
-        *slot = c.old.clone();
-        profile.set_string_array(&c.key, values);
+        if !c.before.is_empty() && values == c.written {
+            // Untouched since: the file's own array exactly as it was,
+            // "nil" elements included.
+            values = c.before.clone();
+        } else {
+            // Another element changed since; it stays. This one goes back.
+            let old = match c.before.get(c.index) {
+                Some(before) if c.before.len() == values.len() => before.clone(),
+                _ => c.old.clone(),
+            };
+            let Some(slot) = values.get_mut(c.index) else {
+                return Err(CHANGED_SINCE.to_string());
+            };
+            *slot = old;
+        }
+        profile.set_string_array(&c.key, values.clone());
+        restored.push((c.key.clone(), Some(values)));
     }
     let backup = backup_profile(&path)
         .map_err(|e| format!("The preset couldn't be backed up, so Undo changed nothing: {e}"))?;
@@ -699,18 +818,87 @@ pub fn undo(
             return Err(restore(&backup, &path, ledger, &reason));
         }
     }
-    let read_back = crate::agent::validate::validate_profile_file(&path)
-        .and_then(|()| flattened(&path, presets))
-        .and_then(|(_, config)| {
-            for c in changes.iter().filter(|c| c.had_key) {
-                if element(&config, &c.key, c.index).as_deref() != Some(c.old.as_str()) {
-                    return Err(format!("{} didn't read back as {}", c.key, c.old));
-                }
+    // Read back: a valid preset whose changed keys are exactly as restored.
+    let read_back = crate::agent::validate::validate_profile_file(&path).and_then(|()| {
+        let now = read_profile(&path).map_err(|e| e.to_string())?;
+        for (key, values) in &restored {
+            let got = now
+                .raw()
+                .contains_key(key)
+                .then(|| string_array(now.raw(), key));
+            if got != *values {
+                return Err(format!("{key} didn't read back as restored"));
             }
-            Ok(())
-        });
+        }
+        Ok(())
+    });
     if let Err(reason) = read_back {
         return Err(restore(&backup, &path, ledger, &reason));
+    }
+    Ok(())
+}
+
+/// The array a save that added `c.key` wrote, for a row saved before
+/// `written` was recorded: the parent's flattened array with the new
+/// element in place.
+fn rebuilt_written(
+    profile: &FilamentProfile,
+    presets: &PresetIndex,
+    c: &KeyChange,
+) -> Result<Vec<String>, String> {
+    let mut without = FilamentProfile::from_map(profile.raw().clone());
+    without.raw_mut().remove(&c.key);
+    let parent = presets
+        .flatten_profile(PresetKind::Filament, &without)
+        .map_err(|e| e.to_string())?;
+    let mut values = string_array(&parent, &c.key);
+    match values.get_mut(c.index) {
+        Some(slot) => *slot = c.new.clone(),
+        None => return Err(CHANGED_SINCE.to_string()),
+    }
+    Ok(values)
+}
+
+/// Moves the calibrated copy a save created into `.backups`, once it is
+/// proven to be that copy, unchanged: a "(calibrated)" preset directly in
+/// the copy folder, named like its file, whose content still has the
+/// SHA-256 the save recorded. Its `BambuStudio.conf` entry goes too, best
+/// effort.
+fn undo_copy(
+    path: &Path,
+    profile: &FilamentProfile,
+    changes: &[KeyChange],
+    folders: &PresetFolders,
+    ledger: &mut Vec<LedgerNote>,
+) -> Result<(), String> {
+    let in_copy_dir = folders
+        .copy_dir()
+        .ok()
+        .and_then(|d| d.canonicalize().ok())
+        .is_some_and(|d| path.parent() == Some(d.as_path()));
+    let name = profile.name().unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let named_as_copy = name.contains(CALIBRATED) && stem == name.replace(['/', '\\'], "_");
+    if !in_copy_dir || !named_as_copy {
+        return Err(NOT_THE_COPY.to_string());
+    }
+    let unchanged = match &changes[0].copy_sha256 {
+        Some(recorded) => content_sha256(path).is_ok_and(|now| now == *recorded),
+        None => false,
+    };
+    if !unchanged {
+        return Err(CHANGED_SINCE.to_string());
+    }
+    retire_profile(path).map_err(|e| {
+        format!("The calibrated copy couldn't be moved away, so Undo changed nothing: {e:#}")
+    })?;
+    crate::profile::note_presets_changed();
+    ledger.push(LedgerNote::Forgot(path.to_path_buf()));
+    if let Err(e) = unregister_filament_in_conf(&folders.config_root, stem) {
+        tracing::warn!("calibrated copy still listed in BambuStudio.conf: {e}");
     }
     Ok(())
 }
@@ -965,7 +1153,7 @@ mod tests {
         let root = fake_root();
         let (idx, f) = (presets(root.path()), folders(root.path()));
         let path = user_path(root.path(), MY_PETG);
-        let before = crate::profile::presets_generation();
+        let before = crate::profile::presets_changed_on_this_thread();
         let mut ledger = Vec::new();
         let s = saved(
             save(
@@ -991,7 +1179,11 @@ mod tests {
         assert_eq!(s.changes.len(), 2);
         assert!(s.changes.iter().all(|c| c.had_key && c.index == 1));
         assert!(s.backup_path.as_ref().is_some_and(|b| b.is_file()));
-        assert!(crate::profile::presets_generation() > before);
+        assert_eq!(
+            crate::profile::presets_changed_on_this_thread(),
+            before + 1,
+            "one bump for the one write"
+        );
         assert_eq!(ledger.len(), 1);
     }
 
@@ -1218,7 +1410,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let before = crate::profile::presets_generation();
+        let before = crate::profile::presets_changed_on_this_thread();
         undo(
             &copy.target_path,
             &copy.changes,
@@ -1231,7 +1423,7 @@ mod tests {
         assert!(!copy.target_path.exists());
         assert!(!copy.target_path.with_extension("info").exists());
         assert!(matches!(ledger.last(), Some(LedgerNote::Forgot(_))));
-        assert!(crate::profile::presets_generation() > before);
+        assert_eq!(crate::profile::presets_changed_on_this_thread(), before + 1);
     }
 
     #[test]
@@ -1288,6 +1480,7 @@ mod tests {
             old: "1".into(),
             new: "0.98".into(),
             had_key: true,
+            ..Default::default()
         }];
         let mut ledger = Vec::new();
         for created_copy in [true, false] {
@@ -1298,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn a_backup_is_never_taken_for_a_preset() {
+    fn a_backup_is_never_treated_as_a_preset() {
         let root = fake_root();
         let (idx, f) = (presets(root.path()), folders(root.path()));
         let path = user_path(root.path(), MY_PETG);
@@ -1327,11 +1520,12 @@ mod tests {
     }
 
     #[test]
-    fn a_save_that_would_change_the_other_variants_is_refused_up_front() {
-        // A user preset whose own array is all "nil" over a parent that
-        // sets real values: the flattened preset reads the parent's, so
-        // writing one element into the file's own array would turn the
-        // other variants from the parent's values into "nil".
+    fn an_all_nil_override_saves_one_variant_and_keeps_the_printers_value_elsewhere() {
+        // A user preset that switched the retraction override off for every
+        // variant ("nil" is the printer's value), over a parent that sets
+        // it. Bambu Studio replaces an override key whole, so the preset's
+        // own "nil"s are what it reads, and writing one element leaves the
+        // others on the printer's value.
         let root = fake_root();
         let name = "Nil Over Parent @BBL H2D";
         let path = user_path(root.path(), name);
@@ -1345,13 +1539,82 @@ mod tests {
         )
         .unwrap();
         let (idx, f) = (presets(root.path()), folders(root.path()));
-        let before = std::fs::read_to_string(&path).unwrap();
         let c = change(TestKind::Retraction, 0.6, Some("Direct Drive Standard"));
-        assert_eq!(plan(&path, &f, &idx, c), Err(OTHER_VARIANTS.to_string()));
+        assert_eq!(plan(&path, &f, &idx, c).unwrap().changes[0].old, "nil");
+        let mut ledger = Vec::new();
+        let s = saved(save(&path, &f, &idx, c, "nil", &mut ledger).unwrap());
+        assert_eq!(
+            raw(&path)["filament_retraction_length"],
+            json!(["0.6", "nil", "nil"])
+        );
+        undo(&path, &s.changes, false, &f, &idx, &mut ledger).unwrap();
+        assert_eq!(
+            raw(&path)["filament_retraction_length"],
+            json!(["nil", "nil", "nil"])
+        );
+    }
+
+    #[test]
+    fn a_nil_variant_element_reads_as_the_parents_and_stays_nil() {
+        // Bambu Studio writes "nil" for each variant element equal to the
+        // parent's; it reads as the parent's element.
+        let root = fake_root();
+        let name = "Partly Nil @BBL H2D";
+        let path = user_path(root.path(), name);
+        std::fs::write(
+            &path,
+            json!({
+                "name":name,"inherits":SYSTEM_H2D,"from":"User","instantiation":"true",
+                "filament_settings_id":[name],"filament_flow_ratio":["nil","0.95","nil"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (idx, f) = (presets(root.path()), folders(root.path()));
+        let c = change(TestKind::FlowCoarse, 1.029, Some("Direct Drive Standard"));
+        assert_eq!(plan(&path, &f, &idx, c).unwrap().changes[0].old, "0.98");
+        let mut ledger = Vec::new();
+        let s = saved(save(&path, &f, &idx, c, "0.98", &mut ledger).unwrap());
+        assert_eq!(
+            raw(&path)["filament_flow_ratio"],
+            json!(["1.029", "0.95", "nil"])
+        );
+        undo(&path, &s.changes, false, &f, &idx, &mut ledger).unwrap();
+        assert_eq!(
+            raw(&path)["filament_flow_ratio"],
+            json!(["nil", "0.95", "nil"]),
+            "the nil comes back, not the parent's value pinned in its place"
+        );
+    }
+
+    #[test]
+    fn a_preset_whose_variants_bambumate_cant_line_up_is_refused_up_front() {
+        // The preset lists its variants in another order than its parent:
+        // the element BambuMate would write isn't the one Bambu Studio
+        // reads for that variant, so the current value can't be read
+        // reliably and nothing is written.
+        let root = fake_root();
+        let name = "Reordered @BBL H2D";
+        let path = user_path(root.path(), name);
+        std::fs::write(
+            &path,
+            json!({
+                "name":name,"inherits":SYSTEM_H2D,"from":"User","instantiation":"true",
+                "filament_settings_id":[name],
+                "filament_extruder_variant":["Direct Drive High Flow","Direct Drive Standard","Direct Drive E3D High Flow"],
+                "filament_flow_ratio":["0.9","0.98","0.98"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (idx, f) = (presets(root.path()), folders(root.path()));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let c = change(TestKind::FlowCoarse, 1.029, Some("Direct Drive Standard"));
+        assert_eq!(plan(&path, &f, &idx, c), Err(UNREADABLE.to_string()));
         let mut ledger = Vec::new();
         assert_eq!(
-            save(&path, &f, &idx, c, "0.4", &mut ledger),
-            Err(OTHER_VARIANTS.to_string())
+            save(&path, &f, &idx, c, "0.98", &mut ledger),
+            Err(UNREADABLE.to_string())
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         assert!(!path.parent().unwrap().join(".backups").exists());
@@ -1406,6 +1669,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(raw(&path), before, "{err}");
+        assert!(
+            err.contains("settings were put back") && err.contains(".info couldn't be restored"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1451,6 +1718,286 @@ mod tests {
         assert_eq!(
             PresetFolders::from_paths(&paths).copy_dir,
             Some(r.join("user/123/filament/base"))
+        );
+    }
+
+    #[test]
+    fn undo_of_an_added_key_is_refused_after_another_variant_was_edited() {
+        let root = fake_root();
+        let (idx, f) = (presets(root.path()), folders(root.path()));
+        let path = user_path(root.path(), MY_INHERITED);
+        let mut ledger = Vec::new();
+        let s = saved(
+            save(
+                &path,
+                &f,
+                &idx,
+                change(TestKind::FlowCoarse, 1.029, Some("Direct Drive Standard")),
+                "0.98",
+                &mut ledger,
+            )
+            .unwrap(),
+        );
+        assert!(!s.changes[0].had_key);
+        assert_eq!(s.changes[0].written, vec!["1.029", "0.98", "0.98"]);
+        // Later, in Bambu Studio: High Flow is set to 0.95.
+        let mut edited = raw(&path);
+        edited.insert(
+            "filament_flow_ratio".into(),
+            json!(["1.029", "0.95", "0.98"]),
+        );
+        std::fs::write(&path, Value::Object(edited).to_string()).unwrap();
+        assert_eq!(
+            undo(&path, &s.changes, false, &f, &idx, &mut ledger),
+            Err(CHANGED_SINCE.to_string())
+        );
+        assert_eq!(
+            raw(&path)["filament_flow_ratio"],
+            json!(["1.029", "0.95", "0.98"])
+        );
+        // A row saved before `written` was recorded: the array is rebuilt
+        // from the parent, and the edit is still caught.
+        let legacy: Vec<KeyChange> = s
+            .changes
+            .iter()
+            .map(|c| KeyChange {
+                written: Vec::new(),
+                ..c.clone()
+            })
+            .collect();
+        assert_eq!(
+            undo(&path, &legacy, false, &f, &idx, &mut ledger),
+            Err(CHANGED_SINCE.to_string())
+        );
+    }
+
+    fn copied(root: &Path, f: &PresetFolders, idx: &PresetIndex) -> Saved {
+        let mut ledger = Vec::new();
+        saved(
+            save(
+                &system_path(root, SYSTEM_H2D),
+                f,
+                idx,
+                change(TestKind::FlowCoarse, 1.029, Some("Direct Drive Standard")),
+                "0.98",
+                &mut ledger,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn undo_refuses_a_created_copy_edited_since() {
+        let root = fake_root();
+        let (idx, f) = (presets(root.path()), folders(root.path()));
+        let copy = copied(root.path(), &f, &idx);
+        assert!(copy.changes[0].copy_sha256.is_some());
+        // A week of the user's own edits in Bambu Studio, to another key.
+        let mut edited = raw(&copy.target_path);
+        edited.insert("filament_density".into(), json!(["1.3"]));
+        std::fs::write(&copy.target_path, Value::Object(edited).to_string()).unwrap();
+        let mut ledger = Vec::new();
+        assert_eq!(
+            undo(
+                &copy.target_path,
+                &copy.changes,
+                true,
+                &f,
+                &idx,
+                &mut ledger
+            ),
+            Err(CHANGED_SINCE.to_string())
+        );
+        assert_eq!(raw(&copy.target_path)["filament_density"], json!(["1.3"]));
+        // A row without the proof is refused the same way.
+        let mut unproven = copy.changes.clone();
+        unproven[0].copy_sha256 = None;
+        std::fs::write(
+            &copy.target_path,
+            Value::Object(raw(&copy.target_path)).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            undo(&copy.target_path, &unproven, true, &f, &idx, &mut ledger),
+            Err(CHANGED_SINCE.to_string())
+        );
+        assert!(copy.target_path.is_file());
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn undo_moves_a_created_copy_into_backups_and_unregisters_it() {
+        let root = fake_root();
+        std::fs::write(
+            root.path().join("BambuStudio.conf"),
+            "{\n  \"filaments\": [\"Other\"]\n}\n",
+        )
+        .unwrap();
+        let (idx, f) = (presets(root.path()), folders(root.path()));
+        let copy = copied(root.path(), &f, &idx);
+        let stem = copy
+            .target_path
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let conf = || -> Value {
+            serde_json::from_str(
+                &std::fs::read_to_string(root.path().join("BambuStudio.conf")).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(conf()["filaments"], json!(["Other", stem]));
+        let json_before = raw(&copy.target_path);
+        let mut ledger = Vec::new();
+        undo(
+            &copy.target_path,
+            &copy.changes,
+            true,
+            &f,
+            &idx,
+            &mut ledger,
+        )
+        .unwrap();
+        assert!(!copy.target_path.exists());
+        assert!(!copy.target_path.with_extension("info").exists());
+        let backups: Vec<PathBuf> =
+            std::fs::read_dir(copy.target_path.parent().unwrap().join(".backups"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.file_name().unwrap().to_str().unwrap().starts_with(&stem))
+                .collect();
+        let json = backups
+            .iter()
+            .find(|p| p.extension().unwrap() == "json")
+            .unwrap();
+        assert_eq!(raw(json), json_before);
+        assert!(json.with_extension("info").is_file());
+        assert_eq!(conf()["filaments"], json!(["Other"]));
+        assert!(matches!(ledger.last(), Some(LedgerNote::Forgot(_))));
+    }
+
+    #[test]
+    fn undo_wont_take_a_user_preset_for_a_created_copy() {
+        let root = fake_root();
+        let (idx, f) = (presets(root.path()), folders(root.path()));
+        let path = user_path(root.path(), MY_PETG);
+        let before = std::fs::read_to_string(&path).unwrap();
+        // A pairing bug: MY_PETG's element matches, but it isn't a copy.
+        let mut changes = vec![KeyChange {
+            key: "nozzle_temperature".into(),
+            index: 1,
+            old: "220".into(),
+            new: "245".into(),
+            had_key: true,
+            ..Default::default()
+        }];
+        let mut ledger = Vec::new();
+        assert_eq!(
+            undo(&path, &changes, true, &f, &idx, &mut ledger),
+            Err(NOT_THE_COPY.to_string()),
+            "no proof at all"
+        );
+        changes[0].copy_sha256 = Some("0".repeat(64));
+        assert_eq!(
+            undo(&path, &changes, true, &f, &idx, &mut ledger),
+            Err(NOT_THE_COPY.to_string()),
+            "not named as a copy"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(ledger.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn undo_of_a_copy_that_cant_be_removed_fails_without_forgetting_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fake_root();
+        let (idx, f) = (presets(root.path()), folders(root.path()));
+        let copy = copied(root.path(), &f, &idx);
+        let dir = copy.target_path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(dir.join(".backups")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut ledger = Vec::new();
+        let result = undo(
+            &copy.target_path,
+            &copy.changes,
+            true,
+            &f,
+            &idx,
+            &mut ledger,
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+        assert!(copy.target_path.is_file());
+        assert!(ledger.is_empty(), "nothing forgotten: {ledger:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_folder_cant_take_a_preset_or_a_copy_outside() {
+        let root = fake_root();
+        let (idx, mut f) = (presets(root.path()), folders(root.path()));
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("x.json"),
+            "{\"name\":\"x\",\"filament_id\":\"P1\"}",
+        )
+        .unwrap();
+        let link = root
+            .path()
+            .join(format!("user/{USER_ID}/filament/elsewhere"));
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        assert_eq!(
+            plan(
+                &link.join("x.json"),
+                &f,
+                &idx,
+                change(TestKind::Temperature, 220.0, None)
+            ),
+            Err(NOT_A_PRESET_FOLDER.to_string())
+        );
+        f.copy_dir = Some(link.clone());
+        let c = change(TestKind::FlowCoarse, 1.029, Some("Direct Drive Standard"));
+        let system = system_path(root.path(), SYSTEM_H2D);
+        assert_eq!(plan(&system, &f, &idx, c), Err(NO_COPY_DIR.to_string()));
+        let mut ledger = Vec::new();
+        assert_eq!(
+            save(&system, &f, &idx, c, "0.98", &mut ledger),
+            Err(NO_COPY_DIR.to_string())
+        );
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
+
+        // And `from_paths` drops a symlinked `filament/base`.
+        let r = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(r.path().join("user/123/filament")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), r.path().join("user/123/filament/base"))
+            .unwrap();
+        let paths = BambuPaths {
+            config_root: r.path().to_path_buf(),
+            system_filaments: r.path().join("system/BBL/filament"),
+            user_root: r.path().join("user"),
+            preset_folder: Some("123".into()),
+        };
+        assert_eq!(PresetFolders::from_paths(&paths).copy_dir, None);
+    }
+
+    #[test]
+    fn duplicate_variant_names_are_refused() {
+        let mut config = Map::new();
+        config.insert(
+            VARIANT_KEY.into(),
+            json!(["Direct Drive Standard", "direct drive standard"]),
+        );
+        config.insert("filament_flow_ratio".into(), json!(["1", "1"]));
+        assert_eq!(
+            variant_index(
+                &config,
+                "filament_flow_ratio",
+                Some("Direct Drive Standard")
+            ),
+            Err(UNLABELLED.to_string())
         );
     }
 }

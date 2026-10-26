@@ -200,7 +200,7 @@ impl StepKey {
 }
 
 /// One element a save changed, so an undo can put exactly it back.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyChange {
     pub key: String,
     /// The nozzle variant's element.
@@ -210,6 +210,21 @@ pub struct KeyChange {
     pub new: String,
     /// The file had the key itself before the save, rather than inheriting it.
     pub had_key: bool,
+    /// The whole array the save left in the file for this key, so an undo
+    /// can tell a later edit to another variant. Empty in rows saved before
+    /// it was recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub written: Vec<String>,
+    /// The file's own array for this key before the save, when it had one
+    /// (`"nil"` elements included), so an undo puts back exactly that.
+    /// Empty when the file didn't have the key, or in older rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub before: Vec<String>,
+    /// On the first change of a save that created the calibrated copy: the
+    /// SHA-256 of the copy's content as saved. Undo moves the copy away only
+    /// while it still matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -842,6 +857,7 @@ mod tests {
                 old: "220".into(),
                 new: "225".into(),
                 had_key: true,
+                ..Default::default()
             }],
             created_copy: false,
             photo_path: None,
@@ -1517,5 +1533,34 @@ mod tests {
         }
         writer.join().unwrap();
         assert_eq!(first.runs().unwrap().len(), 41);
+    }
+
+    #[test]
+    fn a_key_change_saved_before_written_and_copy_sha256_still_reads() {
+        let old: Vec<KeyChange> = serde_json::from_str(
+            r#"[{"key":"nozzle_temperature","index":1,"old":"245","new":"230","had_key":true}]"#,
+        )
+        .unwrap();
+        assert!(old[0].written.is_empty() && old[0].copy_sha256.is_none());
+        let new = KeyChange {
+            key: "filament_flow_ratio".into(),
+            index: 0,
+            old: "0.98".into(),
+            new: "1.029".into(),
+            had_key: false,
+            written: vec!["1.029".into(), "0.98".into()],
+            before: vec!["nil".into(), "0.98".into()],
+            copy_sha256: Some("ab".into()),
+        };
+        let text = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<KeyChange>(&text).unwrap(), new);
+        let plain = KeyChange {
+            written: Vec::new(),
+            before: Vec::new(),
+            copy_sha256: None,
+            ..new
+        };
+        let text = serde_json::to_string(&plain).unwrap();
+        assert!(!text.contains("written") && !text.contains("before") && !text.contains("sha"));
     }
 }
