@@ -191,6 +191,7 @@ const TAB_ROUTES = [
   ["/filament", "/filament"],
   ["/filament", "/filament/advise"],
   ["/filament", "/filament/batch"],
+  ["/filament", "/filament/calibrate"],
   ["/profiles", "/profiles"],
   ["/profiles", "/profiles/compare"],
   ["/settings", "/settings"],

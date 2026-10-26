@@ -5,7 +5,7 @@
 
 use super::types::{
     ChangeView, Diagram, Reading, ResultView, RunSummary, RunView, Setup, StepKey, StepStatus,
-    TestKind,
+    Suggestion, TestKind,
 };
 use crate::journal::format::local_time_text;
 use crate::journal::types::PrintEntry;
@@ -24,6 +24,10 @@ pub const STUDIO_RUNNING: &str = "Bambu Studio is open: restart it so it reads t
 pub const PA_NOTE: &str =
     "BambuMate records K only. Bambu Studio's Flow Dynamics wizard saves it on the printer.";
 pub const NOT_A_BAND: &str = "That temperature isn't one of the bands on this tower.";
+pub const ENTER_A_NUMBER: &str = "Enter a number.";
+/// Shown on the fine pass after a coarse save made while Bambu Studio was
+/// open: Studio slices the fine pass from the flow ratio it has loaded.
+pub const RESTART_BEFORE_FINE: &str = "Bambu Studio was open when the coarse pass was saved: restart it before you slice the fine pass, so it reads the new flow ratio.";
 /// Most characters shown of a preset or print name.
 const NAME_MAX: usize = 96;
 /// Most characters shown of an error the backend passed on.
@@ -460,7 +464,9 @@ pub fn slot_preset_name(slot: &SlotView) -> String {
     }
 }
 
-/// The journal's chip for a print linked to a calibration step.
+/// The journal's chip for a print linked to a calibration step. The
+/// journal (Task 9) shows it; remove the `allow` when it does.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn purpose_chip(test_key: &str) -> String {
     match TestKind::from_key(test_key) {
         Some(t) => format!("Calibration: {}", t.title()),
@@ -516,6 +522,94 @@ pub fn history_change(r: &ResultView) -> Option<String> {
 pub fn reason_line(reason: &str) -> String {
     let one_line = reason.split_whitespace().collect::<Vec<_>>().join(" ");
     untrusted_text(&one_line, REASON_MAX)
+}
+
+/// The typed field's label and unit, for each test.
+pub fn typed_label(test: TestKind) -> (&'static str, &'static str) {
+    match test {
+        TestKind::Temperature => ("Or type the temperature", "°C"),
+        TestKind::FlowCoarse | TestKind::FlowFine => ("Or type the modifier", "%"),
+        TestKind::Retraction | TestKind::MaxVolumetricSpeed => ("Or type the height", "mm"),
+        TestKind::PressureAdvance => ("K you used", ""),
+    }
+}
+
+/// A typed temperature, modifier, height or K as a reading for `setup`'s
+/// test. `None` for an empty field; otherwise the reading, or the line
+/// that says why it isn't one. The backend checks the range.
+pub fn typed_reading(setup: &Setup, text: &str) -> Option<Result<Reading, &'static str>> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let float = || t.parse::<f64>().ok().filter(|v| v.is_finite());
+    let test = setup.test();
+    Some(match test {
+        TestKind::Temperature => t
+            .parse::<i32>()
+            .ok()
+            .and_then(|c| band_for_celsius(setup, c))
+            .map(|band| Reading::Temperature { band })
+            .ok_or(NOT_A_BAND),
+        TestKind::FlowCoarse | TestKind::FlowFine => t
+            .parse::<i32>()
+            .ok()
+            .and_then(|m| patch_reading(test, m))
+            .ok_or(ENTER_A_NUMBER),
+        TestKind::Retraction | TestKind::MaxVolumetricSpeed => float()
+            .and_then(|h| height_reading(test, h))
+            .ok_or(ENTER_A_NUMBER),
+        TestKind::PressureAdvance => float()
+            .map(|k| Reading::PressureAdvance { k })
+            .ok_or(ENTER_A_NUMBER),
+    })
+}
+
+/// A link candidate that another result already holds: linking moves the
+/// print, so the list says so first.
+pub fn linked_elsewhere(e: &PrintEntry, result_id: i64) -> Option<String> {
+    let p = e
+        .purpose
+        .as_ref()
+        .filter(|p| p.calibration_result_id != result_id)?;
+    let to = TestKind::from_key(&p.test).map_or("another calibration", TestKind::title);
+    Some(format!("Linked to {to}: linking moves it here"))
+}
+
+/// Shown with Undo when the save made the "(calibrated)" copy: undoing it
+/// moves the copy away.
+pub fn undo_copy_note(change: &ChangeView) -> Option<String> {
+    change.will_copy.then(|| {
+        format!(
+            "Undo moves {} to the backups, so Bambu Studio no longer lists it.",
+            untrusted_text(&short_preset(&change.target_name), NAME_MAX)
+        )
+    })
+}
+
+/// `Confidence 80% · <reason>`: the reason on one line, as plain text.
+pub fn suggestion_detail(s: &Suggestion) -> String {
+    let confidence = format!("Confidence {}%", (s.confidence * 100.0).round() as i64);
+    let reason = reason_line(&s.reason);
+    if reason.is_empty() {
+        confidence
+    } else {
+        format!("{confidence} · {reason}")
+    }
+}
+
+/// `The preset holds 220 °C now.`, from the defaults' `current`. A `"nil"`
+/// (a retraction left to the printer) isn't labelled here: the diff names
+/// it from the backend's `old_display`.
+pub fn current_line(test: TestKind, current: Option<&str>) -> Option<String> {
+    let c = current
+        .map(str::trim)
+        .filter(|c| !c.is_empty() && *c != "nil")?;
+    let c = untrusted_text(c, NAME_MAX);
+    Some(match test.unit() {
+        "" => format!("The preset holds {c} now."),
+        unit => format!("The preset holds {c} {unit} now."),
+    })
 }
 
 #[cfg(test)]
@@ -975,5 +1069,167 @@ mod tests {
         );
         assert_eq!(reason_line("a\u{7}b\u{202E}c"), "a\u{FFFD}b\u{FFFD}c");
         assert_eq!(reason_line(&"x".repeat(1000)).chars().count(), 400);
+    }
+
+    #[test]
+    fn a_typed_value_becomes_a_reading_or_says_why_not() {
+        let temp = Setup::Temperature {
+            start: 230,
+            end: 190,
+        };
+        assert_eq!(
+            typed_reading(&temp, "  "),
+            None,
+            "an empty field asks nothing"
+        );
+        assert_eq!(
+            typed_reading(&temp, " 225 "),
+            Some(Ok(Reading::Temperature { band: 1 }))
+        );
+        assert_eq!(typed_reading(&temp, "226"), Some(Err(NOT_A_BAND)));
+        assert_eq!(typed_reading(&temp, "hot"), Some(Err(NOT_A_BAND)));
+        assert_eq!(
+            typed_reading(&Setup::FlowFine { base: 1.0 }, "-6"),
+            Some(Ok(Reading::FlowFine { modifier: -6 }))
+        );
+        assert_eq!(
+            typed_reading(&Setup::FlowCoarse { base: 1.0 }, "five"),
+            Some(Err(ENTER_A_NUMBER))
+        );
+        let retraction = Setup::Retraction {
+            start: 0.0,
+            end: 2.0,
+            step: 0.1,
+        };
+        assert_eq!(
+            typed_reading(&retraction, "5.5"),
+            Some(Ok(Reading::Retraction { height_mm: 5.5 }))
+        );
+        assert_eq!(typed_reading(&retraction, "inf"), Some(Err(ENTER_A_NUMBER)));
+        assert_eq!(
+            typed_reading(&Setup::PressureAdvance {}, "0.025"),
+            Some(Ok(Reading::PressureAdvance { k: 0.025 }))
+        );
+        assert_eq!(
+            typed_reading(&Setup::PressureAdvance {}, "NaN"),
+            Some(Err(ENTER_A_NUMBER))
+        );
+        assert_eq!(
+            typed_label(TestKind::Temperature),
+            ("Or type the temperature", "°C")
+        );
+        assert_eq!(
+            typed_label(TestKind::FlowFine),
+            ("Or type the modifier", "%")
+        );
+        assert_eq!(
+            typed_label(TestKind::MaxVolumetricSpeed),
+            ("Or type the height", "mm")
+        );
+        assert_eq!(typed_label(TestKind::PressureAdvance), ("K you used", ""));
+    }
+
+    #[test]
+    fn a_print_linked_to_another_result_says_so() {
+        let mut e = PrintEntry {
+            id: 42,
+            name: "Tower".into(),
+            ..Default::default()
+        };
+        assert_eq!(linked_elsewhere(&e, 11), None, "a free print says nothing");
+        e.purpose = Some(crate::journal::types::PrintPurpose {
+            calibration_result_id: 11,
+            test: "temperature".into(),
+        });
+        assert_eq!(linked_elsewhere(&e, 11), None, "already this result's");
+        assert_eq!(
+            linked_elsewhere(&e, 12).as_deref(),
+            Some("Linked to Temperature: linking moves it here")
+        );
+        e.purpose = Some(crate::journal::types::PrintPurpose {
+            calibration_result_id: 9,
+            test: "flow_fine".into(),
+        });
+        assert_eq!(
+            linked_elsewhere(&e, 12).as_deref(),
+            Some("Linked to Flow (fine): linking moves it here")
+        );
+        e.purpose = Some(crate::journal::types::PrintPurpose {
+            calibration_result_id: 9,
+            test: "vfa".into(),
+        });
+        assert_eq!(
+            linked_elsewhere(&e, 12).as_deref(),
+            Some("Linked to another calibration: linking moves it here")
+        );
+    }
+
+    #[test]
+    fn undoing_a_save_that_made_a_copy_warns_first() {
+        let change = ChangeView {
+            preset_key: "nozzle_temperature".into(),
+            old: "220".into(),
+            old_display: "220".into(),
+            new: "225".into(),
+            extra: None,
+            target_name: "Bambu PLA Basic (calibrated) @BBL H2D".into(),
+            will_copy: true,
+            variant: None,
+        };
+        assert_eq!(
+            undo_copy_note(&change).as_deref(),
+            Some("Undo moves Bambu PLA Basic (calibrated) to the backups, so Bambu Studio no longer lists it.")
+        );
+        let in_place = ChangeView {
+            will_copy: false,
+            ..change.clone()
+        };
+        assert_eq!(undo_copy_note(&in_place), None);
+        let hostile = ChangeView {
+            target_name: "Evil\u{202E} @BBL H2D".into(),
+            ..change
+        };
+        assert_eq!(
+            undo_copy_note(&hostile).as_deref(),
+            Some("Undo moves Evil\u{FFFD} to the backups, so Bambu Studio no longer lists it.")
+        );
+    }
+
+    #[test]
+    fn the_suggestion_shows_its_confidence_and_its_reason_as_text() {
+        let sg = crate::calibration::types::Suggestion {
+            pick: "+5".into(),
+            confidence: 0.804,
+            reason: " Sharpest <b>edge</b>\n at +5 ".into(),
+        };
+        assert_eq!(
+            suggestion_detail(&sg),
+            "Confidence 80% · Sharpest <b>edge</b> at +5"
+        );
+        let bare = crate::calibration::types::Suggestion {
+            reason: "  ".into(),
+            confidence: 1.0,
+            ..sg
+        };
+        assert_eq!(suggestion_detail(&bare), "Confidence 100%");
+    }
+
+    #[test]
+    fn the_card_names_what_the_preset_holds_now() {
+        assert_eq!(
+            current_line(TestKind::Temperature, Some("220")).as_deref(),
+            Some("The preset holds 220 °C now.")
+        );
+        assert_eq!(
+            current_line(TestKind::FlowCoarse, Some("0.98")).as_deref(),
+            Some("The preset holds 0.98 now.")
+        );
+        assert_eq!(
+            current_line(TestKind::Retraction, Some("nil")),
+            None,
+            "a retraction left to the printer isn't labelled here: the diff shows it from old_display"
+        );
+        assert_eq!(current_line(TestKind::MaxVolumetricSpeed, None), None);
+        assert_eq!(current_line(TestKind::Temperature, Some("  ")), None);
     }
 }

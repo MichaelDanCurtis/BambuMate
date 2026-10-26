@@ -115,7 +115,7 @@ fn photo_alt(n: usize, total: usize, added_at: i64, offset_minutes: i32) -> Stri
 
 /// The local UTC offset, in minutes east, at Unix time `unix_secs`: each
 /// time gets its own, so a DST change since then doesn't shift it.
-fn local_offset_minutes(unix_secs: i64) -> i32 {
+pub(crate) fn local_offset_minutes(unix_secs: i64) -> i32 {
     let at = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(unix_secs as f64 * 1000.0));
     -(at.get_timezone_offset() as i32)
 }

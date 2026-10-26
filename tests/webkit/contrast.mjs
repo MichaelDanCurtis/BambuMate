@@ -20,11 +20,13 @@ const TEXT = [
 ];
 const BACKGROUNDS = ["--nd-black", "--nd-surface", "--nd-surface-raised"];
 // Text drawn on a filled token: active tab pills and primary buttons
-// (--nd-black on --nd-text-display, and on --nd-text-primary when hovered).
+// (--nd-black on --nd-text-display, and on --nd-text-primary when hovered),
+// and Calibrate's chosen band, patch or height (--nd-black on --nd-signal).
 const FILLED = [
   ["--nd-black", "--nd-text-display", 4.5],
   ["--nd-black", "--nd-text-primary", 4.5],
   ["--nd-black", "--nd-accent", 4.5],
+  ["--nd-black", "--nd-signal", 4.5],
 ];
 const THEMES = ["dark", "bambu"];
 

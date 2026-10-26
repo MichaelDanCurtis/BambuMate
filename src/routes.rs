@@ -8,6 +8,7 @@ pub const FILAMENT_TABS: &[Tab] = &[
     ("Advise", "/filament/advise"),
     ("Search", "/filament"),
     ("Batch", "/filament/batch"),
+    ("Calibrate", "/filament/calibrate"),
 ];
 
 pub const PRINTER_TABS: &[Tab] = &[("Live", "/printer"), ("Journal", "/printer/journal")];
@@ -48,6 +49,7 @@ pub const PAGE_ROUTES: &[&str] = &[
     "/filament",
     "/filament/advise",
     "/filament/batch",
+    "/filament/calibrate",
     "/profiles",
     "/profiles/compare",
     "/slice",
@@ -102,9 +104,10 @@ mod tests {
     }
 
     #[test]
-    fn filament_tabs_read_advise_search_batch() {
+    fn filament_tabs_read_advise_search_batch_calibrate() {
         let labels: Vec<&str> = FILAMENT_TABS.iter().map(|(l, _)| *l).collect();
-        assert_eq!(labels, ["Advise", "Search", "Batch"]);
+        assert_eq!(labels, ["Advise", "Search", "Batch", "Calibrate"]);
+        assert!(PAGE_ROUTES.contains(&"/filament/calibrate"));
     }
 
     #[test]

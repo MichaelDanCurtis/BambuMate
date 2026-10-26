@@ -99,6 +99,8 @@ pub enum Reading {
     PressureAdvance { k: f64 },
 }
 
+// Only the wire tests ask a reading for its test: the page always knows it.
+#[cfg(test)]
 impl Reading {
     pub fn test(&self) -> TestKind {
         match self {

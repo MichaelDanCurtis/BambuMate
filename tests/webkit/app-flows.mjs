@@ -1970,7 +1970,7 @@ async function driveApp(browserType, engine, baseUrl) {
     const current = await page.locator('.nd-tabs a[aria-current="page"]').getAttribute("href");
     if (current !== "/filament/advise") throw new Error(`the current tab is ${current}`);
     const tabs = await page.locator(".nd-tabs a").allTextContents();
-    if (tabs.join("|") !== "Advise|Search|Batch") throw new Error(`tabs read ${tabs.join("|")}`);
+    if (tabs.join("|") !== "Advise|Search|Batch|Calibrate") throw new Error(`tabs read ${tabs.join("|")}`);
   });
 
   await step(run, page, "before advising the page says what to do", async () => {
