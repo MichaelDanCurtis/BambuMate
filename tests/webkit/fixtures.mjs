@@ -481,6 +481,200 @@ export const JOURNAL_ENTRIES = [JOURNAL_PRINTING, JOURNAL_FINISHED, JOURNAL_FAIL
 // an end was seen (7080 + 2400 + 5400 s).
 export const JOURNAL_SUMMARY = { prints: 5, good: 1, usable: 0, finished: 1, failed: 1, printing_seconds: 14880 };
 
+// -- calibration --------------------------------------------------------------
+//
+// Shapes mirror src-tauri/src/commands/calibration.rs (RunView, PreviewView,
+// SaveAnswer), as src/calibration/wire.json records them: the page's mirrors
+// default none of the always-sent fields, so a missing one fails to decode.
+// A2 holds an RFID Bambu PLA Basic spool, so its run calibrates the system
+// preset and the first save makes the calibrated copy. The maths is the
+// backend's: these answers are what it would give.
+
+export const CAL_SYSTEM_PATH = `${SYSTEM_FILAMENTS}/Bambu PLA Basic @BBL H2D.json`;
+export const CAL_COPY = "Bambu PLA Basic (calibrated) @BBL H2D";
+const CAL_COPY_PATH = `${USER_FILAMENTS}/${CAL_COPY}.json`;
+const CAL_STEPS = ["temperature", "flow", "retraction", "max_speed", "pressure_advance"];
+const calSteps = (patch = {}) =>
+  CAL_STEPS.map((step) => ({ step, status: { state: "not_run" }, fine_ready: false, opened_at: null, ...(patch[step] ?? {}) }));
+const saved = (result_id, value) => ({ status: { state: "saved", result_id, value, at: JOURNAL_NOW } });
+
+export const CAL_RUN = {
+  id: 7,
+  preset_name: "Bambu PLA Basic @BBL H2D",
+  preset_path: CAL_SYSTEM_PATH,
+  target_name: "Bambu PLA Basic @BBL H2D",
+  target_path: CAL_SYSTEM_PATH,
+  is_system: true,
+  will_save_as: CAL_COPY,
+  filament_id: "GFA00",
+  material: "PLA",
+  printer_model: "H2D",
+  nozzle: "0.4",
+  slot_label: "A2",
+  variant: "Direct Drive Standard",
+  variants: ["Direct Drive Standard", "Direct Drive High Flow", "Direct Drive E3D High Flow"],
+  needs_variant: false,
+  preset_error: null,
+  steps: calSteps(),
+  results: [],
+  created_at: JOURNAL_NOW - 3600,
+  updated_at: JOURNAL_NOW - 3600,
+};
+
+/** A3's run: a system PETG preset, a different run from A2's. */
+export const CAL_RUN_A3 = {
+  ...CAL_RUN,
+  id: 8,
+  preset_name: A3_DETECTED,
+  preset_path: A3_DETECTED_PATH,
+  target_name: A3_DETECTED,
+  target_path: A3_DETECTED_PATH,
+  will_save_as: "Generic PETG (calibrated) @BBL H2D 0.4 nozzle",
+  filament_id: "GFG99",
+  material: "PETG",
+  slot_label: "A3",
+};
+
+/** A preset with several nozzle variants and none chosen: the card waits for the user. */
+export const CAL_RUN_NEEDS_VARIANT = { ...CAL_RUN, variant: null, needs_variant: true };
+
+const calResult = (id, test, value, extra = {}) => {
+  const result = {
+    id,
+    test,
+    value,
+    preset_key: "nozzle_temperature",
+    old_value: "220",
+    new_value: "225",
+    target_name: CAL_COPY,
+    variant: "Direct Drive Standard",
+    saved: true,
+    undone: false,
+    created_at: JOURNAL_NOW,
+    photo: null,
+    journal_entry_id: null,
+    can_undo: true,
+    created_copy: false,
+    ...extra,
+  };
+  // What the page shows for the old value; `printer default` only for a "nil" override.
+  return { old_display: result.old_value, ...result };
+};
+
+/** The first save: it made the copy, so Undo moves the copy to the backups. */
+export const CAL_RESULT_TEMP = calResult(11, "temperature", "225 °C", { created_copy: true });
+
+/** After saving 225 °C: the copy exists and is the target. */
+export const CAL_RUN_TEMP_SAVED = {
+  ...CAL_RUN,
+  target_name: CAL_COPY,
+  target_path: CAL_COPY_PATH,
+  is_system: false,
+  will_save_as: null,
+  steps: calSteps({ temperature: saved(11, "225 °C") }),
+  results: [CAL_RESULT_TEMP],
+  updated_at: JOURNAL_NOW,
+};
+
+/** After Undo: back to the system preset. The result stays, undone. */
+export const CAL_RUN_UNDONE = {
+  ...CAL_RUN,
+  results: [{ ...CAL_RESULT_TEMP, undone: true, can_undo: false }],
+  updated_at: JOURNAL_NOW,
+};
+
+/** After the coarse flow pass: the fine pass is open. */
+export const CAL_RUN_COARSE_SAVED = {
+  ...CAL_RUN_TEMP_SAVED,
+  steps: calSteps({
+    temperature: saved(11, "225 °C"),
+    flow: { ...saved(12, "1.029"), fine_ready: true },
+  }),
+  results: [
+    calResult(12, "flow_coarse", "1.029", { preset_key: "filament_flow_ratio", old_value: "0.98", new_value: "1.029" }),
+    { ...CAL_RESULT_TEMP, can_undo: false },
+  ],
+};
+
+export const CAL_RUN_PA_RECORDED = {
+  ...CAL_RUN,
+  steps: calSteps({ pressure_advance: { status: { state: "recorded", result_id: 13, value: "K 0.025", at: JOURNAL_NOW } } }),
+  results: [
+    calResult(13, "pressure_advance", "K 0.025", {
+      preset_key: null,
+      old_value: null,
+      old_display: null,
+      new_value: "0.025",
+      target_name: "",
+      saved: false,
+      can_undo: false,
+    }),
+  ],
+};
+
+const CAL_BANDS = [230, 225, 220, 215, 210, 205, 200, 195, 190].map((t, index) => ({ index, label: `${t} °C` }));
+export const CAL_TEMP_DEFAULTS = { setup: { test: "temperature", start: 230, end: 190 }, current: "220", material_label: "PLA" };
+/** The tower, and the 225 °C band's value and diff. The page shows the value only for a request that had a reading. */
+export const CAL_TEMP_PREVIEW = {
+  diagram: { kind: "bands", bands: CAL_BANDS },
+  labels: CAL_BANDS.map((b) => b.label),
+  value: {
+    value: 225,
+    text: "225",
+    display: "225 °C",
+    change: {
+      preset_key: "nozzle_temperature",
+      old: "220",
+      old_display: "220",
+      new: "225",
+      extra: { key: "nozzle_temperature_initial_layer", old: "220", new: "225" },
+      target_name: CAL_COPY,
+      will_copy: true,
+      variant: "Direct Drive Standard",
+    },
+    change_error: null,
+  },
+};
+
+const CAL_MODS = [-20, -15, -10, -5, 0, 5, 10, 15, 20].map((m) => ({ modifier: m, label: m > 0 ? `+${m}` : `${m}` }));
+export const CAL_FLOW_DEFAULTS = { setup: { test: "flow_coarse", base: 0.98 }, current: "0.98", material_label: null };
+export const CAL_FLOW_PREVIEW = {
+  diagram: { kind: "patches", patches: CAL_MODS },
+  labels: CAL_MODS.map((p) => p.label),
+  value: {
+    value: 1.029,
+    text: "1.029",
+    display: "1.029",
+    change: {
+      preset_key: "filament_flow_ratio",
+      old: "0.98",
+      old_display: "0.98",
+      new: "1.029",
+      extra: null,
+      target_name: CAL_COPY,
+      will_copy: false,
+      variant: "Direct Drive Standard",
+    },
+    change_error: null,
+  },
+};
+
+// The fine pass slices from the saved coarse value: -9 to 0 in steps of 1.
+const CAL_FINE_MODS = [-9, -8, -7, -6, -5, -4, -3, -2, -1, 0].map((m) => ({ modifier: m, label: `${m}` }));
+export const CAL_FINE_DEFAULTS = { setup: { test: "flow_fine", base: 1.029 }, current: "1.029", material_label: null };
+export const CAL_FINE_PREVIEW = {
+  diagram: { kind: "patches", patches: CAL_FINE_MODS },
+  labels: CAL_FINE_MODS.map((p) => p.label),
+  value: null,
+};
+
+export const CAL_PA_DEFAULTS = { setup: { test: "pressure_advance" }, current: null, material_label: null };
+export const CAL_PA_PREVIEW = {
+  diagram: { kind: "none" },
+  labels: [],
+  value: { value: 0.025, text: "0.025", display: "K 0.025", change: null, change_error: null },
+};
+
 export const FIXTURES = {
   // -- boot --
   get_preference: null,
@@ -1051,6 +1245,22 @@ export const FIXTURES = {
   journal_remove_photo: { ...JOURNAL_FINISHED, photos: [] },
   journal_delete: null,
   journal_image: PNG_1X1,
+
+  // -- calibration --
+  calibration_runs: [{ id: 7, preset_name: "Bambu PLA Basic @BBL H2D", slot_label: "A2", updated_at: JOURNAL_NOW, result_ids: [11] }],
+  calibration_start: CAL_RUN,
+  calibration_set_variant: CAL_RUN,
+  calibration_defaults: CAL_TEMP_DEFAULTS,
+  calibration_preview: CAL_TEMP_PREVIEW,
+  calibration_save: { outcome: "saved", run: CAL_RUN_TEMP_SAVED, result_id: 11, studio_running: false, assign_error: null },
+  calibration_record: CAL_RUN_PA_RECORDED,
+  calibration_undo: CAL_RUN_UNDONE,
+  calibration_skip: CAL_RUN,
+  // Never a real model: the suggestion is canned, so no test spends tokens.
+  calibration_suggest: { photo: "c0ffee.jpg", suggestion: { pick: "225 °C", confidence: 0.8, reason: "Least stringing." }, note: null },
+  calibration_image: PNG_1X1,
+  calibration_link_candidates: { suggested: 2, entries: [JOURNAL_FINISHED, JOURNAL_FAILED] },
+  calibration_link_print: { ...CAL_RUN_TEMP_SAVED, results: [{ ...CAL_RESULT_TEMP, journal_entry_id: 2 }] },
 };
 
 // -- test images ------------------------------------------------------------
