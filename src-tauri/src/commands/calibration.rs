@@ -902,7 +902,18 @@ pub(crate) fn undo_for(
     }
     .ok_or_else(|| RESULT_GONE.to_string())?;
     let target = Path::new(target);
-    if result.created_copy && std::fs::symlink_metadata(target).is_err() {
+    // Only a copy that is really gone counts: a permission or I/O error
+    // must not forget a copy that is still on disk.
+    let copy_gone = result.created_copy
+        && match std::fs::symlink_metadata(target) {
+            Ok(_) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                tracing::warn!("calibration: can't check result {}'s copy: {e}", result.id);
+                return Err(READ_FAILED.into());
+            }
+        };
+    if copy_gone {
         // Already moved away by an undo whose history write failed (or by
         // the user): only the history is left to put back.
         tracing::warn!(
