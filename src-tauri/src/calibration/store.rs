@@ -621,6 +621,18 @@ impl CalibrationStore {
     }
 
     pub fn add_result(&self, new: &NewResult, now: i64) -> Result<i64, String> {
+        self.add_result_with_copy(new, None, now)
+    }
+
+    /// Adds a result and, in the same transaction, records the calibrated
+    /// copy (`name`, `path`) its save made on the run, so the history never
+    /// holds one without the other.
+    pub fn add_result_with_copy(
+        &self,
+        new: &NewResult,
+        copy: Option<(&str, &str)>,
+        now: i64,
+    ) -> Result<i64, String> {
         let setup = serde_json::to_string(&new.setup).map_err(save_err)?;
         let reading = serde_json::to_string(&new.reading).map_err(save_err)?;
         let changes = serde_json::to_string(&new.changes).map_err(save_err)?;
@@ -651,6 +663,13 @@ impl CalibrationStore {
         )
         .map_err(save_err)?;
         let id = tx.last_insert_rowid();
+        if let Some((name, path)) = copy {
+            tx.execute(
+                "UPDATE runs SET copy_name = ?2, copy_path = ?3 WHERE id = ?1",
+                params![new.run_id, name, path],
+            )
+            .map_err(save_err)?;
+        }
         self.touch_run(new.run_id, now)?;
         tx.commit().map_err(save_err)?;
         Ok(id)
@@ -683,6 +702,18 @@ impl CalibrationStore {
     }
 
     pub fn mark_undone(&self, id: i64, now: i64) -> Result<bool, String> {
+        self.mark_undone_with_copy(id, false, now)
+    }
+
+    /// Marks a result undone and, in the same transaction, forgets the run's
+    /// calibrated copy when the undo took it away (`forget_copy`). `false`,
+    /// with nothing changed, when it was already undone or is gone.
+    pub fn mark_undone_with_copy(
+        &self,
+        id: i64,
+        forget_copy: bool,
+        now: i64,
+    ) -> Result<bool, String> {
         let Some(row) = self.result(id)? else {
             return Ok(false);
         };
@@ -696,6 +727,13 @@ impl CalibrationStore {
         if n == 0 {
             // Already undone (a second click, or another window): not ours.
             return Ok(false);
+        }
+        if forget_copy {
+            tx.execute(
+                "UPDATE runs SET copy_name = NULL, copy_path = NULL WHERE id = ?1",
+                [row.run_id],
+            )
+            .map_err(save_err)?;
         }
         self.touch_run(row.run_id, now)?;
         tx.commit().map_err(save_err)?;
@@ -1562,5 +1600,50 @@ mod tests {
         };
         let text = serde_json::to_string(&plain).unwrap();
         assert!(!text.contains("written") && !text.contains("before") && !text.contains("sha"));
+    }
+
+    #[test]
+    fn a_save_and_its_copy_are_recorded_together_and_so_is_their_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let run = s.create_run(&new_run("/sys/a.json"), 100).unwrap();
+        let copy = Some(("A (calibrated)", "/user/a.json"));
+        // A failed copy write takes the result with it.
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER no_copy BEFORE UPDATE OF copy_path ON runs \
+                 BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            )
+            .unwrap();
+        assert_eq!(
+            s.add_result_with_copy(&temp_result(run.id, 0), copy, 200),
+            Err(SAVE_FAILED.to_string())
+        );
+        assert!(s.results(run.id).unwrap().is_empty());
+        s.conn.execute_batch("DROP TRIGGER no_copy;").unwrap();
+        let id = s
+            .add_result_with_copy(&temp_result(run.id, 0), copy, 300)
+            .unwrap();
+        let back = s.run(run.id).unwrap().unwrap();
+        assert_eq!(back.target(), ("A (calibrated)", "/user/a.json"));
+        assert_eq!(back.updated_at, 300);
+        // And the undo: a failed forget leaves the result live.
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER no_forget BEFORE UPDATE OF copy_path ON runs \
+                 BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            )
+            .unwrap();
+        assert!(s.mark_undone_with_copy(id, true, 400).is_err());
+        assert!(!s.result(id).unwrap().unwrap().undone);
+        s.conn.execute_batch("DROP TRIGGER no_forget;").unwrap();
+        assert!(s.mark_undone_with_copy(id, true, 500).unwrap());
+        assert!(s.result(id).unwrap().unwrap().undone);
+        let back = s.run(run.id).unwrap().unwrap();
+        assert_eq!((back.copy_name, back.copy_path), (None, None));
+        assert!(
+            !s.mark_undone_with_copy(id, true, 600).unwrap(),
+            "only once"
+        );
     }
 }

@@ -248,6 +248,16 @@ pub fn month_bounds<Tz: TimeZone>(now: &DateTime<Tz>) -> (i64, i64) {
     )
 }
 
+/// What [`JournalStore::link_purpose`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Linked {
+    /// The print isn't in the journal: nothing changed.
+    Gone,
+    /// The print now names the result. `displaced` is the other result it
+    /// named before, which no longer has this print.
+    Linked { displaced: Option<i64> },
+}
+
 pub struct JournalStore {
     conn: Connection,
     root: PathBuf,
@@ -930,7 +940,9 @@ impl JournalStore {
     /// transaction clears `previous`'s purpose while it still points at that
     /// result ([`Self::clear_purpose_if`]), so no reader sees the result on
     /// both prints or on neither. A `previous` whose purpose can't be read
-    /// keeps it (logged) and the new link still stands. `false`, with
+    /// keeps it (logged) and the new link still stands. A print belongs to
+    /// one result: the result `id` pointed at before, when another, comes
+    /// back as `displaced` for the caller to unlink. [`Linked::Gone`], with
     /// nothing changed, when `id` is gone.
     pub fn link_purpose(
         &self,
@@ -938,23 +950,45 @@ impl JournalStore {
         purpose: &PrintPurpose,
         previous: Option<i64>,
         now: i64,
-    ) -> Result<bool, String> {
+    ) -> Result<Linked, String> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )
         .map_err(save_err)?;
+        let current: Option<Option<i64>> = match self
+            .conn
+            .query_row(
+                "SELECT json_extract(purpose_json, '$.calibration_result_id') \
+                 FROM prints WHERE id = ?1",
+                [id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+        {
+            Ok(found) => found,
+            // A purpose that can't be read names no result to unlink.
+            Err(e) => {
+                tracing::warn!("journal: print {id}'s old purpose can't be read: {e}");
+                self.exists(id)?.then_some(None)
+            }
+        };
+        let Some(current) = current else {
+            return Ok(Linked::Gone);
+        };
         if let Some(previous) = previous.filter(|p| *p != id) {
             if let Err(e) = self.clear_purpose_if(previous, purpose.calibration_result_id, now) {
                 tracing::warn!("journal: print {previous} keeps its old calibration link: {e}");
             }
         }
-        // Dropping the transaction un-does the clear when `id` is gone.
         if !self.set_purpose(id, Some(purpose), now)? {
-            return Ok(false);
+            // Dropping the transaction un-does the clear.
+            return Ok(Linked::Gone);
         }
         tx.commit().map_err(save_err)?;
-        Ok(true)
+        Ok(Linked::Linked {
+            displaced: current.filter(|r| *r != purpose.calibration_result_id),
+        })
     }
 
     /// The prints a calibration step opened at `since` may be linked to.
@@ -2078,12 +2112,22 @@ mod tests {
             calibration_result_id: n,
             test: crate::calibration::tests::TestKind::Temperature,
         };
-        assert!(s.link_purpose(a, &purpose(11), None, 1_200).unwrap());
-        assert!(s.link_purpose(b, &purpose(11), Some(a), 1_300).unwrap());
+        let linked = |displaced| Linked::Linked { displaced };
+        assert_eq!(
+            s.link_purpose(a, &purpose(11), None, 1_200).unwrap(),
+            linked(None)
+        );
+        assert_eq!(
+            s.link_purpose(b, &purpose(11), Some(a), 1_300).unwrap(),
+            linked(None)
+        );
         assert_eq!(s.get(a).unwrap().unwrap().purpose, None, "moved");
         assert_eq!(s.get(b).unwrap().unwrap().purpose, Some(purpose(11)));
         // A print that is gone takes nothing: the old link stays where it was.
-        assert!(!s.link_purpose(999, &purpose(11), Some(b), 1_400).unwrap());
+        assert_eq!(
+            s.link_purpose(999, &purpose(11), Some(b), 1_400).unwrap(),
+            Linked::Gone
+        );
         let e = s.get(b).unwrap().unwrap();
         assert_eq!((e.purpose, e.updated_at), (Some(purpose(11)), 1_300));
         // An old print whose purpose can't be read keeps it; the new link stands.
@@ -2093,7 +2137,10 @@ mod tests {
                 [b],
             )
             .unwrap();
-        assert!(s.link_purpose(a, &purpose(11), Some(b), 1_500).unwrap());
+        assert_eq!(
+            s.link_purpose(a, &purpose(11), Some(b), 1_500).unwrap(),
+            linked(None)
+        );
         assert_eq!(s.get(a).unwrap().unwrap().purpose, Some(purpose(11)));
         let kept: Option<String> = s
             .conn
@@ -2102,8 +2149,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(kept.as_deref(), Some("{not json"));
-        // Relinking the same print clears nothing.
-        assert!(s.link_purpose(a, &purpose(11), Some(a), 1_600).unwrap());
+        // Relinking the same print clears nothing and displaces nothing.
+        assert_eq!(
+            s.link_purpose(a, &purpose(11), Some(a), 1_600).unwrap(),
+            linked(None)
+        );
         assert_eq!(s.get(a).unwrap().unwrap().purpose, Some(purpose(11)));
+        // A print that named another result now names this one, and says so.
+        assert_eq!(
+            s.link_purpose(a, &purpose(12), None, 1_700).unwrap(),
+            linked(Some(11))
+        );
+        assert_eq!(s.get(a).unwrap().unwrap().purpose, Some(purpose(12)));
+        // A corrupt purpose on the target itself names no one.
+        assert_eq!(
+            s.link_purpose(b, &purpose(12), Some(a), 1_800).unwrap(),
+            linked(None)
+        );
+        assert_eq!(s.get(b).unwrap().unwrap().purpose, Some(purpose(12)));
     }
 }

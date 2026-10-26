@@ -4,7 +4,7 @@
 //! against temp folders; the commands only gather the app's state.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -12,14 +12,15 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::calibration::apply::{self, Change, LedgerNote, Planned, PresetFolders, SaveOutcome};
 use crate::calibration::store::{
-    latest_live, newest_saved, step_views, CalibrationPaths, CalibrationStore, NewResult, NewRun,
-    Run, SlotSource, StepKey, StepView, PHOTO_FAILED, READ_FAILED, RESULT_GONE, RUN_GONE,
+    latest_live, newest_saved, step_views, CalibrationPaths, CalibrationStore, KeyChange,
+    NewResult, NewRun, Run, SlotSource, StepKey, StepView, PHOTO_FAILED, READ_FAILED, RESULT_GONE,
+    RUN_GONE,
 };
 use crate::calibration::suggest::{self, Suggestion, VisionBackend};
 use crate::calibration::tests::{self as cal, Current, Diagram, Reading, Setup, TestKind};
 use crate::journal::photos;
-use crate::journal::store::{JournalStore, GONE};
-use crate::journal::types::{LinkCandidates, PrintPurpose};
+use crate::journal::store::{JournalStore, Linked, GONE};
+use crate::journal::types::{LinkCandidates, Outcome, PrintPurpose};
 use crate::journal::{JournalPaths, CHANGED_EVENT};
 use crate::printer::client::ConnectionState;
 use crate::printer::service::{PrinterService, PrinterView};
@@ -46,11 +47,39 @@ pub const TOO_TALL: &str =
 /// `"nil"` in a retraction override: the printer's own value.
 pub const PRINTER_DEFAULT: &str = "printer default";
 const PHOTO_GONE: &str = "That photo isn't in the calibration history any more.";
+/// The save's history write failed, and the preset was put back.
+pub const SAVE_NOT_RECORDED: &str =
+    "The calibration history couldn't record the save, so the preset was put back as it was.";
+/// The undo's file step happened but its history write failed. A second
+/// Undo finishes it: it sees the file already put back.
+pub const UNDO_NOT_RECORDED: &str =
+    "The preset was put back, but the calibration history couldn't record the undo. Undo again to finish.";
+pub const LINK_UNDONE: &str = "That save was undone, so there's no result to link a print to.";
+pub const STILL_PRINTING: &str = "That print hasn't ended yet. Link it once it has.";
+/// A bug stopped a preset change partway (a panic). Its ledger notes were
+/// still recorded.
+pub const INTERRUPTED: &str =
+    "BambuMate hit a problem partway through. Check the preset in Bambu Studio before you try again.";
 /// The most labels a test may have. A ruler has one per whole mm, so this
 /// is a tower of about 400 mm, taller than any Bambu printer's build
 /// volume (the H2D's is 325 mm). `validate_setup` has no upper bound on
 /// the height, so a tiny step would otherwise build a vast label list.
 pub const MAX_LABELS: usize = 400;
+
+/// Serialises every command that reads a preset or the history and then
+/// writes either: save, undo, record, skip, set variant, link and start.
+/// Without it two overlapping saves could each read the file, and the
+/// second write would drop the first's value; a double click on a system
+/// preset would make two copies. Held only inside a blocking closure,
+/// never across an `.await`.
+static MUTATE: Mutex<()> = Mutex::new(());
+
+/// The [`MUTATE`] guard. A panic while it was held poisons it; the lock
+/// is still good (the files and the history are checked on every read),
+/// so it is taken anyway.
+fn mutating() -> MutexGuard<'static, ()> {
+    MUTATE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// What every helper reads and writes.
 pub(crate) struct Ctx {
@@ -399,6 +428,7 @@ pub(crate) fn start_run(
     view: &PrinterView,
     now: i64,
 ) -> Result<RunView, String> {
+    let _held = mutating();
     if let Some(id) = req.run {
         return run_view(ctx, load_run(ctx, id)?);
     }
@@ -528,8 +558,51 @@ fn checked_diagram(setup: &Setup) -> Result<(Diagram, Vec<String>), String> {
     Ok((diagram, labels))
 }
 
-fn coarse_saved(ctx: &Ctx, run_id: i64) -> Result<bool, String> {
-    Ok(latest_live(&ctx.store.results(run_id)?, TestKind::FlowCoarse).is_some_and(|r| r.saved))
+fn coarse_saved(store: &CalibrationStore, run_id: i64) -> Result<bool, String> {
+    Ok(latest_live(&store.results(run_id)?, TestKind::FlowCoarse).is_some_and(|r| r.saved))
+}
+
+/// The run, with its calibrated copy taken back from the history when the
+/// run lost track of it: the live save that made the copy recorded its
+/// path. A later save then edits that copy rather than making another.
+fn reconciled_run(ctx: &Ctx, id: i64, now: i64) -> Result<Run, String> {
+    let run = load_run(ctx, id)?;
+    if run.copy_path.is_some() {
+        return Ok(run);
+    }
+    let results = ctx.store.results(run.id)?;
+    let made = results
+        .iter()
+        .filter(|r| r.saved && !r.undone && r.created_copy)
+        .max_by_key(|r| r.id);
+    let Some(path) = made.and_then(|r| r.target_path.as_deref()) else {
+        return Ok(run);
+    };
+    let name = crate::profile::reader::read_profile(Path::new(path))
+        .ok()
+        .and_then(|p| p.name().map(str::to_string))
+        .unwrap_or_else(|| file_label(Some(path)));
+    tracing::warn!(
+        "calibration: run {} had lost its copy {path}; taken back",
+        run.id
+    );
+    ctx.store.set_copy(run.id, Some((&name, path)), now)?;
+    load_run(ctx, id)
+}
+
+/// The file already holds every element a save changed as it was before:
+/// an undo whose history write failed after it put them back.
+fn already_put_back(ctx: &Ctx, target: &Path, changes: &[KeyChange]) -> bool {
+    let Ok((path, _)) = ctx.folders.checked(target) else {
+        return false;
+    };
+    let Ok((_, config)) = apply::flattened(&path, &ctx.presets) else {
+        return false;
+    };
+    !changes.is_empty()
+        && changes
+            .iter()
+            .all(|c| apply::element(&config, &c.key, c.index).as_deref() == Some(c.old.as_str()))
 }
 
 fn change_view(p: &Planned) -> ChangeView {
@@ -591,7 +664,7 @@ pub(crate) fn preview_for(
     check_test(test, &setup, reading.as_ref())?;
     let (diagram, labels) = checked_diagram(&setup)?;
     let run = load_run(ctx, run_id)?;
-    if test == TestKind::FlowFine && !coarse_saved(ctx, run.id)? {
+    if test == TestKind::FlowFine && !coarse_saved(&ctx.store, run.id)? {
         return Err(COARSE_FIRST.into());
     }
     Ok(PreviewView {
@@ -637,8 +710,11 @@ pub(crate) fn save_for(
     }
     check_test(test, &setup, Some(&reading))?;
     let (diagram, labels) = checked_diagram(&setup)?;
-    let run = load_run(ctx, run_id)?;
-    if test == TestKind::FlowFine && !coarse_saved(ctx, run.id)? {
+    // Held from reading the run's target to recording the result: a second
+    // save waits, then reads the file (and the copy) this one left.
+    let _held = mutating();
+    let run = reconciled_run(ctx, run_id, now)?;
+    if test == TestKind::FlowFine && !coarse_saved(&ctx.store, run.id)? {
         return Err(COARSE_FIRST.into());
     }
     let value = cal::value_of(&setup, &reading)?;
@@ -677,42 +753,56 @@ pub(crate) fn save_for(
     };
     let main = &saved.changes[0];
     let target_text = saved.target_path.to_string_lossy().into_owned();
-    let result_id = ctx
-        .store
-        .add_result(
-            &NewResult {
-                run_id: run.id,
-                setup,
-                reading,
-                value,
-                preset_key: Some(main.key.clone()),
-                old_value: Some(main.old.clone()),
-                new_value: Some(main.new.clone()),
-                target_path: Some(target_text.clone()),
-                variant: saved.variant.clone(),
-                backup_path: saved
-                    .backup_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned()),
-                // Exactly as `save` returned them: `written`, `before` and
-                // `copy_sha256` are what makes the undo exact.
-                changes: saved.changes.clone(),
-                created_copy: saved.created_copy,
-                photo_path: photo,
-                saved: true,
-            },
-            now,
-        )
-        .map_err(|e| {
-            format!("The preset was saved, but the calibration history couldn't record it: {e}")
-        })?;
+    let new = NewResult {
+        run_id: run.id,
+        setup,
+        reading,
+        value,
+        preset_key: Some(main.key.clone()),
+        old_value: Some(main.old.clone()),
+        new_value: Some(main.new.clone()),
+        target_path: Some(target_text.clone()),
+        variant: saved.variant.clone(),
+        backup_path: saved
+            .backup_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        // Exactly as `save` returned them: `written`, `before` and
+        // `copy_sha256` are what makes the undo exact.
+        changes: saved.changes.clone(),
+        created_copy: saved.created_copy,
+        photo_path: photo,
+        saved: true,
+    };
+    // The result and the run's copy in one transaction: both or neither.
+    let copy = saved
+        .created_copy
+        .then_some((saved.target_name.as_str(), target_text.as_str()));
+    let result_id = match ctx.store.add_result_with_copy(&new, copy, now) {
+        Ok(id) => id,
+        // A save the history doesn't hold could never be undone, and a
+        // retry would make a second copy: put the preset back.
+        Err(e) => {
+            tracing::warn!("calibration: the save wasn't recorded ({e}); putting it back");
+            return Err(
+                match apply::undo(
+                    &saved.target_path,
+                    &saved.changes,
+                    saved.created_copy,
+                    &ctx.folders,
+                    &ctx.presets,
+                    ledger,
+                ) {
+                    Ok(()) => SAVE_NOT_RECORDED.to_string(),
+                    Err(undo) => format!(
+                        "The preset was saved, but the calibration history couldn't record it ({e}), and putting it back failed too: {undo}"
+                    ),
+                },
+            );
+        }
+    };
     let mut assign_error = None;
     if saved.created_copy {
-        ctx.store.set_copy(
-            run.id,
-            Some((saved.target_name.as_str(), target_text.as_str())),
-            now,
-        )?;
         if let (Some(ams), Some(tray)) = (run.ams_id, run.tray_id) {
             assign_error = assigner
                 .assign(
@@ -743,6 +833,7 @@ pub(crate) fn record_for(
     now: i64,
 ) -> Result<RunView, String> {
     check_test(TestKind::PressureAdvance, &setup, Some(&reading))?;
+    let _held = mutating();
     let run = load_run(ctx, run_id)?;
     let value = cal::value_of(&setup, &reading)?;
     let photo = checked_photo(ctx, photo)?;
@@ -772,6 +863,10 @@ pub(crate) fn record_for(
 /// still assigned to it goes back to the original preset, or is cleared
 /// when the preset was only detected. Ledger notes go to `ledger` even
 /// when the undo fails.
+///
+/// The files are put back first, then the history in one transaction. If
+/// that write fails ([`UNDO_NOT_RECORDED`]), a second Undo finds the copy
+/// already gone, or the elements already back, and only records it.
 pub(crate) fn undo_for(
     ctx: &Ctx,
     result_id: i64,
@@ -779,6 +874,7 @@ pub(crate) fn undo_for(
     now: i64,
     ledger: &mut Vec<LedgerNote>,
 ) -> Result<RunView, String> {
+    let _held = mutating();
     let result = ctx
         .store
         .result(result_id)?
@@ -793,11 +889,11 @@ pub(crate) fn undo_for(
     if newest_saved(&results).map(|r| r.id) != Some(result.id) {
         return Err(NEWER_FIRST.into());
     }
-    let run = load_run(ctx, result.run_id)?;
+    let run = reconciled_run(ctx, result.run_id, now)?;
     // A save that made the copy, or edited it, is undone in the run's
     // copy: never in the preset it came from. A copy-making save whose run
-    // lost the copy (its history write failed) falls back to the path it
-    // recorded, which `apply::undo` proves is that copy before moving it.
+    // lost the copy falls back to the path it recorded, which
+    // `apply::undo` proves is that copy before moving it.
     let edited_copy = run.copy_path.is_some() && run.copy_path == result.target_path;
     let target = if result.created_copy || edited_copy {
         run.copy_path.as_deref().or(result.target_path.as_deref())
@@ -805,17 +901,48 @@ pub(crate) fn undo_for(
         result.target_path.as_deref()
     }
     .ok_or_else(|| RESULT_GONE.to_string())?;
-    apply::undo(
-        Path::new(target),
-        &result.changes,
-        result.created_copy,
-        &ctx.folders,
-        &ctx.presets,
-        ledger,
-    )?;
-    ctx.store.mark_undone(result.id, now)?;
+    let target = Path::new(target);
+    if result.created_copy && std::fs::symlink_metadata(target).is_err() {
+        // Already moved away by an undo whose history write failed (or by
+        // the user): only the history is left to put back.
+        tracing::warn!(
+            "calibration: result {}'s copy is already gone; recording its undo",
+            result.id
+        );
+    } else {
+        match apply::undo(
+            target,
+            &result.changes,
+            result.created_copy,
+            &ctx.folders,
+            &ctx.presets,
+            ledger,
+        ) {
+            Ok(()) => {}
+            Err(e)
+                if !result.created_copy
+                    && e == apply::CHANGED_SINCE
+                    && already_put_back(ctx, target, &result.changes) =>
+            {
+                tracing::warn!(
+                    "calibration: result {}'s preset is already put back; recording its undo",
+                    result.id
+                );
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if let Err(e) = ctx
+        .store
+        .mark_undone_with_copy(result.id, result.created_copy, now)
+    {
+        tracing::warn!(
+            "calibration: undo of result {} not recorded: {e}",
+            result.id
+        );
+        return Err(UNDO_NOT_RECORDED.into());
+    }
     if result.created_copy {
-        ctx.store.set_copy(run.id, None, now)?;
         if let (Some(ams), Some(tray)) = (run.ams_id, run.tray_id) {
             if run.copy_name.is_some() && assigner.assigned_name(ams, tray) == run.copy_name {
                 let restored = match run.slot_source {
@@ -844,6 +971,7 @@ pub(crate) fn skip_for(
     skipped: bool,
     now: i64,
 ) -> Result<RunView, String> {
+    let _held = mutating();
     let run = load_run(ctx, run_id)?;
     ctx.store.set_skipped(run.id, step, skipped, now)?;
     run_view(ctx, load_run(ctx, run.id)?)
@@ -856,6 +984,7 @@ pub(crate) fn set_variant_for(
     variant: &str,
     now: i64,
 ) -> Result<RunView, String> {
+    let _held = mutating();
     let view = run_view(ctx, load_run(ctx, run_id)?)?;
     let name = view
         .variants
@@ -889,6 +1018,8 @@ pub(crate) fn link_candidates_for(
 
 /// Links a result to a journal print. The print linked before is unlinked
 /// in the same journal transaction, when it still points at this result.
+/// A print belongs to one result: one that named another result is taken
+/// from it, and that result's link is cleared.
 pub(crate) fn link_for(
     ctx: &Ctx,
     journal: &JournalStore,
@@ -896,19 +1027,36 @@ pub(crate) fn link_for(
     journal_id: i64,
     now: i64,
 ) -> Result<RunView, String> {
+    let _held = mutating();
     let result = ctx
         .store
         .result(result_id)?
         .ok_or_else(|| RESULT_GONE.to_string())?;
+    if result.undone {
+        return Err(LINK_UNDONE.into());
+    }
+    let entry = journal.get(journal_id)?.ok_or_else(|| GONE.to_string())?;
+    if entry.outcome == Outcome::Printing {
+        return Err(STILL_PRINTING.into());
+    }
     let purpose = PrintPurpose {
         calibration_result_id: result.id,
         test: result.test,
     };
-    if !journal.link_purpose(journal_id, &purpose, result.journal_entry_id, now)? {
+    let Linked::Linked { displaced } =
+        journal.link_purpose(journal_id, &purpose, result.journal_entry_id, now)?
+    else {
         return Err(GONE.into());
-    }
+    };
     ctx.store
         .set_journal_entry(result.id, Some(journal_id), now)?;
+    if let Some(other) = displaced {
+        if let Some(r) = ctx.store.result(other)? {
+            if r.journal_entry_id == Some(journal_id) {
+                ctx.store.set_journal_entry(other, None, now)?;
+            }
+        }
+    }
     run_view(ctx, load_run(ctx, result.run_id)?)
 }
 
@@ -943,8 +1091,8 @@ pub(crate) fn keep_photo(
     Ok((name, jpeg))
 }
 
-/// The blocking half of a suggestion: checks the run and the setup, then
-/// keeps the photo. Returns its name, the JPEG the AI is shown, and the
+/// The blocking half of a suggestion: checks the run, the setup and, for
+/// the fine flow pass, a saved coarse pass, then keeps the photo. Returns its name, the JPEG the AI is shown, and the
 /// labels it must pick from. A refused setup keeps no photo.
 pub(crate) fn prepare_suggest(
     store: &CalibrationStore,
@@ -956,6 +1104,11 @@ pub(crate) fn prepare_suggest(
     check_test(test, &setup, None)?;
     let (_, labels) = checked_diagram(&setup)?;
     store.run(run_id)?.ok_or_else(|| RUN_GONE.to_string())?;
+    // The fine pass is refused until the coarse one is saved: no photo is
+    // kept and no AI asked for a pass that can't be saved.
+    if test == TestKind::FlowFine && !coarse_saved(store, run_id)? {
+        return Err(COARSE_FIRST.into());
+    }
     let (photo, jpeg) = keep_photo(store, data_base64)?;
     Ok((photo, jpeg, labels))
 }
@@ -1079,6 +1232,23 @@ fn open_ctx(dir: &Path, slicer: &SlicerService) -> Result<Ctx, String> {
     })
 }
 
+/// Runs a preset-changing helper with a fresh ledger, then replays every
+/// note it made, also when it returned an error or panicked partway: a
+/// write the app's history should know about is never lost to a bug. A
+/// panic is answered with [`INTERRUPTED`].
+fn replaying<T>(
+    f: impl FnOnce(&mut Vec<LedgerNote>) -> Result<T, String>,
+    replay: impl FnOnce(&[LedgerNote]),
+) -> Result<T, String> {
+    let mut ledger = Vec::new();
+    let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut ledger)));
+    replay(&ledger);
+    answer.unwrap_or_else(|_| {
+        tracing::error!("calibration: a preset change panicked; its ledger notes were replayed");
+        Err(INTERRUPTED.into())
+    })
+}
+
 /// The app's history ledger, which tracks the presets BambuMate wrote new.
 /// Every note is replayed, including those of a save or undo that failed
 /// and put the file back.
@@ -1182,7 +1352,6 @@ pub async fn calibration_save(
     );
     blocking(move || {
         let ctx = open_ctx(&dir, &slicer)?;
-        let mut ledger = Vec::new();
         let req = SaveRequest {
             run_id,
             test,
@@ -1192,9 +1361,10 @@ pub async fn calibration_save(
             photo,
         };
         let studio_running = crate::profile::is_bambu_studio_running();
-        let answer = save_for(&ctx, req, &printer, studio_running, now(), &mut ledger);
-        note_ledger(&ledger);
-        answer
+        replaying(
+            |ledger| save_for(&ctx, req, &printer, studio_running, now(), ledger),
+            note_ledger,
+        )
     })
     .await
 }
@@ -1236,10 +1406,10 @@ pub async fn calibration_undo(
     );
     blocking(move || {
         let ctx = open_ctx(&dir, &slicer)?;
-        let mut ledger = Vec::new();
-        let answer = undo_for(&ctx, result_id, &printer, now(), &mut ledger);
-        note_ledger(&ledger);
-        answer
+        replaying(
+            |ledger| undo_for(&ctx, result_id, &printer, now(), ledger),
+            note_ledger,
+        )
     })
     .await
 }
@@ -2283,6 +2453,376 @@ mod tests {
             .as_deref(),
             Some(crate::journal::photos::NOT_AN_IMAGE)
         );
+        // The fine pass waits for a saved coarse one, before any photo or AI.
+        let fine = Setup::FlowFine { base: 0.98 };
+        assert_eq!(
+            prepare_suggest(
+                &ctx.store,
+                run.id,
+                TestKind::FlowFine,
+                fine,
+                &png_base64(8, 8)
+            )
+            .err()
+            .as_deref(),
+            Some(COARSE_FIRST)
+        );
         assert_eq!(photo_count(data.path()), 0);
+    }
+
+    // Fix round 1: serialised writes, recoverable history writes, links.
+
+    fn json_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.contains("(calibrated)") && name.ends_with(".json")
+            })
+            .count()
+    }
+
+    /// A trigger, from a second connection, that makes the store's writes
+    /// `on` fail.
+    fn refuse(data: &Path, name: &str, on: &str) {
+        rusqlite::Connection::open(data.join("calibration.db"))
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER {name} BEFORE {on} BEGIN SELECT RAISE(ABORT, 'test'); END;"
+            ))
+            .unwrap();
+    }
+
+    fn allow(data: &Path, name: &str) {
+        rusqlite::Connection::open(data.join("calibration.db"))
+            .unwrap()
+            .execute_batch(&format!("DROP TRIGGER {name};"))
+            .unwrap();
+    }
+
+    /// MY_PETG's run at its high-flow variant, with no printer.
+    fn petg_run(ctx: &Ctx, root: &Path) -> RunView {
+        let run = start_preset(ctx, &PrinterView::unconfigured(), &user_path(root, MY_PETG));
+        set_variant_for(ctx, run.id, "Direct Drive High Flow", 110).unwrap()
+    }
+
+    fn petg_temp(run: &RunView) -> SaveRequest {
+        save_req(
+            run,
+            Setup::Temperature {
+                start: 250,
+                end: 230,
+            },
+            Reading::Temperature { band: 0 },
+            "245",
+        )
+    }
+
+    #[test]
+    fn two_saves_at_once_to_one_preset_both_reach_the_file() {
+        // Several rounds: without the lock the two writes overlap in most.
+        for _ in 0..8 {
+            let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+            let run = petg_run(&ctx_in(root.path(), data.path()), root.path());
+            let flow = save_req(
+                &run,
+                Setup::FlowCoarse { base: 0.95 },
+                Reading::FlowCoarse { modifier: 5 },
+                "0.95",
+            );
+            let barrier = std::sync::Barrier::new(2);
+            let save = |req: SaveRequest| {
+                let ctx = ctx_in(root.path(), data.path());
+                barrier.wait();
+                save_for(
+                    &ctx,
+                    req,
+                    &FakeAssigner::default(),
+                    false,
+                    200,
+                    &mut Vec::new(),
+                )
+            };
+            let (a, b) = std::thread::scope(|s| {
+                let a = s.spawn(|| save(petg_temp(&run)));
+                let b = s.spawn(|| save(flow));
+                (a.join().unwrap(), b.join().unwrap())
+            });
+            saved(a.unwrap());
+            saved(b.unwrap());
+            let file = raw(&user_path(root.path(), MY_PETG));
+            assert_eq!(file["nozzle_temperature"], json!(["240", "250"]));
+            assert_eq!(file["filament_flow_ratio"], json!(["0.97", "0.9975"]));
+        }
+    }
+
+    #[test]
+    fn two_rapid_saves_on_a_system_preset_make_one_copy() {
+        for _ in 0..5 {
+            let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+            let run = start_slot(
+                &ctx_in(root.path(), data.path()),
+                &printer(root.path(), true),
+                "A2",
+            )
+            .unwrap();
+            let slots = FakeAssigner::default();
+            let barrier = std::sync::Barrier::new(2);
+            let save = || {
+                let ctx = ctx_in(root.path(), data.path());
+                barrier.wait();
+                save_for(&ctx, temp_225(&run), &slots, false, 200, &mut Vec::new()).unwrap()
+            };
+            let answers = std::thread::scope(|s| {
+                let a = s.spawn(save);
+                let b = s.spawn(save);
+                [a.join().unwrap(), b.join().unwrap()]
+            });
+            let saves = answers
+                .iter()
+                .filter(|a| matches!(a, SaveAnswer::Saved { .. }))
+                .count();
+            assert_eq!(
+                saves, 1,
+                "the second reads the copy the first made: {answers:?}"
+            );
+            let base = user_path(root.path(), "x").parent().unwrap().to_path_buf();
+            assert_eq!(json_count(&base), 1, "exactly one copy");
+            assert_eq!(slots.calls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_run_that_lost_its_copy_takes_it_back_and_makes_no_second_one() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let slots = FakeAssigner::default();
+        let run = start_slot(&ctx, &printer(root.path(), true), "A2").unwrap();
+        let (run, _) =
+            saved(save_for(&ctx, temp_225(&run), &slots, false, 200, &mut Vec::new()).unwrap());
+        // The run forgets its copy, as a failed history write once could leave it.
+        ctx.store.set_copy(run.id, None, 250).unwrap();
+        let flow = save_req(
+            &run,
+            Setup::FlowCoarse { base: 0.98 },
+            Reading::FlowCoarse { modifier: 5 },
+            "0.98",
+        );
+        let (run, _) = saved(save_for(&ctx, flow, &slots, false, 300, &mut Vec::new()).unwrap());
+        assert_eq!(run.target_name, "Bambu PLA Basic (calibrated) @BBL H2D");
+        let copy = user_path(root.path(), "Bambu PLA Basic (calibrated) @BBL H2D");
+        assert_eq!(json_count(copy.parent().unwrap()), 1, "no \"(2)\"");
+        assert_eq!(
+            raw(&copy)["filament_flow_ratio"],
+            json!(["1.029", "0.98", "0.98"])
+        );
+    }
+
+    #[test]
+    fn a_save_the_history_cant_record_is_put_back() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let slots = FakeAssigner::default();
+        let run = start_slot(&ctx, &printer(root.path(), true), "A2").unwrap();
+        let petg = petg_run(&ctx, root.path());
+        let petg_before = raw(&user_path(root.path(), MY_PETG));
+        refuse(data.path(), "no_results", "INSERT ON results");
+        // A system preset: the copy goes again.
+        let mut ledger = Vec::new();
+        assert_eq!(
+            save_for(&ctx, temp_225(&run), &slots, false, 200, &mut ledger),
+            Err(SAVE_NOT_RECORDED.to_string())
+        );
+        let copy = user_path(root.path(), "Bambu PLA Basic (calibrated) @BBL H2D");
+        assert!(!copy.exists());
+        assert!(
+            matches!(ledger.last(), Some(LedgerNote::Forgot(_))),
+            "{ledger:?}"
+        );
+        assert!(slots.calls.lock().unwrap().is_empty());
+        // A user preset: every element back as it was.
+        assert_eq!(
+            save_for(&ctx, petg_temp(&petg), &slots, false, 200, &mut Vec::new()),
+            Err(SAVE_NOT_RECORDED.to_string())
+        );
+        let now = raw(&user_path(root.path(), MY_PETG));
+        for key in ["nozzle_temperature", "nozzle_temperature_initial_layer"] {
+            assert_eq!(now[key], petg_before[key], "{key}");
+        }
+        // Once the history works again, the save makes the copy with its own name.
+        allow(data.path(), "no_results");
+        let (run, _) =
+            saved(save_for(&ctx, temp_225(&run), &slots, false, 300, &mut Vec::new()).unwrap());
+        assert_eq!(run.target_name, "Bambu PLA Basic (calibrated) @BBL H2D");
+        assert_eq!(json_count(copy.parent().unwrap()), 1);
+    }
+
+    #[test]
+    fn an_undo_the_history_cant_record_is_finished_by_the_next_undo() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let slots = FakeAssigner::default();
+        let run = start_slot(&ctx, &printer(root.path(), true), "A2").unwrap();
+        let (_, temp) =
+            saved(save_for(&ctx, temp_225(&run), &slots, false, 200, &mut Vec::new()).unwrap());
+        let petg = petg_run(&ctx, root.path());
+        let (_, petg_temp_id) =
+            saved(save_for(&ctx, petg_temp(&petg), &slots, false, 210, &mut Vec::new()).unwrap());
+        refuse(data.path(), "no_undo", "UPDATE OF undone ON results");
+        // The copy is moved away, but the history still has it.
+        assert_eq!(
+            undo_for(&ctx, temp, &slots, 300, &mut Vec::new()),
+            Err(UNDO_NOT_RECORDED.to_string())
+        );
+        let copy = user_path(root.path(), "Bambu PLA Basic (calibrated) @BBL H2D");
+        assert!(!copy.exists());
+        // A user preset: the elements are back, the history not yet.
+        assert_eq!(
+            undo_for(&ctx, petg_temp_id, &slots, 300, &mut Vec::new()),
+            Err(UNDO_NOT_RECORDED.to_string())
+        );
+        assert_eq!(
+            raw(&user_path(root.path(), MY_PETG))["nozzle_temperature"],
+            json!(["240", "245"])
+        );
+        allow(data.path(), "no_undo");
+        let run = undo_for(&ctx, temp, &slots, 400, &mut Vec::new()).unwrap();
+        assert!(
+            run.is_system && run.target_name == SYSTEM_H2D,
+            "back on the system preset"
+        );
+        assert!(run.results.iter().all(|r| r.undone));
+        assert_eq!(
+            slots.calls.lock().unwrap().last().map(String::as_str),
+            Some("clear 0/1")
+        );
+        let petg = undo_for(&ctx, petg_temp_id, &slots, 400, &mut Vec::new()).unwrap();
+        assert!(petg.results[0].undone);
+        assert_eq!(
+            raw(&user_path(root.path(), MY_PETG))["nozzle_temperature"],
+            json!(["240", "245"])
+        );
+    }
+
+    #[test]
+    fn a_print_links_to_one_result_and_only_once_it_has_ended() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let journal = JournalStore::open(&JournalPaths::in_dir(data.path())).unwrap();
+        let new_print = |name: &str, start: i64| NewPrint {
+            job_key: name.into(),
+            name: name.into(),
+            gcode_file: None,
+            plate: None,
+            printer_model: None,
+            started_at: start,
+            start_approx: false,
+        };
+        let done = journal.start(&new_print("Done", 1_000), 1_000).unwrap();
+        journal
+            .end(
+                done,
+                &PrintEnd {
+                    outcome: Outcome::Failed,
+                    ended_at: Some(1_100),
+                    error_code: None,
+                    hms: Vec::new(),
+                },
+                1_100,
+            )
+            .unwrap();
+        let running = journal.start(&new_print("Running", 1_200), 1_200).unwrap();
+        let run = start_slot(&ctx, &printer(root.path(), true), "A2").unwrap();
+        let k = |k: f64, at: i64| {
+            record_for(
+                &ctx,
+                run.id,
+                Setup::PressureAdvance {},
+                Reading::PressureAdvance { k },
+                None,
+                at,
+            )
+            .unwrap()
+            .results[0]
+                .id
+        };
+        let (first, second) = (k(0.02, 1_300), k(0.03, 1_310));
+        link_for(&ctx, &journal, first, done, 1_400).unwrap();
+        let view = link_for(&ctx, &journal, second, done, 1_500).unwrap();
+        let link = |id: i64| {
+            view.results
+                .iter()
+                .find(|r| r.id == id)
+                .unwrap()
+                .journal_entry_id
+        };
+        assert_eq!(
+            (link(first), link(second)),
+            (None, Some(done)),
+            "taken from the first"
+        );
+        assert_eq!(
+            journal
+                .get(done)
+                .unwrap()
+                .unwrap()
+                .purpose
+                .unwrap()
+                .calibration_result_id,
+            second
+        );
+        assert_eq!(
+            link_for(&ctx, &journal, second, running, 1_600)
+                .err()
+                .as_deref(),
+            Some(STILL_PRINTING)
+        );
+        assert_eq!(journal.get(running).unwrap().unwrap().purpose, None);
+        // An undone save has nothing to link.
+        let slots = FakeAssigner::default();
+        let (_, temp) =
+            saved(save_for(&ctx, temp_225(&run), &slots, false, 1_700, &mut Vec::new()).unwrap());
+        undo_for(&ctx, temp, &slots, 1_800, &mut Vec::new()).unwrap();
+        assert_eq!(
+            link_for(&ctx, &journal, temp, done, 1_900).err().as_deref(),
+            Some(LINK_UNDONE)
+        );
+        assert_eq!(
+            journal
+                .get(done)
+                .unwrap()
+                .unwrap()
+                .purpose
+                .unwrap()
+                .calibration_result_id,
+            second
+        );
+    }
+
+    #[test]
+    fn a_panic_still_replays_the_ledger_and_leaves_the_lock_usable() {
+        let note = LedgerNote::Forgot(PathBuf::from("/tmp/x.json"));
+        let mut replayed = Vec::new();
+        let answer: Result<(), String> = replaying(
+            |ledger| {
+                let _held = mutating();
+                ledger.push(note.clone());
+                panic!("a bug mid-save");
+            },
+            |notes| replayed = notes.to_vec(),
+        );
+        assert_eq!(answer, Err(INTERRUPTED.to_string()));
+        assert_eq!(replayed, vec![note.clone()]);
+        drop(mutating());
+        let mut replayed = Vec::new();
+        let answer: Result<(), String> = replaying(
+            |ledger| {
+                ledger.push(note.clone());
+                Err("refused".into())
+            },
+            |notes| replayed = notes.to_vec(),
+        );
+        assert_eq!((answer, replayed), (Err("refused".to_string()), vec![note]));
     }
 }
