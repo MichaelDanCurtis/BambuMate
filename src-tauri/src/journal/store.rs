@@ -154,7 +154,7 @@ fn entry_row(r: &Row) -> rusqlite::Result<PrintEntry> {
 /// A stored photo file name: one plain path component. Separators, `:` (a
 /// drive prefix on Windows), NUL and a leading dot are all refused, so a
 /// joined name can never leave the entry's folder.
-fn is_plain_name(name: &str) -> bool {
+pub(crate) fn is_plain_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
         && !name.contains(['/', '\\', ':', '\0'])
