@@ -926,6 +926,37 @@ impl JournalStore {
         Ok(n > 0)
     }
 
+    /// Links print `id` to a calibration result, and in the same immediate
+    /// transaction clears `previous`'s purpose while it still points at that
+    /// result ([`Self::clear_purpose_if`]), so no reader sees the result on
+    /// both prints or on neither. A `previous` whose purpose can't be read
+    /// keeps it (logged) and the new link still stands. `false`, with
+    /// nothing changed, when `id` is gone.
+    pub fn link_purpose(
+        &self,
+        id: i64,
+        purpose: &PrintPurpose,
+        previous: Option<i64>,
+        now: i64,
+    ) -> Result<bool, String> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(save_err)?;
+        if let Some(previous) = previous.filter(|p| *p != id) {
+            if let Err(e) = self.clear_purpose_if(previous, purpose.calibration_result_id, now) {
+                tracing::warn!("journal: print {previous} keeps its old calibration link: {e}");
+            }
+        }
+        // Dropping the transaction un-does the clear when `id` is gone.
+        if !self.set_purpose(id, Some(purpose), now)? {
+            return Ok(false);
+        }
+        tx.commit().map_err(save_err)?;
+        Ok(true)
+    }
+
     /// The prints a calibration step opened at `since` may be linked to.
     /// The first is the newest print that ended since then. The four ended
     /// before it follow. With none since, the five newest ended prints come
@@ -2035,5 +2066,44 @@ mod tests {
         assert_eq!((e.purpose, e.updated_at), (None, 1_400));
         assert_eq!(s.get(other).unwrap().unwrap().purpose, Some(purpose(12)));
         assert!(!s.clear_purpose_if(999, 12, 1_400).unwrap());
+    }
+
+    #[test]
+    fn a_purpose_moves_to_another_print_in_one_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let a = s.start(&new_print("a", "Tower", 1_000), 1_000).unwrap();
+        let b = s.start(&new_print("b", "Tower 2", 1_100), 1_100).unwrap();
+        let purpose = |n| PrintPurpose {
+            calibration_result_id: n,
+            test: crate::calibration::tests::TestKind::Temperature,
+        };
+        assert!(s.link_purpose(a, &purpose(11), None, 1_200).unwrap());
+        assert!(s.link_purpose(b, &purpose(11), Some(a), 1_300).unwrap());
+        assert_eq!(s.get(a).unwrap().unwrap().purpose, None, "moved");
+        assert_eq!(s.get(b).unwrap().unwrap().purpose, Some(purpose(11)));
+        // A print that is gone takes nothing: the old link stays where it was.
+        assert!(!s.link_purpose(999, &purpose(11), Some(b), 1_400).unwrap());
+        let e = s.get(b).unwrap().unwrap();
+        assert_eq!((e.purpose, e.updated_at), (Some(purpose(11)), 1_300));
+        // An old print whose purpose can't be read keeps it; the new link stands.
+        s.conn
+            .execute(
+                "UPDATE prints SET purpose_json = '{not json' WHERE id = ?1",
+                [b],
+            )
+            .unwrap();
+        assert!(s.link_purpose(a, &purpose(11), Some(b), 1_500).unwrap());
+        assert_eq!(s.get(a).unwrap().unwrap().purpose, Some(purpose(11)));
+        let kept: Option<String> = s
+            .conn
+            .query_row("SELECT purpose_json FROM prints WHERE id = ?1", [b], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("{not json"));
+        // Relinking the same print clears nothing.
+        assert!(s.link_purpose(a, &purpose(11), Some(a), 1_600).unwrap());
+        assert_eq!(s.get(a).unwrap().unwrap().purpose, Some(purpose(11)));
     }
 }
