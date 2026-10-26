@@ -131,6 +131,14 @@ pub struct Photo {
     pub added_at: i64,
 }
 
+/// What a print was for, kept apart from its defect tags: the calibration
+/// result it was printed for. Stored as `purpose_json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrintPurpose {
+    pub calibration_result_id: i64,
+    pub test: crate::calibration::tests::TestKind,
+}
+
 /// One print. Times are Unix seconds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrintEntry {
@@ -155,6 +163,9 @@ pub struct PrintEntry {
     pub photos: Vec<Photo>,
     /// `refinement_sessions` ids of the analyses made from this entry.
     pub analyses: Vec<i64>,
+    /// Set when the print was linked to a calibration step.
+    #[serde(default)]
+    pub purpose: Option<PrintPurpose>,
     pub updated_at: i64,
 }
 
@@ -335,4 +346,12 @@ mod tests {
             EntryUpdate::default()
         );
     }
+}
+
+/// The prints a calibration step may be linked to, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkCandidates {
+    /// The newest print that ended after the step was opened.
+    pub suggested: Option<i64>,
+    pub entries: Vec<PrintEntry>,
 }
