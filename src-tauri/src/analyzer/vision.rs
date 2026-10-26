@@ -45,23 +45,8 @@ pub async fn analyze_image(
     );
 
     // Call the appropriate vision API
-    let response_text = match provider {
-        "claude" => call_claude_vision(api_key, model, &prompt, &base64_image, &schema).await?,
-        "openai" => call_openai_vision(api_key, model, &prompt, &base64_image, &schema).await?,
-        "kimi" => call_kimi_vision(api_key, model, &prompt, &base64_image).await?,
-        "openrouter" => {
-            call_openrouter_vision(api_key, model, &prompt, &base64_image, &schema).await?
-        }
-        "local" => call_local_vision(api_key, model, &prompt, &base64_image).await?,
-        _ => {
-            let msg = format!(
-                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
-                provider
-            );
-            error!("{}", msg);
-            return Err(msg);
-        }
-    };
+    let response_text =
+        vision_reply(provider, model, api_key, &prompt, &base64_image, &schema).await?;
 
     // Parse response
     let report = parse_defect_report(&response_text)?;
@@ -73,6 +58,48 @@ pub async fn analyze_image(
     );
 
     Ok(report)
+}
+
+/// The provider's raw text reply to `prompt` about `base64_image`. The one
+/// vision dispatch: defect analysis and calibration's suggestion share it.
+async fn vision_reply(
+    provider: &str,
+    model: &str,
+    api_key: &str,
+    prompt: &str,
+    base64_image: &str,
+    schema: &serde_json::Value,
+) -> Result<String, String> {
+    match provider {
+        "claude" => call_claude_vision(api_key, model, prompt, base64_image, schema).await,
+        "openai" => call_openai_vision(api_key, model, prompt, base64_image, schema).await,
+        "kimi" => call_kimi_vision(api_key, model, prompt, base64_image).await,
+        "openrouter" => call_openrouter_vision(api_key, model, prompt, base64_image, schema).await,
+        "local" => call_local_vision(api_key, model, prompt, base64_image).await,
+        _ => {
+            let msg = format!(
+                "Unsupported AI provider: '{}'. Supported: claude, openai, kimi, openrouter, local",
+                provider
+            );
+            error!("{}", msg);
+            Err(msg)
+        }
+    }
+}
+
+/// Sends a photo and `prompt` to the configured vision provider and parses
+/// its reply as JSON. The photo is resized as for defect analysis.
+pub(crate) async fn complete_vision_json(
+    image_bytes: &[u8],
+    prompt: &str,
+    schema: &serde_json::Value,
+    provider: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<serde_json::Value, String> {
+    let base64_image = prepare_image(image_bytes)?;
+    let text = vision_reply(provider, model, api_key, prompt, &base64_image, schema).await?;
+    crate::scraper::extraction::parse_json_response(&text)
 }
 
 /// Parse the raw JSON response into a DefectReport.
@@ -640,6 +667,25 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_vision_json_names_an_unsupported_provider() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(300, 300)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let err = complete_vision_json(
+            png.get_ref(),
+            "pick one",
+            &serde_json::json!({}),
+            "nope",
+            "model",
+            "key",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Unsupported AI provider"), "{err}");
     }
 
     #[test]
