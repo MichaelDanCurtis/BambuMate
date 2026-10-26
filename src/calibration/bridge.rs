@@ -67,6 +67,8 @@ struct SaveArgs<'a> {
     setup: &'a Setup,
     reading: &'a Reading,
     expected_old: &'a str,
+    /// The variant the preview wrote to (`ChangeView::variant`).
+    expected_variant: Option<&'a str>,
     photo: Option<&'a str>,
 }
 
@@ -156,6 +158,7 @@ pub async fn save(
     setup: &Setup,
     reading: &Reading,
     expected_old: &str,
+    expected_variant: Option<&str>,
     photo: Option<&str>,
 ) -> Result<SaveAnswer, String> {
     let args = SaveArgs {
@@ -164,6 +167,7 @@ pub async fn save(
         setup,
         reading,
         expected_old,
+        expected_variant,
         photo,
     };
     call("calibration_save", &args).await

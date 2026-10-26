@@ -3,9 +3,11 @@
 //! validation, read-back and an exact undo.
 //!
 //! - A user preset is edited in place.
-//! - A Bambu system preset is first copied to "<name> (calibrated)" with a
-//!   fresh `filament_id`, through the existing duplicate path. The copy is
-//!   fully flattened, like BambuMate's generated presets.
+//! - A Bambu system preset is first copied to "<name> (calibrated)"
+//!   through the existing duplicate path, keeping the system preset's
+//!   `filament_id` as Studio's own user presets do, so an RFID spool's
+//!   slot still reads as set. The copy is fully flattened, like
+//!   BambuMate's generated presets.
 //! - Per-variant arrays: only the chosen nozzle variant's element is
 //!   written, never every variant. The preset is read the way Bambu Studio
 //!   reads it (`profile::inheritance`: "nil" in a variant array is the
@@ -34,7 +36,7 @@ use crate::profile::writer::{
     unregister_filament_in_conf,
 };
 use crate::profile::{BambuPaths, FilamentProfile};
-use crate::slicer::settings::{PresetIndex, PresetKind};
+use crate::slicer::settings::{PresetIndex, PresetKind, PresetSource};
 
 pub const VARIANT_KEY: &str = "filament_extruder_variant";
 pub const INITIAL_LAYER_KEY: &str = "nozzle_temperature_initial_layer";
@@ -306,6 +308,18 @@ pub fn calibrated_name(name: &str) -> String {
 pub fn copy_name(folders: &PresetFolders, name: &str) -> Result<String, String> {
     let dir = folders.copy_dir()?;
     Ok(crate::commands::profile::duplicate_target(dir, &calibrated_name(name)).0)
+}
+
+/// Bambu Studio lists the preset for printing, by the slicer's rule: a
+/// system preset says `"instantiation": "true"`, a user preset doesn't say
+/// `"false"`. The rest are `@base` presets and `fdm_filament_*` templates.
+pub fn instantiable(profile: &FilamentProfile, is_system: bool) -> bool {
+    let source = if is_system {
+        PresetSource::System
+    } else {
+        PresetSource::User
+    };
+    crate::slicer::settings::is_selectable(profile, source, PresetKind::Filament)
 }
 
 /// `path`'s preset as Bambu Studio sees it now: its file as it is on disk,
@@ -686,6 +700,7 @@ fn save_copy(
         &dir,
         &new_name,
         &folders.fallback_user_id,
+        crate::commands::profile::FilamentIdRule::KeepParent,
     ) {
         Ok(written) => written,
         // The JSON is written before the `.info`: a half-written copy is
@@ -1331,11 +1346,13 @@ mod tests {
             s.target_path,
             user_path(root.path(), "Bambu PLA Basic (calibrated) @BBL H2D")
         );
-        assert!(s
-            .filament_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with('P')));
+        assert_eq!(
+            s.filament_id.as_deref(),
+            Some("GFA00"),
+            "the copy keeps the system preset's id, so an RFID spool still names it"
+        );
         let copy = raw(&s.target_path);
+        assert_eq!(copy["filament_id"], json!("GFA00"));
         assert_eq!(copy["inherits"], json!(""));
         assert_eq!(copy["from"], json!("User"));
         assert_eq!(copy["instantiation"], json!("true"));

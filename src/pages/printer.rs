@@ -1011,6 +1011,7 @@ mod tests {
             filament_id: None,
             path: format!("/{n}.json"),
             is_user_profile: true,
+            instantiable: true,
         };
         let list = vec![p("Polymaker PolyLite PLA"), p("Bambu PETG HF")];
         assert_eq!(matching(&list, "polylite").len(), 1);
@@ -1121,6 +1122,7 @@ mod tests {
                 filament_id: None,
                 path: format!("/{i}.json"),
                 is_user_profile: false,
+                instantiable: true,
             })
             .collect();
         assert_eq!(matching(&list, "").len(), PICKER_LIMIT);

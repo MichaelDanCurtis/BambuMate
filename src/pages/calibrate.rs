@@ -8,7 +8,10 @@
 //! only `try_*` accessors after it. A request carries the generation it
 //! was asked under, so a slow answer for an earlier filament, setup,
 //! reading or photo is dropped. An answer that carries a run is applied
-//! only while the page still shows that run (`adopt`).
+//! only while the page still shows that run, and only when no answer to a
+//! newer request has been shown (`adopt`). While one request that changes
+//! the run is out, the others (the variant pick, save, undo, record, skip
+//! and link) wait: the page sends them one at a time.
 
 use std::time::Duration;
 
@@ -24,14 +27,15 @@ use crate::calibration::types::{
     StepStatus, Suggestion, TestKind,
 };
 use crate::calibration::view::{
-    candidate_line, context_line, current_line, date_text, diff_line, extra_line, first_open,
-    height_reading, hero_label, history_change, history_value, linked_elsewhere, patch_reading,
-    preset_href, reading_for_pick, restart_before_fine, result_href, ruler_ticks, run_for_result,
-    same_run, save_notes, setup_fields, slot_has_preset, slot_href, slot_preset_name, status_key,
-    status_text, step_name, step_of_result, step_result, studio_steps, suggestion_detail,
-    suggestion_line, target_line, test_for, typed_label, typed_reading, undo_note, undo_target,
-    variant_needed, will_save_line, with_field, DEVELOPER_MODE, DISCARD_CHANGES, FINE_AFTER_COARSE,
-    NO_PRESET, PA_NOTE, PICK_VARIANT_PROMPT, RESTART_BEFORE_FINE, RESULT_GONE,
+    calibratable, candidate_line, context_line, current_line, date_text, diff_line, extra_line,
+    first_open, height_reading, hero_label, history_change, history_value, linked_elsewhere,
+    patch_reading, preset_href, reading_for_pick, restart_before_fine, result_href, ruler_ticks,
+    run_for_result, same_run, save_notes, setup_fields, slot_has_preset, slot_href,
+    slot_preset_name, status_key, status_text, step_name, step_of_result, step_result,
+    studio_steps, suggestion_detail, suggestion_line, target_line, test_for, typed_label,
+    typed_reading, undo_note, undo_target, variant_needed, will_save_line, with_field, AnswerOrder,
+    DEVELOPER_MODE, DISCARD_CHANGES, FINE_AFTER_COARSE, NO_PRESET, PA_NOTE, PICK_VARIANT_PROMPT,
+    RESTART_BEFORE_FINE, RESULT_GONE,
 };
 use crate::commands::{self, ProfileInfo};
 use crate::components::patterns::{Hero, StateKind, StateText};
@@ -50,18 +54,45 @@ fn offset_now() -> i32 {
     local_offset_minutes((js_sys::Date::now() / 1000.0) as i64)
 }
 
-/// Shows `next` only while the page still shows run `asked`: an answer
-/// for a run the user has left is dropped, so the next save can't go to
-/// its preset. Call after the `.await`; says whether it was applied.
-fn adopt(run: RwSignal<Option<RunView>>, asked: i64, next: RunView) -> bool {
+/// The ticket for a request whose answer carries a run. Call before the
+/// `.await`.
+fn ticket(order: StoredValue<AnswerOrder>) -> u64 {
+    order.try_update_value(|o| o.issue()).unwrap_or_default()
+}
+
+/// Shows `next` only while the page still shows run `asked`, and only when
+/// no newer request's answer has been shown: an answer for a run the user
+/// has left is dropped, so the next save can't go to its preset, and an
+/// older answer that lands late can't put back an older variant. Call
+/// after the `.await`; says whether it was applied.
+fn adopt(
+    run: RwSignal<Option<RunView>>,
+    order: StoredValue<AnswerOrder>,
+    asked: i64,
+    ticket: u64,
+    next: RunView,
+) -> bool {
     let current = run
         .try_with_untracked(|r| r.as_ref().map(|r| r.id))
         .flatten();
     if !same_run(current, asked, next.id) {
         return false;
     }
+    if order.try_update_value(|o| o.accept(ticket)) != Some(true) {
+        return false;
+    }
     run.try_set(Some(next));
     true
+}
+
+/// One more request that changes the run is out.
+fn begin(pending: RwSignal<u32>) {
+    pending.update(|n| *n += 1);
+}
+
+/// Its answer is back. Call after the `.await`.
+fn end(pending: RwSignal<u32>) {
+    pending.try_update(|n| *n = n.saturating_sub(1));
 }
 
 /// After the card re-renders, focuses the first of `selectors` inside it,
@@ -101,6 +132,7 @@ pub fn CalibratePage() -> impl IntoView {
     let studio_was_open = RwSignal::new(false);
     let last_run = StoredValue::new(None::<i64>);
     let ask = StoredValue::new(0u64);
+    let order = StoredValue::new(AnswerOrder::default());
 
     // `?slot=A2`, `?preset=<path>` or `?result=<id>` picks the filament.
     Effect::new(move |_| {
@@ -122,6 +154,7 @@ pub fn CalibratePage() -> impl IntoView {
             return;
         }
         loading.set(true);
+        let start_ticket = ticket(order);
         spawn_local(async move {
             let result_id = result.as_deref().and_then(|r| r.parse::<i64>().ok());
             let answer = match (result_id, result.is_some()) {
@@ -151,6 +184,8 @@ pub fn CalibratePage() -> impl IntoView {
                         studio_was_open.try_set(false);
                     }
                     last_run.try_update_value(|l| *l = Some(r.id));
+                    // Older answers for this run, still out, now land late.
+                    order.try_update_value(|o| o.accept(start_ticket));
                     run.try_set(Some(r));
                 }
                 Err(e) if e == NO_PRESET => {
@@ -187,7 +222,7 @@ pub fn CalibratePage() -> impl IntoView {
                 <StateText kind=StateKind::Empty message="Pick a slot or a preset to calibrate." />
             </Show>
             {move || run_id.get().map(|_| view! {
-                <RunPanel run=run open=open fine=fine studio_was_open=studio_was_open />
+                <RunPanel run=run order=order open=open fine=fine studio_was_open=studio_was_open />
             })}
         </div>
     }
@@ -219,7 +254,7 @@ fn Picker() -> impl IntoView {
             .await;
             match answer {
                 Ok(all) => {
-                    presets.try_set(all);
+                    presets.try_set(calibratable(all));
                 }
                 Err(e) => {
                     loaded.try_update_value(|l| *l = false);
@@ -287,6 +322,7 @@ fn Picker() -> impl IntoView {
 #[component]
 fn RunPanel(
     run: RwSignal<Option<RunView>>,
+    order: StoredValue<AnswerOrder>,
     open: RwSignal<StepKey>,
     fine: RwSignal<bool>,
     studio_was_open: RwSignal<bool>,
@@ -294,6 +330,9 @@ fn RunPanel(
     let target = Memo::new(move |_| run.with(|r| r.as_ref().map(target_line).unwrap_or_default()));
     let preset_error =
         Memo::new(move |_| run.with(|r| r.as_ref().and_then(|r| r.preset_error.clone())));
+    // Requests that change the run, still out: the variant pick and every
+    // card's save, undo, record, skip and link wait for them.
+    let pending = RwSignal::new(0u32);
     // A new step, pass or variant gets a fresh card. A save keeps it.
     let card = Memo::new(move |_| {
         (
@@ -306,13 +345,13 @@ fn RunPanel(
         <section class="cal-run" aria-label="Calibration">
             <p class="cal-target">{move || target.get()}</p>
             {move || preset_error.get().map(|e| view! { <StateText kind=StateKind::Error message=e /> })}
-            <VariantPicker run=run />
+            <VariantPicker run=run order=order pending=pending />
             <CalStrip run=run open=open fine=fine />
             {move || {
                 let (step, fine_pass, _) = card.get();
                 view! {
-                    <StepCard run=run step=step fine=fine fine_pass=fine_pass
-                        studio_was_open=studio_was_open />
+                    <StepCard run=run order=order pending=pending step=step fine=fine
+                        fine_pass=fine_pass studio_was_open=studio_was_open />
                 }
             }}
             <History run=run />
@@ -321,23 +360,32 @@ fn RunPanel(
 }
 
 /// Shown when the preset has several nozzle variants: the user's pick,
-/// listing the preset's own names.
+/// listing the preset's own names. It waits while a card's save, undo,
+/// record, skip or link is out: a save is for the variant it previewed.
 #[component]
-fn VariantPicker(run: RwSignal<Option<RunView>>) -> impl IntoView {
-    let busy = RwSignal::new(false);
+fn VariantPicker(
+    run: RwSignal<Option<RunView>>,
+    order: StoredValue<AnswerOrder>,
+    pending: RwSignal<u32>,
+) -> impl IntoView {
     let error = RwSignal::new(None::<String>);
+    let waiting = move || pending.get() > 0;
     let pick = move |variant: String| {
+        if pending.get_untracked() > 0 {
+            return;
+        }
         let Some(id) = run.with_untracked(|r| r.as_ref().map(|r| r.id)) else {
             return;
         };
-        busy.set(true);
+        let ticket = ticket(order);
+        begin(pending);
         error.set(None);
         spawn_local(async move {
             let answer = bridge::set_variant(id, &variant).await;
-            busy.try_set(false);
+            end(pending);
             match answer {
                 Ok(r) => {
-                    adopt(run, id, r);
+                    adopt(run, order, id, ticket, r);
                 }
                 Err(e) => {
                     error.try_set(Some(e));
@@ -362,7 +410,7 @@ fn VariantPicker(run: RwSignal<Option<RunView>>) -> impl IntoView {
                     let value = v.clone();
                     view! {
                         <button type="button" class="nd-tab cal-variant-option"
-                            aria-pressed=pressed.to_string() disabled=move || busy.get()
+                            aria-pressed=pressed.to_string() disabled=waiting
                             on:click=move |_| pick(value.clone())>
                             {untrusted_text(&v, NAME_MAX)}
                         </button>
@@ -455,6 +503,8 @@ fn FlowPasses(
 #[component]
 fn StepCard(
     run: RwSignal<Option<RunView>>,
+    order: StoredValue<AnswerOrder>,
+    pending: RwSignal<u32>,
     step: StepKey,
     fine: RwSignal<bool>,
     fine_pass: bool,
@@ -604,21 +654,37 @@ fn StepCard(
         let (Some(s), Some(r)) = (setup.get_untracked(), reading.get_untracked()) else {
             return;
         };
-        // `old` goes back raw (`"nil"` included) as `expectedOld`.
-        let Some(old) = value.with_untracked(|v| {
+        if pending.get_untracked() > 0 {
+            return;
+        }
+        // `old` goes back raw (`"nil"` included) as `expectedOld`, and the
+        // variant it was read at as `expectedVariant`.
+        let Some((old, variant)) = value.with_untracked(|v| {
             v.as_ref()
                 .and_then(|v| v.change.as_ref())
-                .map(|c| c.old.clone())
+                .map(|c| (c.old.clone(), c.variant.clone()))
         }) else {
             return;
         };
         let photo_name = photo.get_untracked();
+        let ticket = ticket(order);
+        begin(pending);
         busy.set(true);
         save_error.set(None);
         changed.set(false);
         notes.set(Vec::new());
         spawn_local(async move {
-            let answer = bridge::save(run_id, test, &s, &r, &old, photo_name.as_deref()).await;
+            let answer = bridge::save(
+                run_id,
+                test,
+                &s,
+                &r,
+                &old,
+                variant.as_deref(),
+                photo_name.as_deref(),
+            )
+            .await;
+            end(pending);
             busy.try_set(false);
             match answer {
                 Ok(SaveAnswer::Saved {
@@ -627,7 +693,7 @@ fn StepCard(
                     assign_error,
                     ..
                 }) => {
-                    if !adopt(run, run_id, next) {
+                    if !adopt(run, order, run_id, ticket, next) {
                         return;
                     }
                     done_for.try_set(Some((s, r)));
@@ -649,17 +715,23 @@ fn StepCard(
         });
     };
     let undo = move |_| {
+        if pending.get_untracked() > 0 {
+            return;
+        }
         let Some(id) = undo_offer.with_untracked(|o| o.as_ref().map(|(id, _)| *id)) else {
             return;
         };
+        let ticket = ticket(order);
+        begin(pending);
         busy.set(true);
         save_error.set(None);
         spawn_local(async move {
             let answer = bridge::undo(id).await;
+            end(pending);
             busy.try_set(false);
             match answer {
                 Ok(next) => {
-                    if !adopt(run, run_id, next) {
+                    if !adopt(run, order, run_id, ticket, next) {
                         return;
                     }
                     done_for.try_set(None);
@@ -685,15 +757,21 @@ fn StepCard(
         let (Some(s), Some(r)) = (setup.get_untracked(), reading.get_untracked()) else {
             return;
         };
+        if pending.get_untracked() > 0 {
+            return;
+        }
         let photo_name = photo.get_untracked();
+        let ticket = ticket(order);
+        begin(pending);
         busy.set(true);
         save_error.set(None);
         spawn_local(async move {
             let answer = bridge::record(run_id, &s, &r, photo_name.as_deref()).await;
+            end(pending);
             busy.try_set(false);
             match answer {
                 Ok(next) => {
-                    if !adopt(run, run_id, next) {
+                    if !adopt(run, order, run_id, ticket, next) {
                         return;
                     }
                     done_for.try_set(Some((s, r)));
@@ -707,17 +785,20 @@ fn StepCard(
         });
     };
     let toggle_skip = move |_| {
-        if busy.get_untracked() {
+        if busy.get_untracked() || pending.get_untracked() > 0 {
             return;
         }
         let next = !skipped.get_untracked();
+        let ticket = ticket(order);
+        begin(pending);
         busy.set(true);
         spawn_local(async move {
             let answer = bridge::skip(run_id, step, next).await;
+            end(pending);
             busy.try_set(false);
             match answer {
                 Ok(r) => {
-                    adopt(run, run_id, r);
+                    adopt(run, order, run_id, ticket, r);
                 }
                 Err(e) => {
                     save_error.try_set(Some(e));
@@ -790,6 +871,7 @@ fn StepCard(
     };
     let can_save = move || {
         !busy.get()
+            && pending.get() == 0
             && !locked
             && !done_now()
             && value.with(|v| {
@@ -797,7 +879,10 @@ fn StepCard(
                     .is_some_and(|v| v.change.is_some() && v.change_error.is_none())
             })
     };
-    let can_record = move || !busy.get() && reading.with(Option::is_some) && !done_now();
+    // A save, undo, record, skip, link or variant pick is out.
+    let waiting = move || busy.get() || pending.get() > 0;
+    let can_record =
+        move || !busy.get() && pending.get() == 0 && reading.with(Option::is_some) && !done_now();
     let fields = move || setup.with(|s| s.map(|s| setup_fields(&s)).unwrap_or_default());
     let (typed_text, typed_unit) = typed_label(test);
 
@@ -928,13 +1013,13 @@ fn StepCard(
                             {move || undo_offer.get().map(|(id, _)| view! {
                                 <button type="button" class="btn btn-secondary cal-undo"
                                     data-result=id.to_string()
-                                    disabled=move || busy.get() on:click=undo>"Undo"</button>
+                                    disabled=waiting on:click=undo>"Undo"</button>
                             })}
                         }
                         .into_any()
                     }}
                     <button type="button" class="btn btn-secondary cal-skip"
-                        disabled=move || busy.get() on:click=toggle_skip>
+                        disabled=waiting on:click=toggle_skip>
                         {move || if skipped.get() { "Unskip" } else { "Skip" }}
                     </button>
                 </div>
@@ -947,7 +1032,7 @@ fn StepCard(
                 <div class="cal-notes" role="status">
                     {move || notes.get().into_iter().map(|n| view! { <p class="cal-quiet cal-note">{n}</p> }).collect_view()}
                 </div>
-                <LinkPrint run=run step=step />
+                <LinkPrint run=run order=order pending=pending step=step />
             </section>
         </article>
     }
@@ -1012,7 +1097,12 @@ fn DiagramView(
 /// Once the step has a result: the newest print that ended after the step
 /// was opened first, then the four before it.
 #[component]
-fn LinkPrint(run: RwSignal<Option<RunView>>, step: StepKey) -> impl IntoView {
+fn LinkPrint(
+    run: RwSignal<Option<RunView>>,
+    order: StoredValue<AnswerOrder>,
+    pending: RwSignal<u32>,
+    step: StepKey,
+) -> impl IntoView {
     let offset = offset_now();
     let run_id = run
         .with_untracked(|r| r.as_ref().map(|r| r.id))
@@ -1028,6 +1118,7 @@ fn LinkPrint(run: RwSignal<Option<RunView>>, step: StepKey) -> impl IntoView {
     let candidates = RwSignal::new(None::<LinkCandidates>);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
+    let waiting = move || busy.get() || pending.get() > 0;
     let open_list = move |_| {
         let Some(id) = result_id.get_untracked() else {
             return;
@@ -1048,18 +1139,24 @@ fn LinkPrint(run: RwSignal<Option<RunView>>, step: StepKey) -> impl IntoView {
         });
     };
     let link = move |entry: i64| {
+        if pending.get_untracked() > 0 {
+            return;
+        }
         let Some(id) = result_id.get_untracked() else {
             return;
         };
+        let ticket = ticket(order);
+        begin(pending);
         busy.set(true);
         error.set(None);
         spawn_local(async move {
             let answer = bridge::link_print(id, entry).await;
+            end(pending);
             busy.try_set(false);
             match answer {
                 Ok(r) => {
                     candidates.try_set(None);
-                    adopt(run, run_id, r);
+                    adopt(run, order, run_id, ticket, r);
                 }
                 Err(e) => {
                     error.try_set(Some(e));
@@ -1092,7 +1189,8 @@ fn LinkPrint(run: RwSignal<Option<RunView>>, step: StepKey) -> impl IntoView {
                                 view! {
                                     <li>
                                         <button type="button" class="cal-candidate" data-entry=id.to_string()
-                                            data-taken=is_taken disabled=move || busy.get()
+                                            data-taken=is_taken
+                                            disabled=waiting
                                             on:click=move |_| link(id)>
                                             {(Some(id) == suggested).then(|| view! { <span class="nd-label cal-suggested">"Suggested"</span> })}
                                             <span class="cal-candidate-text">

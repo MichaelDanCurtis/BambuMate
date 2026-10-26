@@ -533,7 +533,7 @@ fn add_dir(idx: &mut KindIndex, dir: &Path, source: PresetSource, kind: PresetKi
 
 /// System presets are pickable only when `instantiation` is `"true"` (the
 /// rest are bases and templates). User presets are, unless marked `"false"`.
-fn is_selectable(p: &FilamentProfile, source: PresetSource, kind: PresetKind) -> bool {
+pub(crate) fn is_selectable(p: &FilamentProfile, source: PresetSource, kind: PresetKind) -> bool {
     let inst = p.raw().get("instantiation").and_then(Value::as_str);
     let type_ok = p
         .raw()

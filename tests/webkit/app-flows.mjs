@@ -4528,7 +4528,9 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.click(`${CAL} .cal-save-btn`);
     await page.waitForSelector(`${CAL} .cal-undo`, { timeout: 5000 });
     const a = (await callsOf("calibration_save")).at(-1).args;
-    if (a.runId !== 7 || a.test !== "temperature" || a.expectedOld !== "220") throw new Error(`save sent ${JSON.stringify(a)}`);
+    if (a.runId !== 7 || a.test !== "temperature" || a.expectedOld !== "220" || a.expectedVariant !== "Direct Drive Standard") {
+      throw new Error(`save sent ${JSON.stringify(a)}`);
+    }
     if (!isDeepStrictEqual(a.setup, { test: "temperature", start: 230, end: 190 })) throw new Error(`setup ${JSON.stringify(a.setup)}`);
     if (!isDeepStrictEqual(a.reading, { test: "temperature", band: 1 })) throw new Error(`reading ${JSON.stringify(a.reading)}`);
     await calStatus("temperature", "saved");
@@ -4772,6 +4774,54 @@ async function driveApp(browserType, engine, baseUrl) {
       if ((await calText(`${CAL} .cal-will-save`)) !== "Will save as Generic PETG (calibrated)") throw new Error("A3 isn't saving to its own copy");
       if (new URL(page.url()).searchParams.get("slot") !== "A3") throw new Error("the URL left A3");
     });
+  });
+
+  await calFlow("the variant picker waits while a save is out, and a late answer can't put back the old variant", async () => {
+    await openCal("?slot=A2");
+    await page.waitForSelector(`${calCard("temperature")} .cal-band[data-index="1"]`, { timeout: 5000 });
+    await page.click(`${calCard("temperature")} .cal-band[data-index="1"]`);
+    await heroReads("225");
+    const held = { outcome: "saved", run: CAL_RUN_TEMP_SAVED, result_id: 11, studio_running: false, assign_error: null };
+    await withFixtures({ calibration_save: { __hold: "cal-variant", answer: held } }, async () => {
+      const sent = await callCount("calibration_save");
+      const settled = await settledCount("calibration_save");
+      const picks = await callCount("calibration_set_variant");
+      await page.click(`${CAL} .cal-save-btn`);
+      await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "calibration_save").length > n, sent, { timeout: 5000 });
+      const enabled = await page.locator(`${CAL} .cal-variant-option`).evaluateAll((bs) => bs.filter((b) => !b.disabled).length);
+      if (enabled !== 0) throw new Error(`${enabled} variant buttons stayed enabled while the save was out`);
+      await page.locator(`${CAL} .cal-variant-option:has-text("Direct Drive High Flow")`).click({ force: true });
+      await settle();
+      if ((await callCount("calibration_set_variant")) !== picks) throw new Error("a variant was picked while the save was out");
+      await page.evaluate(() => window.__release("cal-variant"));
+      await page.waitForFunction((n) => window.__ipc.settled.filter((c) => c === "calibration_save").length > n, settled, { timeout: 5000 });
+      await page.waitForSelector(`${CAL} .cal-undo`, { timeout: 5000 });
+      await page.waitForFunction(() => [...document.querySelectorAll(".calibrate-page .cal-variant-option")].every((b) => !b.disabled), null, { timeout: 5000 });
+      const pressed = (await page.locator(`${CAL} .cal-variant-option[aria-pressed="true"]`).textContent()).trim();
+      if (pressed !== "Direct Drive Standard") throw new Error(`the page shows ${pressed}`);
+    });
+  });
+
+  await calFlow("Calibrate's preset search leaves out base presets and templates", async () => {
+    const base = {
+      name: "Bambu PLA Basic @base",
+      filament_type: "PLA",
+      filament_id: "GFA00",
+      path: "/Applications/BambuStudio.app/Contents/Resources/profiles/BBL/filament/Bambu PLA Basic @base.json",
+      is_user_profile: false,
+      instantiable: false,
+    };
+    // The picker reads the presets once per visit: a fresh one, and leave it after.
+    await goTo("/");
+    await withFixtures({ list_system_profiles: [base, ...FIXTURES.list_system_profiles] }, async () => {
+      await openCal();
+      await page.fill(`${CAL} .cal-search-input`, "Bambu PLA Basic");
+      await page.waitForSelector(`${CAL} a.cal-preset`, { timeout: 5000 });
+      const names = await page.locator(`${CAL} a.cal-preset`).allTextContents();
+      if (names.some((n) => n.includes("@base"))) throw new Error(`the search offers ${names.join(" | ")}`);
+      if (!names.includes("Bambu PLA Basic @BBL X1C")) throw new Error(`the search lost the real preset: ${names.join(" | ")}`);
+    });
+    await goTo("/");
   });
 
   await calFlow("Undo lasts across other taps, steps, and a reload", async () => {

@@ -800,6 +800,7 @@ export const FIXTURES = {
       filament_id: "PA-PL-WHTPA0-01",
       path: USER_PROFILE_PATH,
       is_user_profile: true,
+      instantiable: true,
     },
     {
       name: "Bambu PLA Basic @BBL X1C 0.4 nozzle",
@@ -807,6 +808,7 @@ export const FIXTURES = {
       filament_id: "GFA00",
       path: "/Users/runner/Library/Application Support/BambuStudio/user/00000001/filament/Bambu PLA Basic @BBL X1C 0.4 nozzle.json",
       is_user_profile: true,
+      instantiable: true,
     },
   ],
   analyze_print: {
@@ -927,6 +929,7 @@ export const FIXTURES = {
       filament_id: "GFA00",
       path: "/Applications/BambuStudio.app/Contents/Resources/profiles/BBL/filament/Bambu PLA Basic @BBL X1C.json",
       is_user_profile: false,
+      instantiable: true,
     },
   ],
   compare_profiles: {

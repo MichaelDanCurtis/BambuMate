@@ -20,6 +20,14 @@ const HEIGHT_EPSILON: f64 = 1e-6;
 pub const OTHER_TEST: &str = "That reading is for another test.";
 pub const NO_FLOW_RATIO: &str =
     "This preset has no flow ratio for this nozzle variant to start from.";
+/// The most labels a test may have. A ruler has one per whole mm, so this
+/// is a tower of about 400 mm, taller than any Bambu printer's build
+/// volume (the H2D's is 325 mm). Without it a tiny step would build a vast
+/// label list.
+pub const MAX_LABELS: usize = 400;
+/// A tower with more labels than [`MAX_LABELS`]: taller than any printer.
+pub const TOO_TALL: &str =
+    "That tower would be taller than any printer can print. Use a bigger step or a shorter range.";
 const NUMBERS_ONLY: &str = "Enter numbers only.";
 const NOT_A_PATCH: &str = "That patch isn't on this print.";
 
@@ -324,6 +332,7 @@ pub fn validate_setup(setup: &Setup) -> Result<(), String> {
             if end > 10.0 {
                 return Err("Retraction can't go past 10 mm.".into());
             }
+            fits_labels(retraction_tower_mm(start, end, step))?;
         }
         Setup::MaxVolumetricSpeed { start, end, step } => {
             if !finite(&[start, end, step]) {
@@ -341,10 +350,23 @@ pub fn validate_setup(setup: &Setup) -> Result<(), String> {
             if end > 200.0 {
                 return Err("Max volumetric speed can't go past 200 mm³/s.".into());
             }
+            fits_labels(speed_tower_mm(start, end, step))?;
         }
         Setup::PressureAdvance {} => {}
     }
     Ok(())
+}
+
+/// A ruler of `tower_mm` (as [`diagram`] rounds it) has one label per
+/// whole mm from 0: at most [`MAX_LABELS`]. A temperature tower is bounded
+/// by its 180–350 °C range (35 bands), and the patches are fixed.
+fn fits_labels(tower_mm: f64) -> Result<(), String> {
+    let max_mm = round_to(tower_mm, 1);
+    if max_mm.is_finite() && (max_mm + HEIGHT_EPSILON).floor() + 1.0 <= MAX_LABELS as f64 {
+        Ok(())
+    } else {
+        Err(TOO_TALL.into())
+    }
 }
 
 /// The temperature of band `band`, counted from the bed.
@@ -873,6 +895,54 @@ mod unit_tests {
         })
         .contains("numbers"));
         assert_eq!(validate_setup(&Setup::PressureAdvance {}), Ok(()));
+    }
+
+    #[test]
+    fn a_tower_with_more_labels_than_any_printer_is_tall_is_refused_here_too() {
+        let tall = [
+            Setup::Retraction {
+                start: 0.0,
+                end: 10.0,
+                step: 0.001,
+            },
+            Setup::MaxVolumetricSpeed {
+                start: 1.0,
+                end: 200.0,
+                step: 0.0001,
+            },
+            // 400 mm: 401 labels, one over.
+            Setup::MaxVolumetricSpeed {
+                start: 1.0,
+                end: 200.0,
+                step: 0.5,
+            },
+        ];
+        for s in tall {
+            assert_eq!(validate_setup(&s), Err(TOO_TALL.to_string()), "{s:?}");
+            assert!(
+                value_of(&s, &Reading::Retraction { height_mm: 1.0 }).is_err(),
+                "value_of validates first"
+            );
+        }
+        // 399 mm: exactly 400 labels.
+        let tallest = Setup::MaxVolumetricSpeed {
+            start: 1.0,
+            end: 199.5,
+            step: 0.5,
+        };
+        assert_eq!(validate_setup(&tallest), Ok(()));
+        assert_eq!(labels(&diagram(&tallest)).len(), MAX_LABELS);
+        // Every setup that passes builds at most MAX_LABELS labels.
+        for step in [0.01, 0.025, 0.05, 0.1, 0.5] {
+            let s = Setup::Retraction {
+                start: 0.0,
+                end: 10.0,
+                step,
+            };
+            if validate_setup(&s).is_ok() {
+                assert!(labels(&diagram(&s)).len() <= MAX_LABELS, "{s:?}");
+            }
+        }
     }
 
     #[test]

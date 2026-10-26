@@ -293,8 +293,11 @@ pub struct ResolvedPreset {
 /// is not inherited, except that a leaf without `filament_id` takes its
 /// nearest ancestor's, as Bambu Studio does.
 ///
-/// A `"nil"` value never replaces a real one; it is kept only where nothing
-/// else set the key, so Bambu Studio still sees the key.
+/// "nil" follows Studio's two merges (see [`ResolvedPreset`]): a system
+/// level or an include replaces each key whole, "nil" included. At a user
+/// level a "nil" element of a variant array keeps the parent's element,
+/// "nil" in a retraction override is the printer's own value, and an
+/// all-"nil" array in any other key leaves the parent's value.
 ///
 /// Unlike [`resolve_inheritance`] this resolves `include`, which system
 /// machine presets use for their G-code and filament presets for per-nozzle
@@ -445,8 +448,10 @@ fn merge_user_level(
 /// variant name in `own`, unless that one is "nil" or missing. `own` is
 /// first fitted to its variant list (cut, or widened with its first
 /// element, as `extend_default_config_length` does). A parent array that
-/// doesn't match its own variant list is kept as it is, as Studio keeps
-/// it after refusing the merge.
+/// doesn't match its own variant list is kept as it is. That differs from
+/// Studio, whose `set_only_diff` throws on the length mismatch, after
+/// which `load_presets` drops the user preset: keeping the parent's value
+/// is BambuMate's fail-soft choice.
 fn merge_by_variant(
     key: &str,
     parent: &[Value],

@@ -39,11 +39,14 @@ pub const NEWER_FIRST: &str = "Undo the newer save first.";
 pub const NOTHING_TO_UNDO: &str = "A recorded K changed no preset, so there is nothing to undo.";
 pub const ALREADY_UNDONE: &str = "That save is already undone.";
 pub const NOT_A_VARIANT: &str = "That isn't one of this preset's nozzle variants.";
+/// An `@base` preset or an `fdm_filament_*` template: Bambu Studio never
+/// lists it for a printer, so a calibrated copy of it would be wrong.
+pub const NOT_INSTANTIABLE: &str = "That's a base preset Bambu Studio doesn't list for any printer. Pick the preset for your printer instead.";
 pub const NO_AI: &str = "No AI backend is set up, so the photo is kept without a suggestion.";
 pub const PHOTO_UNAVAILABLE: &str = "Photo unavailable";
 /// A tower with more labels than [`MAX_LABELS`]: taller than any printer.
-pub const TOO_TALL: &str =
-    "That tower would be taller than any printer can print. Use a bigger step or a shorter range.";
+/// `tests::validate_setup` refuses it.
+pub const TOO_TALL: &str = cal::TOO_TALL;
 /// `"nil"` in a retraction override: the printer's own value.
 pub const PRINTER_DEFAULT: &str = "printer default";
 const PHOTO_GONE: &str = "That photo isn't in the calibration history any more.";
@@ -60,11 +63,8 @@ pub const STILL_PRINTING: &str = "That print hasn't ended yet. Link it once it h
 /// still recorded.
 pub const INTERRUPTED: &str =
     "BambuMate hit a problem partway through. Check the preset in Bambu Studio before you try again.";
-/// The most labels a test may have. A ruler has one per whole mm, so this
-/// is a tower of about 400 mm, taller than any Bambu printer's build
-/// volume (the H2D's is 325 mm). `validate_setup` has no upper bound on
-/// the height, so a tiny step would otherwise build a vast label list.
-pub const MAX_LABELS: usize = 400;
+/// The most labels a test may have: see [`cal::MAX_LABELS`].
+pub const MAX_LABELS: usize = cal::MAX_LABELS;
 
 /// Serialises every command that reads a preset or the history and then
 /// writes either: save, undo, record, skip, set variant, link and start.
@@ -281,6 +281,10 @@ pub(crate) struct SaveRequest {
     pub setup: Setup,
     pub reading: Reading,
     pub expected_old: String,
+    /// The variant the page's preview wrote to (`ChangeView::variant`).
+    /// A variant picked since is a new diff, never a write to the other
+    /// variant.
+    pub expected_variant: Option<String>,
     pub photo: Option<String>,
 }
 
@@ -453,8 +457,11 @@ pub(crate) fn start_run(
         (None, Some(p)) => (PathBuf::from(p), None),
         (None, None) => return Err(PICK_ONE.into()),
     };
-    let (path, _) = ctx.folders.checked(&picked)?;
+    let (path, is_system) = ctx.folders.checked(&picked)?;
     let (profile, config) = apply::flattened(&path, &ctx.presets)?;
+    if !apply::instantiable(&profile, is_system) {
+        return Err(NOT_INSTANTIABLE.into());
+    }
     let printer_model = view
         .printer
         .as_ref()
@@ -544,17 +551,12 @@ fn check_test(test: TestKind, setup: &Setup, reading: Option<&Reading>) -> Resul
     Ok(())
 }
 
-/// A setup Studio would run, its diagram and its labels. A ruler taller
-/// than [`MAX_LABELS`] mm is refused before its labels are built.
+/// A setup Studio would run, its diagram and its labels. `validate_setup`
+/// refuses a ruler taller than [`MAX_LABELS`] mm before its labels are
+/// built; the count is checked again here.
 fn checked_diagram(setup: &Setup) -> Result<(Diagram, Vec<String>), String> {
     cal::validate_setup(setup)?;
     let diagram = cal::diagram(setup);
-    if let Diagram::Ruler { max_mm } = diagram {
-        // One label per whole mm, from 0.
-        if !(max_mm.is_finite() && max_mm + 1.0 <= MAX_LABELS as f64) {
-            return Err(TOO_TALL.into());
-        }
-    }
     let labels = cal::labels(&diagram);
     if labels.len() > MAX_LABELS {
         return Err(TOO_TALL.into());
@@ -690,8 +692,18 @@ fn checked_photo(ctx: &Ctx, photo: Option<String>) -> Result<Option<String>, Str
     }
 }
 
+/// The variant a save writes is the one its preview wrote: both `None`
+/// for a single-element key, else the preset's own name for the variant.
+fn same_variant(planned: Option<&str>, previewed: Option<&str>) -> bool {
+    match (planned, previewed) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.trim().eq_ignore_ascii_case(b.trim()),
+        _ => false,
+    }
+}
+
 /// Saves a reading into the run's preset, or answers the new diff when the
-/// preset changed since the preview. Ledger notes go to `ledger` even when
+/// preset, or the run's nozzle variant, changed since the preview. Ledger notes go to `ledger` even when
 /// the save fails: the caller replays them all.
 pub(crate) fn save_for(
     ctx: &Ctx,
@@ -707,6 +719,7 @@ pub(crate) fn save_for(
         setup,
         reading,
         expected_old,
+        expected_variant,
         photo,
     } = req;
     if test == TestKind::PressureAdvance {
@@ -729,6 +742,25 @@ pub(crate) fn save_for(
         variant: run.variant.as_deref(),
     };
     let target = PathBuf::from(run.target().1);
+    let changed = |p: &Planned| SaveAnswer::Changed {
+        preview: PreviewView {
+            labels: labels.clone(),
+            diagram: diagram.clone(),
+            value: Some(ValueView {
+                value,
+                text: cal::format_value(test, value),
+                display: cal::display_value(test, value),
+                change: Some(change_view(p)),
+                change_error: None,
+            }),
+        },
+    };
+    // The variant this save would write, read under the lock: a pick that
+    // landed after the preview makes this a new diff to check.
+    let planned = apply::plan(&target, &ctx.folders, &ctx.presets, change)?;
+    if !same_variant(planned.variant.as_deref(), expected_variant.as_deref()) {
+        return Ok(changed(&planned));
+    }
     let outcome = apply::save(
         &target,
         &ctx.folders,
@@ -738,21 +770,7 @@ pub(crate) fn save_for(
         ledger,
     )?;
     let saved = match outcome {
-        SaveOutcome::Changed(p) => {
-            return Ok(SaveAnswer::Changed {
-                preview: PreviewView {
-                    labels,
-                    diagram,
-                    value: Some(ValueView {
-                        value,
-                        text: cal::format_value(test, value),
-                        display: cal::display_value(test, value),
-                        change: Some(change_view(&p)),
-                        change_error: None,
-                    }),
-                },
-            });
-        }
+        SaveOutcome::Changed(p) => return Ok(changed(&p)),
         SaveOutcome::Saved(s) => s,
     };
     let main = &saved.changes[0];
@@ -1358,6 +1376,7 @@ pub async fn calibration_save(
     setup: Setup,
     reading: Reading,
     expected_old: String,
+    expected_variant: Option<String>,
     photo: Option<String>,
 ) -> Result<SaveAnswer, String> {
     let (dir, printer, slicer) = (
@@ -1373,6 +1392,7 @@ pub async fn calibration_save(
             setup,
             reading,
             expected_old,
+            expected_variant,
             photo,
         };
         let studio_running = crate::profile::is_bambu_studio_running();
@@ -1546,6 +1566,8 @@ mod tests {
     struct FakeAssigner {
         calls: Mutex<Vec<String>>,
         assigned: Mutex<Option<String>>,
+        /// The newest assignment's `filament_id`.
+        filament_id: Mutex<Option<String>>,
     }
 
     impl SlotAssigner for FakeAssigner {
@@ -1554,7 +1576,7 @@ mod tests {
             ams_id: u32,
             tray_id: u32,
             name: &str,
-            _filament_id: Option<&str>,
+            filament_id: Option<&str>,
             _path: &str,
         ) -> Result<(), String> {
             self.calls
@@ -1562,6 +1584,7 @@ mod tests {
                 .unwrap()
                 .push(format!("assign {ams_id}/{tray_id} {name}"));
             *self.assigned.lock().unwrap() = Some(name.to_string());
+            *self.filament_id.lock().unwrap() = filament_id.map(str::to_string);
             Ok(())
         }
 
@@ -1695,6 +1718,7 @@ mod tests {
             setup,
             reading,
             expected_old: expected_old.into(),
+            expected_variant: run.variant.clone(),
             photo: None,
         }
     }
@@ -1760,6 +1784,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reopened.id, run.id);
+    }
+
+    #[test]
+    fn a_base_preset_or_a_template_is_never_calibrated() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let view = printer(root.path(), true);
+        for name in [
+            "Bambu PLA Basic @base",
+            "fdm_filament_common",
+            "fdm_filament_template_direct_dual_e3d",
+        ] {
+            let answer = start_run(
+                &ctx,
+                StartRequest {
+                    slot: None,
+                    preset: Some(
+                        system_path(root.path(), name)
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    run: None,
+                },
+                &view,
+                100,
+            );
+            assert_eq!(answer, Err(NOT_INSTANTIABLE.to_string()), "{name}");
+        }
+        assert!(ctx.store.runs().unwrap().is_empty(), "no run was made");
+        // A user preset that says nothing is listed by Studio, so it counts.
+        let mine = user_path(root.path(), "Mine");
+        std::fs::write(
+            &mine,
+            json!({"name":"Mine","inherits":"","from":"User","filament_id":"P7",
+                "filament_type":["PLA"],"filament_flow_ratio":["0.98"]})
+            .to_string(),
+        )
+        .unwrap();
+        start_preset(&ctx, &view, &mine);
     }
 
     #[test]
@@ -1868,6 +1931,63 @@ mod tests {
     }
 
     #[test]
+    fn an_rfid_slot_reads_as_set_after_its_calibrated_copy_is_saved() {
+        use crate::history::SlotAssignment;
+        use crate::printer::slots::{compute_slots, slot_status};
+        use crate::printer::state::AmsUnit;
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let slots = FakeAssigner::default();
+        let run = start_slot(&ctx, &printer(root.path(), true), "A2").unwrap();
+        let (run, _) =
+            saved(save_for(&ctx, temp_225(&run), &slots, false, 200, &mut Vec::new()).unwrap());
+        let filament_id = slots.filament_id.lock().unwrap().clone();
+        assert_eq!(
+            filament_id.as_deref(),
+            Some("GFA00"),
+            "the copy is assigned with the spool's own id"
+        );
+        // A2 holds a Bambu spool: RFID tagged, reporting GFA00.
+        let spool = Tray {
+            id: 1,
+            tray_type: "PLA".into(),
+            tray_info_idx: "GFA00".into(),
+            tag_uid: "A1B2C3D4E5F60708".into(),
+            ..Default::default()
+        };
+        assert!(spool.has_rfid());
+        let assignment = SlotAssignment {
+            serial: "SN1".into(),
+            ams_id: 0,
+            tray_id: 1,
+            preset_name: run.target_name.clone(),
+            filament_id,
+            preset_path: Some(run.target_path.clone()),
+            assigned_at: String::new(),
+        };
+        assert_eq!(
+            slot_status(&spool, Some(&assignment)),
+            SlotStatus::Matches,
+            "✓ Set, not \"Previously assigned\""
+        );
+        let state = PrinterState {
+            ams_units: vec![AmsUnit {
+                id: 0,
+                trays: vec![spool],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let views = compute_slots(&state, &[assignment], &|_| false);
+        let a2 = views.iter().find(|v| v.label == "A2").unwrap();
+        assert_eq!(a2.status, SlotStatus::Matches);
+        assert_eq!(
+            a2.assigned_preset.as_deref(),
+            Some("Bambu PLA Basic (calibrated) @BBL H2D")
+        );
+    }
+
+    #[test]
     fn a_stale_preview_answers_the_new_diff() {
         let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
         let ctx = ctx_in(root.path(), data.path());
@@ -1897,6 +2017,71 @@ mod tests {
             })
         );
         assert!(change.will_copy);
+    }
+
+    #[test]
+    fn a_variant_picked_after_the_preview_is_a_new_diff_not_a_write_to_it() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let slots = FakeAssigner::default();
+        let run = start_slot(&ctx, &printer(root.path(), true), "A2").unwrap();
+        // Previewed on Standard. Every variant holds 220 °C, so the old
+        // value alone can't tell the two apart.
+        let req = temp_225(&run);
+        assert_eq!(
+            req.expected_variant.as_deref(),
+            Some("Direct Drive Standard")
+        );
+        set_variant_for(&ctx, run.id, "Direct Drive High Flow", 150).unwrap();
+        let answer = save_for(&ctx, req, &slots, false, 200, &mut Vec::new()).unwrap();
+        let SaveAnswer::Changed { preview } = answer else {
+            panic!("a save previewed on another variant must not write");
+        };
+        let change = preview.value.unwrap().change.unwrap();
+        assert_eq!(change.variant.as_deref(), Some("Direct Drive High Flow"));
+        assert_eq!((change.old.as_str(), change.new.as_str()), ("220", "225"));
+        assert!(
+            !user_path(root.path(), "Bambu PLA Basic (calibrated) @BBL H2D").exists(),
+            "no copy was made"
+        );
+        assert!(slots.calls.lock().unwrap().is_empty());
+        let run = run_view(&ctx, load_run(&ctx, run.id).unwrap()).unwrap();
+        assert!(run.results.is_empty(), "nothing was recorded");
+        // Saved again with the new diff's variant, it writes High Flow only.
+        let mut again = temp_225(&run);
+        again.expected_variant = change.variant;
+        let (run, _) = saved(save_for(&ctx, again, &slots, false, 300, &mut Vec::new()).unwrap());
+        let copy = raw(&user_path(root.path(), &run.target_name));
+        assert_eq!(copy["nozzle_temperature"], json!(["220", "225", "220"]));
+    }
+
+    #[test]
+    fn a_save_with_no_previewed_variant_is_refused_for_a_multi_variant_key() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let run = start_slot(&ctx, &printer(root.path(), true), "A2").unwrap();
+        let mut req = temp_225(&run);
+        req.expected_variant = None;
+        let answer = save_for(
+            &ctx,
+            req,
+            &FakeAssigner::default(),
+            false,
+            200,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            matches!(answer, SaveAnswer::Changed { .. }),
+            "the page didn't preview this variant: {answer:?}"
+        );
+        assert!(same_variant(None, None));
+        assert!(same_variant(
+            Some("Direct Drive Standard"),
+            Some(" direct drive standard")
+        ));
+        assert!(!same_variant(Some("Direct Drive Standard"), None));
+        assert!(!same_variant(None, Some("Direct Drive Standard")));
     }
 
     #[test]

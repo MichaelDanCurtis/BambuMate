@@ -676,6 +676,35 @@ mod tests {
     }
 
     #[test]
+    fn a_calibrated_copy_sharing_the_system_id_never_displaces_the_system_preset() {
+        // Calibration's copy of a system preset keeps its filament_id: a
+        // flattened user preset with the same id, printer and nozzle.
+        let root = fake_bambu_root();
+        write(
+            root.path(),
+            &format!("user/{USER}/filament/base/Bambu PLA Basic (calibrated) @BBL H2C.json"),
+            json!({
+                "name":"Bambu PLA Basic (calibrated) @BBL H2C","inherits":"","from":"User",
+                "instantiation":"true","filament_id":"GFA00","filament_type":["PLA"],
+                "compatible_printers":["Bambu Lab H2C 0.4 nozzle"]
+            }),
+        );
+        let first = index(root.path(), "H2C", Some(0.4))
+            .lookup("GFA00")
+            .unwrap();
+        assert_eq!(first.preset_name, "Bambu PLA Basic @BBL H2C");
+        assert!(!first.is_user, "the system preset comes first");
+        assert_eq!(first.variants, vec!["Bambu PLA Basic @BBL H2C"]);
+        // Rebuilt (every preset change rebuilds it), the pick stays put.
+        for _ in 0..5 {
+            assert_eq!(
+                index(root.path(), "H2C", Some(0.4)).lookup("GFA00"),
+                Some(first.clone())
+            );
+        }
+    }
+
+    #[test]
     fn an_unknown_or_missing_id_gives_none() {
         let root = fake_bambu_root();
         let idx = index(root.path(), "H2C", Some(0.4));

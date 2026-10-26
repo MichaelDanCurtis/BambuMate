@@ -165,7 +165,7 @@ Results must fall in these ranges:
   - the band and patch labels;
   - the result ranges.
 - **`calibration/apply.rs`** applies a result:
-  - It resolves the target. A user preset is edited in place. A system preset is copied to "<name> (calibrated)" with a fresh `filament_id`, using the existing duplicate path, and assigned to the slot if one was chosen.
+  - It resolves the target. A user preset is edited in place. A system preset is copied to "<name> (calibrated)", keeping the system preset's `filament_id`, using the existing duplicate path, and assigned to the slot if one was chosen. The copy keeps the parent's id as Bambu Studio's own user presets do, so a Bambu RFID spool (which reports that id) still reads as matched in its slot.
   - It resolves the variant index from the slot's extruder and nozzle volume type in the printer state; otherwise it uses the variant the user picked.
   - It writes one key, plus `nozzle_temperature_initial_layer` for temperature, which keeps its offset from `nozzle_temperature`.
   - It backs up the file first, writes through the guarded profile writer, validates the result, and bumps `note_presets_changed()`.

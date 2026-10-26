@@ -7,6 +7,7 @@ use super::types::{
     ChangeView, Diagram, Reading, ResultView, RunSummary, RunView, Setup, StepKey, StepStatus,
     Suggestion, TestKind,
 };
+use crate::commands::ProfileInfo;
 use crate::journal::format::local_time_text;
 use crate::journal::types::PrintEntry;
 use crate::pages::printer::short_preset;
@@ -606,6 +607,40 @@ pub fn undo_note(r: &ResultView) -> String {
 /// was asked for, and only when it is that run.
 pub fn same_run(current: Option<i64>, asked: i64, answer: i64) -> bool {
     current == Some(asked) && answer == asked
+}
+
+/// The order of the page's requests whose answers carry a run. Each takes
+/// a ticket when it is sent; an answer is shown only when its ticket is
+/// newer than the last one shown, so an older request's answer that lands
+/// late can't put back what a newer one changed (a variant, a save).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AnswerOrder {
+    issued: u64,
+    shown: u64,
+}
+
+impl AnswerOrder {
+    /// The ticket for a request about to be sent.
+    pub fn issue(&mut self) -> u64 {
+        self.issued += 1;
+        self.issued
+    }
+
+    /// Whether the answer to `ticket` may be shown. It then counts as the
+    /// newest shown.
+    pub fn accept(&mut self, ticket: u64) -> bool {
+        if ticket <= self.shown {
+            return false;
+        }
+        self.shown = ticket;
+        true
+    }
+}
+
+/// The presets the picker offers: Bambu Studio's `@base` presets and
+/// `fdm_filament_*` templates are never calibrated.
+pub fn calibratable(presets: Vec<ProfileInfo>) -> Vec<ProfileInfo> {
+    presets.into_iter().filter(|p| p.instantiable).collect()
 }
 
 /// The run's preset has several variants and none is chosen: every test
@@ -1293,6 +1328,44 @@ mod tests {
         assert!(!same_run(Some(8), 7, 7), "the page moved to another run");
         assert!(!same_run(None, 7, 7), "a new filament is loading");
         assert!(!same_run(Some(7), 7, 8), "the answer names another run");
+    }
+
+    #[test]
+    fn an_older_requests_answer_that_lands_late_is_dropped() {
+        let mut order = AnswerOrder::default();
+        let save = order.issue();
+        let pick = order.issue();
+        assert!(order.accept(pick), "the pick's answer lands first");
+        assert!(!order.accept(save), "the save, sent before it, lands late");
+        let undo = order.issue();
+        assert!(order.accept(undo), "a newer request is shown");
+        assert!(!order.accept(undo), "the same answer twice is shown once");
+        let (a, b) = (order.issue(), order.issue());
+        assert!(
+            order.accept(a) && order.accept(b),
+            "in order, both are shown"
+        );
+    }
+
+    #[test]
+    fn the_picker_leaves_out_base_presets_and_templates() {
+        let p = |name: &str, instantiable: bool| ProfileInfo {
+            name: name.into(),
+            filament_type: Some("PLA".into()),
+            filament_id: Some("GFA00".into()),
+            path: format!("/p/{name}.json"),
+            is_user_profile: false,
+            instantiable,
+        };
+        let names: Vec<String> = calibratable(vec![
+            p("Bambu PLA Basic @base", false),
+            p("Bambu PLA Basic @BBL H2D", true),
+            p("fdm_filament_pla", false),
+        ])
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+        assert_eq!(names, vec!["Bambu PLA Basic @BBL H2D"]);
     }
 
     #[test]
