@@ -1014,6 +1014,8 @@ async function driveApp(browserType, engine, baseUrl) {
     if (keys === 0) throw new Error("fields table rendered with no rows");
     const pills = await page.locator(".pm-actions .btn").count();
     if (pills !== 4) throw new Error(`${pills} action buttons`);
+    const calHref = await page.locator(".pm-actions a.pm-calibrate").getAttribute("href");
+    if (!calHref || !calHref.startsWith("/filament/calibrate?preset=") || calHref.includes(" ")) throw new Error(`profile Calibrate link: ${calHref}`);
     return `${title}, ${keys} field rows`;
   });
 
@@ -2337,6 +2339,30 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await main(2).getAttribute("aria-expanded")) !== "false") throw new Error("the closed row is still marked expanded");
     await main(1).click();
     await page.waitForSelector(`${journalRow(1)} .jr-detail`, { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "a calibration print shows a plain chip in its row and a link in its open entry", async () => {
+    const linked = { ...JOURNAL_FINISHED, purpose: { calibration_result_id: 11, test: "temperature" } };
+    await withFixtures({ journal_list: [linked] }, async () => {
+      const lists = await countOf("journal_list");
+      await page.click(`${JR} .jr-filter[data-kind="needs_verdict"]`);
+      await pastCalls("journal_list", lists);
+      await rowsRead([JOURNAL_FINISHED.name]);
+      const chip = page.locator(`${journalRow(2)} .jr-row-main .jr-purpose`);
+      if ((await chip.innerText()).trim() !== "Calibration: Temperature") throw new Error(`chip reads "${await chip.innerText()}"`);
+      if ((await page.locator(`${journalRow(2)} .jr-row-main a`).count()) !== 0) throw new Error("the row button holds a link");
+      await page.click(`${journalRow(2)} .jr-row-main`);
+      await page.waitForSelector(`${journalRow(2)} .jr-detail`, { timeout: 5000 });
+      const link = page.locator(`${journalRow(2)} .jr-detail a.jr-purpose-link`);
+      if ((await link.getAttribute("href")) !== "/filament/calibrate?result=11") throw new Error(`detail link: ${await link.getAttribute("href")}`);
+      if ((await link.innerText()).trim() !== "Calibration: Temperature") throw new Error("detail link text");
+      await page.click(`${journalRow(2)} .jr-row-main`);
+      await page.waitForSelector(`${journalRow(2)} .jr-detail`, { state: "detached", timeout: 5000 });
+    });
+    // A print without a purpose has neither.
+    await page.click(`${JR} .jr-filter[data-kind="all"]`);
+    await rowsRead(ALL_ROWS);
+    if ((await page.locator(`${JR} .jr-purpose`).count()) !== 0) throw new Error("a plain print shows a calibration chip");
   });
 
   await step(run, page, "journal filters and search ask the backend for what was picked", async () => {
@@ -3933,6 +3959,13 @@ async function driveApp(browserType, engine, baseUrl) {
       if (got !== badge) throw new Error(`${label} shows "${got}", expected "${badge}"`);
     }
     if ((await slotCard("A2").locator(".pr-rfid").count()) !== 1) throw new Error("A2 lacks its RFID badge");
+    // Every loaded slot links to the Calibrate tab; an empty one has nothing to calibrate.
+    const calHref = (label) => slotCard(label).locator(".pr-calibrate-link").getAttribute("href");
+    if ((await calHref("A2")) !== "/filament/calibrate?slot=A2") throw new Error(`A2 Calibrate link: ${await calHref("A2")}`);
+    if ((await calHref("A3")) !== "/filament/calibrate?slot=A3") throw new Error(`A3 Calibrate link: ${await calHref("A3")}`);
+    if ((await slotCard("B4").locator(".pr-calibrate-link").count()) !== 0) throw new Error("an empty slot offers Calibrate");
+    // The link sits beside the card's button, never inside it.
+    if ((await slotCard("A2").locator(".pr-slot-main a").count()) !== 0) throw new Error("a link is nested in the card button");
     const meta = await page.locator(".pr-ams-meta").first().innerText();
     if (!meta.includes("Humidity 21%")) throw new Error(`AMS A meta: ${meta}`);
   });
@@ -4426,6 +4459,8 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "home AMS slots open the preset picker", async () => {
     const slots = await page.locator(".hm-slot").count();
     if (slots !== PRINTER_SLOTS.length) throw new Error(`${slots} slots, expected ${PRINTER_SLOTS.length}`);
+    const homeCal = await page.locator('.hm-slot[data-slot-label="A3"] .pr-calibrate-link').getAttribute("href");
+    if (homeCal !== "/filament/calibrate?slot=A3") throw new Error(`Home A3 Calibrate link: ${homeCal}`);
     await page.click('.hm-slot[data-slot-label="A3"] .hm-slot-main');
     await page.waitForSelector(".pr-picker", { timeout: 5000 });
     await page.click(".pr-picker-cancel");

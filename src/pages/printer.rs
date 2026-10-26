@@ -374,6 +374,27 @@ pub(crate) fn detected_line(s: &SlotView) -> DetectedLine {
     DetectedLine::None
 }
 
+/// Where a slot's Calibrate link goes: any slot with filament in it. A slot
+/// without a profile still links, and the tab says so and points to Search.
+pub(crate) fn calibrate_href_for(s: &SlotView) -> Option<String> {
+    (!s.tray.empty).then(|| crate::calibration::view::slot_href(&s.label))
+}
+
+/// The quiet Calibrate link under a slot card, on Printer and Home. It sits
+/// outside the card's main button, because links can't nest in buttons.
+#[component]
+pub(crate) fn CalibrateLink(item: Memo<SlotView>) -> impl IntoView {
+    move || {
+        item.with(calibrate_href_for).map(|href| {
+            view! {
+                <p class="pr-calibrate">
+                    <a class="pr-calibrate-link" href=href>"Calibrate"</a>
+                </p>
+            }
+        })
+    }
+}
+
 /// The detected profile under a slot card, on Printer and Home, with "Use
 /// this" for a slot that has no assignment. "Use this" saves the detected
 /// preset through `printer_assign_slot`. It opens neither the picker nor the
@@ -632,6 +653,7 @@ fn SlotCard(item: Memo<SlotView>, picking: RwSignal<Option<SlotView>>) -> impl I
                 {body}
             </button>
             <SlotDetection item=item />
+            <CalibrateLink item=item />
             {guide}
         </div>
     }
@@ -917,6 +939,30 @@ mod tests {
             tray_id,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_loaded_slot_links_to_calibrate_it() {
+        let loaded = SlotView {
+            label: "A2".into(),
+            tray: Tray {
+                tray_type: "PLA".into(),
+                ..Default::default()
+            },
+            ..slot(0, 1)
+        };
+        assert_eq!(
+            calibrate_href_for(&loaded).as_deref(),
+            Some("/filament/calibrate?slot=A2")
+        );
+        let empty = SlotView {
+            tray: Tray {
+                empty: true,
+                ..Default::default()
+            },
+            ..slot(1, 3)
+        };
+        assert_eq!(calibrate_href_for(&empty), None);
     }
 
     #[test]

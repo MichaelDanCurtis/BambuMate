@@ -466,9 +466,7 @@ pub fn slot_preset_name(slot: &SlotView) -> String {
     }
 }
 
-/// The journal's chip for a print linked to a calibration step. The
-/// journal (Task 9) shows it; remove the `allow` when it does.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The journal's chip for a print linked to a calibration step.
 pub fn purpose_chip(test_key: &str) -> String {
     match TestKind::from_key(test_key) {
         Some(t) => format!("Calibration: {}", t.title()),

@@ -437,3 +437,8 @@
 .tooltip-wrapper:hover .tooltip-content {
     display: block;
 }
+
+.pm-calibrate {
+    align-self: center;
+    color: var(--nd-interactive);
+}

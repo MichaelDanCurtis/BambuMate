@@ -117,3 +117,5 @@
 .printer-trust-details { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
 .printer-trust-details dd { margin: 0; min-width: 0; }
 .printer-fingerprint { font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.pr-calibrate { margin: 0; padding: var(--nd-space-xs) var(--nd-space-md); border-top: 1px solid var(--nd-border); font-size: 12px; }
+.pr-calibrate-link { color: var(--nd-interactive); }

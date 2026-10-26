@@ -19,9 +19,9 @@ use wasm_bindgen_futures::spawn_local;
 use crate::app::FeatureFlagsContext;
 use crate::components::defect_report::defect_display_name;
 use crate::journal::format::{
-    analyze_href, fact_rows, local_time_text, toggle_tag, verdict_after_click, verdict_key,
-    verdict_text, DELETE_CONFIRM, ISSUE_TAGS, MAX_PHOTO_BYTES, NOT_AN_IMAGE, PHOTO_UNAVAILABLE,
-    TOO_LARGE, VERDICTS,
+    analyze_href, fact_rows, local_time_text, purpose_link, toggle_tag, verdict_after_click,
+    verdict_key, verdict_text, DELETE_CONFIRM, ISSUE_TAGS, MAX_PHOTO_BYTES, NOT_AN_IMAGE,
+    PHOTO_UNAVAILABLE, TOO_LARGE, VERDICTS,
 };
 use crate::journal::types::{EntryUpdate, PrintEntry, Verdict, VerdictChoice};
 use crate::journal::{bridge, next_revision};
@@ -576,6 +576,9 @@ pub fn EntryDetail(id: i64, entries: Entries, open: RwSignal<Option<i64>>) -> im
     };
     view! {
         <div class="jr-detail" id=format!("jr-detail-{id}") role="region" aria-label="Print details">
+            {move || entry.with(|e| e.as_ref().and_then(purpose_link)).map(|(chip, href)| view! {
+                <p class="jr-purpose-line"><a class="jr-purpose-link" href=href>{chip}</a></p>
+            })}
             <dl class="jr-facts">{facts}</dl>
             <RatingControls id=id entry=entry entries=entries />
             <Notes id=id entry=entry entries=entries />

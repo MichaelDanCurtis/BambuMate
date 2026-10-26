@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::calibration::view::preset_href;
 use crate::commands::{self, FilamentSpecs, ProfileDetail, ProfileInfo};
 use crate::components::patterns::{Hero, StatRow, StateKind, StateText};
 use crate::components::specs_editor::SpecsEditor;
@@ -461,6 +462,9 @@ pub fn ProfileManagementPage() -> impl IntoView {
                                                         >
                                                             "Open in Bambu Studio"
                                                         </button>
+                                                        {move || selected_path.get().map(|p| view! {
+                                                            <a class="pm-calibrate" href=preset_href(&p)>"Calibrate"</a>
+                                                        })}
                                                         <button
                                                             class="btn btn-secondary btn-edit-specs"
                                                             disabled=move || specs_loading.get()
