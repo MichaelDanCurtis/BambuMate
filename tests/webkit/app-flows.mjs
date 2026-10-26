@@ -1019,6 +1019,36 @@ async function driveApp(browserType, engine, baseUrl) {
     return `${title}, ${keys} field rows`;
   });
 
+  await step(run, page, "a profile's Calibrate link carries its exact path and opens the tab on it", async () => {
+    // Every character a partial encoder gets wrong: space, &, #, @ and +.
+    const path = "/Users/runner/Library/Application Support/BambuStudio/user/00000001/filament/Poly & Co #1 PLA+ @BBL X1C.json";
+    const strict = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+    const first = { ...FIXTURES.list_profiles[0], name: "Poly & Co #1 PLA+ @BBL X1C", path };
+    await withFixtures(
+      { list_profiles: [first, ...FIXTURES.list_profiles.slice(1)], calibration_start: { __reject: "stub: only the request is under test" } },
+      async () => {
+        await page.click('nav.sidebar a[href="/"]');
+        await page.click('nav.sidebar a[href="/profiles"]');
+        await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+        await page.locator(".profile-list-item").first().click();
+        const link = page.locator(".pm-actions a.pm-calibrate");
+        await link.waitFor({ timeout: 15000 });
+        const href = await link.getAttribute("href");
+        if (href !== `/filament/calibrate?preset=${strict(path)}`) throw new Error(`profile Calibrate href: ${href}`);
+        const before = (await callsOf("calibration_start")).length;
+        await link.click();
+        await page.waitForSelector(".calibrate-page", { timeout: 15000 });
+        await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "calibration_start").length > n, before, { timeout: 5000 });
+        const asked = (await callsOf("calibration_start")).at(-1).args;
+        if (asked.preset !== path || asked.slot != null || asked.run != null) throw new Error(`calibration_start got ${JSON.stringify(asked)}`);
+        if (new URL(page.url()).searchParams.get("preset") !== path) throw new Error(`the page URL names "${new URL(page.url()).searchParams.get("preset")}"`);
+      }
+    );
+    await page.click('nav.sidebar a[href="/"]');
+    await page.click('nav.sidebar a[href="/profiles"]');
+    await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+  });
+
   await step(run, page, "a preset that isn't syncing gets a warning dot", async () => {
     const path = FIXTURES.list_profiles[0].path;
     await withFixtures(
@@ -3964,6 +3994,10 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await calHref("A2")) !== "/filament/calibrate?slot=A2") throw new Error(`A2 Calibrate link: ${await calHref("A2")}`);
     if ((await calHref("A3")) !== "/filament/calibrate?slot=A3") throw new Error(`A3 Calibrate link: ${await calHref("A3")}`);
     if ((await slotCard("B4").locator(".pr-calibrate-link").count()) !== 0) throw new Error("an empty slot offers Calibrate");
+    // Ten links, ten names: each says which slot it is for, and starts with its visible text.
+    const calNames = await page.locator(".pr-slot .pr-calibrate-link").evaluateAll((as) => as.map((a) => [a.closest(".pr-slot").dataset.label, a.getAttribute("aria-label"), a.textContent.trim()]));
+    if (calNames.length === 0 || new Set(calNames.map((n) => n[1])).size !== calNames.length) throw new Error(`Calibrate names are not distinct: ${JSON.stringify(calNames)}`);
+    for (const [label, name, text] of calNames) if (name !== `Calibrate ${label}` || !name.startsWith(text)) throw new Error(`${label} Calibrate link is named "${name}"`);
     // The link sits beside the card's button, never inside it.
     if ((await slotCard("A2").locator(".pr-slot-main a").count()) !== 0) throw new Error("a link is nested in the card button");
     const meta = await page.locator(".pr-ams-meta").first().innerText();
@@ -4461,6 +4495,9 @@ async function driveApp(browserType, engine, baseUrl) {
     if (slots !== PRINTER_SLOTS.length) throw new Error(`${slots} slots, expected ${PRINTER_SLOTS.length}`);
     const homeCal = await page.locator('.hm-slot[data-slot-label="A3"] .pr-calibrate-link').getAttribute("href");
     if (homeCal !== "/filament/calibrate?slot=A3") throw new Error(`Home A3 Calibrate link: ${homeCal}`);
+    const homeNames = await page.locator(".hm-slot .pr-calibrate-link").evaluateAll((as) => as.map((a) => [a.closest(".hm-slot").dataset.slotLabel, a.getAttribute("aria-label")]));
+    if (homeNames.length === 0 || new Set(homeNames.map((n) => n[1])).size !== homeNames.length) throw new Error(`Home Calibrate names are not distinct: ${JSON.stringify(homeNames)}`);
+    for (const [label, name] of homeNames) if (name !== `Calibrate ${label}`) throw new Error(`Home ${label} Calibrate link is named "${name}"`);
     await page.click('.hm-slot[data-slot-label="A3"] .hm-slot-main');
     await page.waitForSelector(".pr-picker", { timeout: 5000 });
     await page.click(".pr-picker-cancel");

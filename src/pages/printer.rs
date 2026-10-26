@@ -380,18 +380,25 @@ pub(crate) fn calibrate_href_for(s: &SlotView) -> Option<String> {
     (!s.tray.empty).then(|| crate::calibration::view::slot_href(&s.label))
 }
 
+/// The link's accessible name: ten slots mean ten links, so each one names
+/// its slot (it still starts with the visible "Calibrate").
+pub(crate) fn calibrate_label_for(s: &SlotView) -> String {
+    format!("Calibrate {}", untrusted_text(&s.label, ID_MAX))
+}
+
 /// The quiet Calibrate link under a slot card, on Printer and Home. It sits
 /// outside the card's main button, because links can't nest in buttons.
 #[component]
 pub(crate) fn CalibrateLink(item: Memo<SlotView>) -> impl IntoView {
     move || {
-        item.with(calibrate_href_for).map(|href| {
-            view! {
-                <p class="pr-calibrate">
-                    <a class="pr-calibrate-link" href=href>"Calibrate"</a>
-                </p>
-            }
-        })
+        item.with(|s| calibrate_href_for(s).map(|href| (href, calibrate_label_for(s))))
+            .map(|(href, label)| {
+                view! {
+                    <p class="pr-calibrate">
+                        <a class="pr-calibrate-link" href=href aria-label=label>"Calibrate"</a>
+                    </p>
+                }
+            })
     }
 }
 
@@ -963,6 +970,7 @@ mod tests {
             ..slot(1, 3)
         };
         assert_eq!(calibrate_href_for(&empty), None);
+        assert_eq!(calibrate_label_for(&loaded), "Calibrate A2");
     }
 
     #[test]

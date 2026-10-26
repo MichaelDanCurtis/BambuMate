@@ -479,3 +479,8 @@
     font-size: 12px;
     color: var(--nd-interactive);
 }
+
+.jr-purpose-link:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}

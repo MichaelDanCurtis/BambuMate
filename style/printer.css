@@ -119,3 +119,4 @@
 .printer-fingerprint { font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }
 .pr-calibrate { margin: 0; padding: var(--nd-space-xs) var(--nd-space-md); border-top: 1px solid var(--nd-border); font-size: 12px; }
 .pr-calibrate-link { color: var(--nd-interactive); }
+.pr-calibrate-link:focus-visible { outline: 1px solid var(--nd-text-primary); outline-offset: 2px; }

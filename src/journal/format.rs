@@ -312,13 +312,18 @@ pub fn analyze_href(id: i64) -> String {
 
 /// The chip and link of a print linked to a calibration step:
 /// `Calibration: Temperature`, to that step on the Calibrate tab.
+/// A purpose without a result id (it reads as 0) has nothing to link to, so
+/// it shows neither the chip nor the link.
 pub fn purpose_link(e: &PrintEntry) -> Option<(String, String)> {
-    e.purpose.as_ref().map(|p| {
-        (
-            crate::calibration::view::purpose_chip(&p.test),
-            crate::calibration::view::result_href(p.calibration_result_id),
-        )
-    })
+    e.purpose
+        .as_ref()
+        .filter(|p| p.calibration_result_id > 0)
+        .map(|p| {
+            (
+                crate::calibration::view::purpose_chip(&p.test),
+                crate::calibration::view::result_href(p.calibration_result_id),
+            )
+        })
 }
 
 /// Home's "Rate your last print": a finished print with no verdict.
@@ -759,6 +764,12 @@ mod tests {
             ))
         );
         assert_eq!(purpose_link(&entry()), None);
+        let no_id: PrintEntry = serde_json::from_value(serde_json::json!({
+            "id": 3,
+            "purpose": {"test": "temperature"}
+        }))
+        .unwrap();
+        assert_eq!(purpose_link(&no_id), None, "no result id, no dead link");
         let parsed: PrintEntry = serde_json::from_value(serde_json::json!({
             "id": 3,
             "purpose": {"calibration_result_id": 4, "test": "flow_fine"}
