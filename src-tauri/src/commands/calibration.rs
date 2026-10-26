@@ -152,6 +152,9 @@ pub struct ResultView {
     pub journal_entry_id: Option<i64>,
     /// The newest saved result that isn't undone: the only one Undo takes back.
     pub can_undo: bool,
+    /// This save made the "(calibrated)" copy, so undoing it moves the copy
+    /// to the backups.
+    pub created_copy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -346,6 +349,7 @@ pub(crate) fn run_view(ctx: &Ctx, run: Run) -> Result<RunView, String> {
             photo: r.photo_path.clone(),
             journal_entry_id: r.journal_entry_id,
             can_undo: Some(r.id) == newest,
+            created_copy: r.created_copy,
         })
         .collect();
     Ok(RunView {
@@ -1826,6 +1830,10 @@ mod tests {
             }
         );
         assert!(run.results[0].can_undo);
+        assert!(
+            run.results[0].created_copy,
+            "the first save made the copy, so its undo moves it away"
+        );
         assert!(!ledger.is_empty());
 
         let flow = save_req(
@@ -1852,6 +1860,10 @@ mod tests {
         assert!(
             !run.results[1].can_undo && run.results[0].can_undo,
             "newest first, only it undoes"
+        );
+        assert!(
+            !run.results[0].created_copy && run.results[1].created_copy,
+            "a later save edits the copy in place"
         );
     }
 
@@ -2906,6 +2918,7 @@ mod tests {
             photo: Some("3f2a.jpg".into()),
             journal_entry_id: Some(42),
             can_undo: true,
+            created_copy: true,
         };
         let run = RunView {
             id: 1,

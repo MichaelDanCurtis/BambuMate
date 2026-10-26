@@ -21,7 +21,7 @@
 .cal-presets { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; max-height: 240px; overflow-y: auto; }
 .cal-preset { display: block; padding: 4px 8px; color: var(--nd-interactive); text-decoration: none; overflow-wrap: anywhere; }
 .cal-preset:hover { text-decoration: underline; }
-.cal-card { padding: var(--nd-space-md); border: 1px solid var(--nd-border); border-radius: var(--nd-radius-card); background: var(--nd-surface); }
+.cal-card { position: relative; padding: var(--nd-space-md); border: 1px solid var(--nd-border); border-radius: var(--nd-radius-card); background: var(--nd-surface); }
 .cal-card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--nd-space-sm); }
 .cal-card-title { margin: 0; font-size: 18px; color: var(--nd-text-display); }
 .cal-part { padding-top: var(--nd-space-sm); border-top: 1px solid var(--nd-border); }
@@ -41,6 +41,14 @@
 .cal-reason, .cal-current, .cal-undo-note, .cal-photo-note, .cal-note, .cal-extra { overflow-wrap: anywhere; }
 .cal-note { margin: 0; color: var(--nd-text-primary); font-size: 13px; }
 .cal-changed { margin: 0; color: var(--nd-warning); }
+.cal-pick-variant { margin: 0; color: var(--nd-text-primary); }
+.cal-notes { display: flex; flex-direction: column; gap: var(--nd-space-xs); }
+.cal-typed-note, .cal-photo-note { margin: 0; }
+/* Live regions stay mounted so a new line is announced; while empty they
+   take no room and no gap in the column. */
+.cal-photo-note:empty, .cal-typed-note:empty, .cal-changed:empty, .cal-restart:empty, .cal-notes:empty { position: absolute; }
+.cal-band:disabled, .cal-patch:disabled, .cal-tick:disabled { cursor: not-allowed; }
+.cal-card-title:focus-visible { outline: 1px solid var(--nd-text-primary); outline-offset: 2px; }
 .cal-step-status { font-size: 10px; letter-spacing: 0; text-transform: none; }
 .cal-step[data-status="skipped"] .nd-step-btn { border-style: dashed; }
 .cal-candidates { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--nd-space-xs); }
@@ -56,7 +64,7 @@
 .cal-history-table th { padding: 4px 8px; border-bottom: 1px solid var(--nd-border-visible); font-family: var(--nd-font-mono); font-size: 11px; font-weight: 400; letter-spacing: 0.08em; text-align: left; text-transform: uppercase; }
 .cal-history-table td { padding: 4px 8px; border-bottom: 1px solid var(--nd-border); overflow-wrap: anywhere; }
 .cal-history-table tr[data-undone="true"] td { text-decoration: line-through; }
-.cal-thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; }
+.cal-thumb { width: 40px; height: 40px; object-fit: cover; border-radius: var(--nd-radius-input); }
 
 @media (max-width: 700px) {
     .cal-history-table th:nth-child(5), .cal-history-table td:nth-child(5) { display: none; }

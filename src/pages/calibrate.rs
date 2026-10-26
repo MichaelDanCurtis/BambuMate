@@ -6,8 +6,11 @@
 //!
 //! Every `spawn_local` reads its signals before its first `.await` and uses
 //! only `try_*` accessors after it. A request carries the generation it
-//! was asked under, so a slow answer for an earlier filament, setup or
-//! reading is dropped.
+//! was asked under, so a slow answer for an earlier filament, setup,
+//! reading or photo is dropped. An answer that carries a run is applied
+//! only while the page still shows that run (`adopt`).
+
+use std::time::Duration;
 
 use leptos::html;
 use leptos::prelude::*;
@@ -17,18 +20,18 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::calibration::bridge;
 use crate::calibration::types::{
-    Diagram, LinkCandidates, PreviewView, Reading, RunView, SaveAnswer, Setup, StepKey, StepStatus,
-    Suggestion, TestKind,
+    Diagram, LinkCandidates, PreviewView, Reading, ResultView, RunView, SaveAnswer, Setup, StepKey,
+    StepStatus, Suggestion, TestKind,
 };
 use crate::calibration::view::{
     candidate_line, context_line, current_line, date_text, diff_line, extra_line, first_open,
-    height_reading, history_change, history_value, linked_elsewhere, patch_reading, preset_href,
-    reading_for_pick, result_href, ruler_ticks, run_for_result, save_notes, setup_fields,
-    slot_has_preset, slot_href, slot_preset_name, status_key, status_text, step_name,
-    step_of_result, step_result, studio_steps, suggestion_detail, suggestion_line, target_line,
-    test_for, typed_label, typed_reading, undo_copy_note, will_save_line, with_field,
-    DEVELOPER_MODE, DISCARD_CHANGES, FINE_AFTER_COARSE, NO_PRESET, PA_NOTE, RESTART_BEFORE_FINE,
-    RESULT_GONE,
+    height_reading, hero_label, history_change, history_value, linked_elsewhere, patch_reading,
+    preset_href, reading_for_pick, restart_before_fine, result_href, ruler_ticks, run_for_result,
+    same_run, save_notes, setup_fields, slot_has_preset, slot_href, slot_preset_name, status_key,
+    status_text, step_name, step_of_result, step_result, studio_steps, suggestion_detail,
+    suggestion_line, target_line, test_for, typed_label, typed_reading, undo_note, undo_target,
+    variant_needed, will_save_line, with_field, DEVELOPER_MODE, DISCARD_CHANGES, FINE_AFTER_COARSE,
+    NO_PRESET, PA_NOTE, PICK_VARIANT_PROMPT, RESTART_BEFORE_FINE, RESULT_GONE,
 };
 use crate::commands::{self, ProfileInfo};
 use crate::components::patterns::{Hero, StateKind, StateText};
@@ -41,9 +44,48 @@ use crate::printer::PrinterShared;
 
 /// Most characters shown of a preset or print name.
 const NAME_MAX: usize = 96;
+const CHANGED_SINCE_LINE: &str = "The preset changed since. Check the new value, then save again.";
 
 fn offset_now() -> i32 {
     local_offset_minutes((js_sys::Date::now() / 1000.0) as i64)
+}
+
+/// Shows `next` only while the page still shows run `asked`: an answer
+/// for a run the user has left is dropped, so the next save can't go to
+/// its preset. Call after the `.await`; says whether it was applied.
+fn adopt(run: RwSignal<Option<RunView>>, asked: i64, next: RunView) -> bool {
+    let current = run
+        .try_with_untracked(|r| r.as_ref().map(|r| r.id))
+        .flatten();
+    if !same_run(current, asked, next.id) {
+        return false;
+    }
+    run.try_set(Some(next));
+    true
+}
+
+/// After the card re-renders, focuses the first of `selectors` inside it,
+/// so a button that turned disabled or went away doesn't drop focus.
+fn focus_in(card: NodeRef<html::Article>, selectors: &'static [&'static str]) {
+    set_timeout(
+        move || {
+            let Some(el) = card.try_get_untracked().flatten() else {
+                return;
+            };
+            for sel in selectors {
+                if let Some(e) = el
+                    .query_selector(sel)
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+                {
+                    let _ = e.focus();
+                    return;
+                }
+            }
+        },
+        Duration::ZERO,
+    );
 }
 
 #[component]
@@ -57,6 +99,7 @@ pub fn CalibratePage() -> impl IntoView {
     let fine = RwSignal::new(false);
     // A coarse save answered `studio_running`: the fine pass says to restart.
     let studio_was_open = RwSignal::new(false);
+    let last_run = StoredValue::new(None::<i64>);
     let ask = StoredValue::new(0u64);
 
     // `?slot=A2`, `?preset=<path>` or `?result=<id>` picks the filament.
@@ -69,17 +112,16 @@ pub fn CalibratePage() -> impl IntoView {
         }) else {
             return;
         };
+        // The old run goes at once: nothing on it can be saved, undone or
+        // linked while the new filament loads.
+        run.set(None);
+        error.set(None);
+        no_preset.set(None);
         if slot.is_none() && preset.is_none() && result.is_none() {
-            // The URL names no filament any more: neither does the page.
             loading.set(false);
-            error.set(None);
-            no_preset.set(None);
-            run.set(None);
             return;
         }
         loading.set(true);
-        error.set(None);
-        no_preset.set(None);
         spawn_local(async move {
             let result_id = result.as_deref().and_then(|r| r.parse::<i64>().ok());
             let answer = match (result_id, result.is_some()) {
@@ -105,18 +147,16 @@ pub fn CalibratePage() -> impl IntoView {
                         .is_some_and(|x| x.test == TestKind::FlowFine);
                     open.try_set(opened.unwrap_or_else(|| first_open(&r)));
                     fine.try_set(fine_pass);
-                    if run.try_with_untracked(|old| old.as_ref().map(|o| o.id)) != Some(Some(r.id))
-                    {
+                    if last_run.try_get_value().flatten() != Some(r.id) {
                         studio_was_open.try_set(false);
                     }
+                    last_run.try_update_value(|l| *l = Some(r.id));
                     run.try_set(Some(r));
                 }
                 Err(e) if e == NO_PRESET => {
-                    run.try_set(None);
                     no_preset.try_set(Some(slot.unwrap_or_default()));
                 }
                 Err(e) => {
-                    run.try_set(None);
                     error.try_set(Some(e));
                 }
             }
@@ -160,17 +200,32 @@ fn Picker() -> impl IntoView {
     let printer = expect_context::<PrinterShared>();
     let presets = RwSignal::new(Vec::<ProfileInfo>::new());
     let loaded = StoredValue::new(false);
+    let load_error = RwSignal::new(None::<String>);
     let search = RwSignal::new(String::new());
-    // The system list is long: it is read once, when the search is used.
-    let load = move |_| {
+    // The system list is long: it is read once, when the search is used,
+    // and again only after a failed read.
+    let load = move || {
         if loaded.get_value() {
             return;
         }
         loaded.set_value(true);
+        load_error.set(None);
         spawn_local(async move {
-            let mut all = commands::list_profiles().await.unwrap_or_default();
-            all.extend(commands::list_system_profiles().await.unwrap_or_default());
-            presets.try_set(all);
+            let answer = async {
+                let mut all = commands::list_profiles().await?;
+                all.extend(commands::list_system_profiles().await?);
+                Ok::<_, String>(all)
+            }
+            .await;
+            match answer {
+                Ok(all) => {
+                    presets.try_set(all);
+                }
+                Err(e) => {
+                    loaded.try_update_value(|l| *l = false);
+                    load_error.try_set(Some(e));
+                }
+            }
         });
     };
     let slots = Memo::new(move |_| {
@@ -203,9 +258,16 @@ fn Picker() -> impl IntoView {
             <label class="cal-search">
                 <span class="nd-label">"Or a preset"</span>
                 <input type="search" class="cal-search-input" placeholder="Search presets"
-                    prop:value=move || search.get() on:focus=load
+                    prop:value=move || search.get() on:focus=move |_| load()
                     on:input=move |ev| search.set(event_target_value(&ev)) />
             </label>
+            {move || load_error.get().map(|e| view! {
+                <div class="cal-row cal-search-error">
+                    <StateText kind=StateKind::Error message=e />
+                    <button type="button" class="btn btn-secondary cal-search-retry"
+                        on:click=move |_| load()>"Retry"</button>
+                </div>
+            })}
             <Show when=move || !search.with(|q| q.trim().is_empty())>
                 <ul class="cal-presets">
                     {move || matching(&presets.get(), &search.get()).into_iter().map(|p| view! {
@@ -232,8 +294,7 @@ fn RunPanel(
     let target = Memo::new(move |_| run.with(|r| r.as_ref().map(target_line).unwrap_or_default()));
     let preset_error =
         Memo::new(move |_| run.with(|r| r.as_ref().and_then(|r| r.preset_error.clone())));
-    // A new step, pass or variant gets a fresh card. A save keeps it, so
-    // its Undo stays.
+    // A new step, pass or variant gets a fresh card. A save keeps it.
     let card = Memo::new(move |_| {
         (
             open.get(),
@@ -276,7 +337,7 @@ fn VariantPicker(run: RwSignal<Option<RunView>>) -> impl IntoView {
             busy.try_set(false);
             match answer {
                 Ok(r) => {
-                    run.try_set(Some(r));
+                    adopt(run, id, r);
                 }
                 Err(e) => {
                     error.try_set(Some(e));
@@ -404,6 +465,9 @@ fn StepCard(
     let run_id = run
         .with_untracked(|r| r.as_ref().map(|r| r.id))
         .unwrap_or_default();
+    // The card is rebuilt when the variant changes, so this holds for its
+    // life: with no variant chosen it only asks for one.
+    let locked = run.with_untracked(|r| r.as_ref().is_some_and(|r| variant_needed(r, test)));
     let setup = RwSignal::new(None::<Setup>);
     let material = RwSignal::new(None::<String>);
     let current = RwSignal::new(None::<String>);
@@ -411,32 +475,37 @@ fn StepCard(
     let preview = RwSignal::new(None::<PreviewView>);
     let card_error = RwSignal::new(None::<String>);
     let save_error = RwSignal::new(None::<String>);
+    // A typed value that isn't a reading: a slip, said quietly.
+    let typed_note = RwSignal::new(None::<String>);
     let changed = RwSignal::new(false);
     let busy = RwSignal::new(false);
-    // The save this card just made: Undo shows while it is set.
-    let saved_id = RwSignal::new(None::<i64>);
+    // The setup and reading this card last saved or recorded: Save and
+    // Record K wait for a different one.
+    let done_for = RwSignal::new(None::<(Setup, Reading)>);
     let notes = RwSignal::new(Vec::<String>::new());
     let photo = RwSignal::new(None::<String>);
     let suggestion = RwSignal::new(None::<Suggestion>);
     let photo_note = RwSignal::new(None::<String>);
     let photo_error = RwSignal::new(None::<String>);
-    // Shown with Undo when the save made the "(calibrated)" copy.
-    let undo_note = RwSignal::new(None::<String>);
     let ask = StoredValue::new(0u64);
+    let photo_ask = StoredValue::new(0u64);
     let file_input = NodeRef::<html::Input>::new();
+    let card_ref = NodeRef::<html::Article>::new();
 
-    spawn_local(async move {
-        match bridge::defaults(run_id, test).await {
-            Ok(d) => {
-                material.try_set(d.material_label);
-                current.try_set(d.current);
-                setup.try_set(Some(d.setup));
+    if !locked {
+        spawn_local(async move {
+            match bridge::defaults(run_id, test).await {
+                Ok(d) => {
+                    material.try_set(d.material_label);
+                    current.try_set(d.current);
+                    setup.try_set(Some(d.setup));
+                }
+                Err(e) => {
+                    card_error.try_set(Some(e));
+                }
             }
-            Err(e) => {
-                card_error.try_set(Some(e));
-            }
-        }
-    });
+        });
+    }
 
     // The diagram, and the value once there is a reading.
     Effect::new(move |_| {
@@ -484,13 +553,25 @@ fn StepCard(
                 .is_some_and(|s| s.status == StepStatus::Skipped)
         })
     });
+    // Undo lasts: the step's newest save, while the backend allows it.
+    let undo_offer = Memo::new(move |_| {
+        run.with(|r| {
+            r.as_ref()
+                .and_then(|r| undo_target(r, step))
+                .map(|x: &ResultView| (x.id, undo_note(x)))
+        })
+    });
+    // Nothing is read while a save, record or undo is out, so its answer
+    // can't land next to a newer reading.
+    let reading_locked = Signal::derive(move || locked || busy.get());
+    let done_now =
+        move || done_for.get().is_some() && done_for.get() == setup.get().zip(reading.get());
 
     let choose = move |r: Reading| {
-        saved_id.set(None);
-        undo_note.set(None);
         changed.set(false);
         save_error.set(None);
         card_error.set(None);
+        typed_note.set(None);
         reading.set(Some(r));
     };
     let set_field = move |key: &'static str, text: String| {
@@ -498,8 +579,6 @@ fn StepCard(
             .get_untracked()
             .and_then(|s| with_field(&s, key, &text))
         {
-            saved_id.set(None);
-            undo_note.set(None);
             reading.set(None);
             setup.set(Some(next));
         }
@@ -510,8 +589,8 @@ fn StepCard(
         };
         match typed_reading(&s, &text) {
             Some(Ok(r)) => choose(r),
-            Some(Err(why)) => card_error.set(Some(why.into())),
-            None => {}
+            Some(Err(why)) => typed_note.set(Some(why.into())),
+            None => typed_note.set(None),
         }
     };
     let open_studio = move |_| {
@@ -526,10 +605,10 @@ fn StepCard(
             return;
         };
         // `old` goes back raw (`"nil"` included) as `expectedOld`.
-        let Some((old, copy_note)) = value.with_untracked(|v| {
+        let Some(old) = value.with_untracked(|v| {
             v.as_ref()
                 .and_then(|v| v.change.as_ref())
-                .map(|c| (c.old.clone(), undo_copy_note(c)))
+                .map(|c| c.old.clone())
         }) else {
             return;
         };
@@ -544,19 +623,22 @@ fn StepCard(
             match answer {
                 Ok(SaveAnswer::Saved {
                     run: next,
-                    result_id,
                     studio_running,
                     assign_error,
+                    ..
                 }) => {
-                    saved_id.try_set(Some(result_id));
-                    undo_note.try_set(copy_note);
-                    notes.try_set(save_notes(studio_running, assign_error.as_deref()));
-                    if studio_running && test == TestKind::FlowCoarse {
-                        studio_was_open.try_set(true);
+                    if !adopt(run, run_id, next) {
+                        return;
                     }
-                    run.try_set(Some(next));
+                    done_for.try_set(Some((s, r)));
+                    notes.try_set(save_notes(studio_running, assign_error.as_deref()));
+                    studio_was_open
+                        .try_update(|w| *w = restart_before_fine(*w, test, studio_running));
+                    focus_in(card_ref, &[".cal-undo", ".cal-card-title"]);
                 }
                 Ok(SaveAnswer::Changed { preview: p }) => {
+                    // Newer than any preview still out: it must not be overwritten.
+                    ask.try_update_value(|g| *g += 1);
                     changed.try_set(true);
                     preview.try_set(Some(p));
                 }
@@ -567,7 +649,7 @@ fn StepCard(
         });
     };
     let undo = move |_| {
-        let Some(id) = saved_id.get_untracked() else {
+        let Some(id) = undo_offer.with_untracked(|o| o.as_ref().map(|(id, _)| *id)) else {
             return;
         };
         busy.set(true);
@@ -577,12 +659,21 @@ fn StepCard(
             busy.try_set(false);
             match answer {
                 Ok(next) => {
-                    saved_id.try_set(None);
-                    undo_note.try_set(None);
+                    if !adopt(run, run_id, next) {
+                        return;
+                    }
+                    done_for.try_set(None);
                     notes.try_set(Vec::new());
-                    run.try_set(Some(next));
                     // The preset is back: ask for the diff again.
                     reading.try_update(|_| {});
+                    focus_in(
+                        card_ref,
+                        &[
+                            ".cal-undo",
+                            ".cal-save-btn:not(:disabled)",
+                            ".cal-card-title",
+                        ],
+                    );
                 }
                 Err(e) => {
                     save_error.try_set(Some(e));
@@ -602,8 +693,12 @@ fn StepCard(
             busy.try_set(false);
             match answer {
                 Ok(next) => {
+                    if !adopt(run, run_id, next) {
+                        return;
+                    }
+                    done_for.try_set(Some((s, r)));
                     notes.try_set(vec!["Recorded. BambuMate never writes K anywhere.".into()]);
-                    run.try_set(Some(next));
+                    focus_in(card_ref, &[".cal-card-title"]);
                 }
                 Err(e) => {
                     save_error.try_set(Some(e));
@@ -612,11 +707,17 @@ fn StepCard(
         });
     };
     let toggle_skip = move |_| {
+        if busy.get_untracked() {
+            return;
+        }
         let next = !skipped.get_untracked();
+        busy.set(true);
         spawn_local(async move {
-            match bridge::skip(run_id, step, next).await {
+            let answer = bridge::skip(run_id, step, next).await;
+            busy.try_set(false);
+            match answer {
                 Ok(r) => {
-                    run.try_set(Some(r));
+                    adopt(run, run_id, r);
                 }
                 Err(e) => {
                     save_error.try_set(Some(e));
@@ -643,6 +744,12 @@ fn StepCard(
         let Some(s) = setup.get_untracked() else {
             return;
         };
+        let Some(generation) = photo_ask.try_update_value(|g| {
+            *g += 1;
+            *g
+        }) else {
+            return;
+        };
         suggestion.set(None);
         photo_error.set(None);
         photo_note.set(Some("Reading the photo…".into()));
@@ -651,6 +758,10 @@ fn StepCard(
                 Ok((_, data)) => bridge::suggest(run_id, test, &s, data).await,
                 Err(e) => Err(e),
             };
+            // A newer photo's answer wins, whichever lands first.
+            if photo_ask.try_get_value() != Some(generation) {
+                return;
+            }
             match answer {
                 Ok(a) => {
                     photo.try_set(Some(a.photo));
@@ -679,25 +790,30 @@ fn StepCard(
     };
     let can_save = move || {
         !busy.get()
-            && saved_id.get().is_none()
+            && !locked
+            && !done_now()
             && value.with(|v| {
                 v.as_ref()
                     .is_some_and(|v| v.change.is_some() && v.change_error.is_none())
             })
     };
+    let can_record = move || !busy.get() && reading.with(Option::is_some) && !done_now();
     let fields = move || setup.with(|s| s.map(|s| setup_fields(&s)).unwrap_or_default());
     let (typed_text, typed_unit) = typed_label(test);
 
     view! {
-        <article class="cal-card" data-test=test.key()>
+        <article class="cal-card" data-test=test.key() data-locked=locked.to_string() node_ref=card_ref>
             <header class="cal-card-head">
-                <h2 class="cal-card-title">{step_name(step)}</h2>
+                <h2 class="cal-card-title" tabindex="-1">{step_name(step)}</h2>
                 {(step == StepKey::Flow).then(|| view! { <FlowPasses run=run fine=fine fine_pass=fine_pass /> })}
             </header>
+            {locked.then(|| view! { <p class="cal-pick-variant">{PICK_VARIANT_PROMPT}</p> })}
             {move || card_error.get().map(|e| view! { <StateText kind=StateKind::Error message=e /> })}
-            <Show when=move || test == TestKind::FlowFine && studio_was_open.get()>
-                <p class="cal-note cal-restart" role="status">{RESTART_BEFORE_FINE}</p>
-            </Show>
+            {(test == TestKind::FlowFine).then(|| view! {
+                <p class="cal-note cal-restart" role="status">
+                    {move || if studio_was_open.get() { RESTART_BEFORE_FINE } else { "" }}
+                </p>
+            })}
 
             <section class="cal-part cal-setup">
                 <h3 class="nd-label">"Set up in Bambu Studio"</h3>
@@ -720,7 +836,8 @@ fn StepCard(
                             <label class="cal-field">
                                 <span class="nd-label">{f.label}</span>
                                 <input type="number" step="any" class="cal-input" data-field=key
-                                    prop:value=f.value on:change=move |ev| set_field(key, event_target_value(&ev)) />
+                                    prop:value=f.value disabled=move || busy.get()
+                                    on:change=move |ev| set_field(key, event_target_value(&ev)) />
                                 <span class="cal-unit">{f.unit}</span>
                             </label>
                         }
@@ -740,27 +857,36 @@ fn StepCard(
             <section class="cal-part cal-read">
                 <h3 class="nd-label">{if is_pa { "Record K" } else { "Read the print" }}</h3>
                 {move || diagram.get().map(|d| view! {
-                    <DiagramView diagram=d test=test reading=reading choose=Callback::new(choose) />
+                    <DiagramView diagram=d test=test reading=reading disabled=reading_locked
+                        choose=Callback::new(choose) />
                 })}
                 <label class="cal-field cal-typed">
                     <span class="nd-label">{typed_text}</span>
                     <input type="number" step="any" class="cal-input cal-typed-input"
+                        disabled=move || reading_locked.get()
                         on:change=move |ev| typed(event_target_value(&ev)) />
                     <span class="cal-unit">{typed_unit}</span>
                 </label>
+                <p class="cal-quiet cal-typed-note" role="status">
+                    {move || typed_note.get().unwrap_or_default()}
+                </p>
                 <div class="cal-row">
-                    <button type="button" class="btn btn-secondary cal-add-photo" on:click=pick_photo>"Add a photo"</button>
+                    <button type="button" class="btn btn-secondary cal-add-photo"
+                        disabled=move || reading_locked.get() on:click=pick_photo>"Add a photo"</button>
                     <input type="file" accept="image/*" class="cal-photo-input" hidden node_ref=file_input
                         on:change=photo_chosen />
                     {move || photo.get().is_some().then(|| view! { <span class="cal-quiet">"Photo kept"</span> })}
                 </div>
-                {move || photo_note.get().map(|n| view! { <p class="cal-quiet cal-photo-note" role="status">{n}</p> })}
+                <p class="cal-quiet cal-photo-note" role="status">
+                    {move || photo_note.get().unwrap_or_default()}
+                </p>
                 {move || photo_error.get().map(|e| view! { <StateText kind=StateKind::Error message=e /> })}
                 {move || suggestion.get().map(|sg| view! {
                     <div class="cal-suggestion">
                         <p class="cal-suggestion-line">
                             <span>{suggestion_line(test, &sg.pick)}</span>
-                            <button type="button" class="btn btn-secondary cal-accept" on:click=accept>"Use this"</button>
+                            <button type="button" class="btn btn-secondary cal-accept"
+                                disabled=move || reading_locked.get() on:click=accept>"Use this"</button>
                         </p>
                         <p class="cal-quiet cal-reason">{suggestion_detail(&sg)}</p>
                     </div>
@@ -777,7 +903,7 @@ fn StepCard(
                         .unwrap_or_default();
                     let extra = v.change.as_ref().and_then(extra_line);
                     view! {
-                        <Hero label=step_name(step).to_string() value=v.text.clone()
+                        <Hero label=hero_label(test).to_string() value=v.text.clone()
                             unit=(!test.unit().is_empty()).then(|| test.unit().to_string()) detail=detail />
                         {extra.map(|e| view! { <p class="cal-quiet cal-extra">{e}</p> })}
                     }
@@ -792,40 +918,35 @@ fn StepCard(
                     {if is_pa {
                         view! {
                             <button type="button" class="btn btn-primary cal-record"
-                                disabled=move || busy.get() || reading.with(Option::is_none)
-                                on:click=record>"Record K"</button>
+                                disabled=move || !can_record() on:click=record>"Record K"</button>
                         }
                         .into_any()
                     } else {
                         view! {
-                            <Show when=move || saved_id.get().is_none() fallback=move || view! {
+                            <button type="button" class="btn btn-primary cal-save-btn"
+                                disabled=move || !can_save() on:click=save>"Save to preset"</button>
+                            {move || undo_offer.get().map(|(id, _)| view! {
                                 <button type="button" class="btn btn-secondary cal-undo"
+                                    data-result=id.to_string()
                                     disabled=move || busy.get() on:click=undo>"Undo"</button>
-                            }>
-                                <button type="button" class="btn btn-primary cal-save-btn"
-                                    disabled=move || !can_save() on:click=save>"Save to preset"</button>
-                            </Show>
+                            })}
                         }
                         .into_any()
                     }}
-                    <button type="button" class="btn btn-secondary cal-skip" on:click=toggle_skip>
+                    <button type="button" class="btn btn-secondary cal-skip"
+                        disabled=move || busy.get() on:click=toggle_skip>
                         {move || if skipped.get() { "Unskip" } else { "Skip" }}
                     </button>
                 </div>
-                {move || {
-                    saved_id
-                        .get()
-                        .and(undo_note.get())
-                        .map(|n| view! { <p class="cal-quiet cal-undo-note">{n}</p> })
-                }}
+                {move || undo_offer.get().map(|(_, note)| view! { <p class="cal-quiet cal-undo-note">{note}</p> })}
                 {is_pa.then(|| view! { <p class="cal-quiet">{PA_NOTE}</p> })}
-                <Show when=move || changed.get()>
-                    <p class="cal-changed" role="status">
-                        "The preset changed since. Check the new value, then save again."
-                    </p>
-                </Show>
+                <p class="cal-changed" role="status">
+                    {move || if changed.get() { CHANGED_SINCE_LINE } else { "" }}
+                </p>
                 {move || save_error.get().map(|e| view! { <StateText kind=StateKind::Error message=e /> })}
-                {move || notes.get().into_iter().map(|n| view! { <p class="cal-quiet cal-note">{n}</p> }).collect_view()}
+                <div class="cal-notes" role="status">
+                    {move || notes.get().into_iter().map(|n| view! { <p class="cal-quiet cal-note">{n}</p> }).collect_view()}
+                </div>
                 <LinkPrint run=run step=step />
             </section>
         </article>
@@ -839,9 +960,11 @@ fn DiagramView(
     diagram: Diagram,
     test: TestKind,
     reading: RwSignal<Option<Reading>>,
+    disabled: Signal<bool>,
     choose: Callback<Reading>,
 ) -> impl IntoView {
     let pressed = move |r: Option<Reading>| move || (r.is_some() && reading.get() == r).to_string();
+    let off = move || disabled.get();
     match diagram {
         Diagram::Bands { bands } => view! {
             <div class="cal-bands" role="group" aria-label="Bands, hottest at the bottom">
@@ -849,7 +972,7 @@ fn DiagramView(
                     let r = Some(Reading::Temperature { band: b.index });
                     view! {
                         <button type="button" class="cal-band" data-index=b.index.to_string()
-                            aria-pressed=pressed(r)
+                            aria-pressed=pressed(r) disabled=off
                             on:click=move |_| if let Some(r) = r { choose.run(r) }>{b.label}</button>
                     }
                 }).collect_view()}
@@ -862,7 +985,7 @@ fn DiagramView(
                     let r = patch_reading(test, p.modifier);
                     view! {
                         <button type="button" class="cal-patch" data-modifier=p.modifier.to_string()
-                            aria-pressed=pressed(r)
+                            aria-pressed=pressed(r) disabled=off
                             on:click=move |_| if let Some(r) = r { choose.run(r) }>{p.label}</button>
                     }
                 }).collect_view()}
@@ -875,7 +998,7 @@ fn DiagramView(
                     let r = height_reading(test, f64::from(mm));
                     view! {
                         <button type="button" class="cal-tick" data-mm=mm.to_string()
-                            aria-pressed=pressed(r)
+                            aria-pressed=pressed(r) disabled=off
                             on:click=move |_| if let Some(r) = r { choose.run(r) }>{format!("{mm} mm")}</button>
                     }
                 }).collect_view()}
@@ -891,6 +1014,9 @@ fn DiagramView(
 #[component]
 fn LinkPrint(run: RwSignal<Option<RunView>>, step: StepKey) -> impl IntoView {
     let offset = offset_now();
+    let run_id = run
+        .with_untracked(|r| r.as_ref().map(|r| r.id))
+        .unwrap_or_default();
     let result_id = Memo::new(move |_| run.with(|r| r.as_ref().and_then(|r| step_result(r, step))));
     let linked = Memo::new(move |_| {
         run.with(|r| {
@@ -926,13 +1052,14 @@ fn LinkPrint(run: RwSignal<Option<RunView>>, step: StepKey) -> impl IntoView {
             return;
         };
         busy.set(true);
+        error.set(None);
         spawn_local(async move {
             let answer = bridge::link_print(id, entry).await;
             busy.try_set(false);
             match answer {
                 Ok(r) => {
                     candidates.try_set(None);
-                    run.try_set(Some(r));
+                    adopt(run, run_id, r);
                 }
                 Err(e) => {
                     error.try_set(Some(e));
@@ -965,7 +1092,7 @@ fn LinkPrint(run: RwSignal<Option<RunView>>, step: StepKey) -> impl IntoView {
                                 view! {
                                     <li>
                                         <button type="button" class="cal-candidate" data-entry=id.to_string()
-                                            data-taken=is_taken
+                                            data-taken=is_taken disabled=move || busy.get()
                                             on:click=move |_| link(id)>
                                             {(Some(id) == suggested).then(|| view! { <span class="nd-label cal-suggested">"Suggested"</span> })}
                                             <span class="cal-candidate-text">
@@ -985,21 +1112,29 @@ fn LinkPrint(run: RwSignal<Option<RunView>>, step: StepKey) -> impl IntoView {
     }
 }
 
-/// A quiet table of every result in the run, newest first.
+/// A quiet table of every result in the run, newest first. Rows are keyed
+/// by result, so a run update re-renders (and re-asks a thumbnail for)
+/// only a row that changed.
 #[component]
 fn History(run: RwSignal<Option<RunView>>) -> impl IntoView {
     let offset = offset_now();
-    move || {
-        let r = run.get()?;
-        if r.results.is_empty() {
-            return None;
-        }
-        let printer = if r.nozzle.is_empty() {
-            r.printer_model.clone()
-        } else {
-            format!("{} · {} mm", r.printer_model, r.nozzle)
-        };
-        Some(view! {
+    let rows =
+        Memo::new(move |_| run.with(|r| r.as_ref().map(|r| r.results.clone()).unwrap_or_default()));
+    let printer = Memo::new(move |_| {
+        run.with(|r| {
+            r.as_ref()
+                .map(|r| {
+                    if r.nozzle.is_empty() {
+                        r.printer_model.clone()
+                    } else {
+                        format!("{} · {} mm", r.printer_model, r.nozzle)
+                    }
+                })
+                .unwrap_or_default()
+        })
+    });
+    view! {
+        <Show when=move || rows.with(|r| !r.is_empty())>
             <section class="cal-history" aria-labelledby="cal-history-title">
                 <h3 class="nd-label" id="cal-history-title">"History"</h3>
                 <table class="cal-history-table">
@@ -1014,26 +1149,30 @@ fn History(run: RwSignal<Option<RunView>>) -> impl IntoView {
                         </tr>
                     </thead>
                     <tbody>
-                        {r.results.into_iter().map(|x| {
-                            let printer = untrusted_text(&printer, 48);
-                            view! {
-                                <tr data-result=x.id.to_string() data-undone=x.undone.to_string()>
-                                    <td>{date_text(x.created_at, offset)}</td>
-                                    <td><a class="cal-text-link" href=result_href(x.id)>{x.test.title()}</a></td>
-                                    <td>
-                                        {history_value(&x)}
-                                        {history_change(&x).map(|c| view! { <span class="cal-history-change">{c}</span> })}
-                                    </td>
-                                    <td>{untrusted_text(&short_preset(&x.target_name), NAME_MAX)}</td>
-                                    <td>{printer}</td>
-                                    <td>{x.photo.clone().map(|file| view! { <Thumb file=file /> })}</td>
-                                </tr>
+                        <For
+                            each=move || rows.get()
+                            key=|x| (x.id, x.undone, x.journal_entry_id)
+                            children=move |x| {
+                                let printer = untrusted_text(&printer.get_untracked(), 48);
+                                view! {
+                                    <tr data-result=x.id.to_string() data-undone=x.undone.to_string()>
+                                        <td>{date_text(x.created_at, offset)}</td>
+                                        <td><a class="cal-text-link" href=result_href(x.id)>{x.test.title()}</a></td>
+                                        <td>
+                                            {history_value(&x)}
+                                            {history_change(&x).map(|c| view! { <span class="cal-history-change">{c}</span> })}
+                                        </td>
+                                        <td>{untrusted_text(&short_preset(&x.target_name), NAME_MAX)}</td>
+                                        <td>{printer}</td>
+                                        <td>{x.photo.clone().map(|file| view! { <Thumb file=file /> })}</td>
+                                    </tr>
+                                }
                             }
-                        }).collect_view()}
+                        />
                     </tbody>
                 </table>
             </section>
-        })
+        </Show>
     }
 }
 

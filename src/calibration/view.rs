@@ -25,6 +25,8 @@ pub const PA_NOTE: &str =
     "BambuMate records K only. Bambu Studio's Flow Dynamics wizard saves it on the printer.";
 pub const NOT_A_BAND: &str = "That temperature isn't one of the bands on this tower.";
 pub const ENTER_A_NUMBER: &str = "Enter a number.";
+/// The card's quiet prompt while a multi-variant preset has no variant.
+pub const PICK_VARIANT_PROMPT: &str = "Pick the nozzle variant above to save to.";
 /// Shown on the fine pass after a coarse save made while Bambu Studio was
 /// open: Studio slices the fine pass from the flow ratio it has loaded.
 pub const RESTART_BEFORE_FINE: &str = "Bambu Studio was open when the coarse pass was saved: restart it before you slice the fine pass, so it reads the new flow ratio.";
@@ -545,12 +547,12 @@ pub fn typed_reading(setup: &Setup, text: &str) -> Option<Result<Reading, &'stat
     let float = || t.parse::<f64>().ok().filter(|v| v.is_finite());
     let test = setup.test();
     Some(match test {
-        TestKind::Temperature => t
-            .parse::<i32>()
-            .ok()
-            .and_then(|c| band_for_celsius(setup, c))
-            .map(|band| Reading::Temperature { band })
-            .ok_or(NOT_A_BAND),
+        TestKind::Temperature => match t.parse::<i32>() {
+            Err(_) => Err(ENTER_A_NUMBER),
+            Ok(c) => band_for_celsius(setup, c)
+                .map(|band| Reading::Temperature { band })
+                .ok_or(NOT_A_BAND),
+        },
         TestKind::FlowCoarse | TestKind::FlowFine => t
             .parse::<i32>()
             .ok()
@@ -576,15 +578,61 @@ pub fn linked_elsewhere(e: &PrintEntry, result_id: i64) -> Option<String> {
     Some(format!("Linked to {to}: linking moves it here"))
 }
 
-/// Shown with Undo when the save made the "(calibrated)" copy: undoing it
-/// moves the copy away.
-pub fn undo_copy_note(change: &ChangeView) -> Option<String> {
-    change.will_copy.then(|| {
-        format!(
-            "Undo moves {} to the backups, so Bambu Studio no longer lists it.",
-            untrusted_text(&short_preset(&change.target_name), NAME_MAX)
-        )
-    })
+/// The step's save that Undo can take back: its newest result, while the
+/// backend marks it `can_undo` (the run's newest live save).
+pub fn undo_target(run: &RunView, step: StepKey) -> Option<&ResultView> {
+    let id = step_result(run, step)?;
+    run.results
+        .iter()
+        .find(|r| r.id == id && r.can_undo && r.saved && !r.undone)
+}
+
+/// Shown with Undo: what it takes back. A save that made the
+/// "(calibrated)" copy says the copy moves to the backups; another names
+/// the key and its old value, from the backend's `old_display`.
+pub fn undo_note(r: &ResultView) -> String {
+    let what = format!("Undo takes back {} {}", r.test.title(), shown(&r.value));
+    if r.created_copy {
+        return format!(
+            "{what} and moves {} to the backups, so Bambu Studio no longer lists it.",
+            untrusted_text(&short_preset(&r.target_name), NAME_MAX)
+        );
+    }
+    match (r.preset_key.as_deref(), r.old_display.as_deref()) {
+        (Some(key), Some(old)) => format!("{what}: {} goes back to {}.", shown(key), shown(old)),
+        _ => format!("{what}."),
+    }
+}
+
+/// A late answer is applied only while the page still shows the run it
+/// was asked for, and only when it is that run.
+pub fn same_run(current: Option<i64>, asked: i64, answer: i64) -> bool {
+    current == Some(asked) && answer == asked
+}
+
+/// The run's preset has several variants and none is chosen: every test
+/// but pressure advance (only recorded) waits for the pick.
+pub fn variant_needed(run: &RunView, test: TestKind) -> bool {
+    run.needs_variant && test != TestKind::PressureAdvance
+}
+
+/// Whether the fine pass still says to restart Bambu Studio, after a save
+/// of `test` that answered `studio_running`.
+pub fn restart_before_fine(was: bool, test: TestKind, studio_running: bool) -> bool {
+    match test {
+        TestKind::FlowCoarse => studio_running,
+        TestKind::FlowFine => false,
+        _ => was && studio_running,
+    }
+}
+
+/// The hero's label: the step, and for flow its pass.
+pub fn hero_label(test: TestKind) -> &'static str {
+    match test {
+        TestKind::FlowCoarse => "Flow · coarse",
+        TestKind::FlowFine => "Flow · fine",
+        t => t.title(),
+    }
 }
 
 /// `Confidence 80% · <reason>`: the reason on one line, as plain text.
@@ -644,6 +692,7 @@ mod tests {
             photo: None,
             journal_entry_id: None,
             can_undo: true,
+            created_copy: false,
         }
     }
 
@@ -1087,7 +1136,11 @@ mod tests {
             Some(Ok(Reading::Temperature { band: 1 }))
         );
         assert_eq!(typed_reading(&temp, "226"), Some(Err(NOT_A_BAND)));
-        assert_eq!(typed_reading(&temp, "hot"), Some(Err(NOT_A_BAND)));
+        assert_eq!(
+            typed_reading(&temp, "hot"),
+            Some(Err(ENTER_A_NUMBER)),
+            "a slip that isn't a number says so"
+        );
         assert_eq!(
             typed_reading(&Setup::FlowFine { base: 1.0 }, "-6"),
             Some(Ok(Reading::FlowFine { modifier: -6 }))
@@ -1165,34 +1218,131 @@ mod tests {
     }
 
     #[test]
-    fn undoing_a_save_that_made_a_copy_warns_first() {
-        let change = ChangeView {
-            preset_key: "nozzle_temperature".into(),
-            old: "220".into(),
-            old_display: "220".into(),
-            new: "225".into(),
-            extra: None,
-            target_name: "Bambu PLA Basic (calibrated) @BBL H2D".into(),
-            will_copy: true,
-            variant: None,
-        };
+    fn the_undo_note_names_what_undo_takes_back() {
+        let mut r = result(11, TestKind::Temperature);
         assert_eq!(
-            undo_copy_note(&change).as_deref(),
-            Some("Undo moves Bambu PLA Basic (calibrated) to the backups, so Bambu Studio no longer lists it.")
+            undo_note(&r),
+            "Undo takes back Temperature 225 °C: nozzle_temperature goes back to 220."
         );
-        let in_place = ChangeView {
-            will_copy: false,
-            ..change.clone()
-        };
-        assert_eq!(undo_copy_note(&in_place), None);
-        let hostile = ChangeView {
-            target_name: "Evil\u{202E} @BBL H2D".into(),
-            ..change
-        };
+        r.created_copy = true;
         assert_eq!(
-            undo_copy_note(&hostile).as_deref(),
-            Some("Undo moves Evil\u{FFFD} to the backups, so Bambu Studio no longer lists it.")
+            undo_note(&r),
+            "Undo takes back Temperature 225 °C and moves Bambu PLA Basic (calibrated) to the backups, so Bambu Studio no longer lists it."
         );
+        let mut nil = result(12, TestKind::Retraction);
+        nil.value = "0.6 mm".into();
+        nil.preset_key = Some("filament_retraction_length".into());
+        nil.old_value = Some("nil".into());
+        nil.old_display = Some("printer default".into());
+        assert_eq!(
+            undo_note(&nil),
+            "Undo takes back Retraction 0.6 mm: filament_retraction_length goes back to printer default.",
+            "the old value is shown from old_display, never the raw old"
+        );
+        nil.old_display = None;
+        assert_eq!(undo_note(&nil), "Undo takes back Retraction 0.6 mm.");
+        let mut hostile = result(13, TestKind::Temperature);
+        hostile.created_copy = true;
+        hostile.target_name = "Evil\u{202E} @BBL H2D".into();
+        assert!(undo_note(&hostile).contains("moves Evil\u{FFFD} to the backups"));
+    }
+
+    #[test]
+    fn undo_is_offered_for_the_steps_newest_save_while_the_backend_allows_it() {
+        let saved = |id| StepStatus::Saved {
+            result_id: id,
+            value: "1.029".into(),
+            at: 1,
+        };
+        let mut r = run(vec![
+            step(StepKey::Temperature, StepStatus::NotRun),
+            step(StepKey::Flow, saved(21)),
+        ]);
+        let mut coarse = result(21, TestKind::FlowCoarse);
+        coarse.can_undo = true;
+        let mut older = result(20, TestKind::Temperature);
+        older.can_undo = false;
+        r.results = vec![coarse, older];
+        assert_eq!(undo_target(&r, StepKey::Flow).map(|x| x.id), Some(21));
+        assert_eq!(undo_target(&r, StepKey::Temperature), None);
+        r.results[0].can_undo = false;
+        assert_eq!(
+            undo_target(&r, StepKey::Flow),
+            None,
+            "a newer save elsewhere comes first (NEWER_FIRST)"
+        );
+        r.results[0].can_undo = true;
+        r.results[0].undone = true;
+        assert_eq!(undo_target(&r, StepKey::Flow), None, "already undone");
+        let mut k = run(vec![step(
+            StepKey::PressureAdvance,
+            StepStatus::Recorded {
+                result_id: 30,
+                value: "K 0.025".into(),
+                at: 1,
+            },
+        )]);
+        let mut recorded = result(30, TestKind::PressureAdvance);
+        recorded.saved = false;
+        recorded.can_undo = false;
+        k.results = vec![recorded];
+        assert_eq!(undo_target(&k, StepKey::PressureAdvance), None);
+    }
+
+    #[test]
+    fn a_late_answer_applies_only_to_the_run_it_was_asked_for() {
+        assert!(same_run(Some(7), 7, 7));
+        assert!(!same_run(Some(8), 7, 7), "the page moved to another run");
+        assert!(!same_run(None, 7, 7), "a new filament is loading");
+        assert!(!same_run(Some(7), 7, 8), "the answer names another run");
+    }
+
+    #[test]
+    fn an_unchosen_variant_asks_quietly_and_holds_the_card() {
+        let mut r = run(vec![]);
+        r.needs_variant = true;
+        r.variant = None;
+        assert!(variant_needed(&r, TestKind::Temperature));
+        assert!(variant_needed(&r, TestKind::FlowCoarse));
+        assert!(
+            !variant_needed(&r, TestKind::PressureAdvance),
+            "K is only recorded"
+        );
+        r.needs_variant = false;
+        assert!(!variant_needed(&r, TestKind::FlowCoarse));
+        assert_eq!(
+            PICK_VARIANT_PROMPT,
+            "Pick the nozzle variant above to save to."
+        );
+    }
+
+    #[test]
+    fn the_restart_note_lasts_until_the_fine_pass_is_saved_or_studio_is_closed() {
+        use TestKind::*;
+        assert!(restart_before_fine(false, FlowCoarse, true));
+        assert!(!restart_before_fine(true, FlowCoarse, false));
+        assert!(
+            !restart_before_fine(true, FlowFine, true),
+            "the fine pass is saved"
+        );
+        assert!(
+            restart_before_fine(true, Temperature, true),
+            "Studio still open"
+        );
+        assert!(
+            !restart_before_fine(true, Temperature, false),
+            "Studio was closed"
+        );
+        assert!(!restart_before_fine(false, Temperature, true));
+    }
+
+    #[test]
+    fn the_hero_names_the_flow_pass() {
+        assert_eq!(hero_label(TestKind::FlowCoarse), "Flow · coarse");
+        assert_eq!(hero_label(TestKind::FlowFine), "Flow · fine");
+        assert_eq!(hero_label(TestKind::Temperature), "Temperature");
+        assert_eq!(hero_label(TestKind::MaxVolumetricSpeed), "Max speed");
+        assert_eq!(hero_label(TestKind::PressureAdvance), "Pressure advance");
     }
 
     #[test]

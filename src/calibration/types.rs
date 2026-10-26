@@ -198,6 +198,9 @@ pub struct ResultView {
     pub photo: Option<String>,
     pub journal_entry_id: Option<i64>,
     pub can_undo: bool,
+    /// This save made the "(calibrated)" copy: undoing it moves the copy to
+    /// the backups.
+    pub created_copy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -426,7 +429,8 @@ mod tests {
             "id":1,"test":"retraction","value":"0.6","preset_key":"filament_retraction_length",
             "old_value":"nil","old_display":"printer default","new_value":"0.6",
             "target_name":"x","variant":null,"saved":true,"undone":false,
-            "created_at":5,"photo":null,"journal_entry_id":null,"can_undo":true
+            "created_at":5,"photo":null,"journal_entry_id":null,"can_undo":true,
+            "created_copy":false
         }))
         .unwrap();
         assert_eq!(result.old_display.as_deref(), Some("printer default"));
@@ -557,7 +561,10 @@ mod tests {
         assert_eq!(r.old_value.as_deref(), Some("nil"));
         assert_eq!(r.old_display.as_deref(), Some("printer default"));
         assert_eq!(r.new_value.as_deref(), Some("0.6"));
-        assert_eq!((r.saved, r.undone, r.can_undo), (true, false, true));
+        assert_eq!(
+            (r.saved, r.undone, r.can_undo, r.created_copy),
+            (true, false, true, true)
+        );
         assert_eq!(
             (r.photo.as_deref(), r.journal_entry_id),
             (Some("3f2a.jpg"), Some(42))
@@ -676,6 +683,7 @@ mod tests {
             vec!["variants"],
             vec!["steps", "0", "fine_ready"],
             vec!["results", "0", "can_undo"],
+            vec!["results", "0", "created_copy"],
             vec!["results", "0", "target_name"],
         ] {
             assert!(
