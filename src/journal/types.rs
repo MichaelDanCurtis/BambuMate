@@ -84,6 +84,16 @@ pub struct Photo {
     pub added_at: i64,
 }
 
+/// What a print was for: the calibration result it was printed for. `test`
+/// is the backend's test key (`temperature`, `flow_fine`, …), kept as text
+/// so an unknown one can't make the whole entry unreadable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PrintPurpose {
+    pub calibration_result_id: i64,
+    pub test: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct PrintEntry {
@@ -106,6 +116,9 @@ pub struct PrintEntry {
     pub trays: Vec<TrayUse>,
     pub photos: Vec<Photo>,
     pub analyses: Vec<i64>,
+    /// Set when the print was linked to a calibration step.
+    #[serde(default)]
+    pub purpose: Option<PrintPurpose>,
     pub updated_at: i64,
     /// Page-only: the [`next_revision`](crate::journal::next_revision) of
     /// the request this copy came from. Not sent by the backend.
@@ -173,6 +186,24 @@ mod tests {
         assert_eq!(e.photos[0].id, 7);
         let odd: Outcome = serde_json::from_str("\"cancelled\"").unwrap();
         assert_eq!(odd, Outcome::Unknown);
+        assert_eq!(e.purpose, None, "an entry without a purpose reads as none");
+    }
+
+    #[test]
+    fn an_entry_reads_the_calibration_purpose_it_was_linked_with() {
+        let e: PrintEntry = serde_json::from_str(
+            r#"{"id":2,"name":"cube","purpose":{"calibration_result_id":11,"test":"temperature"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            e.purpose,
+            Some(PrintPurpose {
+                calibration_result_id: 11,
+                test: "temperature".into()
+            })
+        );
+        let null: PrintEntry = serde_json::from_str(r#"{"id":3,"purpose":null}"#).unwrap();
+        assert_eq!(null.purpose, None);
     }
 
     #[test]

@@ -2836,4 +2836,223 @@ mod tests {
         );
         assert_eq!((answer, replayed), (Err("refused".to_string()), vec![note]));
     }
+
+    // The frontend's mirrors (`src/calibration/types.rs`) are tested against
+    // this file: it holds what the real types above serialize. Run with
+    // `UPDATE_WIRE_FIXTURE=1` to rewrite it after a deliberate wire change.
+    #[test]
+    fn the_wire_fixture_holds_what_the_real_types_serialize() {
+        use crate::calibration::store::{StepKey, StepView};
+        use crate::journal::types::{Photo, TrayUse, Verdict};
+
+        fn to<T: serde::Serialize>(v: &T) -> Value {
+            serde_json::to_value(v).unwrap()
+        }
+        let setups = json!({
+            "temperature": to(&Setup::Temperature { start: 230, end: 190 }),
+            "flow_coarse": to(&Setup::FlowCoarse { base: 0.98 }),
+            "flow_fine": to(&Setup::FlowFine { base: 1.029 }),
+            "retraction": to(&Setup::Retraction { start: 0.0, end: 2.0, step: 0.1 }),
+            "max_volumetric_speed": to(&Setup::MaxVolumetricSpeed { start: 5.0, end: 20.0, step: 0.5 }),
+            "pressure_advance": to(&Setup::PressureAdvance {}),
+        });
+        let readings = json!({
+            "temperature": to(&Reading::Temperature { band: 1 }),
+            "flow_coarse": to(&Reading::FlowCoarse { modifier: 5 }),
+            "flow_fine": to(&Reading::FlowFine { modifier: -6 }),
+            "retraction": to(&Reading::Retraction { height_mm: 5.0 }),
+            "max_volumetric_speed": to(&Reading::MaxVolumetricSpeed { height_mm: 14.0 }),
+            "pressure_advance": to(&Reading::PressureAdvance { k: 0.025 }),
+        });
+        let change = ChangeView {
+            preset_key: "filament_retraction_length".into(),
+            old: "nil".into(),
+            old_display: PRINTER_DEFAULT.into(),
+            new: "0.6".into(),
+            extra: Some(KeyDiff {
+                key: "nozzle_temperature_initial_layer".into(),
+                old: "225".into(),
+                new: "230".into(),
+            }),
+            target_name: "Bambu PLA Basic (calibrated) @BBL H2D".into(),
+            will_copy: true,
+            variant: Some("Direct Drive Standard".into()),
+        };
+        let value = ValueView {
+            value: 225.0,
+            text: "225".into(),
+            display: "225 °C".into(),
+            change: Some(change.clone()),
+            change_error: None,
+        };
+        let preview = |diagram: Diagram, value: Option<ValueView>| PreviewView {
+            labels: cal::labels(&diagram),
+            diagram,
+            value,
+        };
+        let result = ResultView {
+            id: 11,
+            test: TestKind::Retraction,
+            value: "0.6".into(),
+            preset_key: Some("filament_retraction_length".into()),
+            old_value: Some("nil".into()),
+            old_display: Some(PRINTER_DEFAULT.into()),
+            new_value: Some("0.6".into()),
+            target_name: "Bambu PLA Basic (calibrated) @BBL H2D".into(),
+            variant: Some("Direct Drive Standard".into()),
+            saved: true,
+            undone: false,
+            created_at: 300,
+            photo: Some("3f2a.jpg".into()),
+            journal_entry_id: Some(42),
+            can_undo: true,
+        };
+        let run = RunView {
+            id: 1,
+            preset_name: "Bambu PLA Basic @BBL H2D".into(),
+            preset_path: "/sys/Bambu PLA Basic @BBL H2D.json".into(),
+            target_name: "Bambu PLA Basic (calibrated) @BBL H2D".into(),
+            target_path: "/user/Bambu PLA Basic (calibrated) @BBL H2D.json".into(),
+            is_system: false,
+            will_save_as: None,
+            filament_id: Some("GFA00".into()),
+            material: "PLA".into(),
+            printer_model: "H2D".into(),
+            nozzle: "0.4".into(),
+            slot_label: Some("A2".into()),
+            variant: Some("Direct Drive Standard".into()),
+            variants: vec![
+                "Direct Drive Standard".into(),
+                "Direct Drive High Flow".into(),
+            ],
+            needs_variant: false,
+            preset_error: None,
+            steps: vec![
+                StepView {
+                    step: StepKey::Temperature,
+                    status: StepStatus::Saved {
+                        result_id: 10,
+                        value: "225 °C".into(),
+                        at: 200,
+                    },
+                    fine_ready: false,
+                    opened_at: Some(150),
+                },
+                StepView {
+                    step: StepKey::Flow,
+                    status: StepStatus::Skipped,
+                    fine_ready: true,
+                    opened_at: None,
+                },
+                StepView {
+                    step: StepKey::Retraction,
+                    status: StepStatus::Recorded {
+                        result_id: 11,
+                        value: "0.6 mm".into(),
+                        at: 300,
+                    },
+                    fine_ready: false,
+                    opened_at: Some(170),
+                },
+                StepView {
+                    step: StepKey::MaxSpeed,
+                    status: StepStatus::NotRun,
+                    fine_ready: false,
+                    opened_at: None,
+                },
+            ],
+            results: vec![result],
+            created_at: 100,
+            updated_at: 300,
+        };
+        let entry = crate::journal::types::PrintEntry {
+            id: 42,
+            job_key: "local:cube|".into(),
+            name: "Gear housing".into(),
+            gcode_file: Some("gear.gcode.3mf".into()),
+            plate: Some(1),
+            printer_model: Some("H2D".into()),
+            started_at: 1_000,
+            start_approx: false,
+            ended_at: Some(2_000),
+            outcome: Outcome::Finished,
+            error_code: None,
+            hms: vec![],
+            verdict: Some(Verdict::Usable),
+            tags: vec!["stringing".into()],
+            notes: "ok".into(),
+            slice: None,
+            trays: vec![TrayUse {
+                ams_id: 0,
+                tray_id: 1,
+                label: "A2".into(),
+                tray_type: "PLA".into(),
+                color: "FFFFFFFF".into(),
+                brand: "PLA Basic".into(),
+            }],
+            photos: vec![Photo {
+                id: 7,
+                file_name: "a.jpg".into(),
+                added_at: 1_500,
+            }],
+            analyses: vec![3],
+            purpose: Some(PrintPurpose {
+                calibration_result_id: 11,
+                test: TestKind::Retraction,
+            }),
+            updated_at: 2_000,
+        };
+        let fixture = json!({
+            "setups": setups,
+            "readings": readings,
+            "runs": to(&vec![RunSummary {
+                id: 1,
+                preset_name: "Bambu PLA Basic @BBL H2D".into(),
+                slot_label: Some("A2".into()),
+                updated_at: 300,
+                result_ids: vec![10, 11],
+            }]),
+            "run": to(&run),
+            "defaults": to(&Defaults {
+                setup: Setup::Temperature { start: 230, end: 190 },
+                current: Some("220".into()),
+                material_label: Some("PLA".into()),
+            }),
+            "preview_bands": to(&preview(cal::diagram(&Setup::Temperature { start: 230, end: 220 }), Some(value))),
+            "preview_patches": to(&preview(cal::diagram(&Setup::FlowFine { base: 1.0 }), None)),
+            "preview_ruler": to(&preview(cal::diagram(&Setup::Retraction { start: 0.0, end: 1.0, step: 0.5 }), None)),
+            "preview_none": to(&preview(cal::diagram(&Setup::PressureAdvance {}), None)),
+            "saved": to(&SaveAnswer::Saved {
+                run: run.clone(),
+                result_id: 11,
+                studio_running: true,
+                assign_error: Some("No printer configured".into()),
+            }),
+            "changed": to(&SaveAnswer::Changed { preview: preview(Diagram::None {}, None) }),
+            "suggest": to(&SuggestAnswer {
+                photo: "3f2a.jpg".into(),
+                suggestion: Some(Suggestion {
+                    pick: "225 °C".into(),
+                    confidence: 0.8,
+                    reason: "Smoothest band.\nSlight stringing above.".into(),
+                }),
+                note: None,
+            }),
+            "link_candidates": to(&LinkCandidates { suggested: Some(42), entries: vec![entry] }),
+        });
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/calibration/wire.json");
+        if std::env::var_os("UPDATE_WIRE_FIXTURE").is_some() {
+            let text = serde_json::to_string_pretty(&fixture).unwrap() + "\n";
+            std::fs::write(&path, text).unwrap();
+        }
+        let on_disk: Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("src/calibration/wire.json is missing"),
+        )
+        .unwrap();
+        assert_eq!(
+            on_disk, fixture,
+            "the wire changed: rerun with UPDATE_WIRE_FIXTURE=1 and update the frontend mirrors"
+        );
+    }
 }

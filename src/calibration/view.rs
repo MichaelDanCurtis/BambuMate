@@ -26,6 +26,8 @@ pub const PA_NOTE: &str =
 pub const NOT_A_BAND: &str = "That temperature isn't one of the bands on this tower.";
 /// Most characters shown of a preset or print name.
 const NAME_MAX: usize = 96;
+/// Most characters shown of an error the backend passed on.
+const MESSAGE_MAX: usize = 200;
 /// Most characters shown of the AI's reason.
 const REASON_MAX: usize = 400;
 /// Most characters shown of a printer model.
@@ -482,7 +484,10 @@ pub fn save_notes(studio_running: bool, assign_error: Option<&str>) -> Vec<Strin
         notes.push(STUDIO_RUNNING.to_string());
     }
     if let Some(e) = assign_error {
-        notes.push(format!("Saved, but the slot couldn't be assigned: {e}"));
+        notes.push(format!(
+            "Saved, but the slot couldn't be assigned: {}",
+            untrusted_text(e, MESSAGE_MAX)
+        ));
     }
     notes
 }
@@ -505,10 +510,12 @@ pub fn history_change(r: &ResultView) -> Option<String> {
     }
 }
 
-/// The AI's reason, cut and cleaned. It is shown as a plain text node,
+/// The AI's reason on one line (runs of whitespace, newlines and tabs
+/// become one space), cut and cleaned. It is shown as a plain text node,
 /// never as HTML.
 pub fn reason_line(reason: &str) -> String {
-    untrusted_text(reason.trim(), REASON_MAX)
+    let one_line = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    untrusted_text(&one_line, REASON_MAX)
 }
 
 #[cfg(test)]
@@ -937,6 +944,10 @@ mod tests {
                 "Saved, but the slot couldn't be assigned: No printer configured".to_string()
             ]
         );
+        assert_eq!(
+            save_notes(false, Some("odd\u{202E}\nerror"))[0],
+            "Saved, but the slot couldn't be assigned: odd\u{FFFD}\u{FFFD}error"
+        );
         let mut undone = result(11, TestKind::Temperature);
         undone.undone = true;
         assert_eq!(history_value(&undone), "225 °C · undone");
@@ -959,9 +970,10 @@ mod tests {
         recorded.old_display = None;
         assert_eq!(history_change(&recorded), None);
         assert_eq!(
-            reason_line("Sharp edge\n at +5"),
-            "Sharp edge\u{FFFD} at +5"
+            reason_line("  Sharp edge\n\tat +5.\r\n\r\nSlight stringing  "),
+            "Sharp edge at +5. Slight stringing"
         );
+        assert_eq!(reason_line("a\u{7}b\u{202E}c"), "a\u{FFFD}b\u{FFFD}c");
         assert_eq!(reason_line(&"x".repeat(1000)).chars().count(), 400);
     }
 }
