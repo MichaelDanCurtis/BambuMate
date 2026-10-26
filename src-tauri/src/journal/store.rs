@@ -29,10 +29,9 @@ pub const NEWER_SCHEMA: &str =
 pub const PHOTO_FAILED: &str = "The photo couldn't be saved.";
 pub const GONE: &str = "That print isn't in the journal any more.";
 
-/// Version 1. `IF NOT EXISTS` and `BEGIN IMMEDIATE` let two connections
-/// race to create it.
+/// Version 1's tables. It runs inside `migrate_to_v1`'s transaction, and
+/// `IF NOT EXISTS` keeps it harmless on a journal that has them.
 const SCHEMA_V1: &str = "
-BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS prints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_key TEXT NOT NULL,
@@ -81,12 +80,30 @@ CREATE TABLE IF NOT EXISTS print_analyses (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (print_id, session_id)
 );
-PRAGMA user_version = 1;
-COMMIT;
 ";
+
+/// Creates version 1 in an immediate transaction that reads the version
+/// again, so a connection that lost a race to create the journal never
+/// lowers a version another one has already raised.
+fn migrate_to_v1(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(save_err)?;
+    let version: i64 = tx
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(read_err)?;
+    if version < 1 {
+        tx.execute_batch(SCHEMA_V1).map_err(save_err)?;
+        tx.execute_batch("PRAGMA user_version = 1;")
+            .map_err(save_err)?;
+    }
+    tx.commit().map_err(save_err)
+}
 
 /// Version 2 adds `purpose_json`. It runs in an immediate transaction that
 /// reads the version again, so two connections can't both alter the table.
+/// It also skips the `ALTER` when the column is already there, so a journal
+/// left at version 1 with the column still opens and moves to version 2.
 fn migrate_to_v2(conn: &mut Connection) -> Result<(), String> {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -95,10 +112,20 @@ fn migrate_to_v2(conn: &mut Connection) -> Result<(), String> {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(read_err)?;
     if version < 2 {
-        tx.execute_batch(
-            "ALTER TABLE prints ADD COLUMN purpose_json TEXT; PRAGMA user_version = 2;",
-        )
-        .map_err(save_err)?;
+        let has_column: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('prints') \
+                 WHERE name = 'purpose_json')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(read_err)?;
+        if !has_column {
+            tx.execute_batch("ALTER TABLE prints ADD COLUMN purpose_json TEXT;")
+                .map_err(save_err)?;
+        }
+        tx.execute_batch("PRAGMA user_version = 2;")
+            .map_err(save_err)?;
     }
     tx.commit().map_err(save_err)
 }
@@ -243,7 +270,7 @@ impl JournalStore {
             .map_err(read_err)?;
         match version {
             0 => {
-                conn.execute_batch(SCHEMA_V1).map_err(save_err)?;
+                migrate_to_v1(&mut conn)?;
                 migrate_to_v2(&mut conn)?;
             }
             1 => migrate_to_v2(&mut conn)?,
@@ -878,6 +905,22 @@ impl JournalStore {
             .execute(
                 "UPDATE prints SET purpose_json = ?2, updated_at = ?3 WHERE id = ?1",
                 params![id, json, now],
+            )
+            .map_err(save_err)?;
+        Ok(n > 0)
+    }
+
+    /// Clears the purpose only if it still points at `result_id`, in one
+    /// statement, so a purpose set since by another link is left alone.
+    /// `false` when the entry is gone or points elsewhere.
+    pub fn clear_purpose_if(&self, id: i64, result_id: i64, now: i64) -> Result<bool, String> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE prints SET purpose_json = NULL, updated_at = ?3 \
+                 WHERE id = ?1 AND purpose_json IS NOT NULL \
+                 AND json_extract(purpose_json, '$.calibration_result_id') = ?2",
+                params![id, result_id, now],
             )
             .map_err(save_err)?;
         Ok(n > 0)
@@ -1717,8 +1760,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = JournalPaths::in_dir(dir.path());
         {
-            let raw = Connection::open(&paths.db).unwrap();
-            raw.execute_batch(SCHEMA_V1).unwrap();
+            let mut raw = Connection::open(&paths.db).unwrap();
+            migrate_to_v1(&mut raw).unwrap();
             raw.execute(
                 "INSERT INTO prints (job_key, name, started_at, updated_at) VALUES ('k', 'Old', 10, 10)",
                 [],
@@ -1803,8 +1846,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = JournalPaths::in_dir(dir.path());
         {
-            let raw = Connection::open(&paths.db).unwrap();
-            raw.execute_batch(SCHEMA_V1).unwrap();
+            let mut raw = Connection::open(&paths.db).unwrap();
+            migrate_to_v1(&mut raw).unwrap();
             raw.execute(
                 "INSERT INTO prints (job_key, name, started_at, ended_at, outcome, verdict, \
                  tags_json, notes, updated_at) \
@@ -1842,5 +1885,155 @@ mod tests {
         drop(raw);
         let s = JournalStore::open(&paths).unwrap();
         assert_eq!(s.list(&JournalFilter::default()).unwrap(), before);
+    }
+
+    /// A journal as the build before the fix could leave it: the column is
+    /// there, but a lost race reset the version to 1.
+    #[test]
+    fn a_version_1_journal_that_already_has_the_column_opens_at_version_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        {
+            let mut raw = Connection::open(&paths.db).unwrap();
+            migrate_to_v1(&mut raw).unwrap();
+            raw.execute_batch("ALTER TABLE prints ADD COLUMN purpose_json TEXT;")
+                .unwrap();
+            raw.execute(
+                "INSERT INTO prints (job_key, name, started_at, updated_at) VALUES ('k', 'Old', 10, 10)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = JournalStore::open(&paths).unwrap();
+        let version: i64 = s
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(s.list(&JournalFilter::default()).unwrap().len(), 1);
+        assert!(s.set_purpose(1, None, 11).unwrap());
+    }
+
+    #[test]
+    fn a_connection_that_lost_the_race_to_create_the_journal_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        // Both connections read version 0. The first creates version 2.
+        let mut a = Connection::open(&paths.db).unwrap();
+        let mut b = Connection::open(&paths.db).unwrap();
+        migrate_to_v1(&mut a).unwrap();
+        migrate_to_v2(&mut a).unwrap();
+        // The second then runs the same steps.
+        migrate_to_v1(&mut b).unwrap();
+        let after_v1: i64 = b
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after_v1, 2, "creating version 1 again does not lower it");
+        migrate_to_v2(&mut b).unwrap();
+        let version: i64 = b
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2, "the version is not lowered");
+        drop((a, b));
+        let s = JournalStore::open(&paths).unwrap();
+        assert!(s.list(&JournalFilter::default()).unwrap().is_empty());
+        assert!(!s.set_purpose(1, None, 1).unwrap());
+    }
+
+    /// Adds a print that ended; `None` leaves `ended_at` empty, as an
+    /// unknown outcome does.
+    fn add_ended(
+        s: &JournalStore,
+        key: &str,
+        start: i64,
+        outcome: Outcome,
+        end: Option<i64>,
+    ) -> i64 {
+        let id = s.start(&new_print(key, key, start), start).unwrap();
+        let end = PrintEnd {
+            outcome,
+            ended_at: end,
+            error_code: None,
+            hms: Vec::new(),
+        };
+        s.end(id, &end, end.ended_at.unwrap_or(start)).unwrap();
+        id
+    }
+
+    #[test]
+    fn a_print_that_ended_exactly_when_the_step_opened_is_suggested() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        add_ended(&s, "before", 100, Outcome::Finished, Some(999));
+        let on = add_ended(&s, "on", 200, Outcome::Finished, Some(1_000));
+        let got = s.link_candidates(1_000).unwrap();
+        assert_eq!(got.suggested, Some(on), "ended_at >= since, not >");
+    }
+
+    #[test]
+    fn a_print_started_before_the_step_but_ended_after_it_is_suggested() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        add_ended(&s, "old", 100, Outcome::Finished, Some(200));
+        let long = add_ended(&s, "long", 500, Outcome::Finished, Some(1_500));
+        let got = s.link_candidates(1_000).unwrap();
+        assert_eq!(got.suggested, Some(long), "the end counts, not the start");
+    }
+
+    #[test]
+    fn a_print_with_no_end_time_counts_from_when_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let early = add_ended(&s, "early", 900, Outcome::Unknown, None);
+        assert_eq!(s.link_candidates(1_000).unwrap().suggested, None);
+        let late = add_ended(&s, "late", 1_100, Outcome::Unknown, None);
+        let got = s.link_candidates(1_000).unwrap();
+        assert_eq!(got.suggested, Some(late));
+        assert_eq!(
+            got.entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![late, early]
+        );
+    }
+
+    #[test]
+    fn prints_that_started_together_are_all_listed_newest_id_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let old = add_ended(&s, "old", 1_000, Outcome::Finished, Some(1_100));
+        let one = add_ended(&s, "one", 2_000, Outcome::Finished, Some(2_100));
+        let two = add_ended(&s, "two", 2_000, Outcome::Finished, Some(2_200));
+        let got = s.link_candidates(1_500).unwrap();
+        assert_eq!(got.suggested, Some(two));
+        assert_eq!(
+            got.entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![two, one, old],
+            "the equal start is not dropped from the tail"
+        );
+    }
+
+    #[test]
+    fn a_purpose_is_cleared_only_while_it_still_points_at_that_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("p", "Tower", 1_000), 1_000).unwrap();
+        let other = s.start(&new_print("q", "Other", 1_000), 1_000).unwrap();
+        let purpose = |n| PrintPurpose {
+            calibration_result_id: n,
+            test: crate::calibration::tests::TestKind::Temperature,
+        };
+        // No purpose yet, or one for another result: nothing changes.
+        assert!(!s.clear_purpose_if(id, 11, 1_100).unwrap());
+        s.set_purpose(id, Some(&purpose(12)), 1_200).unwrap();
+        assert!(!s.clear_purpose_if(id, 11, 1_300).unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.purpose, Some(purpose(12)));
+        assert_eq!(e.updated_at, 1_200, "a refused clear does not touch it");
+        // The right result clears it, and only on that entry.
+        s.set_purpose(other, Some(&purpose(12)), 1_200).unwrap();
+        assert!(s.clear_purpose_if(id, 12, 1_400).unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!((e.purpose, e.updated_at), (None, 1_400));
+        assert_eq!(s.get(other).unwrap().unwrap().purpose, Some(purpose(12)));
+        assert!(!s.clear_purpose_if(999, 12, 1_400).unwrap());
     }
 }
