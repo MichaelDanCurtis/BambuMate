@@ -339,12 +339,13 @@ pub struct StepView {
     pub opened_at: Option<i64>,
 }
 
-/// The newest result of `test` that isn't undone.
+/// The newest result of `test` that isn't undone. Newest is the highest id
+/// (insertion order), so a clock that steps back can't reorder the undo.
 pub fn latest_live(results: &[ResultRow], test: TestKind) -> Option<&ResultRow> {
     results
         .iter()
         .filter(|r| r.test == test && !r.undone)
-        .max_by_key(|r| (r.created_at, r.id))
+        .max_by_key(|r| r.id)
 }
 
 /// The newest saved result that isn't undone: the only one Undo may take back.
@@ -352,7 +353,7 @@ pub fn newest_saved(results: &[ResultRow]) -> Option<&ResultRow> {
     results
         .iter()
         .filter(|r| r.saved && !r.undone)
-        .max_by_key(|r| (r.created_at, r.id))
+        .max_by_key(|r| r.id)
 }
 
 /// Every step's status, in the strip's order.
@@ -364,7 +365,7 @@ pub fn step_views(results: &[ResultRow], steps: &[StepRow]) -> Vec<StepView> {
                 .tests()
                 .iter()
                 .filter_map(|&t| latest_live(results, t))
-                .max_by_key(|r| (r.created_at, r.id));
+                .max_by_key(|r| r.id);
             let row = steps.iter().find(|s| s.step == step);
             let status = match latest {
                 Some(r) if r.saved => StepStatus::Saved {
@@ -431,6 +432,12 @@ fn result_row(r: &Row) -> rusqlite::Result<Option<ResultRow>> {
         return Ok(None);
     };
     let changes: String = r.get(12)?;
+    // A row whose changes can't be read is an error, never an empty list:
+    // an undo of it would restore nothing and still mark it undone.
+    let changes: Vec<KeyChange> = serde_json::from_str(&changes).map_err(|e| {
+        tracing::warn!("calibration: result {id} has unreadable changes: {e}");
+        rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(e))
+    })?;
     Ok(Some(ResultRow {
         id,
         run_id: r.get(1)?,
@@ -444,7 +451,7 @@ fn result_row(r: &Row) -> rusqlite::Result<Option<ResultRow>> {
         target_path: r.get(9)?,
         variant: r.get(10)?,
         backup_path: r.get(11)?,
-        changes: serde_json::from_str(&changes).unwrap_or_default(),
+        changes,
         created_copy: r.get(13)?,
         photo_path: r.get(14)?,
         journal_entry_id: r.get(15)?,
@@ -652,7 +659,7 @@ impl CalibrationStore {
         let mut stmt = self
             .conn
             .prepare(&format!(
-                "SELECT {RESULT_COLUMNS} FROM results WHERE run_id = ?1 ORDER BY created_at, id"
+                "SELECT {RESULT_COLUMNS} FROM results WHERE run_id = ?1 ORDER BY id"
             ))
             .map_err(read_err)?;
         let rows = stmt.query_map([run_id], result_row).map_err(read_err)?;
@@ -665,8 +672,16 @@ impl CalibrationStore {
             return Ok(false);
         };
         let tx = self.conn.unchecked_transaction().map_err(save_err)?;
-        tx.execute("UPDATE results SET undone = 1 WHERE id = ?1", [id])
+        let n = tx
+            .execute(
+                "UPDATE results SET undone = 1 WHERE id = ?1 AND undone = 0",
+                [id],
+            )
             .map_err(save_err)?;
+        if n == 0 {
+            // Already undone (a second click, or another window): not ours.
+            return Ok(false);
+        }
         self.touch_run(row.run_id, now)?;
         tx.commit().map_err(save_err)?;
         Ok(true)
@@ -773,7 +788,11 @@ impl CalibrationStore {
             return None;
         }
         let path = self.photo_dir().join(file_name);
-        path.is_file().then_some(path)
+        // `symlink_metadata`: a link planted in the folder is not a photo.
+        std::fs::symlink_metadata(&path)
+            .ok()?
+            .is_file()
+            .then_some(path)
     }
 }
 
@@ -1117,5 +1136,386 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"\xFF\xD8\xFFjpeg");
         assert_eq!(s.photo_path("../calibration.db"), None);
         assert_eq!(s.photo_path("missing.jpg"), None);
+    }
+
+    fn count(paths: &CalibrationPaths, table: &str) -> i64 {
+        Connection::open(&paths.db)
+            .unwrap()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_photo_name_that_leaves_the_folder_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let inside = s.save_photo(b"\xFF\xD8\xFFjpeg").unwrap();
+        assert!(s.photo_path(&inside).is_some(), "a real photo is found");
+        let root = dir.path().join("calibration");
+        // Real files the guard has to keep out of reach.
+        let secret = root.join("secret.jpg");
+        std::fs::write(&secret, b"secret").unwrap();
+        let outside = dir.path().join("outside.jpg");
+        std::fs::write(&outside, b"outside").unwrap();
+        let hidden = root.join("photos").join(".hidden.jpg");
+        std::fs::write(&hidden, b"hidden").unwrap();
+        std::fs::create_dir_all(root.join("photos").join("a")).unwrap();
+        std::fs::write(root.join("photos").join("a").join("b.jpg"), b"nested").unwrap();
+
+        assert_eq!(s.photo_path("../secret.jpg"), None, "parent folder");
+        assert_eq!(s.photo_path("..\\secret.jpg"), None, "backslash");
+        assert_eq!(
+            s.photo_path(outside.to_str().unwrap()),
+            None,
+            "an absolute path replaces the base in a join"
+        );
+        assert_eq!(s.photo_path(".hidden.jpg"), None, "a leading dot");
+        assert_eq!(s.photo_path("a/b.jpg"), None, "a sub-folder");
+        assert_eq!(s.photo_path(""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_the_photo_folder_is_not_a_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        s.save_photo(b"\xFF\xD8\xFFjpeg").unwrap();
+        let outside = dir.path().join("outside.jpg");
+        std::fs::write(&outside, b"outside").unwrap();
+        let link = dir
+            .path()
+            .join("calibration")
+            .join("photos")
+            .join("link.jpg");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(link.is_file(), "the link does resolve to a file");
+        assert_eq!(s.photo_path("link.jpg"), None);
+    }
+
+    #[test]
+    fn a_save_after_a_skip_wins_and_a_skip_after_a_save_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let run = s.create_run(&new_run("/p"), 100).unwrap();
+        s.set_skipped(run.id, StepKey::Temperature, true, 110)
+            .unwrap();
+        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap());
+        assert_eq!(views[0].status, StepStatus::Skipped);
+        let saved = s.add_result(&temp_result(run.id, 1), 120).unwrap();
+        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap());
+        assert_eq!(
+            views[0].status,
+            StepStatus::Saved {
+                result_id: saved,
+                value: "225 °C".into(),
+                at: 120
+            },
+            "the skip flag is still set, and the save wins"
+        );
+        // Taking the save back falls to the skip that is still on record.
+        s.mark_undone(saved, 130).unwrap();
+        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap());
+        assert_eq!(views[0].status, StepStatus::Skipped);
+
+        // The other order: a save, then a skip.
+        let flow = s
+            .add_result(
+                &NewResult {
+                    setup: Setup::FlowCoarse { base: 0.98 },
+                    reading: Reading::FlowCoarse { modifier: 5 },
+                    value: 1.029,
+                    preset_key: Some("filament_flow_ratio".into()),
+                    ..temp_result(run.id, 0)
+                },
+                140,
+            )
+            .unwrap();
+        s.set_skipped(run.id, StepKey::Flow, true, 150).unwrap();
+        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap());
+        assert_eq!(
+            views[1].status,
+            StepStatus::Saved {
+                result_id: flow,
+                value: "1.029".into(),
+                at: 140
+            }
+        );
+    }
+
+    #[test]
+    fn undo_takes_the_newest_live_saved_result_and_never_a_recorded_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let run = s.create_run(&new_run("/p"), 100).unwrap();
+        let first = s.add_result(&temp_result(run.id, 1), 110).unwrap();
+        let second = s.add_result(&temp_result(run.id, 2), 120).unwrap();
+        // A newer recorded-only result must not shadow the saved ones.
+        let pa = s.add_result(&pa_result(run.id), 130).unwrap();
+        let results = s.results(run.id).unwrap();
+        assert_eq!(newest_saved(&results).map(|r| r.id), Some(second));
+        assert!(s.mark_undone(second, 140).unwrap());
+        let results = s.results(run.id).unwrap();
+        assert_eq!(
+            newest_saved(&results).map(|r| r.id),
+            Some(first),
+            "the undone one is skipped"
+        );
+        assert!(s.mark_undone(first, 150).unwrap());
+        let results = s.results(run.id).unwrap();
+        assert_eq!(
+            newest_saved(&results),
+            None,
+            "the recorded one is never offered"
+        );
+        assert!(results.iter().any(|r| r.id == pa && !r.undone));
+        assert_eq!(
+            latest_live(&results, TestKind::PressureAdvance).map(|r| r.id),
+            Some(pa)
+        );
+        assert_eq!(latest_live(&results, TestKind::Temperature), None);
+    }
+
+    #[test]
+    fn a_second_undo_of_the_same_result_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let run = s.create_run(&new_run("/p"), 100).unwrap();
+        let id = s.add_result(&temp_result(run.id, 1), 110).unwrap();
+        assert!(s.mark_undone(id, 120).unwrap());
+        assert!(!s.mark_undone(id, 130).unwrap(), "already undone");
+        assert_eq!(
+            s.run(run.id).unwrap().unwrap().updated_at,
+            120,
+            "the refused undo touched nothing"
+        );
+    }
+
+    #[test]
+    fn an_insertion_order_decides_the_newest_even_if_the_clock_steps_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let run = s.create_run(&new_run("/p"), 100).unwrap();
+        let first = s.add_result(&temp_result(run.id, 1), 500).unwrap();
+        let second = s.add_result(&temp_result(run.id, 2), 400).unwrap();
+        let results = s.results(run.id).unwrap();
+        let ids: Vec<i64> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![first, second], "oldest first by insertion");
+        assert_eq!(newest_saved(&results).map(|r| r.id), Some(second));
+        assert_eq!(
+            latest_live(&results, TestKind::Temperature).map(|r| r.id),
+            Some(second)
+        );
+        let views = step_views(&results, &[]);
+        assert!(
+            matches!(views[0].status, StepStatus::Saved { result_id, .. } if result_id == second)
+        );
+    }
+
+    #[test]
+    fn two_runs_keep_their_results_steps_and_lookups_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let a = s.create_run(&new_run("/p"), 100).unwrap();
+        let other_printer = NewRun {
+            printer_model: "X1C".into(),
+            ..new_run("/p")
+        };
+        let b = s.create_run(&other_printer, 200).unwrap();
+        let other_nozzle = NewRun {
+            nozzle: "0.6".into(),
+            ..new_run("/p")
+        };
+        let c = s.create_run(&other_nozzle, 300).unwrap();
+
+        // find_run: printer and nozzle are part of the key.
+        assert_eq!(
+            s.find_run("/p", "H2D", "0.4").unwrap().map(|r| r.id),
+            Some(a.id)
+        );
+        assert_eq!(
+            s.find_run("/p", "X1C", "0.4").unwrap().map(|r| r.id),
+            Some(b.id)
+        );
+        assert_eq!(
+            s.find_run("/p", "H2D", "0.6").unwrap().map(|r| r.id),
+            Some(c.id)
+        );
+        assert!(s.find_run("/p", "P1S", "0.4").unwrap().is_none());
+        // ...and the newest of two matches wins, whichever way it was touched.
+        let a2 = s.create_run(&new_run("/p"), 400).unwrap();
+        assert_eq!(
+            s.find_run("/p", "H2D", "0.4").unwrap().map(|r| r.id),
+            Some(a2.id)
+        );
+        s.add_result(&temp_result(a.id, 1), 500).unwrap();
+        assert_eq!(
+            s.find_run("/p", "H2D", "0.4").unwrap().map(|r| r.id),
+            Some(a.id)
+        );
+        // runs(): newest update first.
+        let order: Vec<i64> = s.runs().unwrap().iter().map(|r| r.id).collect();
+        assert_eq!(order, vec![a.id, a2.id, c.id, b.id]);
+
+        // results are per run.
+        let ra = s.add_result(&temp_result(a.id, 2), 510).unwrap();
+        let rb = s.add_result(&temp_result(b.id, 3), 520).unwrap();
+        let in_a: Vec<i64> = s.results(a.id).unwrap().iter().map(|r| r.id).collect();
+        assert_eq!(in_a.len(), 2);
+        assert!(in_a.contains(&ra) && !in_a.contains(&rb));
+        assert_eq!(
+            s.results(b.id)
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![rb]
+        );
+        assert!(s.results(c.id).unwrap().is_empty());
+
+        // steps are per run: the same step keeps its own first-open time.
+        assert_eq!(s.note_opened(a.id, StepKey::Flow, 600).unwrap(), 600);
+        assert_eq!(s.note_opened(b.id, StepKey::Flow, 700).unwrap(), 700);
+        s.set_skipped(b.id, StepKey::Retraction, true, 710).unwrap();
+        assert_eq!(
+            s.steps(a.id).unwrap(),
+            vec![StepRow {
+                step: StepKey::Flow,
+                opened_at: 600,
+                skipped: false
+            }]
+        );
+        assert_eq!(s.steps(b.id).unwrap().len(), 2);
+        assert!(s.steps(c.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_missing_run_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        assert!(!s.set_variant(999, "x", 1).unwrap());
+        assert!(!s.set_copy(999, Some(("n", "p")), 1).unwrap());
+    }
+
+    #[test]
+    fn changes_that_cannot_be_read_are_an_error_and_undo_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = CalibrationPaths::in_dir(dir.path());
+        let s = CalibrationStore::open(&paths).unwrap();
+        let run = s.create_run(&new_run("/p"), 100).unwrap();
+        let good = s.add_result(&temp_result(run.id, 1), 110).unwrap();
+        let bad = s.add_result(&temp_result(run.id, 2), 120).unwrap();
+        s.conn
+            .execute(
+                "UPDATE results SET changes = 'not json' WHERE id = ?1",
+                [bad],
+            )
+            .unwrap();
+        assert_eq!(s.result(bad), Err(READ_FAILED.to_string()));
+        assert_eq!(s.results(run.id), Err(READ_FAILED.to_string()));
+        assert_eq!(s.mark_undone(bad, 130), Err(READ_FAILED.to_string()));
+        let undone: bool = s
+            .conn
+            .query_row("SELECT undone FROM results WHERE id = ?1", [bad], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(!undone, "an unreadable row is never marked undone");
+        assert!(s.result(good).unwrap().is_some());
+    }
+
+    #[test]
+    fn running_the_schema_again_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = CalibrationPaths::in_dir(dir.path());
+        let s = CalibrationStore::open(&paths).unwrap();
+        let run = s.create_run(&new_run("/p"), 100).unwrap();
+        s.conn.execute_batch(SCHEMA_V1).unwrap();
+        s.conn.execute_batch(SCHEMA_V1).unwrap();
+        let names = |kind: &str| -> Vec<String> {
+            let mut stmt = s
+                .conn
+                .prepare(
+                    "SELECT name FROM sqlite_master WHERE type = ?1 \
+                     AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                )
+                .unwrap();
+            stmt.query_map([kind], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(names("table"), ["results", "runs", "steps"]);
+        assert_eq!(names("index"), ["idx_results_run", "idx_runs_preset"]);
+        let version: i64 = s
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(s.run(run.id).unwrap().is_some(), "the data survived");
+    }
+
+    #[test]
+    fn foreign_keys_are_on_and_deleting_a_run_cascades() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = CalibrationPaths::in_dir(dir.path());
+        let s = CalibrationStore::open(&paths).unwrap();
+        let on: i64 = s
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1, "foreign keys are enforced on the connection");
+        let a = s.create_run(&new_run("/a"), 1).unwrap();
+        let b = s.create_run(&new_run("/b"), 2).unwrap();
+        for run in [a.id, b.id] {
+            s.add_result(&temp_result(run, 1), 3).unwrap();
+            s.note_opened(run, StepKey::Flow, 3).unwrap();
+        }
+        assert_eq!(count(&paths, "results"), 2);
+        assert_eq!(count(&paths, "steps"), 2);
+        s.conn
+            .execute("DELETE FROM runs WHERE id = ?1", [a.id])
+            .unwrap();
+        assert_eq!(
+            count(&paths, "results"),
+            1,
+            "only the other run's results stay"
+        );
+        assert_eq!(count(&paths, "steps"), 1);
+        assert_eq!(
+            s.add_result(&temp_result(a.id, 1), 4),
+            Err(SAVE_FAILED.to_string()),
+            "no orphan rows"
+        );
+        assert_eq!(count(&paths, "results"), 1);
+    }
+
+    #[test]
+    fn two_connections_can_write_in_wal_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = CalibrationPaths::in_dir(dir.path());
+        let first = CalibrationStore::open(&paths).unwrap();
+        let mode: String = first
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        first.create_run(&new_run("/first"), 1).unwrap();
+        let writer_paths = paths.clone();
+        let writer = std::thread::spawn(move || {
+            let second = CalibrationStore::open(&writer_paths).unwrap();
+            for i in 0..20 {
+                second
+                    .create_run(&new_run(&format!("/w{i}")), 10 + i)
+                    .unwrap();
+            }
+        });
+        for i in 0..20 {
+            first
+                .create_run(&new_run(&format!("/m{i}")), 100 + i)
+                .unwrap();
+            first.runs().unwrap();
+        }
+        writer.join().unwrap();
+        assert_eq!(first.runs().unwrap().len(), 41);
     }
 }
