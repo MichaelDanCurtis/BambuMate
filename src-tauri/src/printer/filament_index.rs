@@ -3,6 +3,13 @@
 //! the user's own. Each is resolved through `inherits` to its real
 //! `filament_id` with the slicer's [`PresetIndex::flatten`], so a variant
 //! such as `Bambu PLA Basic @BBL H2C` gets GFA00 from its `@base`.
+//!
+//! The pick is the preset Bambu Studio's AMS sync loads for the spool
+//! (`PresetBundle::sync_ams_list`): the first by name, system and user
+//! alike, that is its own base and is compatible with the printer. A user
+//! preset that inherits another is never picked. So a calibrated copy,
+//! `Bambu PLA Basic (calibrated) @BBL H2D`, is picked over the system
+//! preset it copies, because `(` sorts before `@`.
 
 use std::collections::HashMap;
 
@@ -21,8 +28,9 @@ pub struct Detected {
     pub path: String,
     /// A user preset rather than one of Bambu Studio's system presets.
     pub is_user: bool,
-    /// Every preset with this ID from the same source that fits this printer
-    /// and nozzle (one per nozzle when the nozzle is unknown), by name.
+    /// Every preset with this ID that Studio could pick (its own base) and
+    /// that fits this printer and nozzle (one per nozzle when the nozzle is
+    /// unknown), system and user alike, by name.
     pub variants: Vec<String>,
 }
 
@@ -69,11 +77,15 @@ struct Candidate {
 
 impl FilamentIndex {
     /// Flattens every selectable filament preset in `presets`, already
-    /// loaded, and picks one per ID for `target`. CPU-bound: run it on a
-    /// blocking thread.
+    /// loaded, and picks one per ID for `target`. A user preset that
+    /// inherits another is left out: Studio's AMS sync never loads one.
+    /// CPU-bound: run it on a blocking thread.
     pub fn build(presets: &PresetIndex, target: &PrinterTarget) -> Self {
         let mut groups: HashMap<String, Vec<Candidate>> = HashMap::new();
         for entry in presets.filament_entries() {
+            if !presets.is_own_base(PresetKind::Filament, &entry.name) {
+                continue;
+            }
             let Ok(flat) = presets.flatten(PresetKind::Filament, &entry.name) else {
                 continue;
             };
@@ -202,10 +214,11 @@ const DEFAULT_NOZZLE: f64 = 0.4;
 /// How well a preset fits: 2 for the nozzle (the configured one, else 0.4),
 /// 1 for the configured printer with another nozzle (only while the nozzle
 /// is unknown), `None` for another printer, or for a known nozzle the preset
-/// isn't made for. A preset for every printer fits at 1.
+/// isn't made for. A preset for every printer fits at 2, as Studio counts
+/// it compatible with whichever printer is selected.
 fn fit(compatible: &[String], want: &Want) -> Option<u8> {
     if compatible.is_empty() {
-        return Some(1);
+        return Some(2);
     }
     let diameter = want.nozzle.unwrap_or(DEFAULT_NOZZLE);
     let mut best = None;
@@ -250,32 +263,27 @@ fn nozzles_for(candidates: &[Candidate], want: &Want) -> Vec<f64> {
     out
 }
 
-/// System presets first, user presets only when no system preset fits.
-/// Within a source: the best fit, then the first by name. `variants` are the
-/// presets of that source that fit at all.
+/// Studio's rule: the first preset by name (byte order, as Studio sorts
+/// its presets) that fits, system and user alike. Studio's compatibility is
+/// a yes or no for the printer preset it has selected, which includes the
+/// nozzle. BambuMate may not know the nozzle (or the printer), so the best
+/// fit comes first: with a known printer and nozzle every fitting preset is
+/// a 2 except one whose machine names can't be read. `variants` are every
+/// preset that fits at all.
 fn choose(candidates: &[Candidate], want: &Want) -> Option<Detected> {
-    let mut candidates: Vec<&Candidate> = candidates.iter().collect();
-    candidates.sort_by(|a, b| a.entry.name.cmp(&b.entry.name));
-    for source in [PresetSource::System, PresetSource::User] {
-        let fitting: Vec<(u8, &Candidate)> = candidates
-            .iter()
-            .copied()
-            .filter(|c| c.entry.source == source)
-            .filter_map(|c| fit(&c.compatible, want).map(|f| (f, c)))
-            .collect();
-        let best = fitting
-            .iter()
-            .max_by(|(fa, a), (fb, b)| fa.cmp(fb).then_with(|| b.entry.name.cmp(&a.entry.name)));
-        if let Some((_, c)) = best {
-            return Some(Detected {
-                preset_name: c.entry.name.clone(),
-                path: c.entry.path.to_string_lossy().into_owned(),
-                is_user: source == PresetSource::User,
-                variants: fitting.iter().map(|(_, c)| c.entry.name.clone()).collect(),
-            });
-        }
-    }
-    None
+    let mut fitting: Vec<(u8, &Candidate)> = candidates
+        .iter()
+        .filter_map(|c| fit(&c.compatible, want).map(|f| (f, c)))
+        .collect();
+    fitting.sort_by(|(_, a), (_, b)| a.entry.name.cmp(&b.entry.name));
+    let best = fitting.iter().map(|(f, _)| *f).max()?;
+    let (_, c) = fitting.iter().find(|(f, _)| *f == best)?;
+    Some(Detected {
+        preset_name: c.entry.name.clone(),
+        path: c.entry.path.to_string_lossy().into_owned(),
+        is_user: c.entry.source == PresetSource::User,
+        variants: fitting.iter().map(|(_, c)| c.entry.name.clone()).collect(),
+    })
 }
 
 #[cfg(test)]
@@ -641,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn a_user_preset_resolves_to_itself_and_never_shadows_a_system_preset() {
+    fn a_user_preset_resolves_to_itself_and_one_that_inherits_is_never_picked() {
         let root = fake_bambu_root();
         write(
             root.path(),
@@ -670,31 +678,75 @@ mod tests {
         assert_eq!(
             idx.lookup("GFA00").unwrap().preset_name,
             "Bambu PLA Basic @BBL H2C",
-            "My PLA inherits GFA00, but the system preset comes first"
+            "My PLA inherits GFA00, and Studio never loads a preset that inherits"
         );
         assert!(idx.lookup("HSPETG04").unwrap().is_user);
     }
 
+    /// Calibration's copy of a system preset: a flattened user preset that
+    /// inherits nothing and keeps the system preset's filament_id.
+    fn calibrated_copy(root: &Path, name: &str, compatible: &[&str]) {
+        write(
+            root,
+            &format!("user/{USER}/filament/base/{name}.json"),
+            json!({
+                "name":name,"inherits":"","from":"User",
+                "instantiation":"true","filament_id":"GFA00","filament_type":["PLA"],
+                "compatible_printers":compatible
+            }),
+        );
+    }
+
     #[test]
-    fn a_calibrated_copy_sharing_the_system_id_never_displaces_the_system_preset() {
-        // Calibration's copy of a system preset keeps its filament_id: a
-        // flattened user preset with the same id, printer and nozzle.
+    fn a_calibrated_copy_is_detected_because_bambu_studio_loads_it() {
+        // Studio's AMS sync loads the first preset by name that is its own
+        // base and fits: "(" sorts before "@", so the copy comes first.
         let root = fake_bambu_root();
+        calibrated_copy(
+            root.path(),
+            "Bambu PLA Basic (calibrated) @BBL H2C",
+            &["Bambu Lab H2C 0.4 nozzle"],
+        );
+        let first = index(root.path(), "H2C", Some(0.4))
+            .lookup("GFA00")
+            .unwrap();
+        assert_eq!(first.preset_name, "Bambu PLA Basic (calibrated) @BBL H2C");
+        assert!(first.is_user);
+        assert!(
+            first
+                .path
+                .ends_with("Bambu PLA Basic (calibrated) @BBL H2C.json"),
+            "{}",
+            first.path
+        );
+        assert_eq!(
+            first.variants,
+            vec![
+                "Bambu PLA Basic (calibrated) @BBL H2C",
+                "Bambu PLA Basic @BBL H2C"
+            ]
+        );
+        // A second copy and a preset that inherits the system one, both
+        // sharing its ID: the first copy stays first, and Studio never
+        // loads a preset that inherits, even one named earlier.
+        calibrated_copy(
+            root.path(),
+            "Bambu PLA Basic (calibrated) @BBL H2C (2)",
+            &["Bambu Lab H2C 0.4 nozzle"],
+        );
         write(
             root.path(),
-            &format!("user/{USER}/filament/base/Bambu PLA Basic (calibrated) @BBL H2C.json"),
+            &format!("user/{USER}/filament/Aaa PLA.json"),
             json!({
-                "name":"Bambu PLA Basic (calibrated) @BBL H2C","inherits":"","from":"User",
-                "instantiation":"true","filament_id":"GFA00","filament_type":["PLA"],
-                "compatible_printers":["Bambu Lab H2C 0.4 nozzle"]
+                "type":"filament","name":"Aaa PLA","inherits":"Bambu PLA Basic @BBL H2C",
+                "from":"User","filament_id":"GFA00"
             }),
         );
         let first = index(root.path(), "H2C", Some(0.4))
             .lookup("GFA00")
             .unwrap();
-        assert_eq!(first.preset_name, "Bambu PLA Basic @BBL H2C");
-        assert!(!first.is_user, "the system preset comes first");
-        assert_eq!(first.variants, vec!["Bambu PLA Basic @BBL H2C"]);
+        assert_eq!(first.preset_name, "Bambu PLA Basic (calibrated) @BBL H2C");
+        assert!(!first.variants.contains(&"Aaa PLA".to_string()));
         // Rebuilt (every preset change rebuilds it), the pick stays put.
         for _ in 0..5 {
             assert_eq!(
@@ -702,6 +754,40 @@ mod tests {
                 Some(first.clone())
             );
         }
+        // A copy for another printer doesn't count.
+        assert_eq!(
+            picked(&index(root.path(), "H2S", Some(0.4)), "GFA00").as_deref(),
+            Some("Bambu PLA Basic @BBL H2S")
+        );
+    }
+
+    #[test]
+    fn a_calibrated_copy_for_another_nozzle_never_displaces_the_nozzles_own_preset() {
+        let root = fake_bambu_root();
+        sys(
+            root.path(),
+            "Bambu PLA Basic @BBL H2C 0.2 nozzle",
+            "GFA00",
+            &["Bambu Lab H2C 0.2 nozzle"],
+        );
+        calibrated_copy(
+            root.path(),
+            "Bambu PLA Basic (calibrated) @BBL H2C 0.2 nozzle",
+            &["Bambu Lab H2C 0.2 nozzle"],
+        );
+        assert_eq!(
+            picked(&index(root.path(), "H2C", Some(0.4)), "GFA00").as_deref(),
+            Some("Bambu PLA Basic @BBL H2C")
+        );
+        assert_eq!(
+            picked(&index(root.path(), "H2C", None), "GFA00").as_deref(),
+            Some("Bambu PLA Basic @BBL H2C"),
+            "an unknown nozzle still prefers the 0.4 preset"
+        );
+        assert_eq!(
+            picked(&index(root.path(), "H2C", Some(0.2)), "GFA00").as_deref(),
+            Some("Bambu PLA Basic (calibrated) @BBL H2C 0.2 nozzle")
+        );
     }
 
     #[test]

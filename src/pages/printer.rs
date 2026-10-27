@@ -1165,6 +1165,34 @@ mod tests {
     }
 
     #[test]
+    fn a_calibrated_copy_beside_its_assigned_system_preset_is_named_and_not_offered() {
+        // After calibrating, Studio loads the copy; the system preset the
+        // user assigned shares its ID, so the slot is ✓ Set.
+        let mut s = detected_slot();
+        s.detected = Some(Detected {
+            preset_name: "Bambu PETG HF (calibrated) @BBL H2D".into(),
+            path: "/u/Bambu PETG HF (calibrated) @BBL H2D.json".into(),
+            is_user: true,
+            variants: vec![],
+        });
+        s.assigned_preset = Some("Bambu PETG HF @BBL H2D".into());
+        s.status = SlotStatus::Matches;
+        let line = detected_line(&s);
+        assert_eq!(
+            line.text().as_deref(),
+            Some("Detected: Bambu PETG HF (calibrated)")
+        );
+        assert!(!line.offers(), "the slot already has an assignment");
+        // Once the copy itself is assigned, it is the only name shown.
+        s.assigned_preset = Some("Bambu PETG HF (calibrated) @BBL H2D".into());
+        assert_eq!(
+            detected_line(&s).text().as_deref(),
+            Some("Detected: Bambu PETG HF (calibrated)")
+        );
+        assert!(!detected_line(&s).offers());
+    }
+
+    #[test]
     fn a_detected_profile_is_named_without_its_printer_suffix_and_offered() {
         let line = detected_line(&detected_slot());
         assert_eq!(

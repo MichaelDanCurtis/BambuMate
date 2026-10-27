@@ -398,7 +398,9 @@ fn active_diameter(state: &PrinterState) -> Option<f64> {
 }
 
 /// The preset to calibrate a slot with: an RFID spool's detected preset,
-/// because a stale assignment never beats the spool. Otherwise the
+/// because a stale assignment never beats the spool. That is the preset
+/// Bambu Studio loads for the spool, so once a calibrated copy exists it is
+/// the copy, and calibrating again edits it in place. Otherwise the
 /// assignment (when still installed), else the detected preset.
 fn slot_preset(slot: &SlotView, presets: &PresetIndex) -> Option<(PathBuf, SlotSource)> {
     if slot.tray.empty {
