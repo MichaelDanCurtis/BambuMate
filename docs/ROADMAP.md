@@ -38,7 +38,7 @@ Codex and Claude Agent became AI sources, and the agent drawer was added, using 
 | Print journal | Merged | [#35](https://github.com/MichaelDanCurtis/BambuMate/pull/35) | [spec](superpowers/specs/2026-10-24-print-journal-design.md) · [plan](superpowers/plans/2026-10-24-print-journal.md) |
 | AMS filament detection | Merged | [#36](https://github.com/MichaelDanCurtis/BambuMate/pull/36) | [spec](superpowers/specs/2026-10-25-ams-detection-design.md) · [plan](superpowers/plans/2026-10-25-ams-detection.md) |
 | Calibration mode | Merged | [#37](https://github.com/MichaelDanCurtis/BambuMate/pull/37) | [spec](superpowers/specs/2026-10-25-calibration-mode-design.md) · [plan](superpowers/plans/2026-10-25-calibration-mode.md) |
-| LAN camera | Not started | — | — |
+| LAN camera | In design | — | [spec](superpowers/specs/2026-10-27-lan-camera-design.md) |
 
 ## Hardware checks still to do
 
