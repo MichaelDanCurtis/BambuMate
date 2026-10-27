@@ -581,6 +581,51 @@ mod tests {
     }
 
     #[test]
+    fn after_calibrating_the_slot_detects_the_copy_and_the_assignment_still_matches() {
+        // Calibration's copy keeps GFA00 and inherits nothing, so Bambu
+        // Studio loads it for the spool, and the card names it.
+        let root = crate::slicer::settings::tests::fake_bambu_root();
+        let name = "Bambu PLA Basic (calibrated) @BBL H2C";
+        let path = root
+            .path()
+            .join(format!("user/1881310893/filament/base/{name}.json"));
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "name":name,"inherits":"","from":"User","instantiation":"true",
+                "filament_id":"GFA00","filament_type":["PLA"],
+                "compatible_printers":["Bambu Lab H2C 0.4 nozzle"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let presets = crate::slicer::settings::PresetIndex::load(root.path(), Some("1881310893"));
+        let index = FilamentIndex::build(
+            &presets,
+            &PrinterTarget {
+                model: "H2C".into(),
+                nozzle: Some(0.4),
+            },
+        );
+        let state = state_after(&[H2D_FULL]);
+        let slots = compute_slots_with(&state, &[], &|_| false, Some(&index));
+        let a2 = slots[1].detected.as_ref().unwrap();
+        assert_eq!(a2.preset_name, name);
+        assert!(a2.is_user);
+        assert_eq!(a2.path, path.to_string_lossy());
+        // The system preset assigned before calibrating shares the ID: still
+        // ✓ Set, with the copy as the detected preset.
+        let mut system = assignment(0, 1, Some("GFA00"));
+        system.preset_name = "Bambu PLA Basic @BBL H2C".into();
+        let slots = compute_slots_with(&state, &[system], &|_| false, Some(&index));
+        assert_eq!(slots[1].status, SlotStatus::Matches);
+        assert_eq!(
+            slots[1].detected.as_ref().map(|d| d.preset_name.as_str()),
+            Some(name)
+        );
+    }
+
+    #[test]
     fn a_preset_for_another_nozzle_is_neither_detected_nor_not_installed() {
         let state = state_after(&[H2D_FULL]);
         // GFA00 exists for this printer, but only for the 0.4 nozzle.

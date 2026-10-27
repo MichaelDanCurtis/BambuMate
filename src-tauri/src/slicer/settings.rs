@@ -274,6 +274,19 @@ impl PresetIndex {
         Vec::new()
     }
 
+    /// The preset is its own base, as Bambu Studio's `get_preset_base`
+    /// says: every system preset, and a user preset that inherits nothing.
+    /// A user preset with a parent has that parent's base instead.
+    pub(crate) fn is_own_base(&self, kind: PresetKind, name: &str) -> bool {
+        let idx = self.kind(kind);
+        if idx.sources.get(name) == Some(&PresetSource::System) {
+            return true;
+        }
+        idx.registry
+            .get_by_name(name)
+            .is_some_and(|p| p.inherits().is_none_or(|i| i.trim().is_empty()))
+    }
+
     /// The pickers. With a printer, processes and filaments are limited to
     /// presets compatible with it.
     pub fn list(&self, printer: Option<&str>) -> PresetLists {
