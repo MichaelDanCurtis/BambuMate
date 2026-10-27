@@ -12,8 +12,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::calibration::apply::{self, Change, LedgerNote, Planned, PresetFolders, SaveOutcome};
 use crate::calibration::store::{
-    latest_live, newest_saved, step_views, CalibrationPaths, CalibrationStore, KeyChange,
-    NewResult, NewRun, Run, SlotSource, StepKey, StepView, PHOTO_FAILED, READ_FAILED, RESULT_GONE,
+    coarse_for, newest_saved, step_views, CalibrationPaths, CalibrationStore, KeyChange, NewResult,
+    NewRun, Run, RunSlot, SlotSource, StepKey, StepView, PHOTO_FAILED, READ_FAILED, RESULT_GONE,
     RUN_GONE,
 };
 use crate::calibration::suggest::{self, Suggestion, VisionBackend};
@@ -373,7 +373,7 @@ pub(crate) fn run_view(ctx: &Ctx, run: Run) -> Result<RunView, String> {
         variant: run.variant.clone(),
         variants,
         preset_error,
-        steps: step_views(&results, &steps),
+        steps: step_views(&results, &steps, run.variant.as_deref()),
         results: result_views,
         created_at: run.created_at,
         updated_at: run.updated_at,
@@ -429,7 +429,8 @@ fn first_string(config: &serde_json::Map<String, Value>, key: &str) -> Option<St
 }
 
 /// Opens a run: by id, or for a slot or a preset file. The newest run for
-/// the same file on the same printer and nozzle is reused.
+/// the same file on the same printer and nozzle is reused, and follows the
+/// slot it is opened from.
 pub(crate) fn start_run(
     ctx: &Ctx,
     req: StartRequest,
@@ -472,9 +473,6 @@ pub(crate) fn start_run(
         .map(|d| format!("{d}"))
         .unwrap_or_default();
     let path_text = path.to_string_lossy().into_owned();
-    if let Some(run) = ctx.store.find_run(&path_text, &printer_model, &nozzle)? {
-        return run_view(ctx, run);
-    }
     let variants = apply::variants_of(&config);
     let tray = slot.map(|(s, _)| TrayRef {
         ams_id: s.ams_id,
@@ -488,6 +486,38 @@ pub(crate) fn start_run(
                 .find(|n| n.eq_ignore_ascii_case(&v))
                 .cloned()
         });
+    // One history per preset: a run opened from another slot is the same
+    // run, pointed at that slot and the variant of the extruder feeding it.
+    // A preset opened with no slot keeps the run's slot.
+    if let Some(run) = ctx.store.find_run(&path_text, &printer_model, &nozzle)? {
+        let Some((s, source)) = slot else {
+            return run_view(ctx, run);
+        };
+        let same_slot = run.ams_id == Some(s.ams_id) && run.tray_id == Some(s.tray_id);
+        // A variant the printer can't name: the user's pick stands for the
+        // same slot; another slot's pick is asked again.
+        let variant = match variant {
+            Some(v) => Some(v),
+            None if same_slot => run.variant.clone(),
+            None => None,
+        };
+        let moved = RunSlot {
+            label: s.label.clone(),
+            ams_id: s.ams_id,
+            tray_id: s.tray_id,
+            source,
+        };
+        let unchanged = same_slot
+            && run.slot_label.as_deref() == Some(moved.label.as_str())
+            && run.slot_source == Some(source)
+            && run.variant == variant;
+        if unchanged {
+            return run_view(ctx, run);
+        }
+        ctx.store
+            .set_slot(run.id, &moved, variant.as_deref(), now)?;
+        return run_view(ctx, load_run(ctx, run.id)?);
+    }
     let run = ctx.store.create_run(
         &NewRun {
             preset_name: profile.name().unwrap_or_default().to_string(),
@@ -529,11 +559,19 @@ pub(crate) fn defaults_for(
             .and_then(|s| s.trim().parse::<f64>().ok())
     };
     if matches!(test, TestKind::FlowCoarse | TestKind::FlowFine) {
-        // The base is the variant's own ratio: without a variant, ask.
+        // The base is the variant's own: without a variant, ask.
         at("filament_flow_ratio")?;
     }
+    // The coarse base is the variant's ratio now. The fine base is the
+    // coarse pass saved for this variant, never another variant's.
+    let flow_ratio = if test == TestKind::FlowFine {
+        let results = ctx.store.results(run.id)?;
+        Some(coarse_for(&results, variant).ok_or(COARSE_FIRST)?.value)
+    } else {
+        number("filament_flow_ratio")
+    };
     let current = Current {
-        flow_ratio: number("filament_flow_ratio"),
+        flow_ratio,
         max_volumetric_speed: number("filament_max_volumetric_speed"),
     };
     Ok(Defaults {
@@ -564,8 +602,9 @@ fn checked_diagram(setup: &Setup) -> Result<(Diagram, Vec<String>), String> {
     Ok((diagram, labels))
 }
 
-fn coarse_saved(store: &CalibrationStore, run_id: i64) -> Result<bool, String> {
-    Ok(latest_live(&store.results(run_id)?, TestKind::FlowCoarse).is_some_and(|r| r.saved))
+/// A coarse pass saved for the run's variant: the fine pass slices from it.
+fn coarse_saved(store: &CalibrationStore, run: &Run) -> Result<bool, String> {
+    Ok(coarse_for(&store.results(run.id)?, run.variant.as_deref()).is_some())
 }
 
 /// The run, with its calibrated copy taken back from the history when the
@@ -670,7 +709,7 @@ pub(crate) fn preview_for(
     check_test(test, &setup, reading.as_ref())?;
     let (diagram, labels) = checked_diagram(&setup)?;
     let run = load_run(ctx, run_id)?;
-    if test == TestKind::FlowFine && !coarse_saved(&ctx.store, run.id)? {
+    if test == TestKind::FlowFine && !coarse_saved(&ctx.store, &run)? {
         return Err(COARSE_FIRST.into());
     }
     Ok(PreviewView {
@@ -731,7 +770,7 @@ pub(crate) fn save_for(
     // save waits, then reads the file (and the copy) this one left.
     let _held = mutating();
     let run = reconciled_run(ctx, run_id, now)?;
-    if test == TestKind::FlowFine && !coarse_saved(&ctx.store, run.id)? {
+    if test == TestKind::FlowFine && !coarse_saved(&ctx.store, &run)? {
         return Err(COARSE_FIRST.into());
     }
     let value = cal::value_of(&setup, &reading)?;
@@ -1136,10 +1175,11 @@ pub(crate) fn prepare_suggest(
 ) -> Result<(String, Vec<u8>, Vec<String>), String> {
     check_test(test, &setup, None)?;
     let (_, labels) = checked_diagram(&setup)?;
-    store.run(run_id)?.ok_or_else(|| RUN_GONE.to_string())?;
-    // The fine pass is refused until the coarse one is saved: no photo is
-    // kept and no AI asked for a pass that can't be saved.
-    if test == TestKind::FlowFine && !coarse_saved(store, run_id)? {
+    let run = store.run(run_id)?.ok_or_else(|| RUN_GONE.to_string())?;
+    // The fine pass is refused until the coarse one is saved for the run's
+    // variant: no photo is kept and no AI asked for a pass that can't be
+    // saved.
+    if test == TestKind::FlowFine && !coarse_saved(store, &run)? {
         return Err(COARSE_FIRST.into());
     }
     let (photo, jpeg) = keep_photo(store, data_base64)?;
@@ -2144,6 +2184,187 @@ mod tests {
         .unwrap();
         assert_eq!(p.labels.len(), 10);
         assert_eq!(p.value.unwrap().text, "0.88445");
+    }
+
+    /// [`printer`] with A3 on the same RFID preset as A2, fed by the
+    /// high-flow left nozzle.
+    fn printer_with_a3(root: &Path) -> PrinterView {
+        let mut view = printer(root, true);
+        view.slots
+            .push(slot("A3", 0, 2, Some(system_path(root, SYSTEM_H2D))));
+        view.state.as_mut().unwrap().nozzles[1].tray_now = Some(2);
+        view
+    }
+
+    #[test]
+    fn a_reused_run_follows_the_slot_it_was_opened_from() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let view = printer_with_a3(root.path());
+        let a2 = start_slot(&ctx, &view, "A2").unwrap();
+        assert_eq!(a2.variant.as_deref(), Some("Direct Drive Standard"));
+        let a3 = start_slot(&ctx, &view, "A3").unwrap();
+        assert_eq!(a3.id, a2.id, "one history per preset");
+        assert_eq!(a3.slot_label.as_deref(), Some("A3"));
+        assert_eq!(
+            a3.variant.as_deref(),
+            Some("Direct Drive High Flow"),
+            "the left nozzle feeds A3"
+        );
+        let run = ctx.store.run(a3.id).unwrap().unwrap();
+        assert_eq!(
+            (run.ams_id, run.tray_id, run.slot_source),
+            (Some(0), Some(2), Some(SlotSource::Detected))
+        );
+        // The preset with no slot keeps the run's slot.
+        let by_preset = start_preset(&ctx, &view, &system_path(root.path(), SYSTEM_H2D));
+        assert_eq!(
+            (
+                by_preset.slot_label.as_deref(),
+                by_preset.variant.as_deref()
+            ),
+            (Some("A3"), Some("Direct Drive High Flow"))
+        );
+
+        let slots = FakeAssigner::default();
+        let (run, _) = saved(
+            save_for(
+                &ctx,
+                temp_225(&by_preset),
+                &slots,
+                false,
+                200,
+                &mut Vec::new(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            *slots.calls.lock().unwrap(),
+            vec!["assign 0/2 Bambu PLA Basic (calibrated) @BBL H2D".to_string()],
+            "the copy goes to A3, not A2"
+        );
+        assert_eq!(
+            run.results[0].variant.as_deref(),
+            Some("Direct Drive High Flow")
+        );
+        let copy = raw(&user_path(
+            root.path(),
+            "Bambu PLA Basic (calibrated) @BBL H2D",
+        ));
+        assert_eq!(copy["nozzle_temperature"], json!(["220", "225", "220"]));
+
+        // Back on A2: found by its preset, and pointed at A2 again.
+        let back = start_slot(&ctx, &view, "A2").unwrap();
+        assert_eq!(back.id, run.id);
+        assert_eq!(
+            (back.slot_label.as_deref(), back.variant.as_deref()),
+            (Some("A2"), Some("Direct Drive Standard"))
+        );
+    }
+
+    #[test]
+    fn a_slot_whose_variant_the_printer_cant_name_asks_again_but_the_same_slot_keeps_the_pick() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let mut view = printer(root.path(), true);
+        // A3 is fed by no nozzle and the nozzles differ.
+        view.slots
+            .push(slot("A3", 0, 2, Some(system_path(root.path(), SYSTEM_H2D))));
+        let a2 = start_slot(&ctx, &view, "A2").unwrap();
+        let a3 = start_slot(&ctx, &view, "A3").unwrap();
+        assert_eq!(a3.id, a2.id);
+        assert_eq!(a3.variant, None, "A2's variant isn't A3's");
+        assert!(a3.needs_variant);
+        set_variant_for(&ctx, a3.id, "Direct Drive E3D High Flow", 150).unwrap();
+        let again = start_slot(&ctx, &view, "A3").unwrap();
+        assert_eq!(
+            again.variant.as_deref(),
+            Some("Direct Drive E3D High Flow"),
+            "the user's pick for A3 stands"
+        );
+    }
+
+    #[test]
+    fn the_fine_pass_needs_the_coarse_pass_of_its_own_variant() {
+        let (root, data) = (fake_root(), tempfile::tempdir().unwrap());
+        let ctx = ctx_in(root.path(), data.path());
+        let slots = FakeAssigner::default();
+        let run = start_slot(&ctx, &printer(root.path(), true), "A2").unwrap();
+        assert_eq!(run.variant.as_deref(), Some("Direct Drive Standard"));
+        let coarse = |run: &RunView, modifier: i32| {
+            save_req(
+                run,
+                Setup::FlowCoarse { base: 0.98 },
+                Reading::FlowCoarse { modifier },
+                "0.98",
+            )
+        };
+        let (run, _) =
+            saved(save_for(&ctx, coarse(&run, 5), &slots, false, 200, &mut Vec::new()).unwrap());
+        assert!(run.steps[1].fine_ready);
+
+        let run = set_variant_for(&ctx, run.id, "Direct Drive High Flow", 210).unwrap();
+        assert!(
+            !run.steps[1].fine_ready,
+            "Standard's coarse pass doesn't open High Flow's fine pass"
+        );
+        let fine = Setup::FlowFine { base: 1.029 };
+        let fine_save = save_req(&run, fine, Reading::FlowFine { modifier: -2 }, "0.98");
+        assert_eq!(
+            save_for(&ctx, fine_save, &slots, false, 220, &mut Vec::new()),
+            Err(COARSE_FIRST.to_string())
+        );
+        assert_eq!(
+            preview_for(&ctx, run.id, TestKind::FlowFine, fine, None),
+            Err(COARSE_FIRST.to_string())
+        );
+        assert_eq!(
+            defaults_for(&ctx, run.id, TestKind::FlowFine, 230),
+            Err(COARSE_FIRST.to_string())
+        );
+        assert_eq!(
+            prepare_suggest(
+                &ctx.store,
+                run.id,
+                TestKind::FlowFine,
+                fine,
+                &png_base64(8, 8)
+            )
+            .err()
+            .as_deref(),
+            Some(COARSE_FIRST)
+        );
+        let copy = || {
+            raw(&user_path(
+                root.path(),
+                "Bambu PLA Basic (calibrated) @BBL H2D",
+            ))
+        };
+        assert_eq!(
+            copy()["filament_flow_ratio"],
+            json!(["1.029", "0.98", "0.98"])
+        );
+
+        // High Flow's own coarse pass opens its fine pass, from its result.
+        let (run, _) =
+            saved(save_for(&ctx, coarse(&run, -5), &slots, false, 240, &mut Vec::new()).unwrap());
+        assert!(run.steps[1].fine_ready);
+        let d = defaults_for(&ctx, run.id, TestKind::FlowFine, 250).unwrap();
+        assert_eq!(d.setup, Setup::FlowFine { base: 0.931 });
+        let run = set_variant_for(&ctx, run.id, "Direct Drive Standard", 260).unwrap();
+        assert!(run.steps[1].fine_ready);
+        let d = defaults_for(&ctx, run.id, TestKind::FlowFine, 270).unwrap();
+        assert_eq!(
+            d.setup,
+            Setup::FlowFine { base: 1.029 },
+            "Standard's own coarse result, not High Flow's newer one"
+        );
+        let fine_save = save_req(&run, d.setup, Reading::FlowFine { modifier: -2 }, "1.029");
+        saved(save_for(&ctx, fine_save, &slots, false, 280, &mut Vec::new()).unwrap());
+        assert_eq!(
+            copy()["filament_flow_ratio"],
+            json!(["1.00842", "0.931", "0.98"])
+        );
     }
 
     #[test]

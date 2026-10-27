@@ -88,6 +88,15 @@ pub fn step_of(test: TestKind) -> StepKey {
     }
 }
 
+/// The fine flow pass may open: the backend's `fine_ready`, which counts
+/// only a coarse pass saved for the run's own variant.
+pub fn fine_ready(run: &RunView) -> bool {
+    run.steps
+        .iter()
+        .find(|s| s.step == StepKey::Flow)
+        .is_some_and(|s| s.fine_ready)
+}
+
 /// The strip's names: pressure advance says it is optional.
 pub fn step_name(step: StepKey) -> &'static str {
     match step {
@@ -764,6 +773,18 @@ mod tests {
         );
         assert_eq!(encode_component("é&="), "%C3%A9%26%3D");
         assert_eq!(result_href(11), "/filament/calibrate?result=11");
+    }
+
+    #[test]
+    fn the_fine_pass_is_ready_only_by_the_flow_steps_flag() {
+        let mut flow = step(StepKey::Flow, StepStatus::NotRun);
+        assert!(!fine_ready(&run(vec![flow.clone()])));
+        assert!(!fine_ready(&run(vec![])));
+        let mut other = step(StepKey::Temperature, StepStatus::NotRun);
+        other.fine_ready = true;
+        assert!(!fine_ready(&run(vec![other, flow.clone()])));
+        flow.fine_ready = true;
+        assert!(fine_ready(&run(vec![flow])));
     }
 
     #[test]

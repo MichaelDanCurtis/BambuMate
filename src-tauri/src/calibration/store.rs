@@ -244,6 +244,15 @@ pub struct NewRun {
     pub variant: Option<String>,
 }
 
+/// The AMS slot a run was opened from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunSlot {
+    pub label: String,
+    pub ams_id: u32,
+    pub tray_id: u32,
+    pub source: SlotSource,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Run {
     pub id: i64,
@@ -371,8 +380,29 @@ pub fn newest_saved(results: &[ResultRow]) -> Option<&ResultRow> {
         .max_by_key(|r| r.id)
 }
 
-/// Every step's status, in the strip's order.
-pub fn step_views(results: &[ResultRow], steps: &[StepRow]) -> Vec<StepView> {
+/// The saved coarse flow pass the fine pass of `variant` slices from: the
+/// newest live coarse result written to that variant's element. A result
+/// with no variant wrote a one-element key, the element every variant
+/// reads, so it counts for any.
+pub fn coarse_for<'a>(results: &'a [ResultRow], variant: Option<&str>) -> Option<&'a ResultRow> {
+    results
+        .iter()
+        .filter(|r| r.test == TestKind::FlowCoarse && !r.undone)
+        .filter(|r| match r.variant.as_deref() {
+            None => true,
+            Some(v) => variant.is_some_and(|w| w.trim().eq_ignore_ascii_case(v.trim())),
+        })
+        .max_by_key(|r| r.id)
+        .filter(|r| r.saved)
+}
+
+/// Every step's status, in the strip's order. `variant` is the run's: the
+/// fine pass is ready only after a coarse pass saved for it.
+pub fn step_views(
+    results: &[ResultRow],
+    steps: &[StepRow],
+    variant: Option<&str>,
+) -> Vec<StepView> {
     StepKey::ALL
         .iter()
         .map(|&step| {
@@ -399,8 +429,7 @@ pub fn step_views(results: &[ResultRow], steps: &[StepRow]) -> Vec<StepView> {
             StepView {
                 step,
                 status,
-                fine_ready: step == StepKey::Flow
-                    && latest_live(results, TestKind::FlowCoarse).is_some_and(|r| r.saved),
+                fine_ready: step == StepKey::Flow && coarse_for(results, variant).is_some(),
                 opened_at: row.map(|s| s.opened_at),
             }
         })
@@ -594,6 +623,34 @@ impl CalibrationStore {
             .map_err(read_err)?;
         let rows = stmt.query_map([], run_row).map_err(read_err)?;
         rows.collect::<Result<_, _>>().map_err(read_err)
+    }
+
+    /// Points the run at `slot` and its `variant`: a reused run follows the
+    /// slot it was opened from.
+    pub fn set_slot(
+        &self,
+        id: i64,
+        slot: &RunSlot,
+        variant: Option<&str>,
+        now: i64,
+    ) -> Result<bool, String> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE runs SET slot_label = ?2, ams_id = ?3, tray_id = ?4, slot_source = ?5, \
+                 variant = ?6, updated_at = ?7 WHERE id = ?1",
+                params![
+                    id,
+                    slot.label,
+                    slot.ams_id,
+                    slot.tray_id,
+                    slot.source.key(),
+                    variant,
+                    now
+                ],
+            )
+            .map_err(save_err)?;
+        Ok(n > 0)
     }
 
     pub fn set_variant(&self, id: i64, variant: &str, now: i64) -> Result<bool, String> {
@@ -1045,7 +1102,7 @@ mod tests {
             latest_live(&results, TestKind::Temperature).map(|r| r.id),
             Some(first)
         );
-        let views = step_views(&results, &[]);
+        let views = step_views(&results, &[], None);
         assert_eq!(
             views[0].status,
             StepStatus::Saved {
@@ -1100,7 +1157,7 @@ mod tests {
         let pa = s.add_result(&pa_result(run.id), 120).unwrap();
         s.set_skipped(run.id, StepKey::Retraction, true, 130)
             .unwrap();
-        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap());
+        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap(), None);
         let steps: Vec<StepKey> = views.iter().map(|v| v.step).collect();
         assert_eq!(steps, StepKey::ALL.to_vec());
         assert_eq!(
@@ -1133,6 +1190,7 @@ mod tests {
     fn the_flow_step_shows_the_newest_pass_and_offers_fine_after_a_saved_coarse() {
         let dir = tempfile::tempdir().unwrap();
         let s = open(&dir);
+        const STANDARD: Option<&str> = Some("direct drive standard");
         let run = s.create_run(&new_run("/p"), 100).unwrap();
         let flow = |test_fine: bool, value: f64| NewResult {
             setup: if test_fine {
@@ -1149,11 +1207,21 @@ mod tests {
             preset_key: Some("filament_flow_ratio".into()),
             ..temp_result(run.id, 0)
         };
-        let views = step_views(&s.results(run.id).unwrap(), &[]);
+        let views = step_views(&s.results(run.id).unwrap(), &[], STANDARD);
         assert!(!views[1].fine_ready);
         let coarse = s.add_result(&flow(false, 1.029), 110).unwrap();
-        let views = step_views(&s.results(run.id).unwrap(), &[]);
+        let views = step_views(&s.results(run.id).unwrap(), &[], STANDARD);
         assert!(views[1].fine_ready);
+        let other = step_views(
+            &s.results(run.id).unwrap(),
+            &[],
+            Some("Direct Drive High Flow"),
+        );
+        assert!(
+            !other[1].fine_ready,
+            "a coarse pass counts only for its variant"
+        );
+        assert!(!step_views(&s.results(run.id).unwrap(), &[], None)[1].fine_ready);
         assert_eq!(
             views[1].status,
             StepStatus::Saved {
@@ -1163,7 +1231,7 @@ mod tests {
             }
         );
         let fine = s.add_result(&flow(true, 0.96726), 120).unwrap();
-        let views = step_views(&s.results(run.id).unwrap(), &[]);
+        let views = step_views(&s.results(run.id).unwrap(), &[], STANDARD);
         assert_eq!(
             views[1].status,
             StepStatus::Saved {
@@ -1174,9 +1242,92 @@ mod tests {
         );
         s.mark_undone(fine, 130).unwrap();
         s.mark_undone(coarse, 140).unwrap();
-        let views = step_views(&s.results(run.id).unwrap(), &[]);
+        let views = step_views(&s.results(run.id).unwrap(), &[], STANDARD);
         assert!(!views[1].fine_ready, "an undone coarse pass doesn't count");
         assert_eq!(views[1].status, StepStatus::NotRun);
+    }
+
+    #[test]
+    fn a_coarse_pass_counts_for_its_own_variant_or_for_all_on_a_one_element_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let run = s.create_run(&new_run("/p"), 100).unwrap();
+        let coarse = |variant: Option<&str>| NewResult {
+            setup: Setup::FlowCoarse { base: 0.98 },
+            reading: Reading::FlowCoarse { modifier: 5 },
+            value: 1.029,
+            preset_key: Some("filament_flow_ratio".into()),
+            variant: variant.map(str::to_string),
+            ..temp_result(run.id, 0)
+        };
+        let standard = s
+            .add_result(&coarse(Some("Direct Drive Standard")), 110)
+            .unwrap();
+        let results = s.results(run.id).unwrap();
+        assert_eq!(
+            coarse_for(&results, Some(" direct drive standard ")).map(|r| r.id),
+            Some(standard)
+        );
+        assert_eq!(coarse_for(&results, Some("Direct Drive High Flow")), None);
+        assert_eq!(coarse_for(&results, None), None, "no variant picked");
+        // A newer pass on another variant leaves this one's in place.
+        let high = s
+            .add_result(&coarse(Some("Direct Drive High Flow")), 120)
+            .unwrap();
+        let results = s.results(run.id).unwrap();
+        assert_eq!(
+            coarse_for(&results, Some("Direct Drive Standard")).map(|r| r.id),
+            Some(standard)
+        );
+        assert_eq!(
+            coarse_for(&results, Some("Direct Drive High Flow")).map(|r| r.id),
+            Some(high)
+        );
+        s.mark_undone(high, 130).unwrap();
+        // A one-element key is stored with no variant: every variant reads it.
+        let single = s.add_result(&coarse(None), 140).unwrap();
+        let results = s.results(run.id).unwrap();
+        for variant in [None, Some("Direct Drive High Flow")] {
+            assert_eq!(coarse_for(&results, variant).map(|r| r.id), Some(single));
+        }
+    }
+
+    #[test]
+    fn a_run_is_pointed_at_another_slot_and_its_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let run = s.create_run(&new_run("/p"), 100).unwrap();
+        let a3 = RunSlot {
+            label: "A3".into(),
+            ams_id: 0,
+            tray_id: 2,
+            source: SlotSource::Assigned,
+        };
+        assert!(s
+            .set_slot(run.id, &a3, Some("Direct Drive High Flow"), 200)
+            .unwrap());
+        let moved = s.run(run.id).unwrap().unwrap();
+        assert_eq!(
+            (
+                moved.slot_label.as_deref(),
+                moved.ams_id,
+                moved.tray_id,
+                moved.slot_source,
+                moved.variant.as_deref(),
+                moved.updated_at
+            ),
+            (
+                Some("A3"),
+                Some(0),
+                Some(2),
+                Some(SlotSource::Assigned),
+                Some("Direct Drive High Flow"),
+                200
+            )
+        );
+        assert!(s.set_slot(run.id, &a3, None, 300).unwrap());
+        assert_eq!(s.run(run.id).unwrap().unwrap().variant, None);
+        assert!(!s.set_slot(999, &a3, None, 300).unwrap());
     }
 
     #[test]
@@ -1253,10 +1404,10 @@ mod tests {
         let run = s.create_run(&new_run("/p"), 100).unwrap();
         s.set_skipped(run.id, StepKey::Temperature, true, 110)
             .unwrap();
-        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap());
+        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap(), None);
         assert_eq!(views[0].status, StepStatus::Skipped);
         let saved = s.add_result(&temp_result(run.id, 1), 120).unwrap();
-        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap());
+        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap(), None);
         assert_eq!(
             views[0].status,
             StepStatus::Saved {
@@ -1268,7 +1419,7 @@ mod tests {
         );
         // Taking the save back falls to the skip that is still on record.
         s.mark_undone(saved, 130).unwrap();
-        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap());
+        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap(), None);
         assert_eq!(views[0].status, StepStatus::Skipped);
 
         // The other order: a save, then a skip.
@@ -1285,7 +1436,7 @@ mod tests {
             )
             .unwrap();
         s.set_skipped(run.id, StepKey::Flow, true, 150).unwrap();
-        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap());
+        let views = step_views(&s.results(run.id).unwrap(), &s.steps(run.id).unwrap(), None);
         assert_eq!(
             views[1].status,
             StepStatus::Saved {
@@ -1359,7 +1510,7 @@ mod tests {
             latest_live(&results, TestKind::Temperature).map(|r| r.id),
             Some(second)
         );
-        let views = step_views(&results, &[]);
+        let views = step_views(&results, &[], None);
         assert!(
             matches!(views[0].status, StepStatus::Saved { result_id, .. } if result_id == second)
         );

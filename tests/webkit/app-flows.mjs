@@ -37,6 +37,7 @@ import {
   CAL_RUN,
   CAL_RUN_A3,
   CAL_RUN_COARSE_SAVED,
+  CAL_RUN_HIGH_FLOW_NO_COARSE,
   CAL_RUN_NEEDS_VARIANT,
   CAL_RUN_TEMP_SAVED,
   FIXTURES,
@@ -4577,7 +4578,12 @@ async function driveApp(browserType, engine, baseUrl) {
   await calFlow("the fine flow pass is offered only after the coarse pass is saved", async () => {
     const coarseSaved = { outcome: "saved", run: CAL_RUN_COARSE_SAVED, result_id: 12, studio_running: true, assign_error: null };
     await withFixtures(
-      { calibration_defaults: CAL_FLOW_DEFAULTS, calibration_preview: CAL_FLOW_PREVIEW, calibration_save: coarseSaved },
+      {
+        calibration_defaults: CAL_FLOW_DEFAULTS,
+        calibration_preview: CAL_FLOW_PREVIEW,
+        calibration_save: coarseSaved,
+        calibration_set_variant: CAL_RUN_HIGH_FLOW_NO_COARSE,
+      },
       async () => {
         await page.click(`${calStep("flow")} .nd-step-btn`);
         await page.waitForSelector(`${calCard("flow_coarse")} .cal-patch[data-modifier="5"]`, { timeout: 5000 });
@@ -4608,6 +4614,25 @@ async function driveApp(browserType, engine, baseUrl) {
         if (asked?.test !== "flow_fine") throw new Error(`defaults for ${asked?.test}`);
         if ((await calText(`${calCard("flow_fine")} .cal-studio li`)) !== "Calibration → Flow rate → Fine") throw new Error("the fine menu path");
         if (!(await calText(`${CAL} .cal-restart`)).includes("restart it before you slice the fine pass")) throw new Error("no restart warning on the fine pass");
+        // Standard's coarse pass doesn't open High Flow's fine pass: the card goes back to coarse.
+        await setFixture("calibration_defaults", CAL_FLOW_DEFAULTS);
+        await setFixture("calibration_preview", CAL_FLOW_PREVIEW);
+        await page.click(`${CAL} .cal-variant-option:has-text("Direct Drive High Flow")`);
+        await page.waitForSelector(calCard("flow_coarse"), { timeout: 5000 });
+        if ((await page.locator(calCard("flow_fine")).count()) !== 0) throw new Error("the fine pass stayed open on another variant");
+        if (!(await page.locator(`${CAL} .cal-pass[data-pass="fine"]`).isDisabled())) throw new Error("fine offered on a variant with no coarse pass");
+        if ((await page.locator(`${CAL} .cal-pass[data-pass="coarse"]`).getAttribute("aria-pressed")) !== "true") throw new Error("coarse isn't the open pass");
+        if ((await calText(`${CAL} .cal-fine-note`)) !== "Save the coarse pass first: Bambu Studio slices the fine pass from it.") {
+          throw new Error("no note on the locked fine pass");
+        }
+        const back = (await callsOf("calibration_defaults")).at(-1)?.args;
+        if (back?.test !== "flow_coarse") throw new Error(`defaults for ${back?.test} after the variant pick`);
+        // Back on Standard, its own coarse pass opens fine again, and the card stays on coarse until asked.
+        await setFixture("calibration_set_variant", CAL_RUN_COARSE_SAVED);
+        await page.click(`${CAL} .cal-variant-option:has-text("Direct Drive Standard")`);
+        await page.waitForFunction(() => !document.querySelector('.calibrate-page .cal-pass[data-pass="fine"]')?.disabled, null, { timeout: 5000 });
+        if ((await page.locator(calCard("flow_fine")).count()) !== 0) throw new Error("the fine pass opened without a click");
+        if ((await page.locator(`${CAL} .cal-fine-note`).count()) !== 0) throw new Error("the fine note on a variant with its coarse pass");
       }
     );
   });

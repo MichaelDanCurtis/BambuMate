@@ -596,6 +596,13 @@ export const CAL_RUN_COARSE_SAVED = {
   ],
 };
 
+/** After the coarse pass on Standard, High Flow picked: its own coarse pass isn't saved, so fine stays closed. */
+export const CAL_RUN_HIGH_FLOW_NO_COARSE = {
+  ...CAL_RUN_COARSE_SAVED,
+  variant: "Direct Drive High Flow",
+  steps: calSteps({ temperature: saved(11, "225 °C"), flow: saved(12, "1.029") }),
+};
+
 export const CAL_RUN_PA_RECORDED = {
   ...CAL_RUN,
   steps: calSteps({ pressure_advance: { status: { state: "recorded", result_id: 13, value: "K 0.025", at: JOURNAL_NOW } } }),

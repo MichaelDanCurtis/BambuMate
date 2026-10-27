@@ -1860,10 +1860,9 @@ mod tests {
             .unwrap()
             .to_string();
         let conf = || -> Value {
-            serde_json::from_str(
-                &std::fs::read_to_string(root.path().join("BambuStudio.conf")).unwrap(),
-            )
-            .unwrap()
+            // On Windows the conf carries Studio's MD5 line after the JSON.
+            let text = std::fs::read_to_string(root.path().join("BambuStudio.conf")).unwrap();
+            serde_json::from_str(crate::profile::writer::strip_md5_checksum(&text)).unwrap()
         };
         assert_eq!(conf()["filaments"], json!(["Other", stem]));
         let json_before = raw(&copy.target_path);

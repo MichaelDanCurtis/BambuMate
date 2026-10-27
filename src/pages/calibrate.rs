@@ -28,10 +28,10 @@ use crate::calibration::types::{
 };
 use crate::calibration::view::{
     calibratable, candidate_line, context_line, current_line, date_text, diff_line, extra_line,
-    first_open, height_reading, hero_label, history_change, history_value, linked_elsewhere,
-    patch_reading, preset_href, reading_for_pick, restart_before_fine, result_href, ruler_ticks,
-    run_for_result, same_run, save_notes, setup_fields, slot_has_preset, slot_href,
-    slot_preset_name, status_key, status_text, step_name, step_of_result, step_result,
+    fine_ready, first_open, height_reading, hero_label, history_change, history_value,
+    linked_elsewhere, patch_reading, preset_href, reading_for_pick, restart_before_fine,
+    result_href, ruler_ticks, run_for_result, same_run, save_notes, setup_fields, slot_has_preset,
+    slot_href, slot_preset_name, status_key, status_text, step_name, step_of_result, step_result,
     studio_steps, suggestion_detail, suggestion_line, target_line, test_for, typed_label,
     typed_reading, undo_note, undo_target, variant_needed, will_save_line, with_field, AnswerOrder,
     DEVELOPER_MODE, DISCARD_CHANGES, FINE_AFTER_COARSE, NO_PRESET, PA_NOTE, PICK_VARIANT_PROMPT,
@@ -333,11 +333,19 @@ fn RunPanel(
     // Requests that change the run, still out: the variant pick and every
     // card's save, undo, record, skip and link wait for them.
     let pending = RwSignal::new(0u32);
+    // Fine only while it is ready: a variant whose own coarse pass isn't
+    // saved goes back to coarse, and stays there after that save.
+    let fine_locked = Memo::new(move |_| run.with(|r| r.as_ref().is_some_and(|r| !fine_ready(r))));
+    Effect::new(move |_| {
+        if fine_locked.get() && fine.get() {
+            fine.set(false);
+        }
+    });
     // A new step, pass or variant gets a fresh card. A save keeps it.
     let card = Memo::new(move |_| {
         (
             open.get(),
-            fine.get(),
+            fine.get() && !fine_locked.get(),
             run.with(|r| r.as_ref().and_then(|r| r.variant.clone())),
         )
     });
@@ -478,13 +486,7 @@ fn FlowPasses(
     fine: RwSignal<bool>,
     fine_pass: bool,
 ) -> impl IntoView {
-    let ready = Memo::new(move |_| {
-        run.with(|r| {
-            r.as_ref()
-                .and_then(|r| r.steps.iter().find(|s| s.step == StepKey::Flow))
-                .is_some_and(|s| s.fine_ready)
-        })
-    });
+    let ready = Memo::new(move |_| run.with(|r| r.as_ref().is_some_and(fine_ready)));
     view! {
         <div class="cal-passes" role="group" aria-label="Flow rate pass">
             <button type="button" class="nd-tab cal-pass" data-pass="coarse"
