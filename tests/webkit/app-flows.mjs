@@ -27,6 +27,19 @@ import {
   A3_DETECTED,
   A3_DETECTED_PATH,
   ADVICE,
+  CAL_FINE_DEFAULTS,
+  CAL_FINE_PREVIEW,
+  CAL_FLOW_DEFAULTS,
+  CAL_FLOW_PREVIEW,
+  CAL_PA_DEFAULTS,
+  CAL_PA_PREVIEW,
+  CAL_RESULT_TEMP,
+  CAL_RUN,
+  CAL_RUN_A3,
+  CAL_RUN_COARSE_SAVED,
+  CAL_RUN_HIGH_FLOW_NO_COARSE,
+  CAL_RUN_NEEDS_VARIANT,
+  CAL_RUN_TEMP_SAVED,
   FIXTURES,
   GIF_1X1,
   JOURNAL_FAILED,
@@ -1014,7 +1027,39 @@ async function driveApp(browserType, engine, baseUrl) {
     if (keys === 0) throw new Error("fields table rendered with no rows");
     const pills = await page.locator(".pm-actions .btn").count();
     if (pills !== 4) throw new Error(`${pills} action buttons`);
+    const calHref = await page.locator(".pm-actions a.pm-calibrate").getAttribute("href");
+    if (!calHref || !calHref.startsWith("/filament/calibrate?preset=") || calHref.includes(" ")) throw new Error(`profile Calibrate link: ${calHref}`);
     return `${title}, ${keys} field rows`;
+  });
+
+  await step(run, page, "a profile's Calibrate link carries its exact path and opens the tab on it", async () => {
+    // Every character a partial encoder gets wrong: space, &, #, @ and +.
+    const path = "/Users/runner/Library/Application Support/BambuStudio/user/00000001/filament/Poly & Co #1 PLA+ @BBL X1C.json";
+    const strict = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+    const first = { ...FIXTURES.list_profiles[0], name: "Poly & Co #1 PLA+ @BBL X1C", path };
+    await withFixtures(
+      { list_profiles: [first, ...FIXTURES.list_profiles.slice(1)], calibration_start: { __reject: "stub: only the request is under test" } },
+      async () => {
+        await page.click('nav.sidebar a[href="/"]');
+        await page.click('nav.sidebar a[href="/profiles"]');
+        await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+        await page.locator(".profile-list-item").first().click();
+        const link = page.locator(".pm-actions a.pm-calibrate");
+        await link.waitFor({ timeout: 15000 });
+        const href = await link.getAttribute("href");
+        if (href !== `/filament/calibrate?preset=${strict(path)}`) throw new Error(`profile Calibrate href: ${href}`);
+        const before = (await callsOf("calibration_start")).length;
+        await link.click();
+        await page.waitForSelector(".calibrate-page", { timeout: 15000 });
+        await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "calibration_start").length > n, before, { timeout: 5000 });
+        const asked = (await callsOf("calibration_start")).at(-1).args;
+        if (asked.preset !== path || asked.slot != null || asked.run != null) throw new Error(`calibration_start got ${JSON.stringify(asked)}`);
+        if (new URL(page.url()).searchParams.get("preset") !== path) throw new Error(`the page URL names "${new URL(page.url()).searchParams.get("preset")}"`);
+      }
+    );
+    await page.click('nav.sidebar a[href="/"]');
+    await page.click('nav.sidebar a[href="/profiles"]');
+    await page.waitForSelector(".profile-list-item", { timeout: 15000 });
   });
 
   await step(run, page, "a preset that isn't syncing gets a warning dot", async () => {
@@ -1970,7 +2015,7 @@ async function driveApp(browserType, engine, baseUrl) {
     const current = await page.locator('.nd-tabs a[aria-current="page"]').getAttribute("href");
     if (current !== "/filament/advise") throw new Error(`the current tab is ${current}`);
     const tabs = await page.locator(".nd-tabs a").allTextContents();
-    if (tabs.join("|") !== "Advise|Search|Batch") throw new Error(`tabs read ${tabs.join("|")}`);
+    if (tabs.join("|") !== "Advise|Search|Batch|Calibrate") throw new Error(`tabs read ${tabs.join("|")}`);
   });
 
   await step(run, page, "before advising the page says what to do", async () => {
@@ -2337,6 +2382,30 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await main(2).getAttribute("aria-expanded")) !== "false") throw new Error("the closed row is still marked expanded");
     await main(1).click();
     await page.waitForSelector(`${journalRow(1)} .jr-detail`, { state: "detached", timeout: 5000 });
+  });
+
+  await step(run, page, "a calibration print shows a plain chip in its row and a link in its open entry", async () => {
+    const linked = { ...JOURNAL_FINISHED, purpose: { calibration_result_id: 11, test: "temperature" } };
+    await withFixtures({ journal_list: [linked] }, async () => {
+      const lists = await countOf("journal_list");
+      await page.click(`${JR} .jr-filter[data-kind="needs_verdict"]`);
+      await pastCalls("journal_list", lists);
+      await rowsRead([JOURNAL_FINISHED.name]);
+      const chip = page.locator(`${journalRow(2)} .jr-row-main .jr-purpose`);
+      if ((await chip.innerText()).trim() !== "Calibration: Temperature") throw new Error(`chip reads "${await chip.innerText()}"`);
+      if ((await page.locator(`${journalRow(2)} .jr-row-main a`).count()) !== 0) throw new Error("the row button holds a link");
+      await page.click(`${journalRow(2)} .jr-row-main`);
+      await page.waitForSelector(`${journalRow(2)} .jr-detail`, { timeout: 5000 });
+      const link = page.locator(`${journalRow(2)} .jr-detail a.jr-purpose-link`);
+      if ((await link.getAttribute("href")) !== "/filament/calibrate?result=11") throw new Error(`detail link: ${await link.getAttribute("href")}`);
+      if ((await link.innerText()).trim() !== "Calibration: Temperature") throw new Error("detail link text");
+      await page.click(`${journalRow(2)} .jr-row-main`);
+      await page.waitForSelector(`${journalRow(2)} .jr-detail`, { state: "detached", timeout: 5000 });
+    });
+    // A print without a purpose has neither.
+    await page.click(`${JR} .jr-filter[data-kind="all"]`);
+    await rowsRead(ALL_ROWS);
+    if ((await page.locator(`${JR} .jr-purpose`).count()) !== 0) throw new Error("a plain print shows a calibration chip");
   });
 
   await step(run, page, "journal filters and search ask the backend for what was picked", async () => {
@@ -3933,6 +4002,17 @@ async function driveApp(browserType, engine, baseUrl) {
       if (got !== badge) throw new Error(`${label} shows "${got}", expected "${badge}"`);
     }
     if ((await slotCard("A2").locator(".pr-rfid").count()) !== 1) throw new Error("A2 lacks its RFID badge");
+    // Every loaded slot links to the Calibrate tab; an empty one has nothing to calibrate.
+    const calHref = (label) => slotCard(label).locator(".pr-calibrate-link").getAttribute("href");
+    if ((await calHref("A2")) !== "/filament/calibrate?slot=A2") throw new Error(`A2 Calibrate link: ${await calHref("A2")}`);
+    if ((await calHref("A3")) !== "/filament/calibrate?slot=A3") throw new Error(`A3 Calibrate link: ${await calHref("A3")}`);
+    if ((await slotCard("B4").locator(".pr-calibrate-link").count()) !== 0) throw new Error("an empty slot offers Calibrate");
+    // Ten links, ten names: each says which slot it is for, and starts with its visible text.
+    const calNames = await page.locator(".pr-slot .pr-calibrate-link").evaluateAll((as) => as.map((a) => [a.closest(".pr-slot").dataset.label, a.getAttribute("aria-label"), a.textContent.trim()]));
+    if (calNames.length === 0 || new Set(calNames.map((n) => n[1])).size !== calNames.length) throw new Error(`Calibrate names are not distinct: ${JSON.stringify(calNames)}`);
+    for (const [label, name, text] of calNames) if (name !== `Calibrate ${label}` || !name.startsWith(text)) throw new Error(`${label} Calibrate link is named "${name}"`);
+    // The link sits beside the card's button, never inside it.
+    if ((await slotCard("A2").locator(".pr-slot-main a").count()) !== 0) throw new Error("a link is nested in the card button");
     const meta = await page.locator(".pr-ams-meta").first().innerText();
     if (!meta.includes("Humidity 21%")) throw new Error(`AMS A meta: ${meta}`);
   });
@@ -4345,6 +4425,558 @@ async function driveApp(browserType, engine, baseUrl) {
     if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
   });
 
+  // -- calibration ------------------------------------------------------------
+  // Filament → Calibrate. The backend's maths is mocked: these check that the
+  // page sends what was read and shows what comes back. textContent, not
+  // innerText: the strip's labels are uppercased by CSS. Every flow also
+  // checks that nothing threw, nothing logged an error (a failed decode
+  // surfaces as one) and, unless it is about an error, that no `[ERROR: …]`
+  // line is showing.
+  const CAL = ".calibrate-page";
+  const calCard = (test) => `${CAL} .cal-card[data-test="${test}"]`;
+  const calStep = (name) => `${CAL} .cal-step[data-step="${name}"]`;
+  const calText = (sel) => page.locator(sel).first().evaluate((el) => el.textContent.replace(/\s+/g, " ").trim());
+  const calStatus = (name, status) =>
+    page.waitForFunction(
+      ([s, want]) => document.querySelector(`.calibrate-page .cal-step[data-step="${s}"]`)?.dataset.status === want,
+      [name, status],
+      { timeout: 5000 }
+    );
+  const heroReads = (value) =>
+    page.waitForFunction(
+      (v) => document.querySelector(".calibrate-page .nd-hero .nd-hero-number")?.textContent.trim() === v,
+      value,
+      { timeout: 5000 }
+    );
+  const calErrorLines = (p = page) => p.locator(`${CAL} .nd-state[data-kind="error"]`).allTextContents();
+  const calFlow = (name, fn, { errorLines = false } = {}) =>
+    step(run, page, name, async () => {
+      const before = run.errors.length;
+      const out = await fn();
+      if (run.errors.length !== before) throw new Error(run.errors.slice(before).join("; "));
+      const lines = await calErrorLines();
+      if (!errorLines && lines.length) throw new Error(`an error line is showing: ${lines.join(" | ")}`);
+      return out;
+    });
+  // Opens Calibrate on a query. The bare tab first, so the same query asks again.
+  const openCal = async (query = "") => {
+    await goTo("/filament/calibrate");
+    await page.waitForSelector(`${CAL} .cal-picker`, { timeout: 15000 });
+    if (query) await goTo(`/filament/calibrate${query}`, "/filament/calibrate");
+  };
+  // Resolves once the page has drawn what the last answer changed.
+  const settle = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 60))));
+  const strictEncode = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+
+  // Earlier flows (a Library link) already started runs; these count from here.
+  let calStarts = 0;
+  await calFlow("the Calibrate tab is routed under Filament with one header", async () => {
+    calStarts = await callCount("calibration_start");
+    await setFixture("printer_view", PRINTER_VIEW);
+    await openTab("/filament", "/filament/calibrate");
+    await page.waitForSelector(`${CAL} .cal-picker`, { timeout: 15000 });
+    const tabs = await page
+      .locator('.hub[data-hub="filament"] .nd-tabs a')
+      .evaluateAll((as) => as.map((a) => a.textContent.trim()));
+    if (tabs.join("|") !== "Advise|Search|Batch|Calibrate") throw new Error(`tabs: ${tabs.join("|")}`);
+    if ((await page.locator('.hub[data-hub="filament"] h1').count()) !== 1) throw new Error("a second page title");
+    if ((await page.locator(`${CAL} .nd-page-header`).count()) !== 0) throw new Error("the page has its own header inside the hub");
+    if (!(await calText(`${CAL} .cal-context`)).includes("H2D · 0.4 mm nozzle")) throw new Error("no printer context");
+    await page.waitForSelector(`${CAL} .cal-slot[data-slot="A2"]`, { timeout: 5000 });
+    if ((await page.locator(`${CAL} .nd-state[data-kind="empty"]`).count()) !== 1) throw new Error("no prompt to pick a filament");
+    if ((await callCount("calibration_start")) !== calStarts) throw new Error("a run started before a pick");
+  });
+
+  await calFlow("picking A2 opens its run on the temperature step", async () => {
+    await page.click(`${CAL} .cal-slot[data-slot="A2"]`);
+    await page.waitForFunction(() => location.search === "?slot=A2", null, { timeout: 5000 });
+    await page.waitForSelector(calCard("temperature"), { timeout: 5000 });
+    const [call] = (await callsOf("calibration_start")).slice(calStarts);
+    if (call?.args?.slot !== "A2") throw new Error(`start asked for ${JSON.stringify(call?.args)}`);
+    const steps = await page
+      .locator(`${CAL} .cal-step .nd-step-name`)
+      .evaluateAll((els) => els.map((e) => e.textContent.trim()));
+    if (steps.join("|") !== "Temperature|Flow|Retraction|Max speed|Pressure advance (optional)") {
+      throw new Error(`strip: ${steps.join("|")}`);
+    }
+    if ((await page.locator(`${calStep("temperature")}[data-state="current"]`).count()) !== 1) throw new Error("temperature isn't open");
+    const target = await calText(`${CAL} .cal-target`);
+    if (target !== "Bambu PLA Basic · A2 · H2D · 0.4 mm nozzle") throw new Error(`target: ${target}`);
+    const studio = await calText(`${calCard("temperature")} .cal-studio li`);
+    if (studio !== "Calibration → Temperature · PLA · start 230 · end 190") throw new Error(`studio: ${studio}`);
+    if ((await page.locator(`${calCard("temperature")} .cal-dev-mode`).count()) !== 1) throw new Error("no Developer Mode note");
+    if ((await calText(`${CAL} .cal-will-save`)) !== "Will save as Bambu PLA Basic (calibrated)") throw new Error("no Will save as");
+    const variants = await page.locator(`${CAL} .cal-variant-option`).evaluateAll((bs) => bs.map((b) => `${b.textContent.trim()}:${b.getAttribute("aria-pressed")}`));
+    if (variants.join("|") !== "Direct Drive Standard:true|Direct Drive High Flow:false|Direct Drive E3D High Flow:false") {
+      throw new Error(`variants: ${variants.join("|")}`);
+    }
+    await page.waitForSelector(`${calCard("temperature")} .cal-band[data-index="0"]`, { timeout: 5000 });
+    if ((await page.locator(`${CAL} .nd-hero`).count()) !== 0) throw new Error("a value before any reading");
+    if (!(await page.locator(`${CAL} .cal-save-btn`).isDisabled())) throw new Error("Save offered before a reading");
+    if ((await page.locator(`${CAL} .cal-undo`).count()) !== 0) throw new Error("Undo offered before a save");
+  });
+
+  await calFlow("a tapped band shows the value and its diff, and saving offers Undo", async () => {
+    await page.click(`${calCard("temperature")} .cal-band[data-index="1"]`);
+    await heroReads("225");
+    const asked = (await callsOf("calibration_preview")).at(-1)?.args;
+    if (!isDeepStrictEqual(asked?.reading, { test: "temperature", band: 1 })) throw new Error(`preview read ${JSON.stringify(asked?.reading)}`);
+    if ((await calText(`${CAL} .nd-hero-detail`)) !== "nozzle_temperature 220 → 225") throw new Error("the diff");
+    if ((await calText(`${CAL} .cal-extra`)) !== "First layer 220 → 225") throw new Error("the first layer");
+    const band = page.locator(`${calCard("temperature")} .cal-band[data-index="1"]`);
+    if ((await band.getAttribute("aria-pressed")) !== "true") throw new Error("the band isn't marked");
+    if ((await page.locator(`${CAL} .nd-hero`).count()) !== 1) throw new Error("expected one hero");
+    await page.click(`${CAL} .cal-save-btn`);
+    await page.waitForSelector(`${CAL} .cal-undo`, { timeout: 5000 });
+    const a = (await callsOf("calibration_save")).at(-1).args;
+    if (a.runId !== 7 || a.test !== "temperature" || a.expectedOld !== "220" || a.expectedVariant !== "Direct Drive Standard") {
+      throw new Error(`save sent ${JSON.stringify(a)}`);
+    }
+    if (!isDeepStrictEqual(a.setup, { test: "temperature", start: 230, end: 190 })) throw new Error(`setup ${JSON.stringify(a.setup)}`);
+    if (!isDeepStrictEqual(a.reading, { test: "temperature", band: 1 })) throw new Error(`reading ${JSON.stringify(a.reading)}`);
+    await calStatus("temperature", "saved");
+    const status = await calText(`${calStep("temperature")} .cal-step-status`);
+    if (!status.startsWith("Saved · 225 °C ·")) throw new Error(`status: ${status}`);
+    if ((await page.locator(`${CAL} .cal-history tr[data-result="11"]`).count()) !== 1) throw new Error("no history row");
+    if ((await page.locator(`${CAL} .cal-will-save`).count()) !== 0) throw new Error("Will save as after the copy exists");
+    if (!(await page.locator(`${CAL} .cal-save-btn`).isDisabled())) throw new Error("Save offered again for the reading just saved");
+    const note = await calText(`${CAL} .cal-undo-note`);
+    if (note !== "Undo takes back Temperature 225 °C and moves Bambu PLA Basic (calibrated) to the backups, so Bambu Studio no longer lists it.") {
+      throw new Error(`undo note: ${note}`);
+    }
+  });
+
+  await calFlow("Undo takes the save back and the step reads Not run again", async () => {
+    await page.click(`${CAL} .cal-undo`);
+    await page.waitForSelector(`${CAL} .cal-undo`, { state: "detached", timeout: 5000 });
+    const undo = (await callsOf("calibration_undo")).at(-1);
+    if (undo?.args?.resultId !== CAL_RESULT_TEMP.id) throw new Error(`undo sent ${JSON.stringify(undo?.args)}`);
+    await calStatus("temperature", "not_run");
+    if ((await page.locator(`${CAL} .cal-history tr[data-result="11"][data-undone="true"]`).count()) !== 1) {
+      throw new Error("the history doesn't mark it undone");
+    }
+    if (!(await calText(`${CAL} .cal-history tr[data-result="11"]`)).includes("225 °C · undone")) throw new Error("the history row doesn't say undone");
+    if ((await calText(`${CAL} .cal-will-save`)) !== "Will save as Bambu PLA Basic (calibrated)") throw new Error("the copy is still the target after Undo");
+  });
+
+  await calFlow("a preset changed since the preview shows the new diff and asks again", async () => {
+    const p = FIXTURES.calibration_preview;
+    const change = { ...p.value.change, old: "222", old_display: "222" };
+    const changed = { outcome: "changed", preview: { ...p, value: { ...p.value, change } } };
+    await withFixtures({ calibration_save: changed }, async () => {
+      await page.waitForFunction(() => !document.querySelector(".calibrate-page .cal-save-btn")?.disabled, null, { timeout: 5000 });
+      await page.click(`${CAL} .cal-save-btn`);
+      await page.waitForFunction(() => document.querySelector(".calibrate-page .cal-changed")?.textContent.trim() !== "", null, { timeout: 5000 });
+      if ((await calText(`${CAL} .cal-changed`)) !== "The preset changed since. Check the new value, then save again.") throw new Error("no re-ask line");
+      if ((await calText(`${CAL} .nd-hero-detail`)) !== "nozzle_temperature 222 → 225") throw new Error("the new diff isn't shown");
+      if ((await page.locator(`${CAL} .cal-undo`).count()) !== 0) throw new Error("Undo after nothing was saved");
+      await calStatus("temperature", "not_run");
+      if (await page.locator(`${CAL} .cal-save-btn`).isDisabled()) throw new Error("Save closed after a changed answer");
+    });
+  });
+
+  await calFlow("the fine flow pass is offered only after the coarse pass is saved", async () => {
+    const coarseSaved = { outcome: "saved", run: CAL_RUN_COARSE_SAVED, result_id: 12, studio_running: true, assign_error: null };
+    await withFixtures(
+      {
+        calibration_defaults: CAL_FLOW_DEFAULTS,
+        calibration_preview: CAL_FLOW_PREVIEW,
+        calibration_save: coarseSaved,
+        calibration_set_variant: CAL_RUN_HIGH_FLOW_NO_COARSE,
+      },
+      async () => {
+        await page.click(`${calStep("flow")} .nd-step-btn`);
+        await page.waitForSelector(`${calCard("flow_coarse")} .cal-patch[data-modifier="5"]`, { timeout: 5000 });
+        if (!(await page.locator(`${CAL} .cal-pass[data-pass="fine"]`).isDisabled())) throw new Error("fine offered before coarse");
+        if ((await page.locator(`${CAL} .cal-pass[data-pass="coarse"]`).getAttribute("aria-pressed")) !== "true") throw new Error("coarse isn't the open pass");
+        if ((await calText(`${CAL} .cal-fine-note`)) !== "Save the coarse pass first: Bambu Studio slices the fine pass from it.") {
+          throw new Error("no note on the fine pass");
+        }
+        // A click on a disabled button does nothing: the card stays on coarse.
+        await page.locator(`${CAL} .cal-pass[data-pass="fine"]`).click({ force: true });
+        if ((await page.locator(calCard("flow_fine")).count()) !== 0) throw new Error("the fine pass opened before coarse was saved");
+        await page.click(`${calCard("flow_coarse")} .cal-patch[data-modifier="5"]`);
+        await heroReads("1.029");
+        if ((await calText(`${CAL} .nd-hero-label`)) !== "Flow · coarse") throw new Error("the hero doesn't name the pass");
+        await page.click(`${CAL} .cal-save-btn`);
+        await page.waitForSelector(`${CAL} .cal-undo`, { timeout: 5000 });
+        const a = (await callsOf("calibration_save")).at(-1).args;
+        if (a.test !== "flow_coarse" || a.expectedOld !== "0.98") throw new Error(`save sent ${JSON.stringify(a)}`);
+        if (!isDeepStrictEqual(a.reading, { test: "flow_coarse", modifier: 5 })) throw new Error(`reading ${JSON.stringify(a.reading)}`);
+        if (!(await calText(`${CAL} .cal-note`)).includes("restart it")) throw new Error("no restart note while Studio is open");
+        if (await page.locator(`${CAL} .cal-pass[data-pass="fine"]`).isDisabled()) throw new Error("fine still closed after coarse");
+        if ((await page.locator(`${CAL} .cal-fine-note`).count()) !== 0) throw new Error("the fine note outlived the coarse save");
+        await setFixture("calibration_defaults", CAL_FINE_DEFAULTS);
+        await setFixture("calibration_preview", CAL_FINE_PREVIEW);
+        await page.click(`${CAL} .cal-pass[data-pass="fine"]`);
+        await page.waitForSelector(`${calCard("flow_fine")} .cal-patch[data-modifier="-9"]`, { timeout: 5000 });
+        const asked = (await callsOf("calibration_defaults")).at(-1)?.args;
+        if (asked?.test !== "flow_fine") throw new Error(`defaults for ${asked?.test}`);
+        if ((await calText(`${calCard("flow_fine")} .cal-studio li`)) !== "Calibration → Flow rate → Fine") throw new Error("the fine menu path");
+        if (!(await calText(`${CAL} .cal-restart`)).includes("restart it before you slice the fine pass")) throw new Error("no restart warning on the fine pass");
+        // Standard's coarse pass doesn't open High Flow's fine pass: the card goes back to coarse.
+        await setFixture("calibration_defaults", CAL_FLOW_DEFAULTS);
+        await setFixture("calibration_preview", CAL_FLOW_PREVIEW);
+        await page.click(`${CAL} .cal-variant-option:has-text("Direct Drive High Flow")`);
+        await page.waitForSelector(calCard("flow_coarse"), { timeout: 5000 });
+        if ((await page.locator(calCard("flow_fine")).count()) !== 0) throw new Error("the fine pass stayed open on another variant");
+        if (!(await page.locator(`${CAL} .cal-pass[data-pass="fine"]`).isDisabled())) throw new Error("fine offered on a variant with no coarse pass");
+        if ((await page.locator(`${CAL} .cal-pass[data-pass="coarse"]`).getAttribute("aria-pressed")) !== "true") throw new Error("coarse isn't the open pass");
+        if ((await calText(`${CAL} .cal-fine-note`)) !== "Save the coarse pass first: Bambu Studio slices the fine pass from it.") {
+          throw new Error("no note on the locked fine pass");
+        }
+        const back = (await callsOf("calibration_defaults")).at(-1)?.args;
+        if (back?.test !== "flow_coarse") throw new Error(`defaults for ${back?.test} after the variant pick`);
+        // Back on Standard, its own coarse pass opens fine again, and the card stays on coarse until asked.
+        await setFixture("calibration_set_variant", CAL_RUN_COARSE_SAVED);
+        await page.click(`${CAL} .cal-variant-option:has-text("Direct Drive Standard")`);
+        await page.waitForFunction(() => !document.querySelector('.calibrate-page .cal-pass[data-pass="fine"]')?.disabled, null, { timeout: 5000 });
+        if ((await page.locator(calCard("flow_fine")).count()) !== 0) throw new Error("the fine pass opened without a click");
+        if ((await page.locator(`${CAL} .cal-fine-note`).count()) !== 0) throw new Error("the fine note on a variant with its coarse pass");
+      }
+    );
+  });
+
+  await calFlow("pressure advance is recorded and never saved to a preset", async () => {
+    const saves = await callCount("calibration_save");
+    await withFixtures({ calibration_defaults: CAL_PA_DEFAULTS, calibration_preview: CAL_PA_PREVIEW }, async () => {
+      await page.click(`${calStep("pressure_advance")} .nd-step-btn`);
+      await page.waitForSelector(`${calCard("pressure_advance")} .cal-record`, { timeout: 5000 });
+      if ((await page.locator(`${calCard("pressure_advance")} .cal-save-btn`).count()) !== 0) throw new Error("Save to preset offered for K");
+      if ((await page.locator(`${calCard("pressure_advance")} .cal-will-save`).count()) !== 0) throw new Error("Will save as shown for K");
+      if ((await page.locator(`${calCard("pressure_advance")} .cal-dev-mode`).count()) !== 0) throw new Error("the Developer Mode note on K");
+      if (!(await calText(`${calCard("pressure_advance")} .cal-studio li`)).includes("Flow Dynamics")) throw new Error("no wizard step");
+      if (!(await page.locator(`${calCard("pressure_advance")} .cal-record`).isDisabled())) throw new Error("Record K offered before a value");
+      const k = `${calCard("pressure_advance")} .cal-typed-input`;
+      await page.fill(k, "0.025");
+      await page.press(k, "Tab");
+      await page.waitForFunction(() => !document.querySelector(".calibrate-page .cal-record")?.disabled, null, { timeout: 5000 });
+      await page.click(`${calCard("pressure_advance")} .cal-record`);
+      await calStatus("pressure_advance", "recorded");
+      const rec = (await callsOf("calibration_record")).at(-1);
+      if (!isDeepStrictEqual(rec.args.reading, { test: "pressure_advance", k: 0.025 })) throw new Error(`recorded ${JSON.stringify(rec.args.reading)}`);
+      if (!isDeepStrictEqual(rec.args.setup, { test: "pressure_advance" })) throw new Error(`setup ${JSON.stringify(rec.args.setup)}`);
+      if ((await callCount("calibration_save")) !== saves) throw new Error("K was saved to a preset");
+      if ((await page.locator(`${CAL} .cal-undo`).count()) !== 0) throw new Error("Undo offered for a recorded K");
+      if ((await page.locator(`${CAL} .cal-history tr[data-result="13"]`).count()) !== 1) throw new Error("no history row for K");
+      if ((await calText(`${CAL} .cal-history tr[data-result="13"]`)).includes("→")) throw new Error("the K row shows a preset change");
+      if (!(await calText(`${CAL} .cal-notes`)).includes("never writes K")) throw new Error("no record-only note");
+    });
+  });
+
+  await calFlow("an AI suggestion becomes the reading only when tapped, and its reason shows as text", async () => {
+    // Markup in the reason must stay text. The suggestion is canned: no model is reached.
+    const canned = {
+      photo: "c0ffee.jpg",
+      suggestion: { pick: "225 °C", confidence: 0.8, reason: "Least stringing <b>here</b>.\n\tSlight sag above." },
+      note: null,
+    };
+    await page.click(`${calStep("temperature")} .nd-step-btn`);
+    await page.waitForSelector(`${calCard("temperature")} .cal-band[data-index="1"]`, { timeout: 5000 });
+    const previews = await callCount("calibration_preview");
+    await withFixtures({ calibration_suggest: canned }, async () => {
+      await page.setInputFiles(`${calCard("temperature")} .cal-photo-input`, { name: "tower.png", mimeType: "image/png", buffer: png });
+      await page.waitForSelector(`${CAL} .cal-suggestion`, { timeout: 5000 });
+    });
+    if ((await calText(`${CAL} .cal-suggestion span`)) !== "AI suggests the 225 °C band") throw new Error("the suggestion line");
+    const reason = await page.locator(`${CAL} .cal-reason`).evaluate((el) => ({ text: el.textContent.trim(), children: el.children.length }));
+    if (reason.text !== "Confidence 80% · Least stringing <b>here</b>. Slight sag above.") throw new Error(`reason: ${reason.text}`);
+    if (reason.children !== 0) throw new Error("the reason was parsed as markup");
+    const sg = (await callsOf("calibration_suggest")).at(-1);
+    if (sg.args.test !== "temperature" || sg.args.runId !== 7 || !sg.args.photoBase64) throw new Error("the photo wasn't sent");
+    if (sg.args.photoBase64.startsWith("data:")) throw new Error("the photo went out as a data URL");
+    if ((await page.locator(`${calCard("temperature")} .cal-band[aria-pressed="true"]`).count()) !== 0) {
+      throw new Error("the suggestion was taken without a tap");
+    }
+    if ((await callCount("calibration_preview")) !== previews) throw new Error("read before the tap");
+    if ((await page.locator(`${CAL} .nd-hero`).count()) !== 0) throw new Error("a value before the tap");
+    await page.click(`${CAL} .cal-accept`);
+    await page.waitForFunction(
+      () => document.querySelector('.calibrate-page .cal-band[data-index="1"]')?.getAttribute("aria-pressed") === "true",
+      null,
+      { timeout: 5000 }
+    );
+    const asked = (await callsOf("calibration_preview")).at(-1)?.args;
+    if (!isDeepStrictEqual(asked?.reading, { test: "temperature", band: 1 })) throw new Error(`preview read ${JSON.stringify(asked?.reading)}`);
+    await heroReads("225");
+  });
+
+  await calFlow("a saved step links its print, and the journal chip links back", async () => {
+    await page.click(`${CAL} .cal-save-btn`);
+    await page.waitForSelector(`${CAL} .cal-link-print`, { timeout: 5000 });
+    const save = (await callsOf("calibration_save")).at(-1);
+    if (save.args.photo !== "c0ffee.jpg") throw new Error(`the kept photo wasn't saved with it: ${save.args.photo}`);
+    await page.click(`${CAL} .cal-link-print`);
+    await page.waitForSelector(`${CAL} .cal-candidate[data-entry="2"]`, { timeout: 5000 });
+    if ((await page.locator(`${CAL} .cal-candidate[data-entry="2"] .cal-suggested`).count()) !== 1) throw new Error("the newest print isn't suggested");
+    if ((await page.locator(`${CAL} .cal-candidate[data-entry="1"] .cal-suggested`).count()) !== 0) throw new Error("two prints suggested");
+    if ((await callsOf("calibration_link_candidates")).at(-1).args.resultId !== 11) throw new Error("candidates for another result");
+    await page.click(`${CAL} .cal-candidate[data-entry="2"]`);
+    await page.waitForSelector(`${CAL} .cal-linked`, { timeout: 5000 });
+    const lp = (await callsOf("calibration_link_print")).at(-1);
+    if (lp.args.resultId !== 11 || lp.args.journalId !== 2) throw new Error(`linked ${JSON.stringify(lp.args)}`);
+    if ((await page.locator(`${CAL} .cal-candidates`).count()) !== 0) throw new Error("the list stayed open after linking");
+
+    const linked = { ...JOURNAL_FINISHED, purpose: { calibration_result_id: 11, test: "temperature" } };
+    await withFixtures({ journal_list: [linked, JOURNAL_FAILED], journal_get: linked }, async () => {
+      await openJournal();
+      await page.waitForSelector(`${journalRow(2)} .jr-purpose`, { timeout: 5000 });
+      if ((await calText(`${journalRow(2)} .jr-purpose`)) !== "Calibration: Temperature") throw new Error("the chip");
+      if ((await page.locator(`${journalRow(1)} .jr-purpose`).count()) !== 0) throw new Error("a chip on a print that isn't linked");
+      await page.click(`${journalRow(2)} .jr-row-main`);
+      await page.waitForSelector(`${JR} .jr-purpose-link`, { timeout: 5000 });
+      if ((await page.locator(`${JR} .jr-purpose-link`).getAttribute("href")) !== "/filament/calibrate?result=11") {
+        throw new Error("the chip doesn't link back");
+      }
+      const starts = await callCount("calibration_start");
+      await page.click(`${JR} .jr-purpose-link`);
+      await page.waitForSelector(calCard("temperature"), { timeout: 5000 });
+      const reopened = (await callsOf("calibration_start")).slice(starts)[0];
+      if (reopened?.args?.run !== 7) throw new Error(`reopened ${JSON.stringify(reopened?.args)}`);
+    });
+  });
+
+  await calFlow("the Printer, Home and Library links open a run on their filament", async () => {
+    await page.click('nav.sidebar a[href="/printer"]');
+    await page.waitForSelector('.pr-slot[data-label="A2"] .pr-calibrate-link', { timeout: 15000 });
+    let starts = await callCount("calibration_start");
+    await slotCard("A2").locator(".pr-calibrate-link").click();
+    await page.waitForSelector(calCard("temperature"), { timeout: 5000 });
+    const fromSlot = (await callsOf("calibration_start")).slice(starts)[0];
+    if (!isDeepStrictEqual({ slot: fromSlot?.args?.slot, preset: fromSlot?.args?.preset }, { slot: "A2", preset: undefined })) {
+      throw new Error(`the slot link started ${JSON.stringify(fromSlot?.args)}`);
+    }
+    if ((await calText(`${CAL} .cal-target`)) !== "Bambu PLA Basic · A2 · H2D · 0.4 mm nozzle") throw new Error("the run isn't A2's");
+
+    await withFixtures({ calibration_start: CAL_RUN_A3 }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await page.waitForSelector('.home-page .hm-slot[data-slot-label="A3"] .pr-calibrate-link', { timeout: 15000 });
+      starts = await callCount("calibration_start");
+      await page.locator('.hm-slot[data-slot-label="A3"] .pr-calibrate-link').click();
+      await page.waitForSelector(calCard("temperature"), { timeout: 5000 });
+      const fromHome = (await callsOf("calibration_start")).slice(starts)[0];
+      if (fromHome?.args?.slot !== "A3") throw new Error(`the Home link started ${JSON.stringify(fromHome?.args)}`);
+      if (!(await calText(`${CAL} .cal-target`)).startsWith("Generic PETG · A3")) throw new Error("the run isn't A3's");
+    });
+
+    await page.click('nav.sidebar a[href="/profiles"]');
+    await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+    await page.locator(".profile-list-item").first().click();
+    await page.waitForSelector(".pm-actions .pm-calibrate", { timeout: 15000 });
+    starts = await callCount("calibration_start");
+    await page.click(".pm-actions .pm-calibrate");
+    await page.waitForSelector(calCard("temperature"), { timeout: 5000 });
+    const fromProfile = (await callsOf("calibration_start")).slice(starts)[0];
+    if (fromProfile?.args?.preset !== FIXTURES.list_profiles[0].path || fromProfile?.args?.slot != null) {
+      throw new Error(`the profile link started ${JSON.stringify(fromProfile?.args)}`);
+    }
+    await page.click('nav.sidebar a[href="/"]');
+  });
+
+  await calFlow("a slow save for A2 can't land on A3: the page stays on A3", async () => {
+    await openCal("?slot=A2");
+    await page.waitForSelector(`${calCard("temperature")} .cal-band[data-index="1"]`, { timeout: 5000 });
+    await page.click(`${calCard("temperature")} .cal-band[data-index="1"]`);
+    await heroReads("225");
+    const held = { outcome: "saved", run: CAL_RUN_TEMP_SAVED, result_id: 11, studio_running: false, assign_error: null };
+    await withFixtures({ calibration_save: { __hold: "cal-stale", answer: held }, calibration_start: CAL_RUN_A3 }, async () => {
+      const sent = await callCount("calibration_save");
+      const settled = await settledCount("calibration_save");
+      await page.click(`${CAL} .cal-save-btn`);
+      await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "calibration_save").length > n, sent, { timeout: 5000 });
+      await page.click(`${CAL} .cal-slot[data-slot="A3"]`);
+      await page.waitForFunction(() => document.querySelector(".calibrate-page .cal-target")?.textContent.includes("A3"), null, { timeout: 5000 });
+      await page.waitForSelector(`${calCard("temperature")} .cal-band[data-index="1"]`, { timeout: 5000 });
+      await page.evaluate(() => window.__release("cal-stale"));
+      await page.waitForFunction((n) => window.__ipc.settled.filter((c) => c === "calibration_save").length > n, settled, { timeout: 5000 });
+      await settle();
+      const target = await calText(`${CAL} .cal-target`);
+      if (!target.startsWith("Generic PETG · A3") || target.includes("calibrated")) throw new Error(`the page shows ${target}`);
+      if ((await page.locator(`${calStep("temperature")}[data-status="not_run"]`).count()) !== 1) throw new Error("A2's save marked A3's step");
+      if ((await page.locator(`${CAL} .cal-undo`).count()) !== 0) throw new Error("A3 offers to undo A2's save");
+      if ((await page.locator(`${CAL} .cal-history`).count()) !== 0) throw new Error("A2's save is in A3's history");
+      if ((await page.locator(`${CAL} .cal-note`).count()) !== 0) throw new Error("A2's save notes are on A3's card");
+      if ((await calText(`${CAL} .cal-will-save`)) !== "Will save as Generic PETG (calibrated)") throw new Error("A3 isn't saving to its own copy");
+      if (new URL(page.url()).searchParams.get("slot") !== "A3") throw new Error("the URL left A3");
+    });
+  });
+
+  await calFlow("the variant picker waits while a save is out, and a late answer can't put back the old variant", async () => {
+    await openCal("?slot=A2");
+    await page.waitForSelector(`${calCard("temperature")} .cal-band[data-index="1"]`, { timeout: 5000 });
+    await page.click(`${calCard("temperature")} .cal-band[data-index="1"]`);
+    await heroReads("225");
+    const held = { outcome: "saved", run: CAL_RUN_TEMP_SAVED, result_id: 11, studio_running: false, assign_error: null };
+    await withFixtures({ calibration_save: { __hold: "cal-variant", answer: held } }, async () => {
+      const sent = await callCount("calibration_save");
+      const settled = await settledCount("calibration_save");
+      const picks = await callCount("calibration_set_variant");
+      await page.click(`${CAL} .cal-save-btn`);
+      await page.waitForFunction((n) => window.__ipc.calls.filter((c) => c.cmd === "calibration_save").length > n, sent, { timeout: 5000 });
+      const enabled = await page.locator(`${CAL} .cal-variant-option`).evaluateAll((bs) => bs.filter((b) => !b.disabled).length);
+      if (enabled !== 0) throw new Error(`${enabled} variant buttons stayed enabled while the save was out`);
+      await page.locator(`${CAL} .cal-variant-option:has-text("Direct Drive High Flow")`).click({ force: true });
+      await settle();
+      if ((await callCount("calibration_set_variant")) !== picks) throw new Error("a variant was picked while the save was out");
+      await page.evaluate(() => window.__release("cal-variant"));
+      await page.waitForFunction((n) => window.__ipc.settled.filter((c) => c === "calibration_save").length > n, settled, { timeout: 5000 });
+      await page.waitForSelector(`${CAL} .cal-undo`, { timeout: 5000 });
+      await page.waitForFunction(() => [...document.querySelectorAll(".calibrate-page .cal-variant-option")].every((b) => !b.disabled), null, { timeout: 5000 });
+      const pressed = (await page.locator(`${CAL} .cal-variant-option[aria-pressed="true"]`).textContent()).trim();
+      if (pressed !== "Direct Drive Standard") throw new Error(`the page shows ${pressed}`);
+    });
+  });
+
+  await calFlow("Calibrate's preset search leaves out base presets and templates", async () => {
+    const base = {
+      name: "Bambu PLA Basic @base",
+      filament_type: "PLA",
+      filament_id: "GFA00",
+      path: "/Applications/BambuStudio.app/Contents/Resources/profiles/BBL/filament/Bambu PLA Basic @base.json",
+      is_user_profile: false,
+      instantiable: false,
+    };
+    // The picker reads the presets once per visit: a fresh one, and leave it after.
+    await goTo("/");
+    await withFixtures({ list_system_profiles: [base, ...FIXTURES.list_system_profiles] }, async () => {
+      await openCal();
+      await page.fill(`${CAL} .cal-search-input`, "Bambu PLA Basic");
+      await page.waitForSelector(`${CAL} a.cal-preset`, { timeout: 5000 });
+      const names = await page.locator(`${CAL} a.cal-preset`).allTextContents();
+      if (names.some((n) => n.includes("@base"))) throw new Error(`the search offers ${names.join(" | ")}`);
+      if (!names.includes("Bambu PLA Basic @BBL X1C")) throw new Error(`the search lost the real preset: ${names.join(" | ")}`);
+    });
+    await goTo("/");
+  });
+
+  await calFlow("Undo lasts across other taps, steps, and a reload", async () => {
+    const reopened = { ...FIXTURES, calibration_start: CAL_RUN_TEMP_SAVED };
+    const fb = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    fb.on("pageerror", (e) => run.errors.push(`pageerror: ${e.message}`));
+    fb.on("console", (m) => { if (m.type() === "error") run.errors.push(`console.error: ${m.text()}`); });
+    try {
+      await fb.addInitScript(installTauriMock, reopened);
+      await fb.goto(`${baseUrl}filament/calibrate?result=11`, { waitUntil: "domcontentloaded" });
+      const undo = `${CAL} .cal-undo[data-result="11"]`;
+      await fb.waitForSelector(undo, { timeout: 45000 });
+      const same = async (what) => {
+        if ((await fb.locator(undo).count()) !== 1) throw new Error(`Undo is gone ${what}`);
+        const lines = await calErrorLines(fb);
+        if (lines.length) throw new Error(`an error line ${what}: ${lines.join(" | ")}`);
+      };
+      // Another tap, a field edit and a step switch don't take it away.
+      await fb.waitForSelector(`${calCard("temperature")} .cal-band[data-index="3"]`, { timeout: 5000 });
+      await fb.click(`${calCard("temperature")} .cal-band[data-index="3"]`);
+      await same("after tapping another band");
+      await fb.click(`${calStep("flow")} .nd-step-btn`);
+      await fb.waitForSelector(calCard("flow_coarse"), { timeout: 5000 });
+      if ((await fb.locator(`${CAL} .cal-undo`).count()) !== 0) throw new Error("Undo for temperature shows on the Flow card");
+      await fb.click(`${calStep("temperature")} .nd-step-btn`);
+      await fb.waitForSelector(calCard("temperature"), { timeout: 5000 });
+      await same("after switching steps and back");
+      // A reload asks the backend again; it still allows the Undo.
+      await fb.reload({ waitUntil: "domcontentloaded" });
+      await fb.waitForSelector(undo, { timeout: 45000 });
+      await same("after a reload");
+      const status = await fb.locator(`${calStep("temperature")} .cal-step-status`).evaluate((el) => el.textContent.trim());
+      if (!status.startsWith("Saved · 225 °C ·")) throw new Error(`status after reload: ${status}`);
+    } finally {
+      await fb.close();
+    }
+  });
+
+  await calFlow("an unpicked variant is a quiet prompt, and picking one unlocks the card", async () => {
+    const high = { ...CAL_RUN, variant: "Direct Drive High Flow" };
+    await withFixtures({ calibration_start: CAL_RUN_NEEDS_VARIANT, calibration_set_variant: high }, async () => {
+      const defaults = await callCount("calibration_defaults");
+      await openCal("?slot=A2");
+      await page.waitForSelector(`${CAL} .cal-pick-variant`, { timeout: 5000 });
+      if ((await calText(`${CAL} .cal-pick-variant`)) !== "Pick the nozzle variant above to save to.") throw new Error("the prompt");
+      if ((await page.locator(calCard("temperature")).getAttribute("data-locked")) !== "true") throw new Error("the card isn't locked");
+      if ((await calText(`${CAL} .cal-variant .nd-label`)) !== "Pick the nozzle variant") throw new Error("the picker doesn't ask");
+      const pressed = await page.locator(`${CAL} .cal-variant-option[aria-pressed="true"]`).count();
+      if (pressed !== 0) throw new Error("a variant is marked before the pick");
+      // Not red: the prompt reads like body text, and nothing is an error.
+      const colors = await page.evaluate(() => {
+        const read = (cls, kind) => {
+          const el = document.createElement("p");
+          el.className = cls;
+          if (kind) el.dataset.kind = kind;
+          document.querySelector(".calibrate-page").append(el);
+          const c = getComputedStyle(el).color;
+          el.remove();
+          return c;
+        };
+        const probe = document.createElement("span");
+        probe.style.color = "var(--nd-text-primary)";
+        document.body.append(probe);
+        const primary = getComputedStyle(probe).color;
+        probe.remove();
+        return { prompt: getComputedStyle(document.querySelector(".cal-pick-variant")).color, primary, error: read("nd-state", "error") };
+      });
+      if (colors.prompt !== colors.primary) throw new Error(`the prompt is ${colors.prompt}, not ${colors.primary}`);
+      if (colors.prompt === colors.error) throw new Error("the prompt is the error colour");
+      if ((await page.locator(`${CAL} [role="alert"]`).count()) !== 0) throw new Error("the prompt is announced as an alert");
+      if ((await callCount("calibration_defaults")) !== defaults) throw new Error("a locked card asked for defaults");
+      for (const sel of [".cal-typed-input", ".cal-add-photo", ".cal-save-btn"]) {
+        if (!(await page.locator(`${calCard("temperature")} ${sel}`).isDisabled())) throw new Error(`${sel} is live on a locked card`);
+      }
+      await page.click(`${CAL} .cal-variant-option:has-text("Direct Drive High Flow")`);
+      await page.waitForSelector(`${calCard("temperature")}[data-locked="false"]`, { timeout: 5000 });
+      const set = (await callsOf("calibration_set_variant")).at(-1)?.args;
+      if (!isDeepStrictEqual(set, { runId: 7, variant: "Direct Drive High Flow" })) throw new Error(`set variant sent ${JSON.stringify(set)}`);
+      await page.waitForSelector(`${calCard("temperature")} .cal-band[data-index="1"]`, { timeout: 5000 });
+      if ((await page.locator(`${CAL} .cal-pick-variant`).count()) !== 0) throw new Error("the prompt outlived the pick");
+      if ((await callCount("calibration_defaults")) <= defaults) throw new Error("the unlocked card asked for no defaults");
+      if (await page.locator(`${calCard("temperature")} .cal-typed-input`).isDisabled()) throw new Error("the typed field is still locked");
+      if ((await page.locator(`${CAL} .cal-variant-option[aria-pressed="true"]`).textContent()).trim() !== "Direct Drive High Flow") {
+        throw new Error("the picked variant isn't marked");
+      }
+    });
+  });
+
+  await calFlow("a preset search that fails shows the error with a Retry", async () => {
+    await openCal();
+    const message = "Couldn't read the presets folder";
+    await setFixture("list_profiles", { __reject: message });
+    try {
+      await page.focus(`${CAL} .cal-search-input`);
+      await page.waitForSelector(`${CAL} .cal-search-error`, { timeout: 5000 });
+      if ((await calText(`${CAL} .cal-search-error .nd-state`)) !== `[ERROR: ${message}]`) throw new Error("the error line");
+      if ((await calText(`${CAL} .cal-search-retry`)) !== "Retry") throw new Error("no Retry");
+    } finally {
+      await setFixture("list_profiles", FIXTURES.list_profiles);
+    }
+    await page.click(`${CAL} .cal-search-retry`);
+    await page.waitForSelector(`${CAL} .cal-search-error`, { state: "detached", timeout: 5000 });
+    const first = FIXTURES.list_profiles[0];
+    await page.fill(`${CAL} .cal-search-input`, first.name);
+    await page.waitForSelector(`${CAL} a.cal-preset`, { timeout: 5000 });
+    const hrefs = await page.locator(`${CAL} a.cal-preset`).evaluateAll((as) => as.map((a) => a.getAttribute("href")));
+    if (!hrefs.includes(`/filament/calibrate?preset=${strictEncode(first.path)}`)) throw new Error(`hrefs: ${hrefs.join(" | ")}`);
+  });
+
+  await calFlow("a backend error shows inline exactly as it came", async () => {
+    const message = "The preset has changed since this was saved, so Undo would overwrite that change.";
+    await withFixtures({ calibration_start: CAL_RUN_TEMP_SAVED, calibration_undo: { __reject: message } }, async () => {
+      await openCal("?result=11");
+      await page.waitForSelector(`${CAL} .cal-undo`, { timeout: 5000 });
+      await page.click(`${CAL} .cal-undo`);
+      await page.waitForSelector(`${CAL} .nd-state[data-kind="error"]`, { timeout: 5000 });
+      const lines = await calErrorLines();
+      if (lines.length !== 1 || lines[0].trim() !== `[ERROR: ${message}]`) throw new Error(`error lines: ${JSON.stringify(lines)}`);
+      if ((await page.locator(`${CAL} .cal-undo`).count()) !== 1) throw new Error("Undo went away though nothing was undone");
+      await calStatus("temperature", "saved");
+      if (await page.locator(`${CAL} .cal-undo`).isDisabled()) throw new Error("Undo stayed busy after the error");
+    });
+  }, { errorLines: true });
+
+  await step(run, page, "calibration never opened Bambu Studio or reached a command with no fixture", async () => {
+    const unknown = await page.evaluate(() => [...new Set(window.__ipc.unknown)].filter((c) => c.startsWith("calibration_")));
+    if (unknown.length) throw new Error(`no fixture for ${unknown.join(", ")}`);
+    if ((await callCount("launch_bambu_studio")) !== 0) throw new Error("a flow launched Bambu Studio");
+  });
+
   // -- home cockpit -----------------------------------------------------------
   // textContent, not innerText: the hero label and the footer are uppercased by CSS.
   const homeMode = (mode) => page.waitForSelector(`.home-page[data-mode="${mode}"]`, { timeout: 5000 });
@@ -4426,6 +5058,11 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "home AMS slots open the preset picker", async () => {
     const slots = await page.locator(".hm-slot").count();
     if (slots !== PRINTER_SLOTS.length) throw new Error(`${slots} slots, expected ${PRINTER_SLOTS.length}`);
+    const homeCal = await page.locator('.hm-slot[data-slot-label="A3"] .pr-calibrate-link').getAttribute("href");
+    if (homeCal !== "/filament/calibrate?slot=A3") throw new Error(`Home A3 Calibrate link: ${homeCal}`);
+    const homeNames = await page.locator(".hm-slot .pr-calibrate-link").evaluateAll((as) => as.map((a) => [a.closest(".hm-slot").dataset.slotLabel, a.getAttribute("aria-label")]));
+    if (homeNames.length === 0 || new Set(homeNames.map((n) => n[1])).size !== homeNames.length) throw new Error(`Home Calibrate names are not distinct: ${JSON.stringify(homeNames)}`);
+    for (const [label, name] of homeNames) if (name !== `Calibrate ${label}`) throw new Error(`Home ${label} Calibrate link is named "${name}"`);
     await page.click('.hm-slot[data-slot-label="A3"] .hm-slot-main');
     await page.waitForSelector(".pr-picker", { timeout: 5000 });
     await page.click(".pr-picker-cancel");

@@ -2647,13 +2647,15 @@ mod tests {
             "GFG99 isn't in the test presets"
         );
         assert!(!slot(&view, "B4").not_installed, "B4 is empty");
-        // The new index reaches the page through `printer://state`.
+        // The new index reaches the page through `printer://state`. The
+        // events emitted before the first report have no slots at all, so
+        // the check looks the slot up instead of expecting it.
         wait_for(|| {
-            rec.states
-                .lock()
-                .unwrap()
-                .last()
-                .is_some_and(|v| detected(v, "A2").is_some())
+            rec.states.lock().unwrap().last().is_some_and(|v| {
+                v.slots
+                    .iter()
+                    .any(|s| s.label == "A2" && s.detected.is_some())
+            })
         })
         .await;
     }

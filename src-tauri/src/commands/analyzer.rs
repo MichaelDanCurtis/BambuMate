@@ -366,7 +366,7 @@ fn format_value_for_profile(value: f32, parameter: &str) -> String {
 }
 
 /// Get AI provider settings from preferences and keychain.
-fn get_ai_settings(app: &tauri::AppHandle) -> Result<(String, String, String), String> {
+pub(crate) fn get_ai_settings(app: &tauri::AppHandle) -> Result<(String, String, String), String> {
     // Get provider preference (default to claude)
     let store = app.store("preferences.json").map_err(|e| {
         warn!("Failed to open preferences store: {}", e);

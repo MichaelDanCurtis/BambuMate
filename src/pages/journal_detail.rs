@@ -19,9 +19,9 @@ use wasm_bindgen_futures::spawn_local;
 use crate::app::FeatureFlagsContext;
 use crate::components::defect_report::defect_display_name;
 use crate::journal::format::{
-    analyze_href, fact_rows, local_time_text, toggle_tag, verdict_after_click, verdict_key,
-    verdict_text, DELETE_CONFIRM, ISSUE_TAGS, MAX_PHOTO_BYTES, NOT_AN_IMAGE, PHOTO_UNAVAILABLE,
-    TOO_LARGE, VERDICTS,
+    analyze_href, fact_rows, local_time_text, purpose_link, toggle_tag, verdict_after_click,
+    verdict_key, verdict_text, DELETE_CONFIRM, ISSUE_TAGS, MAX_PHOTO_BYTES, NOT_AN_IMAGE,
+    PHOTO_UNAVAILABLE, TOO_LARGE, VERDICTS,
 };
 use crate::journal::types::{EntryUpdate, PrintEntry, Verdict, VerdictChoice};
 use crate::journal::{bridge, next_revision};
@@ -115,7 +115,7 @@ fn photo_alt(n: usize, total: usize, added_at: i64, offset_minutes: i32) -> Stri
 
 /// The local UTC offset, in minutes east, at Unix time `unix_secs`: each
 /// time gets its own, so a DST change since then doesn't shift it.
-fn local_offset_minutes(unix_secs: i64) -> i32 {
+pub(crate) fn local_offset_minutes(unix_secs: i64) -> i32 {
     let at = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(unix_secs as f64 * 1000.0));
     -(at.get_timezone_offset() as i32)
 }
@@ -576,6 +576,9 @@ pub fn EntryDetail(id: i64, entries: Entries, open: RwSignal<Option<i64>>) -> im
     };
     view! {
         <div class="jr-detail" id=format!("jr-detail-{id}") role="region" aria-label="Print details">
+            {move || entry.with(|e| e.as_ref().and_then(purpose_link)).map(|(chip, href)| view! {
+                <p class="jr-purpose-line"><a class="jr-purpose-link" href=href>{chip}</a></p>
+            })}
             <dl class="jr-facts">{facts}</dl>
             <RatingControls id=id entry=entry entries=entries />
             <Notes id=id entry=entry entries=entries />

@@ -1,0 +1,71 @@
+/* Filament → Calibrate (spec 2026-10-25). Nothing tokens only, in both
+   themes. The strip is the shared .nd-steps pattern; signal marks only
+   the chosen band, patch or height. A chosen pass or variant takes the
+   hub tabs' selected fill. Red is left to [ERROR: …] lines. */
+
+.calibrate-page { display: flex; flex-direction: column; gap: var(--nd-space-lg); }
+.cal-picker, .cal-run, .cal-card, .cal-part, .cal-link { display: flex; flex-direction: column; gap: var(--nd-space-sm); }
+.cal-context, .cal-quiet, .cal-will-save { margin: 0; color: var(--nd-text-secondary); font-size: 13px; }
+.cal-target { margin: 0; color: var(--nd-text-primary); }
+.cal-slots, .cal-row, .cal-actions, .cal-passes, .cal-variant { display: flex; flex-wrap: wrap; gap: var(--nd-space-sm); align-items: center; }
+.cal-pass, .cal-variant-option { background: transparent; cursor: pointer; }
+.cal-pass:disabled, .cal-variant-option:disabled { cursor: not-allowed; color: var(--nd-text-disabled); }
+.cal-pass[aria-pressed="true"], .cal-variant-option[aria-pressed="true"] { background-color: var(--nd-text-display); border-color: var(--nd-text-display); color: var(--nd-black); }
+.cal-slot { display: inline-flex; gap: var(--nd-space-sm); align-items: baseline; padding: 6px 12px; border: 1px solid var(--nd-border-visible); border-radius: var(--nd-radius-pill); color: var(--nd-text-primary); text-decoration: none; font-size: 13px; }
+.cal-slot[data-ready="false"] { color: var(--nd-text-secondary); }
+.cal-slot:focus-visible, .cal-preset:focus-visible, .cal-band:focus-visible, .cal-patch:focus-visible,
+.cal-tick:focus-visible, .cal-candidate:focus-visible { outline: 1px solid var(--nd-text-primary); outline-offset: 2px; }
+.cal-search { display: flex; flex-direction: column; gap: var(--nd-space-xs); max-width: 420px; }
+.cal-search-input, .cal-input { padding: 8px 10px; border: 1px solid var(--nd-border-visible); border-radius: var(--nd-radius-input); background: var(--nd-surface); color: var(--nd-text-primary); font: inherit; }
+.cal-input { width: 7em; }
+.cal-presets { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; max-height: 240px; overflow-y: auto; }
+.cal-preset { display: block; padding: 4px 8px; color: var(--nd-interactive); text-decoration: none; overflow-wrap: anywhere; }
+.cal-preset:hover { text-decoration: underline; }
+.cal-card { position: relative; padding: var(--nd-space-md); border: 1px solid var(--nd-border); border-radius: var(--nd-radius-card); background: var(--nd-surface); }
+.cal-card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--nd-space-sm); }
+.cal-card-title { margin: 0; font-size: 18px; color: var(--nd-text-display); }
+.cal-part { padding-top: var(--nd-space-sm); border-top: 1px solid var(--nd-border); }
+.cal-studio { margin: 0; padding-left: 1.2em; color: var(--nd-text-primary); font-family: var(--nd-font-mono); font-size: 12px; }
+.cal-fields { display: flex; flex-wrap: wrap; gap: var(--nd-space-md); }
+.cal-field { display: inline-flex; flex-direction: column; gap: var(--nd-space-xs); }
+.cal-unit { color: var(--nd-text-secondary); font-size: 12px; }
+.cal-bands, .cal-ruler { display: flex; flex-direction: column; width: max-content; max-width: 100%; border: 1px solid var(--nd-border-visible); }
+.cal-ruler { max-height: 320px; overflow-y: auto; }
+.cal-patches { display: flex; flex-wrap: wrap; width: max-content; max-width: 100%; border: 1px solid var(--nd-border-visible); }
+.cal-band, .cal-patch, .cal-tick { padding: 6px 14px; border: 0; border-bottom: 1px solid var(--nd-border); background: transparent; color: var(--nd-text-primary); font-family: var(--nd-font-mono); font-size: 12px; text-align: left; cursor: pointer; }
+.cal-patch { min-width: 3.5em; border-bottom: 0; border-right: 1px solid var(--nd-border); text-align: center; }
+.cal-band:hover, .cal-patch:hover, .cal-tick:hover { color: var(--nd-text-display); background: var(--nd-surface-raised); }
+.cal-band[aria-pressed="true"], .cal-patch[aria-pressed="true"], .cal-tick[aria-pressed="true"] { background: var(--nd-signal); color: var(--nd-black); }
+.cal-suggestion { display: flex; flex-direction: column; gap: var(--nd-space-xs); }
+.cal-suggestion-line { margin: 0; display: flex; flex-wrap: wrap; gap: var(--nd-space-sm); align-items: center; }
+.cal-reason, .cal-current, .cal-undo-note, .cal-photo-note, .cal-note, .cal-extra { overflow-wrap: anywhere; }
+.cal-note { margin: 0; color: var(--nd-text-primary); font-size: 13px; }
+.cal-changed { margin: 0; color: var(--nd-warning); }
+.cal-pick-variant { margin: 0; color: var(--nd-text-primary); }
+.cal-notes { display: flex; flex-direction: column; gap: var(--nd-space-xs); }
+.cal-typed-note, .cal-photo-note { margin: 0; }
+/* Live regions stay mounted so a new line is announced; while empty they
+   take no room and no gap in the column. */
+.cal-photo-note:empty, .cal-typed-note:empty, .cal-changed:empty, .cal-restart:empty, .cal-notes:empty { position: absolute; }
+.cal-band:disabled, .cal-patch:disabled, .cal-tick:disabled { cursor: not-allowed; }
+.cal-card-title:focus-visible { outline: 1px solid var(--nd-text-primary); outline-offset: 2px; }
+.cal-step-status { font-size: 10px; letter-spacing: 0; text-transform: none; }
+.cal-step[data-status="skipped"] .nd-step-btn { border-style: dashed; }
+.cal-candidates { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--nd-space-xs); }
+.cal-candidate:hover { border-color: var(--nd-text-secondary); }
+.cal-candidate-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.cal-candidate { display: flex; gap: var(--nd-space-sm); align-items: baseline; width: 100%; padding: 6px 10px; border: 1px solid var(--nd-border-visible); border-radius: var(--nd-radius-input); background: transparent; color: var(--nd-text-primary); font: inherit; text-align: left; cursor: pointer; }
+.cal-suggested { color: var(--nd-text-primary); }
+.cal-linked, .cal-no-preset { margin: 0; }
+.cal-text-link { color: var(--nd-interactive); }
+.cal-history { display: flex; flex-direction: column; gap: var(--nd-space-sm); overflow-x: auto; }
+.cal-history-change { display: block; color: var(--nd-text-secondary); font-family: var(--nd-font-mono); font-size: 11px; }
+.cal-history-table { width: 100%; border-collapse: collapse; font-size: 12px; color: var(--nd-text-secondary); }
+.cal-history-table th { padding: 4px 8px; border-bottom: 1px solid var(--nd-border-visible); font-family: var(--nd-font-mono); font-size: 11px; font-weight: 400; letter-spacing: 0.08em; text-align: left; text-transform: uppercase; }
+.cal-history-table td { padding: 4px 8px; border-bottom: 1px solid var(--nd-border); overflow-wrap: anywhere; }
+.cal-history-table tr[data-undone="true"] td { text-decoration: line-through; }
+.cal-thumb { width: 40px; height: 40px; object-fit: cover; border-radius: var(--nd-radius-input); }
+
+@media (max-width: 700px) {
+    .cal-history-table th:nth-child(5), .cal-history-table td:nth-child(5) { display: none; }
+}

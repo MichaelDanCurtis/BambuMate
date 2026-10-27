@@ -231,6 +231,25 @@ impl PresetIndex {
         })
     }
 
+    /// Flattens `profile` as its file holds it now, against this index's
+    /// presets of `kind`: its parents and includes come from the index.
+    /// Calibration reads a preset fresh this way before every write.
+    pub fn flatten_profile(
+        &self,
+        kind: PresetKind,
+        profile: &FilamentProfile,
+    ) -> Result<Map<String, Value>, SlicerError> {
+        let name = profile.name().unwrap_or("<unnamed>").to_string();
+        resolve_with_includes(profile, &self.kind(kind).registry)
+            .map(|resolved| resolved.config)
+            .map_err(|e| match e {
+                ResolveError::MissingParent(parent) => SlicerError::MissingParent { name, parent },
+                ResolveError::Circular(_) | ResolveError::TooDeep(_) => {
+                    SlicerError::io(format!("preset '{name}' has a broken inheritance chain"))
+                }
+            })
+    }
+
     /// `compatible_printers` of a preset, from the nearest level that sets a
     /// non-empty list. Empty means "every printer".
     pub(crate) fn compatible_printers(&self, kind: PresetKind, name: &str) -> Vec<String> {
@@ -514,7 +533,7 @@ fn add_dir(idx: &mut KindIndex, dir: &Path, source: PresetSource, kind: PresetKi
 
 /// System presets are pickable only when `instantiation` is `"true"` (the
 /// rest are bases and templates). User presets are, unless marked `"false"`.
-fn is_selectable(p: &FilamentProfile, source: PresetSource, kind: PresetKind) -> bool {
+pub(crate) fn is_selectable(p: &FilamentProfile, source: PresetSource, kind: PresetKind) -> bool {
     let inst = p.raw().get("instantiation").and_then(Value::as_str);
     let type_ok = p
         .raw()
@@ -781,6 +800,27 @@ pub(crate) mod tests {
             .set_modified(later)
             .unwrap();
         assert_ne!(before, PresetStamp::read(root.path(), Some("1881310893")));
+    }
+
+    #[test]
+    fn a_profile_is_flattened_as_its_file_holds_it_now() {
+        let root = fake_bambu_root();
+        let idx = PresetIndex::load(root.path(), Some("1881310893"));
+        let mut profile = crate::profile::reader::read_profile(
+            &root
+                .path()
+                .join("system/BBL/filament/Bambu PLA Basic @BBL H2C.json"),
+        )
+        .unwrap();
+        profile.set_string_array("filament_flow_ratio", vec!["0.9".into(), "0.91".into()]);
+        let config = idx.flatten_profile(PresetKind::Filament, &profile).unwrap();
+        assert_eq!(
+            config["filament_flow_ratio"],
+            json!(["0.9", "0.91"]),
+            "the leaf as given wins over its include"
+        );
+        assert_eq!(config["filament_id"], json!("GFA00"), "from its @base");
+        assert_eq!(config["filament_density"], json!(["1.26"]));
     }
 
     fn write(root: &Path, rel: &str, v: Value) {

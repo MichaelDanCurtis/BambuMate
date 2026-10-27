@@ -915,6 +915,7 @@ mod tests {
             filament_id: None,
             path: path.into(),
             is_user_profile: true,
+            instantiable: true,
         }
     }
 

@@ -374,6 +374,34 @@ pub(crate) fn detected_line(s: &SlotView) -> DetectedLine {
     DetectedLine::None
 }
 
+/// Where a slot's Calibrate link goes: any slot with filament in it. A slot
+/// without a profile still links, and the tab says so and points to Search.
+pub(crate) fn calibrate_href_for(s: &SlotView) -> Option<String> {
+    (!s.tray.empty).then(|| crate::calibration::view::slot_href(&s.label))
+}
+
+/// The link's accessible name: ten slots mean ten links, so each one names
+/// its slot (it still starts with the visible "Calibrate").
+pub(crate) fn calibrate_label_for(s: &SlotView) -> String {
+    format!("Calibrate {}", untrusted_text(&s.label, ID_MAX))
+}
+
+/// The quiet Calibrate link under a slot card, on Printer and Home. It sits
+/// outside the card's main button, because links can't nest in buttons.
+#[component]
+pub(crate) fn CalibrateLink(item: Memo<SlotView>) -> impl IntoView {
+    move || {
+        item.with(|s| calibrate_href_for(s).map(|href| (href, calibrate_label_for(s))))
+            .map(|(href, label)| {
+                view! {
+                    <p class="pr-calibrate">
+                        <a class="pr-calibrate-link" href=href aria-label=label>"Calibrate"</a>
+                    </p>
+                }
+            })
+    }
+}
+
 /// The detected profile under a slot card, on Printer and Home, with "Use
 /// this" for a slot that has no assignment. "Use this" saves the detected
 /// preset through `printer_assign_slot`. It opens neither the picker nor the
@@ -632,6 +660,7 @@ fn SlotCard(item: Memo<SlotView>, picking: RwSignal<Option<SlotView>>) -> impl I
                 {body}
             </button>
             <SlotDetection item=item />
+            <CalibrateLink item=item />
             {guide}
         </div>
     }
@@ -711,7 +740,7 @@ fn Errors(view: RwSignal<PrinterView>) -> impl IntoView {
 
 /// Filters presets by a case-insensitive search, keeping the first
 /// `PICKER_LIMIT`.
-fn matching(list: &[ProfileInfo], query: &str) -> Vec<ProfileInfo> {
+pub(crate) fn matching(list: &[ProfileInfo], query: &str) -> Vec<ProfileInfo> {
     let q = query.trim().to_lowercase();
     list.iter()
         .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q))
@@ -721,7 +750,7 @@ fn matching(list: &[ProfileInfo], query: &str) -> Vec<ProfileInfo> {
 }
 
 /// More presets match than `matching` shows.
-fn more_than_shown(list: &[ProfileInfo], query: &str) -> bool {
+pub(crate) fn more_than_shown(list: &[ProfileInfo], query: &str) -> bool {
     let q = query.trim().to_lowercase();
     list.iter()
         .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q))
@@ -920,6 +949,31 @@ mod tests {
     }
 
     #[test]
+    fn a_loaded_slot_links_to_calibrate_it() {
+        let loaded = SlotView {
+            label: "A2".into(),
+            tray: Tray {
+                tray_type: "PLA".into(),
+                ..Default::default()
+            },
+            ..slot(0, 1)
+        };
+        assert_eq!(
+            calibrate_href_for(&loaded).as_deref(),
+            Some("/filament/calibrate?slot=A2")
+        );
+        let empty = SlotView {
+            tray: Tray {
+                empty: true,
+                ..Default::default()
+            },
+            ..slot(1, 3)
+        };
+        assert_eq!(calibrate_href_for(&empty), None);
+        assert_eq!(calibrate_label_for(&loaded), "Calibrate A2");
+    }
+
+    #[test]
     fn slots_group_into_rows_in_order() {
         let v = PrinterView {
             slots: vec![slot(0, 0), slot(0, 1), slot(1, 0), slot(255, 254)],
@@ -957,6 +1011,7 @@ mod tests {
             filament_id: None,
             path: format!("/{n}.json"),
             is_user_profile: true,
+            instantiable: true,
         };
         let list = vec![p("Polymaker PolyLite PLA"), p("Bambu PETG HF")];
         assert_eq!(matching(&list, "polylite").len(), 1);
@@ -1067,6 +1122,7 @@ mod tests {
                 filament_id: None,
                 path: format!("/{i}.json"),
                 is_user_profile: false,
+                instantiable: true,
             })
             .collect();
         assert_eq!(matching(&list, "").len(), PICKER_LIMIT);

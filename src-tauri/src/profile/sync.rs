@@ -910,10 +910,11 @@ mod tests {
             "diagnostics/checks.rs",
         ];
         // (file, raw calls allowed, why). Keep this narrow.
-        let raw_io_allowed: [(&str, usize, &str); 6] = [
-            // backup_profile copies into `.backups/`; the conf backup copies
-            // BambuStudio.conf. Neither writes a preset.
-            ("profile/writer.rs", 2, "backups, not presets"),
+        let raw_io_allowed: [(&str, usize, &str); 7] = [
+            // backup_profile copies into `.backups/`, and retire_profile
+            // copies a retired preset's `.info` beside its backup there; the
+            // conf backup copies BambuStudio.conf. None writes a preset.
+            ("profile/writer.rs", 3, "backups, not presets"),
             // Scratch checks in a temp directory.
             ("diagnostics/checks.rs", 7, "scratch dir only"),
             // `copy_verbatim`: copies into the snapshot store, and back out
@@ -930,6 +931,10 @@ mod tests {
             ("slicer/settings.rs", 5, "slice job staging dir"),
             // This module's tests build fixtures; its own code has none.
             ("profile/sync.rs", 0, "uses the writers"),
+            // The one call is the fixture writer in its `#[cfg(test)]
+            // pub(crate) mod testing`, which `without_test_module` does not
+            // strip. Its own code writes through the sync helpers.
+            ("calibration/apply.rs", 1, "test fixtures only"),
         ];
         // Markers of code that reads or writes preset files.
         let handles_presets = [

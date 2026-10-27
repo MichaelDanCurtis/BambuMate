@@ -1008,6 +1008,14 @@ pub struct ProfileInfo {
     pub filament_id: Option<String>,
     pub path: String,
     pub is_user_profile: bool,
+    /// Bambu Studio lists it for printing: `false` for an `@base` preset
+    /// or an `fdm_filament_*` template. Older answers without it count it.
+    #[serde(default = "listed")]
+    pub instantiable: bool,
+}
+
+fn listed() -> bool {
+    true
 }
 
 /// List all user filament profiles from Bambu Studio.

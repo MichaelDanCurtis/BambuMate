@@ -465,3 +465,22 @@
         font-size: 13px;
     }
 }
+
+.jr-purpose {
+    color: var(--nd-text-primary);
+}
+
+.jr-purpose-line {
+    margin: 0 0 var(--nd-space-sm);
+}
+
+.jr-purpose-link {
+    font-family: var(--nd-font-mono);
+    font-size: 12px;
+    color: var(--nd-interactive);
+}
+
+.jr-purpose-link:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}

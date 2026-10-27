@@ -191,6 +191,7 @@ const TAB_ROUTES = [
   ["/filament", "/filament"],
   ["/filament", "/filament/advise"],
   ["/filament", "/filament/batch"],
+  ["/filament", "/filament/calibrate"],
   ["/profiles", "/profiles"],
   ["/profiles", "/profiles/compare"],
   ["/settings", "/settings"],
@@ -278,6 +279,57 @@ async function checkRailOverlap(browserType, name, baseUrl) {
   return failures;
 }
 
+// The profile's Calibrate link at phone width. The Profiles page itself is
+// not laid out for 375px (the detail panel collapses beside the list, so every
+// action, old and new, lies off screen), so a position on screen can't be
+// asserted. What the link owns is checked instead: a real hit area, and no
+// reach beyond the existing pills in its row, so it can't make that worse.
+const PHONE = { width: 375, height: 812 };
+const MIN_HIT = 32;
+
+async function checkProfileCalibrateAtPhoneWidth(browserType, name, baseUrl) {
+  const failures = [];
+  const browser = await browserType.launch();
+  const page = await browser.newPage({ viewport: PHONE });
+  page.on("pageerror", (e) => console.log(`  pageerror ${name} phone: ${e.message}`));
+  await page.addInitScript(installTauriMock, FIXTURES);
+  try {
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".sidebar", { timeout: 45000 });
+    await page.click('nav.sidebar a[href="/profiles"]');
+    await page.waitForSelector(".profile-list-item", { timeout: 15000 });
+    await page.locator(".profile-list-item").first().click();
+    await page.waitForSelector(".pm-actions a.pm-calibrate", { timeout: 15000 });
+    const m = await page.evaluate(() => {
+      const link = document.querySelector(".pm-actions a.pm-calibrate");
+      const a = link.getBoundingClientRect();
+      const others = [...document.querySelectorAll(".pm-actions > :not(a.pm-calibrate)")].map((c) => c.getBoundingClientRect());
+      return {
+        width: Math.round(a.width),
+        height: Math.round(a.height),
+        right: Math.round(a.right),
+        pillsRight: Math.round(Math.max(...others.map((r) => r.right))),
+        pills: others.length,
+      };
+    });
+    const ok = m.height >= MIN_HIT && m.width >= MIN_HIT && m.pills > 0 && m.right <= m.pillsRight + 1;
+    console.log(
+      `  ${ok ? "OK  " : "FAIL"} ${name} phone .pm-calibrate ${m.width}x${m.height}, right edge ${m.right} ` +
+        `(widest pill ends at ${m.pillsRight})`
+    );
+    if (!ok) {
+      failures.push(
+        `${name}: .pm-calibrate is ${m.width}x${m.height} and ends at x=${m.right}, ` +
+          `the existing pills end at x=${m.pillsRight} (need >= ${MIN_HIT}px and no further out) at ${PHONE.width}px`
+      );
+    }
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+  return failures;
+}
+
 const server = await serveDist();
 const baseUrl = `http://127.0.0.1:${server.address().port}/`;
 console.log(`\nServing ${distDir} at ${baseUrl}`);
@@ -287,13 +339,15 @@ try {
   railFailures = [
     ...(await checkRailOverlap(webkit, "webkit", baseUrl)),
     ...(await checkRailOverlap(chromium, "chromium", baseUrl)),
+    ...(await checkProfileCalibrateAtPhoneWidth(webkit, "webkit", baseUrl)),
+    ...(await checkProfileCalibrateAtPhoneWidth(chromium, "chromium", baseUrl)),
   ];
 } finally {
   server.close();
 }
 
 if (railFailures.length) {
-  console.error(`\nFAIL: ${railFailures.length} rail z-index overlap(s):\n` + railFailures.join("\n"));
+  console.error(`\nFAIL: ${railFailures.length} layout failure(s):\n` + railFailures.join("\n"));
   process.exit(1);
 }
 console.log("\nPASS: the expanded rail is never covered by page content in either engine.");

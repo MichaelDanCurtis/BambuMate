@@ -14,6 +14,7 @@ use crate::journal::{JournalEvents, JournalShared};
 use crate::pages::about::AboutPage;
 use crate::pages::advise::AdvisePage;
 use crate::pages::batch_generate::BatchGeneratePage;
+use crate::pages::calibrate::CalibratePage;
 use crate::pages::filament_search::FilamentSearchPage;
 use crate::pages::health::HealthPage;
 use crate::pages::home::HomePage;
@@ -181,6 +182,7 @@ pub fn App() -> impl IntoView {
                                 <Route path=path!("") view=FilamentSearchPage />
                                 <Route path=path!("advise") view=AdvisePage />
                                 <Route path=path!("batch") view=BatchGeneratePage />
+                                <Route path=path!("calibrate") view=CalibratePage />
                             </ParentRoute>
                             <ParentRoute path=path!("/profiles") view=|| view! { <HubPage title="Profiles" tabs=PROFILES_TABS /> }>
                                 <Route path=path!("") view=ProfileManagementPage />

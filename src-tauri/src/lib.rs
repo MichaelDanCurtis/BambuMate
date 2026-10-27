@@ -3,6 +3,7 @@
 pub mod advisor;
 pub mod agent;
 pub mod analyzer;
+pub mod calibration;
 mod commands;
 pub mod diagnostics;
 pub mod history;
@@ -147,6 +148,19 @@ pub fn run() {
             commands::journal::journal_month_summary,
             commands::journal::journal_last,
             commands::journal::journal_image,
+            commands::calibration::calibration_runs,
+            commands::calibration::calibration_start,
+            commands::calibration::calibration_set_variant,
+            commands::calibration::calibration_defaults,
+            commands::calibration::calibration_preview,
+            commands::calibration::calibration_save,
+            commands::calibration::calibration_record,
+            commands::calibration::calibration_undo,
+            commands::calibration::calibration_skip,
+            commands::calibration::calibration_suggest,
+            commands::calibration::calibration_image,
+            commands::calibration::calibration_link_candidates,
+            commands::calibration::calibration_link_print,
         ])
         .setup(|app| {
             // Apply the user-configured Bambu Studio config folder before any

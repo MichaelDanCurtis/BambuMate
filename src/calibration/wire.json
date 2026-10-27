@@ -1,0 +1,444 @@
+{
+  "setups": {
+    "temperature": {
+      "test": "temperature",
+      "start": 230,
+      "end": 190
+    },
+    "flow_coarse": {
+      "test": "flow_coarse",
+      "base": 0.98
+    },
+    "flow_fine": {
+      "test": "flow_fine",
+      "base": 1.029
+    },
+    "retraction": {
+      "test": "retraction",
+      "start": 0.0,
+      "end": 2.0,
+      "step": 0.1
+    },
+    "max_volumetric_speed": {
+      "test": "max_volumetric_speed",
+      "start": 5.0,
+      "end": 20.0,
+      "step": 0.5
+    },
+    "pressure_advance": {
+      "test": "pressure_advance"
+    }
+  },
+  "readings": {
+    "temperature": {
+      "test": "temperature",
+      "band": 1
+    },
+    "flow_coarse": {
+      "test": "flow_coarse",
+      "modifier": 5
+    },
+    "flow_fine": {
+      "test": "flow_fine",
+      "modifier": -6
+    },
+    "retraction": {
+      "test": "retraction",
+      "height_mm": 5.0
+    },
+    "max_volumetric_speed": {
+      "test": "max_volumetric_speed",
+      "height_mm": 14.0
+    },
+    "pressure_advance": {
+      "test": "pressure_advance",
+      "k": 0.025
+    }
+  },
+  "runs": [
+    {
+      "id": 1,
+      "preset_name": "Bambu PLA Basic @BBL H2D",
+      "slot_label": "A2",
+      "updated_at": 300,
+      "result_ids": [
+        10,
+        11
+      ]
+    }
+  ],
+  "run": {
+    "id": 1,
+    "preset_name": "Bambu PLA Basic @BBL H2D",
+    "preset_path": "/sys/Bambu PLA Basic @BBL H2D.json",
+    "target_name": "Bambu PLA Basic (calibrated) @BBL H2D",
+    "target_path": "/user/Bambu PLA Basic (calibrated) @BBL H2D.json",
+    "is_system": false,
+    "will_save_as": null,
+    "filament_id": "GFA00",
+    "material": "PLA",
+    "printer_model": "H2D",
+    "nozzle": "0.4",
+    "slot_label": "A2",
+    "variant": "Direct Drive Standard",
+    "variants": [
+      "Direct Drive Standard",
+      "Direct Drive High Flow"
+    ],
+    "needs_variant": false,
+    "preset_error": null,
+    "steps": [
+      {
+        "step": "temperature",
+        "status": {
+          "state": "saved",
+          "result_id": 10,
+          "value": "225 °C",
+          "at": 200
+        },
+        "fine_ready": false,
+        "opened_at": 150
+      },
+      {
+        "step": "flow",
+        "status": {
+          "state": "skipped"
+        },
+        "fine_ready": true,
+        "opened_at": null
+      },
+      {
+        "step": "retraction",
+        "status": {
+          "state": "recorded",
+          "result_id": 11,
+          "value": "0.6 mm",
+          "at": 300
+        },
+        "fine_ready": false,
+        "opened_at": 170
+      },
+      {
+        "step": "max_speed",
+        "status": {
+          "state": "not_run"
+        },
+        "fine_ready": false,
+        "opened_at": null
+      }
+    ],
+    "results": [
+      {
+        "id": 11,
+        "test": "retraction",
+        "value": "0.6",
+        "preset_key": "filament_retraction_length",
+        "old_value": "nil",
+        "old_display": "printer default",
+        "new_value": "0.6",
+        "target_name": "Bambu PLA Basic (calibrated) @BBL H2D",
+        "variant": "Direct Drive Standard",
+        "saved": true,
+        "undone": false,
+        "created_at": 300,
+        "photo": "3f2a.jpg",
+        "journal_entry_id": 42,
+        "can_undo": true,
+        "created_copy": true
+      }
+    ],
+    "created_at": 100,
+    "updated_at": 300
+  },
+  "defaults": {
+    "setup": {
+      "test": "temperature",
+      "start": 230,
+      "end": 190
+    },
+    "current": "220",
+    "material_label": "PLA"
+  },
+  "preview_bands": {
+    "diagram": {
+      "kind": "bands",
+      "bands": [
+        {
+          "index": 0,
+          "label": "230 °C"
+        },
+        {
+          "index": 1,
+          "label": "225 °C"
+        },
+        {
+          "index": 2,
+          "label": "220 °C"
+        }
+      ]
+    },
+    "labels": [
+      "230 °C",
+      "225 °C",
+      "220 °C"
+    ],
+    "value": {
+      "value": 225.0,
+      "text": "225",
+      "display": "225 °C",
+      "change": {
+        "preset_key": "filament_retraction_length",
+        "old": "nil",
+        "old_display": "printer default",
+        "new": "0.6",
+        "extra": {
+          "key": "nozzle_temperature_initial_layer",
+          "old": "225",
+          "new": "230"
+        },
+        "target_name": "Bambu PLA Basic (calibrated) @BBL H2D",
+        "will_copy": true,
+        "variant": "Direct Drive Standard"
+      },
+      "change_error": null
+    }
+  },
+  "preview_patches": {
+    "diagram": {
+      "kind": "patches",
+      "patches": [
+        {
+          "modifier": -9,
+          "label": "-9"
+        },
+        {
+          "modifier": -8,
+          "label": "-8"
+        },
+        {
+          "modifier": -7,
+          "label": "-7"
+        },
+        {
+          "modifier": -6,
+          "label": "-6"
+        },
+        {
+          "modifier": -5,
+          "label": "-5"
+        },
+        {
+          "modifier": -4,
+          "label": "-4"
+        },
+        {
+          "modifier": -3,
+          "label": "-3"
+        },
+        {
+          "modifier": -2,
+          "label": "-2"
+        },
+        {
+          "modifier": -1,
+          "label": "-1"
+        },
+        {
+          "modifier": 0,
+          "label": "0"
+        }
+      ]
+    },
+    "labels": [
+      "-9",
+      "-8",
+      "-7",
+      "-6",
+      "-5",
+      "-4",
+      "-3",
+      "-2",
+      "-1",
+      "0"
+    ],
+    "value": null
+  },
+  "preview_ruler": {
+    "diagram": {
+      "kind": "ruler",
+      "max_mm": 3.4
+    },
+    "labels": [
+      "0 mm",
+      "1 mm",
+      "2 mm",
+      "3 mm"
+    ],
+    "value": null
+  },
+  "preview_none": {
+    "diagram": {
+      "kind": "none"
+    },
+    "labels": [],
+    "value": null
+  },
+  "saved": {
+    "outcome": "saved",
+    "run": {
+      "id": 1,
+      "preset_name": "Bambu PLA Basic @BBL H2D",
+      "preset_path": "/sys/Bambu PLA Basic @BBL H2D.json",
+      "target_name": "Bambu PLA Basic (calibrated) @BBL H2D",
+      "target_path": "/user/Bambu PLA Basic (calibrated) @BBL H2D.json",
+      "is_system": false,
+      "will_save_as": null,
+      "filament_id": "GFA00",
+      "material": "PLA",
+      "printer_model": "H2D",
+      "nozzle": "0.4",
+      "slot_label": "A2",
+      "variant": "Direct Drive Standard",
+      "variants": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow"
+      ],
+      "needs_variant": false,
+      "preset_error": null,
+      "steps": [
+        {
+          "step": "temperature",
+          "status": {
+            "state": "saved",
+            "result_id": 10,
+            "value": "225 °C",
+            "at": 200
+          },
+          "fine_ready": false,
+          "opened_at": 150
+        },
+        {
+          "step": "flow",
+          "status": {
+            "state": "skipped"
+          },
+          "fine_ready": true,
+          "opened_at": null
+        },
+        {
+          "step": "retraction",
+          "status": {
+            "state": "recorded",
+            "result_id": 11,
+            "value": "0.6 mm",
+            "at": 300
+          },
+          "fine_ready": false,
+          "opened_at": 170
+        },
+        {
+          "step": "max_speed",
+          "status": {
+            "state": "not_run"
+          },
+          "fine_ready": false,
+          "opened_at": null
+        }
+      ],
+      "results": [
+        {
+          "id": 11,
+          "test": "retraction",
+          "value": "0.6",
+          "preset_key": "filament_retraction_length",
+          "old_value": "nil",
+          "old_display": "printer default",
+          "new_value": "0.6",
+          "target_name": "Bambu PLA Basic (calibrated) @BBL H2D",
+          "variant": "Direct Drive Standard",
+          "saved": true,
+          "undone": false,
+          "created_at": 300,
+          "photo": "3f2a.jpg",
+          "journal_entry_id": 42,
+          "can_undo": true,
+          "created_copy": true
+        }
+      ],
+      "created_at": 100,
+      "updated_at": 300
+    },
+    "result_id": 11,
+    "studio_running": true,
+    "assign_error": "No printer configured"
+  },
+  "changed": {
+    "outcome": "changed",
+    "preview": {
+      "diagram": {
+        "kind": "none"
+      },
+      "labels": [],
+      "value": null
+    }
+  },
+  "suggest": {
+    "photo": "3f2a.jpg",
+    "suggestion": {
+      "pick": "225 °C",
+      "confidence": 0.8,
+      "reason": "Smoothest band.\nSlight stringing above."
+    },
+    "note": null
+  },
+  "link_candidates": {
+    "suggested": 42,
+    "entries": [
+      {
+        "id": 42,
+        "job_key": "local:cube|",
+        "name": "Gear housing",
+        "gcode_file": "gear.gcode.3mf",
+        "plate": 1,
+        "printer_model": "H2D",
+        "started_at": 1000,
+        "start_approx": false,
+        "ended_at": 2000,
+        "outcome": "finished",
+        "error_code": null,
+        "hms": [],
+        "verdict": "usable",
+        "tags": [
+          "stringing"
+        ],
+        "notes": "ok",
+        "slice": null,
+        "trays": [
+          {
+            "ams_id": 0,
+            "tray_id": 1,
+            "label": "A2",
+            "tray_type": "PLA",
+            "color": "FFFFFFFF",
+            "brand": "PLA Basic"
+          }
+        ],
+        "photos": [
+          {
+            "id": 7,
+            "file_name": "a.jpg",
+            "added_at": 1500
+          }
+        ],
+        "analyses": [
+          3
+        ],
+        "purpose": {
+          "calibration_result_id": 11,
+          "test": "retraction"
+        },
+        "updated_at": 2000
+      }
+    ]
+  }
+}

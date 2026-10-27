@@ -3,6 +3,7 @@ pub mod advise;
 pub mod analysis_view;
 pub mod batch_generate;
 pub mod batch_view;
+pub mod calibrate;
 pub mod diff_view;
 pub mod filament_search;
 pub mod filament_steps;

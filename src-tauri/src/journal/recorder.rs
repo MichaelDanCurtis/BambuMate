@@ -679,6 +679,7 @@ mod tests {
 
     use super::*;
     use crate::journal::slice::done_job;
+    use crate::journal::store::SCHEMA_VERSION;
     use crate::journal::types::{OpenEntry, Outcome, TrayUse};
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\nthumb";
@@ -1469,14 +1470,16 @@ mod tests {
     }
 
     /// A journal this build can't open, until the returned connection sets
-    /// its version back to 1. Holds one entry an earlier session left open.
+    /// its version back to the current one. Holds one entry an earlier
+    /// session left open.
     fn left_open_and_unreadable(paths: &JournalPaths) -> rusqlite::Connection {
         JournalStore::open(paths)
             .unwrap()
             .start(&new_print("earlier", 10), 10)
             .unwrap();
         let raw = rusqlite::Connection::open(&paths.db).unwrap();
-        raw.pragma_update(None, "user_version", 2).unwrap();
+        raw.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
         raw
     }
 
@@ -1493,7 +1496,8 @@ mod tests {
             Duration::from_millis(20),
         );
         assert_eq!(watch, WatchState::default(), "nothing could be resumed");
-        raw.pragma_update(None, "user_version", 1).unwrap();
+        raw.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
         // No batch comes: the writer's own retry opens it and closes the
         // entry, however long the runner takes to get there.
         let s = JournalStore::open(&paths).unwrap();
@@ -1536,7 +1540,8 @@ mod tests {
         assert!(w.store.is_none());
         assert!(w.keys.is_empty(), "the dropped start opens nothing");
         assert_eq!(changes.count(), 0);
-        raw.pragma_update(None, "user_version", 1).unwrap();
+        raw.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
         w.write(&[started("now", "Now")]);
         assert_eq!(changes.count(), 1, "one batch, one change event");
         let s = JournalStore::open(&paths).unwrap();

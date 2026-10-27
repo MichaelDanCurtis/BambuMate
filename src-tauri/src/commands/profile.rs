@@ -39,6 +39,35 @@ pub struct ProfileInfo {
     pub filament_id: Option<String>,
     pub path: String,
     pub is_user_profile: bool,
+    /// Bambu Studio lists it for printing. `false` for an `@base` preset or
+    /// an `fdm_filament_*` template, which Calibrate leaves out.
+    pub instantiable: bool,
+}
+
+/// The summary of a filament preset file.
+fn profile_info(
+    profile: &FilamentProfile,
+    name: String,
+    path: &std::path::Path,
+    is_user_profile: bool,
+) -> ProfileInfo {
+    let source = if is_user_profile {
+        crate::slicer::settings::PresetSource::User
+    } else {
+        crate::slicer::settings::PresetSource::System
+    };
+    ProfileInfo {
+        name,
+        filament_type: profile.filament_type().map(|s| s.to_string()),
+        filament_id: profile.filament_id().map(|s| s.to_string()),
+        path: path.to_string_lossy().to_string(),
+        is_user_profile,
+        instantiable: crate::slicer::settings::is_selectable(
+            profile,
+            source,
+            crate::slicer::settings::PresetKind::Filament,
+        ),
+    }
 }
 
 /// Detailed information for a single filament profile.
@@ -113,13 +142,7 @@ pub fn list_profiles() -> Result<Vec<ProfileInfo>, String> {
             Ok(profile) => {
                 let name = profile.name().unwrap_or("<unnamed>").to_string();
 
-                profiles.push(ProfileInfo {
-                    name,
-                    filament_type: profile.filament_type().map(|s| s.to_string()),
-                    filament_id: profile.filament_id().map(|s| s.to_string()),
-                    path: path.to_string_lossy().to_string(),
-                    is_user_profile: true,
-                });
+                profiles.push(profile_info(&profile, name, path, true));
             }
             Err(e) => {
                 info!("Skipping unreadable profile at {:?}: {}", path, e);
@@ -246,13 +269,7 @@ pub fn list_system_profiles() -> Result<Vec<ProfileInfo>, String> {
                     None => continue, // Skip registry files like BBL.json
                 };
 
-                profiles.push(ProfileInfo {
-                    name,
-                    filament_type: profile.filament_type().map(|s| s.to_string()),
-                    filament_id: profile.filament_id().map(|s| s.to_string()),
-                    path: path.to_string_lossy().to_string(),
-                    is_user_profile: false,
-                });
+                profiles.push(profile_info(&profile, name, path, false));
             }
             Err(e) => {
                 info!("Skipping unreadable system profile at {:?}: {}", path, e);
@@ -712,7 +729,10 @@ pub fn update_profile_field(
 /// is appended to the name (and so to the file), so a duplicate never
 /// overwrites a preset or shares its name. Path separators become `_` in the
 /// file name only.
-fn duplicate_target(user_dir: &std::path::Path, new_name: &str) -> (String, std::path::PathBuf) {
+pub(crate) fn duplicate_target(
+    user_dir: &std::path::Path,
+    new_name: &str,
+) -> (String, std::path::PathBuf) {
     let file_for = |name: &str| user_dir.join(format!("{}.json", name.replace(['/', '\\'], "_")));
     let mut name = new_name.to_string();
     let mut n = 2;
@@ -760,12 +780,45 @@ fn duplicate_into(
     new_name: &str,
     fallback_user_id: &str,
 ) -> Result<(std::path::PathBuf, crate::profile::sync::NewPresetWrite), String> {
+    if new_name.trim().is_empty() {
+        return Err("Enter a name for the copy".to_string());
+    }
+    let profile = read_profile(source).map_err(|e| e.to_string())?;
+    duplicate_profile_into(
+        profile,
+        user_dir,
+        new_name,
+        fallback_user_id,
+        FilamentIdRule::Fresh,
+    )
+}
+
+/// The `filament_id` a duplicate gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilamentIdRule {
+    /// A new `P…` id: an ordinary duplicate is a filament of its own.
+    Fresh,
+    /// The source's own id (a fresh one only when it has none). A
+    /// calibrated copy of a system preset is the same filament, as a
+    /// Bambu Studio user preset made from a system preset is: an RFID
+    /// spool's `tray_info_idx` (GFA00) still names it.
+    KeepParent,
+}
+
+/// The body of [`duplicate_into`] for a profile already in memory.
+/// Calibration hands it a flattened system preset to copy as
+/// "<name> (calibrated)", keeping its `filament_id`.
+pub(crate) fn duplicate_profile_into(
+    mut profile: FilamentProfile,
+    user_dir: &std::path::Path,
+    new_name: &str,
+    fallback_user_id: &str,
+    id_rule: FilamentIdRule,
+) -> Result<(std::path::PathBuf, crate::profile::sync::NewPresetWrite), String> {
     let new_name = new_name.trim();
     if new_name.is_empty() {
         return Err("Enter a name for the copy".to_string());
     }
-    let mut profile = read_profile(source).map_err(|e| e.to_string())?;
-
     let (name, target_path) = duplicate_target(user_dir, new_name);
     // Even though we construct target_path ourselves from user_dir, run it
     // through the shared guard so any future refactor that lets a caller
@@ -773,7 +826,18 @@ fn duplicate_into(
     crate::profile::paths::ensure_within(user_dir, &target_path, false)?;
 
     profile.set_string("name", name.clone());
-    profile.set_string("filament_id", generator::generate_filament_id());
+    let kept = match id_rule {
+        FilamentIdRule::Fresh => None,
+        FilamentIdRule::KeepParent => profile
+            .filament_id()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
+    };
+    profile.set_string(
+        "filament_id",
+        kept.unwrap_or_else(generator::generate_filament_id),
+    );
     profile.set_string_array("filament_settings_id", vec![name.clone()]);
 
     let outcome = write_profile_new(&profile, &target_path, fallback_user_id)
@@ -1397,9 +1461,9 @@ fn filter_base_profile_index(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_target_printer_options, duplicate_into, filter_base_profile_index,
-        parse_target_printer_label, BaseProfileIndexEntry, DEFAULT_NOZZLE_SIZE,
-        DEFAULT_TARGET_PRINTER_MODEL,
+        build_target_printer_options, duplicate_into, duplicate_profile_into,
+        filter_base_profile_index, parse_target_printer_label, profile_info, BaseProfileIndexEntry,
+        FilamentIdRule, FilamentProfile, DEFAULT_NOZZLE_SIZE, DEFAULT_TARGET_PRINTER_MODEL,
     };
     use crate::profile::reader::{read_profile, read_profile_metadata};
     use crate::profile::sync::NewPresetWrite;
@@ -1448,6 +1512,77 @@ mod tests {
         let files = std::fs::read_dir(&user_dir).unwrap().count();
         assert_eq!(files, 5, "source plus two copies, each with an .info");
         assert!(duplicate_into(&source, &user_dir, "  ", "").is_err());
+    }
+
+    #[test]
+    fn an_ordinary_duplicate_gets_a_fresh_id_and_a_calibrated_copy_keeps_its_parents() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("user/1881310893/filament/base");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        let source = user_dir.join("Bambu PLA Basic.json");
+        std::fs::write(
+            &source,
+            r#"{"name":"Bambu PLA Basic","filament_id":"GFA00","filament_settings_id":["Bambu PLA Basic"]}"#,
+        )
+        .unwrap();
+        let (plain, _) = duplicate_into(&source, &user_dir, "My PLA", "").unwrap();
+        let id = read_profile(&plain)
+            .unwrap()
+            .filament_id()
+            .unwrap()
+            .to_string();
+        assert!(id.starts_with('P') && id != "GFA00", "{id}");
+
+        let (kept, _) = duplicate_profile_into(
+            read_profile(&source).unwrap(),
+            &user_dir,
+            "Bambu PLA Basic (calibrated)",
+            "",
+            FilamentIdRule::KeepParent,
+        )
+        .unwrap();
+        assert_eq!(read_profile(&kept).unwrap().filament_id(), Some("GFA00"));
+
+        let mut no_id = read_profile(&source).unwrap();
+        no_id.raw_mut().remove("filament_id");
+        let (fresh, _) =
+            duplicate_profile_into(no_id, &user_dir, "No id", "", FilamentIdRule::KeepParent)
+                .unwrap();
+        let id = read_profile(&fresh)
+            .unwrap()
+            .filament_id()
+            .unwrap()
+            .to_string();
+        assert!(id.starts_with('P'), "no id to keep: a fresh one, {id}");
+    }
+
+    #[test]
+    fn a_base_preset_or_template_is_listed_as_not_instantiable() {
+        let info = |v: serde_json::Value, user: bool| {
+            let profile = FilamentProfile::from_map(v.as_object().unwrap().clone());
+            profile_info(&profile, "x".into(), std::path::Path::new("x.json"), user).instantiable
+        };
+        use serde_json::json;
+        assert!(info(
+            json!({"name":"Bambu PLA Basic @BBL H2D","instantiation":"true"}),
+            false
+        ));
+        assert!(!info(
+            json!({"name":"Bambu PLA Basic @base","instantiation":"false"}),
+            false
+        ));
+        assert!(
+            !info(json!({"name":"fdm_filament_pla"}), false),
+            "a system file must say true"
+        );
+        assert!(
+            info(json!({"name":"My PLA"}), true),
+            "a user preset must say false"
+        );
+        assert!(!info(
+            json!({"name":"My base","instantiation":"false"}),
+            true
+        ));
     }
 
     fn entry(name: &str, ftype: &str, path: &str) -> BaseProfileIndexEntry {

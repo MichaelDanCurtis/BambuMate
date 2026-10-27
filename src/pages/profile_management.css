@@ -437,3 +437,17 @@
 .tooltip-wrapper:hover .tooltip-content {
     display: block;
 }
+
+.pm-calibrate {
+    display: inline-flex;
+    align-items: center;
+    align-self: center;
+    min-height: 36px;
+    padding: 0 var(--nd-space-md);
+    color: var(--nd-interactive);
+}
+
+.pm-calibrate:focus-visible {
+    outline: 1px solid var(--nd-text-primary);
+    outline-offset: 2px;
+}

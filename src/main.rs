@@ -1,6 +1,7 @@
 mod advisor;
 mod agent;
 mod app;
+mod calibration;
 mod commands;
 mod components;
 mod journal;

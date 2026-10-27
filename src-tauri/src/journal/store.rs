@@ -14,13 +14,13 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::photos::MAX_THUMBNAIL_BYTES;
 use super::types::{
-    EntryUpdate, FilterKind, JournalFilter, MonthSummary, NewPrint, OpenEntry, Outcome, Photo,
-    PrintEnd, PrintEntry, SliceSnapshot, TrayUse, Verdict,
+    EntryUpdate, FilterKind, JournalFilter, LinkCandidates, MonthSummary, NewPrint, OpenEntry,
+    Outcome, Photo, PrintEnd, PrintEntry, PrintPurpose, SliceSnapshot, TrayUse, Verdict,
 };
 use super::JournalPaths;
 
 /// `PRAGMA user_version` of the schema below.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub const READ_FAILED: &str = "The print journal couldn't be read.";
 pub const SAVE_FAILED: &str = "The print journal couldn't be saved.";
@@ -29,10 +29,9 @@ pub const NEWER_SCHEMA: &str =
 pub const PHOTO_FAILED: &str = "The photo couldn't be saved.";
 pub const GONE: &str = "That print isn't in the journal any more.";
 
-/// Version 1. `IF NOT EXISTS` and `BEGIN IMMEDIATE` let two connections
-/// race to create it.
+/// Version 1's tables. It runs inside `migrate_to_v1`'s transaction, and
+/// `IF NOT EXISTS` keeps it harmless on a journal that has them.
 const SCHEMA_V1: &str = "
-BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS prints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_key TEXT NOT NULL,
@@ -81,13 +80,59 @@ CREATE TABLE IF NOT EXISTS print_analyses (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (print_id, session_id)
 );
-PRAGMA user_version = 1;
-COMMIT;
 ";
+
+/// Creates version 1 in an immediate transaction that reads the version
+/// again, so a connection that lost a race to create the journal never
+/// lowers a version another one has already raised.
+fn migrate_to_v1(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(save_err)?;
+    let version: i64 = tx
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(read_err)?;
+    if version < 1 {
+        tx.execute_batch(SCHEMA_V1).map_err(save_err)?;
+        tx.execute_batch("PRAGMA user_version = 1;")
+            .map_err(save_err)?;
+    }
+    tx.commit().map_err(save_err)
+}
+
+/// Version 2 adds `purpose_json`. It runs in an immediate transaction that
+/// reads the version again, so two connections can't both alter the table.
+/// It also skips the `ALTER` when the column is already there, so a journal
+/// left at version 1 with the column still opens and moves to version 2.
+fn migrate_to_v2(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(save_err)?;
+    let version: i64 = tx
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(read_err)?;
+    if version < 2 {
+        let has_column: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('prints') \
+                 WHERE name = 'purpose_json')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(read_err)?;
+        if !has_column {
+            tx.execute_batch("ALTER TABLE prints ADD COLUMN purpose_json TEXT;")
+                .map_err(save_err)?;
+        }
+        tx.execute_batch("PRAGMA user_version = 2;")
+            .map_err(save_err)?;
+    }
+    tx.commit().map_err(save_err)
+}
 
 const COLUMNS: &str = "id, job_key, name, gcode_file, plate, printer_model, started_at, \
      start_approx, ended_at, outcome, error_code, hms_json, verdict, tags_json, notes, \
-     slice_json, updated_at";
+     slice_json, updated_at, purpose_json";
 
 /// `?1` is a lower-cased `%…%` pattern with `\` escapes.
 const SEARCH: &str = " AND (lower(p.name) LIKE ?1 ESCAPE '\\' \
@@ -148,13 +193,16 @@ fn entry_row(r: &Row) -> rusqlite::Result<PrintEntry> {
         trays: Vec::new(),
         photos: Vec::new(),
         analyses: Vec::new(),
+        purpose: r
+            .get::<_, Option<String>>(17)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
 /// A stored photo file name: one plain path component. Separators, `:` (a
 /// drive prefix on Windows), NUL and a leading dot are all refused, so a
 /// joined name can never leave the entry's folder.
-fn is_plain_name(name: &str) -> bool {
+pub(crate) fn is_plain_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
         && !name.contains(['/', '\\', ':', '\0'])
@@ -200,6 +248,16 @@ pub fn month_bounds<Tz: TimeZone>(now: &DateTime<Tz>) -> (i64, i64) {
     )
 }
 
+/// What [`JournalStore::link_purpose`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Linked {
+    /// The print isn't in the journal: nothing changed.
+    Gone,
+    /// The print now names the result. `displaced` is the other result it
+    /// named before, which no longer has this print.
+    Linked { displaced: Option<i64> },
+}
+
 pub struct JournalStore {
     conn: Connection,
     root: PathBuf,
@@ -212,7 +270,7 @@ impl JournalStore {
         if let Some(parent) = paths.db.parent() {
             std::fs::create_dir_all(parent).map_err(read_err)?;
         }
-        let conn = Connection::open(&paths.db).map_err(read_err)?;
+        let mut conn = Connection::open(&paths.db).map_err(read_err)?;
         conn.busy_timeout(Duration::from_secs(2))
             .map_err(read_err)?;
         conn.pragma_update(None, "foreign_keys", true)
@@ -221,7 +279,11 @@ impl JournalStore {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(read_err)?;
         match version {
-            0 => conn.execute_batch(SCHEMA_V1).map_err(save_err)?,
+            0 => {
+                migrate_to_v1(&mut conn)?;
+                migrate_to_v2(&mut conn)?;
+            }
+            1 => migrate_to_v2(&mut conn)?,
             SCHEMA_VERSION => {}
             v if v > SCHEMA_VERSION => {
                 tracing::warn!("print journal schema {v} is newer than {SCHEMA_VERSION}");
@@ -835,12 +897,154 @@ impl JournalStore {
         self.touch(id, now)?;
         tx.commit().map_err(save_err)
     }
+
+    /// Sets what the print was for, or clears it. `false` when the entry is
+    /// gone.
+    pub fn set_purpose(
+        &self,
+        id: i64,
+        purpose: Option<&PrintPurpose>,
+        now: i64,
+    ) -> Result<bool, String> {
+        let json = purpose
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(save_err)?;
+        let n = self
+            .conn
+            .execute(
+                "UPDATE prints SET purpose_json = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, json, now],
+            )
+            .map_err(save_err)?;
+        Ok(n > 0)
+    }
+
+    /// Clears the purpose only if it still points at `result_id`, in one
+    /// statement, so a purpose set since by another link is left alone.
+    /// `false` when the entry is gone or points elsewhere.
+    pub fn clear_purpose_if(&self, id: i64, result_id: i64, now: i64) -> Result<bool, String> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE prints SET purpose_json = NULL, updated_at = ?3 \
+                 WHERE id = ?1 AND purpose_json IS NOT NULL \
+                 AND json_extract(purpose_json, '$.calibration_result_id') = ?2",
+                params![id, result_id, now],
+            )
+            .map_err(save_err)?;
+        Ok(n > 0)
+    }
+
+    /// Links print `id` to a calibration result, and in the same immediate
+    /// transaction clears `previous`'s purpose while it still points at that
+    /// result ([`Self::clear_purpose_if`]), so no reader sees the result on
+    /// both prints or on neither. A `previous` whose purpose can't be read
+    /// keeps it (logged) and the new link still stands. A print belongs to
+    /// one result: the result `id` pointed at before, when another, comes
+    /// back as `displaced` for the caller to unlink. [`Linked::Gone`], with
+    /// nothing changed, when `id` is gone.
+    pub fn link_purpose(
+        &self,
+        id: i64,
+        purpose: &PrintPurpose,
+        previous: Option<i64>,
+        now: i64,
+    ) -> Result<Linked, String> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(save_err)?;
+        let current: Option<Option<i64>> = match self
+            .conn
+            .query_row(
+                "SELECT json_extract(purpose_json, '$.calibration_result_id') \
+                 FROM prints WHERE id = ?1",
+                [id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+        {
+            Ok(found) => found,
+            // A purpose that can't be read names no result to unlink.
+            Err(e) => {
+                tracing::warn!("journal: print {id}'s old purpose can't be read: {e}");
+                self.exists(id)?.then_some(None)
+            }
+        };
+        let Some(current) = current else {
+            return Ok(Linked::Gone);
+        };
+        if let Some(previous) = previous.filter(|p| *p != id) {
+            if let Err(e) = self.clear_purpose_if(previous, purpose.calibration_result_id, now) {
+                tracing::warn!("journal: print {previous} keeps its old calibration link: {e}");
+            }
+        }
+        if !self.set_purpose(id, Some(purpose), now)? {
+            // Dropping the transaction un-does the clear.
+            return Ok(Linked::Gone);
+        }
+        tx.commit().map_err(save_err)?;
+        Ok(Linked::Linked {
+            displaced: current.filter(|r| *r != purpose.calibration_result_id),
+        })
+    }
+
+    /// The prints a calibration step opened at `since` may be linked to.
+    /// The first is the newest print that ended since then. The four ended
+    /// before it follow. With none since, the five newest ended prints come
+    /// back and there is no suggestion. "Ended" means any outcome but
+    /// printing: a max-speed test is often stopped on purpose.
+    pub fn link_candidates(&self, since: i64) -> Result<LinkCandidates, String> {
+        let suggested: Option<PrintEntry> = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM prints WHERE outcome <> 'printing' \
+                     AND COALESCE(ended_at, started_at) >= ?1 \
+                     ORDER BY started_at DESC, id DESC LIMIT 1"
+                ),
+                [since],
+                entry_row,
+            )
+            .optional()
+            .map_err(read_err)?;
+        let limit_sql = match &suggested {
+            Some(_) => {
+                "AND (started_at < ?1 OR (started_at = ?1 AND id < ?2)) \
+                        ORDER BY started_at DESC, id DESC LIMIT 4"
+            }
+            None => "ORDER BY started_at DESC, id DESC LIMIT 5",
+        };
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {COLUMNS} FROM prints WHERE outcome <> 'printing' {limit_sql}"
+            ))
+            .map_err(read_err)?;
+        let rest: Vec<PrintEntry> = match &suggested {
+            Some(first) => stmt.query_map(params![first.started_at, first.id], entry_row),
+            None => stmt.query_map(params![], entry_row),
+        }
+        .map_err(read_err)?
+        .collect::<Result<_, _>>()
+        .map_err(read_err)?;
+        let entries: Vec<PrintEntry> = suggested.clone().into_iter().chain(rest).collect();
+        Ok(LinkCandidates {
+            suggested: suggested.map(|e| e.id),
+            entries: entries
+                .into_iter()
+                .map(|e| self.fill(e))
+                .collect::<Result<_, _>>()?,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::types::{SliceFilament, VerdictChoice};
+    use crate::journal::types::{LinkCandidates, PrintPurpose, SliceFilament, VerdictChoice};
 
     fn open(dir: &tempfile::TempDir) -> JournalStore {
         JournalStore::open(&JournalPaths::in_dir(dir.path())).unwrap()
@@ -1614,5 +1818,354 @@ mod tests {
         }
         writer.join().unwrap();
         assert_eq!(first.list(&JournalFilter::default()).unwrap().len(), 41);
+    }
+
+    #[test]
+    fn a_version_1_journal_gains_a_purpose_column_and_keeps_its_prints() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        {
+            let mut raw = Connection::open(&paths.db).unwrap();
+            migrate_to_v1(&mut raw).unwrap();
+            raw.execute(
+                "INSERT INTO prints (job_key, name, started_at, updated_at) VALUES ('k', 'Old', 10, 10)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = JournalStore::open(&paths).unwrap();
+        let version: i64 = s
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let old = s.list(&JournalFilter::default()).unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].purpose, None);
+        drop(s);
+        assert!(JournalStore::open(&paths).is_ok(), "version 2 reopens");
+    }
+
+    #[test]
+    fn a_purpose_is_set_and_cleared_apart_from_the_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("p", "Tower", 1_000), 1_000).unwrap();
+        let purpose = PrintPurpose {
+            calibration_result_id: 11,
+            test: crate::calibration::tests::TestKind::Temperature,
+        };
+        assert!(s.set_purpose(id, Some(&purpose), 1_100).unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.purpose, Some(purpose.clone()));
+        assert!(e.tags.is_empty(), "the purpose is not a defect tag");
+        assert_eq!(e.updated_at, 1_100);
+        assert_eq!(
+            serde_json::to_value(&e.purpose).unwrap(),
+            serde_json::json!({"calibration_result_id":11,"test":"temperature"})
+        );
+        assert!(s.set_purpose(id, None, 1_200).unwrap());
+        assert_eq!(s.get(id).unwrap().unwrap().purpose, None);
+        assert!(!s.set_purpose(999, Some(&purpose), 1_200).unwrap());
+    }
+
+    #[test]
+    fn link_candidates_suggest_the_newest_print_ended_since_the_step_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let add = |key: &str, start: i64, end: Option<(Outcome, i64)>| {
+            let id = s.start(&new_print(key, key, start), start).unwrap();
+            if let Some((outcome, at)) = end {
+                s.end(id, &ended(outcome, at), at).unwrap();
+            }
+            id
+        };
+        add("g", 100, Some((Outcome::Finished, 200)));
+        let f = add("f", 500, Some((Outcome::Finished, 900)));
+        let a = add("a", 1_000, Some((Outcome::Finished, 1_600)));
+        let b = add("b", 2_000, Some((Outcome::Failed, 2_600)));
+        let c = add("c", 3_000, Some((Outcome::Finished, 3_300)));
+        add("d", 4_000, None);
+        let e = add("e", 5_000, Some((Outcome::Finished, 5_600)));
+        let ids = |l: &LinkCandidates| l.entries.iter().map(|x| x.id).collect::<Vec<_>>();
+
+        let since = s.link_candidates(2_500).unwrap();
+        assert_eq!(since.suggested, Some(e));
+        assert_eq!(
+            ids(&since),
+            vec![e, c, b, a, f],
+            "the suggestion, then four before it"
+        );
+
+        let none = s.link_candidates(9_000).unwrap();
+        assert_eq!(none.suggested, None);
+        assert_eq!(
+            ids(&none),
+            vec![e, c, b, a, f],
+            "the five newest ended prints"
+        );
+    }
+
+    #[test]
+    fn the_version_2_migration_keeps_a_users_whole_history_and_is_safe_to_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        {
+            let mut raw = Connection::open(&paths.db).unwrap();
+            migrate_to_v1(&mut raw).unwrap();
+            raw.execute(
+                "INSERT INTO prints (job_key, name, started_at, ended_at, outcome, verdict, \
+                 tags_json, notes, updated_at) \
+                 VALUES ('a', 'Benchy', 10, 90, 'finished', 'great', '[\"stringing\"]', 'ok', 90)",
+                [],
+            )
+            .unwrap();
+            raw.execute(
+                "INSERT INTO prints (job_key, name, started_at, updated_at) VALUES ('b', 'Open', 100, 100)",
+                [],
+            )
+            .unwrap();
+            raw.execute(
+                "INSERT INTO print_trays (print_id, ams_id, tray_id, label, tray_type, color, brand, \
+                 seen_order) VALUES (1, 0, 0, 'A1', 'PLA', 'FFFFFFFF', 'Bambu', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let before = {
+            let s = JournalStore::open(&JournalPaths::in_dir(dir.path())).unwrap();
+            s.list(&JournalFilter::default()).unwrap()
+        };
+        assert_eq!(before.len(), 2);
+        let benchy = before.iter().find(|e| e.name == "Benchy").unwrap();
+        assert_eq!(benchy.tags, vec!["stringing".to_string()]);
+        assert_eq!(benchy.notes, "ok");
+        assert_eq!(benchy.trays.len(), 1);
+        assert!(before.iter().all(|e| e.purpose.is_none()));
+        // A second connection that read version 1 before the first migrated
+        // finds version 2 once it holds the lock, and changes nothing.
+        let mut raw = Connection::open(&paths.db).unwrap();
+        migrate_to_v2(&mut raw).unwrap();
+        migrate_to_v2(&mut raw).unwrap();
+        drop(raw);
+        let s = JournalStore::open(&paths).unwrap();
+        assert_eq!(s.list(&JournalFilter::default()).unwrap(), before);
+    }
+
+    /// A journal as the build before the fix could leave it: the column is
+    /// there, but a lost race reset the version to 1.
+    #[test]
+    fn a_version_1_journal_that_already_has_the_column_opens_at_version_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        {
+            let mut raw = Connection::open(&paths.db).unwrap();
+            migrate_to_v1(&mut raw).unwrap();
+            raw.execute_batch("ALTER TABLE prints ADD COLUMN purpose_json TEXT;")
+                .unwrap();
+            raw.execute(
+                "INSERT INTO prints (job_key, name, started_at, updated_at) VALUES ('k', 'Old', 10, 10)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = JournalStore::open(&paths).unwrap();
+        let version: i64 = s
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(s.list(&JournalFilter::default()).unwrap().len(), 1);
+        assert!(s.set_purpose(1, None, 11).unwrap());
+    }
+
+    #[test]
+    fn a_connection_that_lost_the_race_to_create_the_journal_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        // Both connections read version 0. The first creates version 2.
+        let mut a = Connection::open(&paths.db).unwrap();
+        let mut b = Connection::open(&paths.db).unwrap();
+        migrate_to_v1(&mut a).unwrap();
+        migrate_to_v2(&mut a).unwrap();
+        // The second then runs the same steps.
+        migrate_to_v1(&mut b).unwrap();
+        let after_v1: i64 = b
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after_v1, 2, "creating version 1 again does not lower it");
+        migrate_to_v2(&mut b).unwrap();
+        let version: i64 = b
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2, "the version is not lowered");
+        drop((a, b));
+        let s = JournalStore::open(&paths).unwrap();
+        assert!(s.list(&JournalFilter::default()).unwrap().is_empty());
+        assert!(!s.set_purpose(1, None, 1).unwrap());
+    }
+
+    /// Adds a print that ended; `None` leaves `ended_at` empty, as an
+    /// unknown outcome does.
+    fn add_ended(
+        s: &JournalStore,
+        key: &str,
+        start: i64,
+        outcome: Outcome,
+        end: Option<i64>,
+    ) -> i64 {
+        let id = s.start(&new_print(key, key, start), start).unwrap();
+        let end = PrintEnd {
+            outcome,
+            ended_at: end,
+            error_code: None,
+            hms: Vec::new(),
+        };
+        s.end(id, &end, end.ended_at.unwrap_or(start)).unwrap();
+        id
+    }
+
+    #[test]
+    fn a_print_that_ended_exactly_when_the_step_opened_is_suggested() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        add_ended(&s, "before", 100, Outcome::Finished, Some(999));
+        let on = add_ended(&s, "on", 200, Outcome::Finished, Some(1_000));
+        let got = s.link_candidates(1_000).unwrap();
+        assert_eq!(got.suggested, Some(on), "ended_at >= since, not >");
+    }
+
+    #[test]
+    fn a_print_started_before_the_step_but_ended_after_it_is_suggested() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        add_ended(&s, "old", 100, Outcome::Finished, Some(200));
+        let long = add_ended(&s, "long", 500, Outcome::Finished, Some(1_500));
+        let got = s.link_candidates(1_000).unwrap();
+        assert_eq!(got.suggested, Some(long), "the end counts, not the start");
+    }
+
+    #[test]
+    fn a_print_with_no_end_time_counts_from_when_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let early = add_ended(&s, "early", 900, Outcome::Unknown, None);
+        assert_eq!(s.link_candidates(1_000).unwrap().suggested, None);
+        let late = add_ended(&s, "late", 1_100, Outcome::Unknown, None);
+        let got = s.link_candidates(1_000).unwrap();
+        assert_eq!(got.suggested, Some(late));
+        assert_eq!(
+            got.entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![late, early]
+        );
+    }
+
+    #[test]
+    fn prints_that_started_together_are_all_listed_newest_id_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let old = add_ended(&s, "old", 1_000, Outcome::Finished, Some(1_100));
+        let one = add_ended(&s, "one", 2_000, Outcome::Finished, Some(2_100));
+        let two = add_ended(&s, "two", 2_000, Outcome::Finished, Some(2_200));
+        let got = s.link_candidates(1_500).unwrap();
+        assert_eq!(got.suggested, Some(two));
+        assert_eq!(
+            got.entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![two, one, old],
+            "the equal start is not dropped from the tail"
+        );
+    }
+
+    #[test]
+    fn a_purpose_is_cleared_only_while_it_still_points_at_that_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("p", "Tower", 1_000), 1_000).unwrap();
+        let other = s.start(&new_print("q", "Other", 1_000), 1_000).unwrap();
+        let purpose = |n| PrintPurpose {
+            calibration_result_id: n,
+            test: crate::calibration::tests::TestKind::Temperature,
+        };
+        // No purpose yet, or one for another result: nothing changes.
+        assert!(!s.clear_purpose_if(id, 11, 1_100).unwrap());
+        s.set_purpose(id, Some(&purpose(12)), 1_200).unwrap();
+        assert!(!s.clear_purpose_if(id, 11, 1_300).unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.purpose, Some(purpose(12)));
+        assert_eq!(e.updated_at, 1_200, "a refused clear does not touch it");
+        // The right result clears it, and only on that entry.
+        s.set_purpose(other, Some(&purpose(12)), 1_200).unwrap();
+        assert!(s.clear_purpose_if(id, 12, 1_400).unwrap());
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!((e.purpose, e.updated_at), (None, 1_400));
+        assert_eq!(s.get(other).unwrap().unwrap().purpose, Some(purpose(12)));
+        assert!(!s.clear_purpose_if(999, 12, 1_400).unwrap());
+    }
+
+    #[test]
+    fn a_purpose_moves_to_another_print_in_one_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let a = s.start(&new_print("a", "Tower", 1_000), 1_000).unwrap();
+        let b = s.start(&new_print("b", "Tower 2", 1_100), 1_100).unwrap();
+        let purpose = |n| PrintPurpose {
+            calibration_result_id: n,
+            test: crate::calibration::tests::TestKind::Temperature,
+        };
+        let linked = |displaced| Linked::Linked { displaced };
+        assert_eq!(
+            s.link_purpose(a, &purpose(11), None, 1_200).unwrap(),
+            linked(None)
+        );
+        assert_eq!(
+            s.link_purpose(b, &purpose(11), Some(a), 1_300).unwrap(),
+            linked(None)
+        );
+        assert_eq!(s.get(a).unwrap().unwrap().purpose, None, "moved");
+        assert_eq!(s.get(b).unwrap().unwrap().purpose, Some(purpose(11)));
+        // A print that is gone takes nothing: the old link stays where it was.
+        assert_eq!(
+            s.link_purpose(999, &purpose(11), Some(b), 1_400).unwrap(),
+            Linked::Gone
+        );
+        let e = s.get(b).unwrap().unwrap();
+        assert_eq!((e.purpose, e.updated_at), (Some(purpose(11)), 1_300));
+        // An old print whose purpose can't be read keeps it; the new link stands.
+        s.conn
+            .execute(
+                "UPDATE prints SET purpose_json = '{not json' WHERE id = ?1",
+                [b],
+            )
+            .unwrap();
+        assert_eq!(
+            s.link_purpose(a, &purpose(11), Some(b), 1_500).unwrap(),
+            linked(None)
+        );
+        assert_eq!(s.get(a).unwrap().unwrap().purpose, Some(purpose(11)));
+        let kept: Option<String> = s
+            .conn
+            .query_row("SELECT purpose_json FROM prints WHERE id = ?1", [b], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("{not json"));
+        // Relinking the same print clears nothing and displaces nothing.
+        assert_eq!(
+            s.link_purpose(a, &purpose(11), Some(a), 1_600).unwrap(),
+            linked(None)
+        );
+        assert_eq!(s.get(a).unwrap().unwrap().purpose, Some(purpose(11)));
+        // A print that named another result now names this one, and says so.
+        assert_eq!(
+            s.link_purpose(a, &purpose(12), None, 1_700).unwrap(),
+            linked(Some(11))
+        );
+        assert_eq!(s.get(a).unwrap().unwrap().purpose, Some(purpose(12)));
+        // A corrupt purpose on the target itself names no one.
+        assert_eq!(
+            s.link_purpose(b, &purpose(12), Some(a), 1_800).unwrap(),
+            linked(None)
+        );
+        assert_eq!(s.get(b).unwrap().unwrap().purpose, Some(purpose(12)));
     }
 }

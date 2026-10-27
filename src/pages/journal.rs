@@ -16,9 +16,9 @@ use wasm_bindgen_futures::spawn_local;
 use crate::components::patterns::{Hero, StateKind, StateText};
 use crate::journal::bridge;
 use crate::journal::format::{
-    filter_key, hero_detail, hero_unit, outcome_key, outcome_text, tray_chip, verdict_text,
-    when_line, EMPTY_JOURNAL, FILTERS, NAME_MAX, NO_MATCH, NO_PRINTER, PHOTO_UNAVAILABLE,
-    PRINTING_NOW,
+    filter_key, hero_detail, hero_unit, outcome_key, outcome_text, purpose_link, tray_chip,
+    verdict_text, when_line, EMPTY_JOURNAL, FILTERS, NAME_MAX, NO_MATCH, NO_PRINTER,
+    PHOTO_UNAVAILABLE, PRINTING_NOW,
 };
 use crate::journal::types::{FilterKind, JournalFilter, MonthSummary, Outcome, PrintEntry};
 use crate::journal::{next_revision, JournalShared};
@@ -511,13 +511,19 @@ fn RowSummary(
             })
             .collect_view()
     };
+    // A plain chip: the row is a button, so the link is in the open entry.
+    let purpose = move || {
+        entry
+            .with(|e| e.as_ref().and_then(purpose_link))
+            .map(|(chip, _)| view! { <span class="jr-chip jr-purpose">{chip}</span> })
+    };
     view! {
         <Show when=move || has_thumbnail.get()>
             <RowThumb id=id thumbs=thumbs />
         </Show>
         <span class="jr-name">{name}</span>
         <span class="jr-when">{when}</span>
-        <span class="jr-chips">{chips}</span>
+        <span class="jr-chips">{chips}{purpose}</span>
         <span class="jr-outcome nd-label" data-outcome=move || outcome_key(outcome.get())>
             {move || outcome_text(outcome.get())}
         </span>
