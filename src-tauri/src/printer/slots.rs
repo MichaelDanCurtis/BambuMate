@@ -586,9 +586,14 @@ mod tests {
         // Studio loads it for the spool, and the card names it.
         let root = crate::slicer::settings::tests::fake_bambu_root();
         let name = "Bambu PLA Basic (calibrated) @BBL H2C";
+        // Joined per segment so the separators match the index's on Windows.
         let path = root
             .path()
-            .join(format!("user/1881310893/filament/base/{name}.json"));
+            .join("user")
+            .join("1881310893")
+            .join("filament")
+            .join("base")
+            .join(format!("{name}.json"));
         std::fs::write(
             &path,
             serde_json::json!({
