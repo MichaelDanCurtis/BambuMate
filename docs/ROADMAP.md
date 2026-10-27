@@ -7,7 +7,7 @@ BambuMate is being built in three phases, in an order agreed with the project ow
 
 Each feature has its own design spec and implementation plan under `docs/superpowers/`.
 
-Status as of 2026-10-26.
+Status as of 2026-10-27.
 
 ## Phase 1: Agent backends (done)
 
@@ -37,7 +37,7 @@ Codex and Claude Agent became AI sources, and the agent drawer was added, using 
 | Filament advisor | Merged | [#34](https://github.com/MichaelDanCurtis/BambuMate/pull/34) | [spec](superpowers/specs/2026-10-23-filament-advisor-design.md) · [plan](superpowers/plans/2026-10-23-filament-advisor.md) |
 | Print journal | Merged | [#35](https://github.com/MichaelDanCurtis/BambuMate/pull/35) | [spec](superpowers/specs/2026-10-24-print-journal-design.md) · [plan](superpowers/plans/2026-10-24-print-journal.md) |
 | AMS filament detection | Merged | [#36](https://github.com/MichaelDanCurtis/BambuMate/pull/36) | [spec](superpowers/specs/2026-10-25-ams-detection-design.md) · [plan](superpowers/plans/2026-10-25-ams-detection.md) |
-| Calibration mode | In review | [#37](https://github.com/MichaelDanCurtis/BambuMate/pull/37) | [spec](superpowers/specs/2026-10-25-calibration-mode-design.md) · [plan](superpowers/plans/2026-10-25-calibration-mode.md) |
+| Calibration mode | Merged | [#37](https://github.com/MichaelDanCurtis/BambuMate/pull/37) | [spec](superpowers/specs/2026-10-25-calibration-mode-design.md) · [plan](superpowers/plans/2026-10-25-calibration-mode.md) |
 | LAN camera | Not started | — | — |
 
 ## Hardware checks still to do
