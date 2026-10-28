@@ -2694,7 +2694,7 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml journal::moments`. Expecte
 
 - [ ] **Step 4: Write the failing store tests** in `journal/store.rs`. Use the module's existing helpers (`open`, `new_print`, or whatever its tests use to create an entry):
 - `snapshots_are_claimed_once_per_moment`: `claim_snapshot(id, "half")` gives true, then false; `"finished"` gives true.
-- `a_calibration_print_is_never_photographed`: after the existing purpose-setting call (search for `purpose_json` writes, for example `link_purpose`), `claim_snapshot` gives false.
+- `a_calibration_print_is_photographed_like_any_other`: after the existing purpose-setting call, `claim_snapshot` still gives true (user ruling, 2026-10-27).
 - `a_snapshot_keeps_its_label_and_a_miss_its_reason`: after `add_snapshot(id, &jpeg, "50 %", now)` and `note_snapshot_miss(id, "This printer has no camera.", now)`, `get(id)` shows `photos[0].label == Some("50 %")` and `snapshot_note == Some("This printer has no camera.")`. A plain `add_photo` photo has `label == None`.
 - `claim_snapshot` on a deleted entry gives `Err(GONE)`.
 - `a_v2_journal_moves_to_v3_with_its_rows`: write a v2 database with the existing pattern for the v1 to v2 migration test (search `migrate_to_v2` tests), open it, and assert `user_version == 3`, both new columns present, and old rows readable with `label` and `snapshot_note` `None`. Also check that a v3 file opened again stays v3, and that a newer version is refused with `NEWER_SCHEMA` (the existing test likely covers this through `SCHEMA_VERSION + 1`, so it keeps passing).
@@ -3488,7 +3488,7 @@ Stage only the files that actually changed. For example, leave out `style/home.c
   | Transports | 1, 2, 4 |
   | Shared session, linger, still cache, errors, retry, stall, backoff | 5 |
   | Commands, preferences, read-only | 6 |
-  | Journal moments, v3, once per entry, calibration skip, misses | 7 |
+  | Journal moments, v3, once per entry, misses | 7 |
   | Panel, states, expand/Esc, visibility, WebCodecs, still fallback | 8 |
   | Home, journal labels, Settings, About credit | 9 |
 
