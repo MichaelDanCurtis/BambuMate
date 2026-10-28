@@ -1814,23 +1814,27 @@ mod tests {
         (recorder, paths)
     }
 
-    /// Polls entry `id` every 10 ms, for up to 2 s, until `done` holds.
+    /// Polls entry `id` every 10 ms, for up to 10 s (CI's Windows runner is
+    /// slow under the full suite), until `done` holds.
     fn entry_when(
         paths: &JournalPaths,
         id: i64,
         done: impl Fn(&crate::journal::types::PrintEntry) -> bool,
     ) -> crate::journal::types::PrintEntry {
         let s = JournalStore::open(paths).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(e) = s.get(id).unwrap() {
-                if done(&e) {
-                    return e;
+            let seen = s.get(id).unwrap();
+            if let Some(e) = &seen {
+                if done(e) {
+                    return seen.unwrap();
                 }
             }
             assert!(
                 Instant::now() < deadline,
-                "entry {id} not as expected in 2 s"
+                "entry {id} not as expected in 10 s; last seen photos {:?}, note {:?}",
+                seen.as_ref().map(labels),
+                seen.as_ref().map(|e| e.snapshot_note.clone()),
             );
             std::thread::sleep(Duration::from_millis(10));
         }
