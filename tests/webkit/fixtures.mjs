@@ -682,6 +682,19 @@ export const CAL_PA_PREVIEW = {
   value: { value: 0.025, text: "0.025", display: "K 0.025", change: null, change_error: null },
 };
 
+// -- camera --
+// States as the backend serializes them (src/camera/wire.json).
+export const CAMERA_LIVE_JPEG = { transport: "jpeg", status: { kind: "streaming" }, last_frame_at: 1761600000 };
+export const CAMERA_LIVE_RTSPS = { transport: "rtsps", status: { kind: "streaming" }, last_frame_at: 1761600000 };
+export const cameraOff = (reason, message) => ({ transport: null, status: { kind: "off", reason, message }, last_frame_at: null });
+export const CAMERA_BUSY = {
+  transport: "jpeg",
+  status: { kind: "error", error: { kind: "busy" }, message: "The camera is in use by another app. Close the live view in Bambu Studio or Handy, then retry." },
+  last_frame_at: null,
+};
+// 1×1 white JPEG.
+export const JPEG_1X1_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
+
 export const FIXTURES = {
   // -- boot --
   get_preference: null,
@@ -1244,6 +1257,14 @@ export const FIXTURES = {
   printer_remove: null,
   printer_assign_slot: withSlot("A3", A3_ASSIGNED),
   printer_clear_slot: PRINTER_VIEW,
+
+  // -- camera --
+  // Liveview off, so no flow but the camera's opens a stream.
+  camera_state: cameraOff("liveview_off", "Turn on LAN Mode Liveview"),
+  camera_watch: 1,
+  camera_unwatch: null,
+  camera_still: null,
+  camera_retry: cameraOff("liveview_off", "Turn on LAN Mode Liveview"),
 
   // -- print journal --
   journal_list: JOURNAL_ENTRIES,

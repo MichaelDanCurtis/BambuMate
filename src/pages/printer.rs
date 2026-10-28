@@ -18,6 +18,7 @@ use leptos_router::components::Outlet;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::camera::view::CameraPanel;
 use crate::commands::{self, ProfileInfo};
 use crate::components::patterns::{PageHeader, SegmentedBar};
 use crate::printer::bridge;
@@ -68,6 +69,8 @@ pub fn PrinterPage() -> impl IntoView {
     // Picks up assignments' cloud-sync state and anything missed while away.
     shared.refresh();
     let picking = RwSignal::new(Option::<SlotView>::None);
+    // The camera is widened over the status.
+    let expanded = RwSignal::new(false);
 
     let configured = Memo::new(move |_| view.with(|v| v.configured));
     let notice = Memo::new(move |_| {
@@ -110,7 +113,14 @@ pub fn PrinterPage() -> impl IntoView {
                     fallback=|| view! { <p class="pr-waiting">"Waiting for the first status report…"</p> }
                 >
                     <div class="pr-body" class:pr-stale=move || !connected.get()>
-                        <Hero view=view />
+                        <div class="pr-top" class:pr-top-expanded=move || expanded.get()>
+                            <Show when=move || !expanded.get() fallback=move || view! {
+                                <p class="pr-status-line nd-mono">{move || view.with(status_line)}</p>
+                            }>
+                                <Hero view=view />
+                            </Show>
+                            <CameraPanel expanded=expanded />
+                        </div>
                         <section class="pr-section pr-ams">
                             <p class="nd-label">"AMS"</p>
                             <For
@@ -140,6 +150,29 @@ fn ident(p: &PrinterSummary) -> String {
     .filter(|s| !s.is_empty())
     .collect::<Vec<_>>()
     .join(" · ")
+}
+
+/// `RUNNING · 42% · Layer 80/200`: the hero in one line, shown in its place
+/// while the camera is expanded. What the printer hasn't reported is left out.
+fn status_line(v: &PrinterView) -> String {
+    let Some(s) = v.state.as_ref() else {
+        return "—".into();
+    };
+    let state = s
+        .gcode_state
+        .as_deref()
+        .filter(|g| !g.is_empty())
+        .map_or_else(|| "—".into(), |g| untrusted_text(g, ID_MAX));
+    let percent = s.mc_percent.map(|p| format!("{p}%"));
+    let layer = match (s.layer_num, s.total_layer_num) {
+        (Some(l), Some(t)) if t > 0 => Some(format!("Layer {l}/{t}")),
+        _ => None,
+    };
+    std::iter::once(state)
+        .chain(percent)
+        .chain(layer)
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Connected, but the printer hasn't sent a status report yet.
@@ -939,6 +972,31 @@ pub(crate) fn SlotPicker(item: SlotView, picking: RwSignal<Option<SlotView>>) ->
 mod tests {
     use super::*;
     use crate::printer::types::{AmsUnit, Detected, PrinterState, PrinterSummary, Tray};
+
+    #[test]
+    fn the_status_line_reads_like_the_hero() {
+        let running = PrinterView {
+            state: Some(PrinterState {
+                gcode_state: Some("RUNNING".into()),
+                mc_percent: Some(42),
+                layer_num: Some(80),
+                total_layer_num: Some(200),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(status_line(&running), "RUNNING · 42% · Layer 80/200");
+        let idle = PrinterView {
+            state: Some(PrinterState {
+                gcode_state: Some("IDLE".into()),
+                total_layer_num: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(status_line(&idle), "IDLE");
+        assert_eq!(status_line(&PrinterView::default()), "—");
+    }
 
     fn slot(ams_id: u32, tray_id: u32) -> SlotView {
         SlotView {

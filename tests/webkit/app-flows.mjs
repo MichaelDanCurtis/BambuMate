@@ -40,6 +40,10 @@ import {
   CAL_RUN_HIGH_FLOW_NO_COARSE,
   CAL_RUN_NEEDS_VARIANT,
   CAL_RUN_TEMP_SAVED,
+  CAMERA_BUSY,
+  CAMERA_LIVE_JPEG,
+  CAMERA_LIVE_RTSPS,
+  cameraOff,
   FIXTURES,
   GIF_1X1,
   JOURNAL_FAILED,
@@ -47,6 +51,7 @@ import {
   JOURNAL_GOOD,
   JOURNAL_PRINTING,
   JOURNAL_UNKNOWN,
+  JPEG_1X1_BASE64,
   makePng,
   PETG,
   PRINTER_FINGERPRINT,
@@ -188,8 +193,50 @@ function installTauriMock(fixtures) {
     return () => {};
   };
   window.__emit = (name, payload) => (handlers[name] || []).forEach((cb) => cb({ event: name, payload }));
-  window.__TAURI__ = { core: { invoke }, event: { listen } };
+  // Tauri's Channel, kept so a step can send messages through the newest one.
+  const channels = (window.__cameraChannels = []);
+  class Channel {
+    constructor() {
+      this.onmessage = () => {};
+      channels.push(this);
+    }
+    toJSON() {
+      return "__CHANNEL__";
+    }
+  }
+  window.__TAURI__ = { core: { invoke, Channel }, event: { listen } };
   window.__TAURI_INTERNALS__ = { invoke };
+}
+
+// WebCodecs stand-in for the H.264 flow: records the codec it was asked
+// about and the type of each chunk decoded, and draws nothing.
+function installDecoderStandIn() {
+  window.__decoded = [];
+  window.EncodedVideoChunk = class {
+    constructor(i) {
+      Object.assign(this, i);
+    }
+  };
+  window.VideoDecoder = class {
+    static async isConfigSupported(c) {
+      window.__decoderConfig = c.codec;
+      return { supported: true };
+    }
+    constructor(cb) {
+      this.cb = cb;
+      this.state = "unconfigured";
+      this.decodeQueueSize = 0;
+    }
+    configure() {
+      this.state = "configured";
+    }
+    decode(chunk) {
+      window.__decoded.push(chunk.type);
+    }
+    close() {
+      this.state = "closed";
+    }
+  };
 }
 
 const png = makePng(320, 240, deflateSync);
@@ -4423,6 +4470,188 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForTimeout(800);
     if ((await callsOf("printer_assign_slot")).length !== before + 1) throw new Error("assign was not sent");
     if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
+  });
+
+  // -- printer camera -----------------------------------------------------------
+  // The panel beside the status on Printer → Live. The backend's Channel is
+  // the mock's `Channel`; `cameraSend` delivers bytes the way Tauri does, as
+  // an ArrayBuffer. Each flow also checks that nothing threw or logged an
+  // error.
+  const JPEG_BYTES = [...Buffer.from(JPEG_1X1_BASE64, "base64")];
+  const cameraSend = (p, bytes) =>
+    p.evaluate((b) => window.__cameraChannels.at(-1).onmessage(new Uint8Array(b).buffer), Array.from(bytes));
+  const camText = (p, sel) => p.locator(sel).first().evaluate((el) => el.textContent.replace(/\s+/g, " ").trim());
+  const camCount = (p, cmd) => p.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c).length, cmd);
+  const callsAbove = (p, cmd, n, timeout = 5000) =>
+    p.waitForFunction(([c, k]) => window.__ipc.calls.filter((x) => x.cmd === c).length > k, [cmd, n], { timeout });
+  const camFlow = (name, fn) =>
+    step(run, page, name, async () => {
+      const before = run.errors.length;
+      const out = await fn();
+      if (run.errors.length !== before) throw new Error(run.errors.slice(before).join("; "));
+      return out;
+    });
+  // Opens Printer → Live afresh, so the panel asks for the camera's state again.
+  const openLive = async () => {
+    await page.click('nav.sidebar a[href="/"]');
+    await page.waitForSelector(".home-page", { timeout: 15000 });
+    await page.click('nav.sidebar a[href="/printer"]');
+    await page.waitForSelector(".pr-top .cam-panel", { timeout: 15000 });
+  };
+  // A page of its own, for the flows that change what the browser offers.
+  const camPage = async (fixtures, init) => {
+    const fb = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    fb.on("pageerror", (e) => run.errors.push(`pageerror: ${e.message}`));
+    fb.on("console", (m) => {
+      if (m.type() === "error") run.errors.push(`console.error: ${m.text()}`);
+    });
+    await fb.addInitScript(installTauriMock, { ...FIXTURES, ...fixtures });
+    if (init) await fb.addInitScript(init);
+    await fb.goto(`${baseUrl}printer`, { waitUntil: "domcontentloaded" });
+    await fb.waitForSelector(".pr-top .cam-panel", { timeout: 45000 });
+    return fb;
+  };
+
+  await camFlow("the camera panel sits beside the status and says how to turn on liveview", async () => {
+    const watches = await camCount(page, "camera_watch");
+    await openLive();
+    await page.waitForFunction(() => document.querySelector(".cam-overlay")?.textContent.includes("Turn on LAN Mode Liveview"), null, {
+      timeout: 5000,
+    });
+    const title = await camText(page, ".cam-overlay .cam-title");
+    if (title !== "Turn on LAN Mode Liveview") throw new Error(`title reads "${title}"`);
+    const steps = await camText(page, ".cam-overlay p:not(.cam-title)");
+    if (steps !== "On the printer screen: Settings → General (or LAN Only) → LAN Mode Liveview.") throw new Error(`steps read "${steps}"`);
+    if (!(await page.locator(".cam-overlay").isVisible())) throw new Error("the steps aren't visible");
+    const hero = await page.locator(".pr-hero").boundingBox();
+    const cam = await page.locator(".cam-panel").boundingBox();
+    if (Math.abs(hero.y - cam.y) > 1 || cam.x < hero.x + hero.width) {
+      throw new Error(`hero ${JSON.stringify(hero)}, camera ${JSON.stringify(cam)}`);
+    }
+    if ((await camCount(page, "camera_watch")) !== watches) throw new Error("a watch started with liveview off");
+  });
+
+  await camFlow("a P1 camera streams JPEGs into the panel", async () => {
+    await withFixtures({ camera_state: CAMERA_LIVE_JPEG }, async () => {
+      const watches = await camCount(page, "camera_watch");
+      await openLive();
+      await callsAbove(page, "camera_watch", watches);
+      const passed = await page.evaluate(() => {
+        const call = window.__ipc.calls.filter((c) => c.cmd === "camera_watch").at(-1);
+        return call.args?.onFrame === window.__cameraChannels.at(-1);
+      });
+      if (!passed) throw new Error("camera_watch wasn't given the Channel as onFrame");
+      await cameraSend(page, [3, 0, ...JPEG_BYTES]);
+      await page.waitForFunction(
+        () => {
+          const img = document.querySelector(".cam-frame img");
+          return img?.src.startsWith("blob:") && img.complete && img.naturalWidth > 0;
+        },
+        null,
+        { timeout: 5000 }
+      );
+      const caption = await camText(page, ".cam-live");
+      if (caption !== `LIVE · ${PRINTER_VIEW.printer.model.toUpperCase()}`) throw new Error(`caption reads "${caption}"`);
+      if (!/^\d\d:\d\d:\d\d$/.test(await camText(page, ".cam-time"))) throw new Error("no frame time");
+    });
+  });
+
+  await camFlow("an H2 camera decodes H.264 with WebCodecs", async () => {
+    const fb = await camPage({ camera_state: CAMERA_LIVE_RTSPS }, installDecoderStandIn);
+    try {
+      await fb.waitForSelector(".cam-frame canvas", { timeout: 5000 });
+      await callsAbove(fb, "camera_watch", 0);
+      const codec = [..."avc1.42c01e"].map((c) => c.charCodeAt(0));
+      await cameraSend(fb, [1, 0, 0, codec.length, ...codec, 1, 66, 192, 30]);
+      await fb.waitForFunction(() => window.__decoderConfig === "avc1.42c01e", null, { timeout: 5000 });
+      await cameraSend(fb, [2, 0, 0, 0, 0, 1, 0x41]);
+      await cameraSend(fb, [2, 1, 0, 0, 0, 1, 0x65]);
+      const decoded = await fb.evaluate(() => window.__decoded);
+      if (JSON.stringify(decoded) !== '["key"]') throw new Error(`decoded ${JSON.stringify(decoded)}`);
+      if ((await fb.locator(".cam-frame canvas").count()) !== 1) throw new Error("no canvas in the frame");
+    } finally {
+      await fb.close();
+    }
+  });
+
+  await camFlow("without WebCodecs an H2 camera shows refreshed stills", async () => {
+    const still = `data:image/jpeg;base64,${JPEG_1X1_BASE64}`;
+    const fb = await camPage({ camera_state: CAMERA_LIVE_RTSPS, camera_still: still }, () => {
+      delete window.VideoDecoder;
+    });
+    try {
+      await fb.waitForFunction(() => document.querySelector(".cam-frame img")?.src.startsWith("data:image/jpeg"), null, {
+        timeout: 5000,
+      });
+      const first = await camCount(fb, "camera_still");
+      await callsAbove(fb, "camera_still", first, 3000);
+      const note = await camText(fb, ".cam-still-note");
+      if (!/^STILL · \d\d:\d\d:\d\d$/.test(note)) throw new Error(`note reads "${note}"`);
+      if ((await camCount(fb, "camera_watch")) !== 0) throw new Error("a watch started without a decoder");
+    } finally {
+      await fb.close();
+    }
+  });
+
+  await camFlow("a busy camera says so and Retry asks again", async () => {
+    await withFixtures({ camera_state: CAMERA_BUSY }, async () => {
+      await openLive();
+      const want = "[ERROR: The camera is in use by another app. Close the live view in Bambu Studio or Handy, then retry.]";
+      await page.waitForFunction((w) => document.querySelector(".cam-overlay")?.textContent.includes(w), want, { timeout: 5000 });
+      const retries = await camCount(page, "camera_retry");
+      await page.click(".cam-overlay button.cam-retry");
+      await callsAbove(page, "camera_retry", retries);
+      // The answer is the fixture's liveview-off state.
+      await page.waitForFunction(() => document.querySelector(".cam-overlay")?.textContent.includes("Turn on LAN Mode Liveview"), null, {
+        timeout: 5000,
+      });
+    });
+  });
+
+  await camFlow("camera states follow the camera event", async () => {
+    await page.evaluate((s) => window.__emit("camera://state", s), cameraOff("no_camera", "This printer has no camera."));
+    await page.waitForFunction(() => document.querySelector(".cam-overlay")?.textContent === "This printer has no camera.", null, {
+      timeout: 5000,
+    });
+  });
+
+  await camFlow("the camera expands and Esc collapses it", async () => {
+    const frame = page.locator(".cam-frame");
+    if ((await frame.getAttribute("aria-expanded")) !== "false") throw new Error("starts expanded");
+    await frame.click();
+    await page.waitForFunction(() => document.querySelector(".cam-frame")?.getAttribute("aria-expanded") === "true", null, { timeout: 5000 });
+    if (await page.locator(".pr-hero").isVisible()) throw new Error("the hero still shows when expanded");
+    if ((await frame.getAttribute("aria-label")) !== "Collapse camera") throw new Error("the label doesn't say collapse");
+    const line = await camText(page, ".pr-status-line");
+    if (line !== "RUNNING · 6% · Layer 1/200") throw new Error(`status line reads "${line}"`);
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector(".cam-frame")?.getAttribute("aria-expanded") === "false", null, { timeout: 5000 });
+    await page.waitForSelector(".pr-hero", { state: "visible", timeout: 5000 });
+    if ((await page.locator(".pr-status-line").count()) !== 0) throw new Error("the status line stays after collapsing");
+    if ((await frame.getAttribute("aria-label")) !== "Expand camera") throw new Error("the label doesn't say expand");
+  });
+
+  await camFlow("leaving Printer → Live releases the camera", async () => {
+    await withFixtures({ camera_state: CAMERA_LIVE_JPEG }, async () => {
+      const watches = await camCount(page, "camera_watch");
+      await openLive();
+      await callsAbove(page, "camera_watch", watches);
+      // The watch's id is back before the page leaves.
+      await page.waitForFunction(
+        () => {
+          const n = (list) => list.filter((c) => (c.cmd ?? c) === "camera_watch").length;
+          return n(window.__ipc.settled) === n(window.__ipc.calls);
+        },
+        null,
+        { timeout: 5000 }
+      );
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 50)));
+      const unwatches = await camCount(page, "camera_unwatch");
+      await page.click('nav.sidebar a[href="/"]');
+      await callsAbove(page, "camera_unwatch", unwatches);
+      const last = (await callsOf("camera_unwatch")).at(-1);
+      if (!sameArgs(last.args, { id: 1 })) throw new Error(`camera_unwatch got ${JSON.stringify(last.args)}`);
+    });
   });
 
   // -- calibration ------------------------------------------------------------

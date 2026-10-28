@@ -1,0 +1,25 @@
+/* The camera panel beside the status on Printer → Live, and its thumbnail.
+   Built on the app-wide Nothing tokens (style/tokens.css). */
+
+.pr-top { display: grid; gap: var(--nd-space-lg); grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+.pr-top-expanded { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 900px) { .pr-top { grid-template-columns: minmax(0, 1fr); } }
+.pr-status-line { margin: 0; color: var(--nd-text-secondary); letter-spacing: 0.06em; }
+
+.cam-panel { display: grid; gap: var(--nd-space-sm); min-width: 0; }
+/* The overlay is a sibling layered over the frame, not inside it: Retry is
+   a button, and a button can't hold another. Clicks pass through to the
+   frame except on Retry. */
+.cam-stage { position: relative; }
+.cam-frame { position: relative; display: block; width: 100%; aspect-ratio: 16 / 9; padding: 0; border: 1px solid var(--nd-border); border-radius: 12px; background: var(--nd-surface); overflow: hidden; cursor: zoom-in; }
+.pr-top-expanded .cam-frame { cursor: zoom-out; }
+.cam-frame:focus-visible { outline: 1px solid var(--nd-text-primary); outline-offset: 2px; }
+.cam-frame img, .cam-frame canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cam-overlay { position: absolute; inset: 0; display: grid; place-content: center; gap: var(--nd-space-sm); padding: var(--nd-space-lg); text-align: center; color: var(--nd-text-secondary); pointer-events: none; overflow-wrap: anywhere; }
+.cam-overlay p { margin: 0; }
+.cam-overlay .cam-title { color: var(--nd-text-primary); }
+.cam-overlay .cam-retry { justify-self: center; pointer-events: auto; }
+.cam-caption { display: flex; justify-content: space-between; gap: var(--nd-space-md); margin: 0; font-family: var(--nd-font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--nd-text-secondary); }
+
+.cam-thumb { display: block; width: 160px; aspect-ratio: 16 / 9; border: 1px solid var(--nd-border); border-radius: 8px; overflow: hidden; background: var(--nd-surface); }
+.cam-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
