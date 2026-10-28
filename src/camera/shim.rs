@@ -28,15 +28,25 @@ export async function cameraWatch(onBytes) {
 export function cameraRelease(channel) {
   if (channel && typeof channel === "object") channel.onmessage = () => {};
 }
+// Chunks from a keyframe on are held while `configure` waits for the
+// browser, then fed: the stream's first keyframe comes right behind its
+// config. `token` changes on every configure and close, so a configure
+// overtaken while it waited makes no decoder.
+const HOLD_MAX = 120;
 export class CameraDecoder {
   constructor(canvas, onError) {
     this.canvas = canvas; this.onError = onError; this.dec = null; this.ts = 0; this.needKey = true;
+    this.token = 0; this.held = null;
   }
   async configure(codec, description) {
     this.close();
+    const token = ++this.token;
+    this.held = [];
     const config = { codec, description: description.slice(), optimizeForLatency: true };
     let ok = false;
     try { ok = !!(await VideoDecoder.isConfigSupported(config)).supported; } catch (_) { ok = false; }
+    if (token !== this.token) return ok;
+    const held = this.held; this.held = null;
     if (!ok) return false;
     this.dec = new VideoDecoder({
       output: (frame) => {
@@ -50,9 +60,15 @@ export class CameraDecoder {
     });
     this.dec.configure(config);
     this.needKey = true;
+    for (const [data, key] of held) this.decode(data, key);
     return true;
   }
   decode(data, key) {
+    if (this.held) {
+      if (key) this.held = [];
+      if ((key || this.held.length) && this.held.length < HOLD_MAX) this.held.push([data, key]);
+      return;
+    }
     const dec = this.dec;
     if (!dec || dec.state !== "configured") return;
     if (this.needKey && !key) return;
@@ -63,7 +79,11 @@ export class CameraDecoder {
       dec.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: this.ts, data }));
     } catch (e) { this.close(); this.onError(String(e && e.message || e)); }
   }
-  close() { const d = this.dec; this.dec = null; if (d && d.state !== "closed") { try { d.close(); } catch (_) {} } }
+  close() {
+    this.token++; this.held = null;
+    const d = this.dec; this.dec = null;
+    if (d && d.state !== "closed") { try { d.close(); } catch (_) {} }
+  }
 }
 export function cameraJpegUrl(data) { return URL.createObjectURL(new Blob([data], { type: "image/jpeg" })); }
 export function cameraRevoke(url) { try { URL.revokeObjectURL(url); } catch (_) {} }
@@ -95,7 +115,8 @@ extern "C" {
         canvas: &web_sys::HtmlCanvasElement,
         on_error: &Closure<dyn FnMut(String)>,
     ) -> CameraDecoder;
-    /// Resolves to whether the browser can decode `codec`.
+    /// Resolves to whether the browser can decode `codec`. Chunks given to
+    /// `decode` meanwhile are held from a keyframe on, then fed.
     #[wasm_bindgen(method)]
     pub fn configure(this: &CameraDecoder, codec: &str, description: &Uint8Array) -> Promise;
     #[wasm_bindgen(method)]
