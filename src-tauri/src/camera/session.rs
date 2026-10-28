@@ -7,22 +7,27 @@
 //! the user has to fix (until Retry), and closes `linger` after the last
 //! consumer leaves.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use futures::FutureExt;
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
 use tokio::sync::{mpsc, watch};
 
 use super::target::{CameraTarget, TargetSource};
 use super::transport::{OffReason, Transport};
-use super::{h264, jpeg6000, rtsps, CameraError, Frame, STATE_EVENT};
+use super::{h264, jpeg6000, rtsps, CameraError, Frame, LIVE_VIEW_PREF, STATE_EVENT};
 
 /// What `capture` says when no picture came within `capture_timeout`.
 const NO_PICTURE: &str = "No picture from the camera in time.";
+/// The error shown when the session's driver panicked; Retry starts it again.
+const STOPPED_UNEXPECTEDLY: &str = "The camera stopped unexpectedly.";
 /// Frames buffered between the connection and the driver.
 const FRAME_QUEUE: usize = 16;
 
@@ -59,9 +64,23 @@ pub struct TauriCameraEvents(pub tauri::AppHandle);
 impl CameraEvents for TauriCameraEvents {
     fn state(&self, state: &CameraState) {
         use tauri::Emitter;
-        if let Err(e) = self.0.emit(STATE_EVENT, state) {
+        let live_view = super::target::camera_pref(&self.0, LIVE_VIEW_PREF);
+        if let Err(e) = self
+            .0
+            .emit(STATE_EVENT, for_page(state, live_view).as_ref())
+        {
             tracing::debug!("camera: couldn't send the camera state: {e}");
         }
+    }
+}
+
+/// What the page is told. With live view off in Settings it is always
+/// Disabled, whatever a journal snapshot's session is doing.
+fn for_page(state: &CameraState, live_view: bool) -> Cow<'_, CameraState> {
+    if live_view {
+        Cow::Borrowed(state)
+    } else {
+        Cow::Owned(CameraState::off(OffReason::Disabled))
     }
 }
 
@@ -159,6 +178,9 @@ struct Inner {
     events: Arc<dyn CameraEvents>,
     timing: Timing,
     shared: Mutex<Shared>,
+    /// Held while a state is read and emitted, so emits never overtake
+    /// one another: the last one sent is the newest state.
+    emit_lock: Mutex<()>,
     state_tx: watch::Sender<CameraState>,
     still_tx: watch::Sender<Option<Still>>,
 }
@@ -231,7 +253,7 @@ struct Still {
 enum Ended {
     Error(CameraError),
     /// `still_valid` said the session no longer fits the printer.
-    Unfit(OffReason),
+    Unfit,
     /// This driver was closed.
     Closed,
 }
@@ -281,6 +303,7 @@ impl CameraHub {
                     last_decode: None,
                     decoding: false,
                 }),
+                emit_lock: Mutex::new(()),
                 state_tx: watch::Sender::new(CameraState::idle()),
                 still_tx: watch::Sender::new(None),
             }),
@@ -313,8 +336,10 @@ impl CameraHub {
 
     /// Adds a viewer. `sink` gets every frame it should see (the config,
     /// then video from a keyframe on, or each JPEG); it returns false once
-    /// the webview is gone, and is then dropped. Sinks are called with the
-    /// hub locked, so they must not call back into it.
+    /// it can't deliver, and is then dropped. A Tauri channel only fails
+    /// that way when its webview is gone, so viewers leave with `unwatch`.
+    /// Sinks are called with the hub locked, so they must not call back
+    /// into it.
     pub fn watch(&self, sink: Box<dyn FnMut(&Frame) -> bool + Send>) -> u64 {
         let mut sh = self.inner.lock();
         let id = sh.next_id;
@@ -346,7 +371,10 @@ impl CameraHub {
     }
 
     /// The latest picture if at most `still_max_age` old, else the next one
-    /// (at most `capture_timeout`). `None` when there is none.
+    /// (at most `capture_timeout`). `None` when there is none. A session
+    /// stopped on an error isn't tried again (only Retry or a journal
+    /// capture does that): the answer is `None` at once, though asking
+    /// still counts as using the session, so it stays open and stopped.
     pub async fn still(&self) -> Option<Vec<u8>> {
         let fresh = self
             .inner
@@ -357,16 +385,22 @@ impl CameraHub {
             .map(|s| s.jpeg.to_vec());
         match fresh {
             Some(jpeg) => Some(jpeg),
-            None => self.capture().await.ok(),
+            None => self.take(false).await.ok(),
         }
     }
 
     /// A picture taken after this call, or why not (a sentence). A session
     /// stopped on an error is tried once more.
     pub async fn capture(&self) -> Result<Vec<u8>, String> {
+        self.take(true).await
+    }
+
+    /// The next picture. `retry_stopped`: a session stopped on an error is
+    /// tried once more; otherwise its error is the answer.
+    async fn take(&self, retry_stopped: bool) -> Result<Vec<u8>, String> {
         let asked = Instant::now();
         let _waiter = Waiter::new(&self.inner);
-        if matches!(self.state().status, CameraStatus::Error { .. }) {
+        if retry_stopped && matches!(self.state().status, CameraStatus::Error { .. }) {
             self.retry();
         }
         let mut states = self.inner.state_tx.subscribe();
@@ -403,19 +437,25 @@ impl CameraHub {
         let emit = {
             let mut sh = self.inner.lock();
             if matches!(self.state().status, CameraStatus::Error { .. }) {
-                if sh.driver.is_some() && sh.consumers() > 0 {
+                let running = sh.driver.as_ref().is_some_and(|d| !d.inner().is_finished());
+                if running && sh.consumers() > 0 {
                     // The driver is waiting for the status to leave Error.
                     self.inner
                         .apply(&mut sh, |s| s.status = CameraStatus::Connecting)
                 } else {
-                    self.inner.close(&mut sh)
+                    let closed = self.inner.close(&mut sh);
+                    if sh.consumers() > 0 {
+                        // The driver had ended: start a new one.
+                        self.inner.ensure_driver(&mut sh);
+                    }
+                    closed
                 }
             } else {
-                None
+                false
             }
         };
-        if let Some(state) = emit {
-            self.inner.events.state(&state);
+        if emit {
+            self.inner.emit();
         }
         self.state()
     }
@@ -427,10 +467,10 @@ impl Inner {
     }
 
     /// A consumer arrived: cancels any linger and starts the driver if
-    /// none runs.
+    /// none runs (or the last one ended).
     fn ensure_driver(self: &Arc<Self>, sh: &mut Shared) {
         sh.idle_epoch += 1;
-        if sh.driver.is_none() {
+        if sh.driver.as_ref().is_none_or(|d| d.inner().is_finished()) {
             sh.generation += 1;
             let generation = sh.generation;
             sh.driver = Some(async_runtime::spawn(self.clone().drive(generation)));
@@ -455,15 +495,15 @@ impl Inner {
                 }
                 inner.close(&mut sh)
             };
-            if let Some(state) = emit {
-                inner.events.state(&state);
+            if emit {
+                inner.emit();
             }
         });
     }
 
-    /// Aborts the driver (dropping its connection) and goes Idle. Returns
-    /// the state to emit.
-    fn close(&self, sh: &mut Shared) -> Option<CameraState> {
+    /// Aborts the driver (dropping its connection) and goes Idle. True if
+    /// the state should be emitted.
+    fn close(&self, sh: &mut Shared) -> bool {
         if let Some(driver) = sh.driver.take() {
             driver.abort();
         }
@@ -475,27 +515,35 @@ impl Inner {
         })
     }
 
-    /// Changes the state; returns it if it should be emitted (after the
-    /// lock is released). `last_frame_at` alone is emitted at most every
-    /// `state_every`.
-    fn apply(&self, sh: &mut Shared, change: impl FnOnce(&mut CameraState)) -> Option<CameraState> {
+    /// Changes the state; true if it should be emitted (after the lock is
+    /// released, with [`Inner::emit`]). `last_frame_at` alone is emitted at
+    /// most every `state_every`.
+    fn apply(&self, sh: &mut Shared, change: impl FnOnce(&mut CameraState)) -> bool {
         let old = self.state_tx.borrow().clone();
         let mut new = old.clone();
         change(&mut new);
         if new == old {
-            return None;
+            return false;
         }
-        self.state_tx.send_replace(new.clone());
         let time_only = new.status == old.status && new.transport == old.transport;
+        self.state_tx.send_replace(new);
         if time_only
             && sh
                 .last_state_emit
                 .is_some_and(|at| at.elapsed() < self.timing.state_every)
         {
-            return None;
+            return false;
         }
         sh.last_state_emit = Some(Instant::now());
-        Some(new)
+        true
+    }
+
+    /// Sends the state as it is now, not as it was when the change was
+    /// made: a change made meanwhile is sent by its own emit, after this one.
+    fn emit(&self) {
+        let _one = self.emit_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state_tx.borrow().clone();
+        self.events.state(&state);
     }
 
     /// `apply` for the driver `generation`, then emits. False once that
@@ -508,19 +556,46 @@ impl Inner {
             }
             self.apply(&mut sh, change)
         };
-        if let Some(state) = emit {
-            self.events.state(&state);
+        if emit {
+            self.emit();
         }
         true
     }
 
+    /// The driver task. A panic in it (printer bytes reach retina's parser)
+    /// stops the session with an error until Retry, rather than leaving
+    /// the hub with a dead driver.
     async fn drive(self: Arc<Self>, generation: u64) {
+        loop {
+            let ran = AssertUnwindSafe(self.connect(generation))
+                .catch_unwind()
+                .await;
+            if ran.is_ok() {
+                return;
+            }
+            tracing::warn!("camera: the camera session stopped unexpectedly");
+            let error = CameraError::Other {
+                message: STOPPED_UNEXPECTEDLY.into(),
+            };
+            let message = error.message();
+            if !self.update(generation, |s| {
+                s.status = CameraStatus::Error { error, message }
+            }) {
+                return;
+            }
+            self.wait_for_retry().await;
+        }
+    }
+
+    /// Resolves, connects and reconnects until this driver is closed.
+    async fn connect(self: &Arc<Self>, generation: u64) {
         let timing = self.timing.clone();
         let mut backoff = timing.backoff_start;
         loop {
-            // While Off, keep saying why rather than flashing Connecting.
+            // While Off, keep saying why rather than flashing Connecting; a
+            // new session says nothing until it knows its transport.
             let connecting = self.update(generation, |s| {
-                if !matches!(s.status, CameraStatus::Off { .. }) {
+                if !matches!(s.status, CameraStatus::Off { .. } | CameraStatus::Idle) {
                     s.status = CameraStatus::Connecting;
                 }
             });
@@ -553,12 +628,9 @@ impl Inner {
             }
             match self.run_once(generation, &target, &mut backoff).await {
                 Ended::Closed => return,
-                Ended::Unfit(reason) => {
-                    if !self.go_off(generation, reason) {
-                        return;
-                    }
-                    tokio::time::sleep(timing.recheck).await;
-                }
+                // Resolve again at once: that finds the new target, or says
+                // why there is none.
+                Ended::Unfit => {}
                 Ended::Error(error) if error.needs_retry() => {
                     let message = error.message();
                     if !self.update(generation, |s| {
@@ -636,8 +708,8 @@ impl Inner {
                     None => open = false,
                 },
                 _ = check.tick() => {
-                    if let Err(reason) = self.source.still_valid(target) {
-                        return Ended::Unfit(reason);
+                    if self.source.still_valid(target).is_err() {
+                        return Ended::Unfit;
                     }
                 }
             }
@@ -690,8 +762,8 @@ impl Inner {
             });
             (emit, decode)
         };
-        if let Some(state) = emit {
-            self.events.state(&state);
+        if emit {
+            self.emit();
         }
         if let Some((avcc, sample)) = decode {
             self.decode(avcc, sample, received);
@@ -753,6 +825,23 @@ mod tests {
         Frames(Vec<Frame>, Duration),
         /// Ends at once with this error.
         Fail(CameraError),
+        /// Panics, as a parser bug in the connection would.
+        Panic,
+    }
+
+    /// The fake connection's panic message, kept out of the test output.
+    const FAKE_PANIC: &str = "the fake camera fell over";
+
+    fn quiet_fake_panics() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let default = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if info.payload().downcast_ref::<&str>() != Some(&FAKE_PANIC) {
+                    default(info);
+                }
+            }));
+        });
     }
 
     #[derive(Default)]
@@ -796,6 +885,7 @@ mod tests {
                 let _alive = alive;
                 match script {
                     Script::Fail(e) => e,
+                    Script::Panic => panic!("the fake camera fell over"),
                     Script::Frames(frames, every) => {
                         for f in frames {
                             if tx.send(f).await.is_err() {
@@ -815,6 +905,8 @@ mod tests {
     struct FakeSource {
         answers: Mutex<Vec<Result<(), OffReason>>>,
         valid: Mutex<Result<(), OffReason>>,
+        /// Answered once by `still_valid`, before `valid`.
+        unfit_once: Mutex<Option<OffReason>>,
         target: CameraTarget,
     }
 
@@ -826,6 +918,7 @@ mod tests {
             Arc::new(FakeSource {
                 answers: Mutex::new(answers),
                 valid: Mutex::new(Ok(())),
+                unfit_once: Mutex::new(None),
                 target,
             })
         }
@@ -838,6 +931,9 @@ mod tests {
             next.map(|()| self.target.clone())
         }
         fn still_valid(&self, _t: &CameraTarget) -> Result<(), OffReason> {
+            if let Some(reason) = self.unfit_once.lock().unwrap().take() {
+                return Err(reason);
+            }
             *self.valid.lock().unwrap()
         }
     }
@@ -1165,6 +1261,205 @@ mod tests {
         until(|| conn.alive.load(Ordering::SeqCst) == 0).await;
         assert_eq!(hub.state().status, CameraStatus::Idle);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_still_never_reconnects_a_stopped_session() {
+        let conn = FakeConnector::with(vec![
+            Script::Fail(CameraError::Auth),
+            Script::Frames(jpeg_frames(100), Duration::from_millis(20)),
+        ]);
+        let hub = hub_with(FakeSource::ok(target()), conn.clone());
+        hub.watch(sink(Arc::new(Mutex::new(vec![]))));
+        until(|| matches!(hub.state().status, CameraStatus::Error { .. })).await;
+        assert_eq!(hub.still().await, None);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(conn.calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            hub.state().status,
+            CameraStatus::Error {
+                error: CameraError::Auth,
+                ..
+            }
+        ));
+    }
+
+    // The Home thumbnail and the still fallback poll inside the linger.
+    #[tokio::test]
+    async fn polling_stills_keeps_a_stopped_session_open_and_stopped() {
+        let conn = FakeConnector::with(vec![
+            Script::Fail(CameraError::Busy),
+            Script::Frames(jpeg_frames(100), Duration::from_millis(20)),
+        ]);
+        let hub = hub_with(FakeSource::ok(target()), conn.clone());
+        assert!(hub.capture().await.is_err());
+        // Three lingers' worth of polls.
+        for _ in 0..9 {
+            assert_eq!(hub.still().await, None);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(conn.calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(hub.state().status, CameraStatus::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_driver_that_panics_stops_with_an_error_until_retry() {
+        quiet_fake_panics();
+        let conn = FakeConnector::with(vec![
+            Script::Panic,
+            Script::Frames(jpeg_frames(50), Duration::from_millis(10)),
+        ]);
+        let hub = hub_with(FakeSource::ok(target()), conn.clone());
+        hub.watch(sink(Arc::new(Mutex::new(vec![]))));
+        until(|| {
+            matches!(
+                hub.state().status,
+                CameraStatus::Error {
+                    error: CameraError::Other { .. },
+                    ..
+                }
+            )
+        })
+        .await;
+        assert_eq!(conn.calls.load(Ordering::SeqCst), 1);
+        hub.retry();
+        until(|| {
+            conn.calls.load(Ordering::SeqCst) == 2 && hub.state().status == CameraStatus::Streaming
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_session_that_stops_fitting_resolves_again_without_going_off() {
+        let source = FakeSource::ok(target());
+        let conn = FakeConnector::with(vec![Script::Frames(
+            jpeg_frames(100),
+            Duration::from_millis(10),
+        )]);
+        let events = Arc::new(Events::default());
+        let hub = CameraHub::new(source.clone(), conn.clone(), events.clone(), fast());
+        hub.watch(sink(Arc::new(Mutex::new(vec![]))));
+        until(|| hub.state().status == CameraStatus::Streaming).await;
+        *source.unfit_once.lock().unwrap() = Some(OffReason::Waiting);
+        until(|| {
+            conn.calls.load(Ordering::SeqCst) == 2 && hub.state().status == CameraStatus::Streaming
+        })
+        .await;
+        let seen = events.0.lock().unwrap().clone();
+        assert!(
+            !seen
+                .iter()
+                .any(|e| matches!(e.status, CameraStatus::Off { .. })),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_session_names_its_transport_in_its_first_event() {
+        let conn = FakeConnector::with(vec![Script::Frames(
+            jpeg_frames(50),
+            Duration::from_millis(10),
+        )]);
+        let events = Arc::new(Events::default());
+        let hub = CameraHub::new(FakeSource::ok(target()), conn, events.clone(), fast());
+        hub.watch(sink(Arc::new(Mutex::new(vec![]))));
+        until(|| hub.state().status == CameraStatus::Streaming).await;
+        let first = events.0.lock().unwrap()[0].clone();
+        assert_eq!(first.transport, Some(Transport::Jpeg), "{first:?}");
+    }
+
+    // The live panel keeps a watch while the camera is off for a reason
+    // that can change, and relies on the session to say when it does.
+    #[tokio::test]
+    async fn a_watched_session_keeps_checking_while_off() {
+        let source = FakeSource::answering(target(), vec![Err(OffReason::LiveviewOff)]);
+        let conn = FakeConnector::with(vec![Script::Frames(
+            jpeg_frames(50),
+            Duration::from_millis(10),
+        )]);
+        let events = Arc::new(Events::default());
+        let hub = CameraHub::new(source.clone(), conn.clone(), events.clone(), fast());
+        hub.watch(sink(Arc::new(Mutex::new(vec![]))));
+        until(|| matches!(hub.state().status, CameraStatus::Off { .. })).await;
+        // Well past the linger: the watch keeps the session.
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        assert!(matches!(hub.state().status, CameraStatus::Off { .. }));
+        assert_eq!(conn.calls.load(Ordering::SeqCst), 0);
+        *source.answers.lock().unwrap() = vec![Ok(())];
+        until(|| hub.state().status == CameraStatus::Streaming).await;
+        let seen = events.0.lock().unwrap().clone();
+        assert_eq!(
+            seen.last().map(|e| e.transport),
+            Some(Some(Transport::Jpeg))
+        );
+    }
+
+    /// Like [`Events`], but the first Error waits in `state` until `open`.
+    #[derive(Default)]
+    struct GatedEvents {
+        log: Mutex<Vec<CameraState>>,
+        held: std::sync::atomic::AtomicBool,
+        open: (Mutex<bool>, std::sync::Condvar),
+    }
+
+    impl GatedEvents {
+        fn release(&self) {
+            *self.open.0.lock().unwrap() = true;
+            self.open.1.notify_all();
+        }
+    }
+
+    impl CameraEvents for GatedEvents {
+        fn state(&self, s: &CameraState) {
+            if matches!(s.status, CameraStatus::Error { .. })
+                && !self.held.swap(true, Ordering::SeqCst)
+            {
+                let mut open = self.open.0.lock().unwrap();
+                while !*open {
+                    open = self.open.1.wait(open).unwrap();
+                }
+            }
+            self.log.lock().unwrap().push(s.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_last_state_sent_is_the_newest() {
+        let conn = FakeConnector::with(vec![
+            Script::Fail(CameraError::Auth),
+            Script::Frames(vec![], Duration::ZERO),
+        ]);
+        let events = Arc::new(GatedEvents::default());
+        let hub = CameraHub::new(FakeSource::ok(target()), conn, events.clone(), fast());
+        hub.watch(sink(Arc::new(Mutex::new(vec![]))));
+        until(|| events.held.load(Ordering::SeqCst)).await;
+        // Retry while the Error is still being sent.
+        let retrying = {
+            let hub = hub.clone();
+            std::thread::spawn(move || {
+                hub.retry();
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        events.release();
+        retrying.join().unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(hub.state().status, CameraStatus::Connecting);
+        assert_eq!(events.log.lock().unwrap().last(), Some(&hub.state()));
+    }
+
+    #[test]
+    fn with_live_view_off_the_page_is_told_disabled() {
+        let connecting = CameraState {
+            transport: Some(Transport::Jpeg),
+            status: CameraStatus::Connecting,
+            last_frame_at: None,
+        };
+        assert_eq!(*for_page(&connecting, true), connecting);
+        assert_eq!(
+            *for_page(&connecting, false),
+            CameraState::off(OffReason::Disabled)
+        );
     }
 
     // Tauri async commands need Send futures (9).

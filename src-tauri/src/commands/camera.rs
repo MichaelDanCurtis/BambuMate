@@ -29,8 +29,10 @@ pub async fn camera_watch(
     if !camera_pref(&app, LIVE_VIEW_PREF) {
         return Err(OffReason::Disabled.message().to_string());
     }
-    // `send` fails once the webview has dropped the channel: that ends the
-    // watch the next time a frame is offered.
+    // In Tauri 2.10 `send` succeeds while the webview exists, even after the
+    // page has let go of the channel, so a dropped channel doesn't end the
+    // watch: the page releases it with `camera_unwatch`. A failed send (the
+    // webview itself gone) ends it the next time a frame is offered.
     Ok(hub.watch(Box::new(move |frame| {
         on_frame
             .send(InvokeResponseBody::Raw(wire::encode(frame)))
