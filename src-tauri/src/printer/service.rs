@@ -385,6 +385,18 @@ impl JournalLink {
     }
 }
 
+/// What the camera needs to know about the printer, read in one lock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraFacts {
+    pub config: Option<PrinterConfig>,
+    pub connected: bool,
+    /// A report has arrived since connecting.
+    pub has_state: bool,
+    /// From `get_version` when connected, else from settings.
+    pub model: String,
+    pub ipcam: Option<crate::printer::state::IpCam>,
+}
+
 struct Live {
     config: Option<PrinterConfig>,
     /// The running client's parameters; `None` once stopped.
@@ -581,6 +593,24 @@ impl PrinterService {
         tauri::async_runtime::spawn(emit_loop(Arc::downgrade(&inner), dirty_rx));
         tauri::async_runtime::spawn(sequence(Arc::downgrade(&inner), commands_rx, runner));
         Self { inner }
+    }
+
+    /// What the camera needs to know about the printer, read in one lock.
+    pub fn camera_facts(&self) -> CameraFacts {
+        let live = self.inner.live.lock().unwrap();
+        CameraFacts {
+            config: live.config.clone(),
+            connected: live.connection == ConnectionState::Connected,
+            has_state: live.state.is_some(),
+            model: live
+                .model
+                .clone()
+                .or_else(|| live.config.as_ref().map(|c| c.model.clone()))
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            ipcam: live.state.as_ref().and_then(|s| s.ipcam.clone()),
+        }
     }
 
     /// Connects to the configured printer, replacing any running connection.

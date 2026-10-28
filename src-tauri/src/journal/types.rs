@@ -129,6 +129,10 @@ pub struct Photo {
     pub id: i64,
     pub file_name: String,
     pub added_at: i64,
+    /// The moment a camera snapshot was taken at (`50 %`, `FINISHED`, …);
+    /// `None` for a photo the user added.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// What a print was for, kept apart from its defect tags: the calibration
@@ -166,6 +170,9 @@ pub struct PrintEntry {
     /// Set when the print was linked to a calibration step.
     #[serde(default)]
     pub purpose: Option<PrintPurpose>,
+    /// Why the entry's last camera snapshot wasn't taken.
+    #[serde(default)]
+    pub snapshot_note: Option<String>,
     pub updated_at: i64,
 }
 

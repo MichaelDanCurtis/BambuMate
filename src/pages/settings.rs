@@ -22,6 +22,66 @@ fn is_macos_host() -> bool {
         .unwrap_or(false)
 }
 
+/// One of the camera's switches, saved as the preference `pref`. Both are on
+/// unless the stored value is `"false"`.
+#[component]
+fn CameraSwitch(
+    pref: &'static str,
+    id: &'static str,
+    label: &'static str,
+    note: &'static str,
+) -> impl IntoView {
+    let checked = RwSignal::new(true);
+    let failed = RwSignal::new(false);
+    // Set once the user has flipped it, so a slow first read can't undo that.
+    let touched = RwSignal::new(false);
+    spawn_local(async move {
+        if let Ok(stored) = commands::get_preference(pref).await {
+            if touched.try_get_untracked() == Some(false) {
+                checked.try_set(stored.as_deref() != Some("false"));
+            }
+        }
+    });
+    let on_change = move |ev: leptos::ev::Event| {
+        use wasm_bindgen::JsCast;
+        let on = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+            .map(|el| el.checked())
+            .unwrap_or(false);
+        touched.set(true);
+        checked.set(on);
+        failed.set(false);
+        spawn_local(async move {
+            if commands::set_preference(pref, if on { "true" } else { "false" })
+                .await
+                .is_err()
+            {
+                checked.try_set(!on);
+                failed.try_set(true);
+            }
+        });
+    };
+    view! {
+        <div class="form-group feature-toggle">
+            <label class="toggle-label" for=id>
+                <input
+                    type="checkbox"
+                    class="toggle-input"
+                    id=id
+                    prop:checked=move || checked.get()
+                    on:change=on_change
+                />
+                <span class="toggle-text">{label}</span>
+            </label>
+            <p class="toggle-description">{note}</p>
+            <Show when=move || failed.get()>
+                <span class="status-text status-warning">"Couldn't save the setting."</span>
+            </Show>
+        </div>
+    }
+}
+
 #[component]
 pub fn SettingsPage() -> impl IntoView {
     let (bambu_path, set_bambu_path) = signal(String::new());
@@ -727,6 +787,15 @@ pub fn SettingsPage() -> impl IntoView {
             </section>
 
             <PrinterSettings />
+
+            <section class="settings-section settings-camera">
+                <h2 class="nd-label settings-section-title">"Camera"</h2>
+                <p class="section-description">"The printer's camera, over your local network only."</p>
+                <CameraSwitch pref="camera_live_view" id="camera-live-view" label="Live view"
+                    note="Shows the camera on Printer → Live and Home." />
+                <CameraSwitch pref="camera_snapshots" id="camera-snapshots" label="Journal snapshots"
+                    note="Photographs each print after the first layer, half way and at the end." />
+            </section>
 
             <section class="settings-section">
                 <h2 class="nd-label settings-section-title">"Application"</h2>

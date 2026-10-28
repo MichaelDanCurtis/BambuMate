@@ -34,6 +34,8 @@ urlencoding = "2.1"
 regex = "1"
 toml = "0.8"
 image = "0.25"
+# Decodes one H.264 keyframe for journal snapshots and stills (BSD-2-Clause).
+openh264 = "0.9.9"
 base64 = "0.22"
 notify = "7"
 async-trait = "0.1"
@@ -44,6 +46,7 @@ uuid = { version = "1", features = ["v4"] }
 # rustls uses the ring provider explicitly: aws-lc-rs needs cmake/NASM on Windows.
 rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 x509-parser = "0.18.1"
 # Printer certificate fingerprints and slice cache keys.
 sha2 = "0.10"
@@ -51,6 +54,9 @@ socket2 = { version = "0.6", features = ["all"] }
 # Slicing with Bambu Studio: read the output .gcode.3mf (a ZIP) and its XML metadata.
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 quick-xml = "0.42"
+# RTSP client for the H2/X1/P2S camera (MIT OR Apache-2.0). It has no RTSPS, so it runs behind a loopback TLS relay.
+retina = "0.4.21"
+futures = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 # killpg: stop the slicer's whole process group on cancel or timeout.
@@ -64,7 +70,6 @@ md5 = "0.7"
 tokio = { version = "1", features = ["test-util"] }
 # In-process TLS MQTT broker and test certificates for printer::client/tls tests.
 rcgen = "0.14.10"
-tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 bytes = "1"
 
 [build-dependencies]

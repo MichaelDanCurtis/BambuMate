@@ -40,6 +40,10 @@ import {
   CAL_RUN_HIGH_FLOW_NO_COARSE,
   CAL_RUN_NEEDS_VARIANT,
   CAL_RUN_TEMP_SAVED,
+  CAMERA_BUSY,
+  CAMERA_LIVE_JPEG,
+  CAMERA_LIVE_RTSPS,
+  cameraOff,
   FIXTURES,
   GIF_1X1,
   JOURNAL_FAILED,
@@ -47,6 +51,7 @@ import {
   JOURNAL_GOOD,
   JOURNAL_PRINTING,
   JOURNAL_UNKNOWN,
+  JPEG_1X1_BASE64,
   makePng,
   PETG,
   PRINTER_FINGERPRINT,
@@ -188,8 +193,88 @@ function installTauriMock(fixtures) {
     return () => {};
   };
   window.__emit = (name, payload) => (handlers[name] || []).forEach((cb) => cb({ event: name, payload }));
-  window.__TAURI__ = { core: { invoke }, event: { listen } };
+  // Tauri's Channel, kept so a step can send messages through the newest one.
+  const channels = (window.__cameraChannels = []);
+  class Channel {
+    constructor() {
+      this.onmessage = () => {};
+      channels.push(this);
+    }
+    toJSON() {
+      return "__CHANNEL__";
+    }
+  }
+  window.__TAURI__ = { core: { invoke, Channel }, event: { listen } };
   window.__TAURI_INTERNALS__ = { invoke };
+}
+
+// WebCodecs stand-in for the H.264 flow: records the codec it was asked
+// about and the type of each chunk decoded, and draws nothing.
+function installDecoderStandIn() {
+  window.__decoded = [];
+  window.EncodedVideoChunk = class {
+    constructor(i) {
+      Object.assign(this, i);
+    }
+  };
+  window.VideoDecoder = class {
+    static async isConfigSupported(c) {
+      window.__decoderConfig = c.codec;
+      return { supported: true };
+    }
+    constructor(cb) {
+      this.cb = cb;
+      this.state = "unconfigured";
+      this.decodeQueueSize = 0;
+    }
+    configure() {
+      this.state = "configured";
+    }
+    decode(chunk) {
+      window.__decoded.push(chunk.type);
+    }
+    close() {
+      this.state = "closed";
+    }
+  };
+}
+
+// The same, but `isConfigSupported` waits until a step calls
+// __openConfig(), as a slow browser would; it counts the decoders made.
+function installGatedDecoderStandIn() {
+  window.__decoded = [];
+  window.__decoders = [];
+  window.__configAsked = 0;
+  let open;
+  const gate = new Promise((r) => (open = r));
+  window.__openConfig = () => open();
+  window.EncodedVideoChunk = class {
+    constructor(i) {
+      Object.assign(this, i);
+    }
+  };
+  window.VideoDecoder = class {
+    static async isConfigSupported() {
+      window.__configAsked += 1;
+      await gate;
+      return { supported: true };
+    }
+    constructor(cb) {
+      this.cb = cb;
+      this.state = "unconfigured";
+      this.decodeQueueSize = 0;
+      window.__decoders.push(this);
+    }
+    configure() {
+      this.state = "configured";
+    }
+    decode(chunk) {
+      window.__decoded.push(chunk.type);
+    }
+    close() {
+      this.state = "closed";
+    }
+  };
 }
 
 const png = makePng(320, 240, deflateSync);
@@ -2926,6 +3011,51 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await link.innerText()).trim().toLowerCase() !== "analyze a photo") throw new Error(`reads "${await link.innerText()}"`);
   });
 
+  await step(run, page, "journal snapshots carry their moment", async () => {
+    const snap = {
+      ...JOURNAL_FINISHED,
+      photos: [{ id: 7, file_name: "5f0c.jpg", added_at: JOURNAL_FINISHED.photos[0].added_at, label: "50 %" }],
+      snapshot_note: "This printer has no camera.",
+    };
+    await withFixtures({ journal_list: [snap] }, async () => {
+      const before = await countOf("journal_list");
+      await page.click(`${JR} .jr-filter[data-kind="needs_verdict"]`);
+      await pastCalls("journal_list", before);
+      await rowsRead([JOURNAL_FINISHED.name]);
+      await expand(2);
+      await page.waitForSelector(`${journalDetail(2)} .jr-photo img`, { timeout: 5000 });
+      const label = (await page.locator(`${journalDetail(2)} .jr-photo-label`).textContent()).trim();
+      if (label !== "50 %") throw new Error(`label reads "${label}"`);
+      if ((await page.locator(`${journalDetail(2)} .jr-photo-label`).getAttribute("aria-hidden")) !== "true") throw new Error("the label isn't hidden from screen readers");
+      const alt = await page.locator(`${journalDetail(2)} .jr-photo img`).getAttribute("alt");
+      if (!alt.startsWith("50 % snapshot, photo 1 of 1, added ")) throw new Error(`alt reads "${alt}"`);
+      const note = page.locator(`${journalDetail(2)} .jr-snapshot-note`);
+      if (!(await note.isVisible())) throw new Error("the miss note isn't visible");
+      if ((await note.textContent()) !== "No camera snapshot: This printer has no camera.") throw new Error(`note reads "${await note.textContent()}"`);
+    });
+    // A photo the user added has no label, and an entry with no miss has no note.
+    const plain = { ...JOURNAL_FINISHED, photos: [{ id: 7, file_name: "5f0c.jpg", added_at: JOURNAL_FINISHED.photos[0].added_at }] };
+    await withFixtures({ journal_list: [plain] }, async () => {
+      const before = await countOf("journal_list");
+      await page.click(`${JR} .jr-filter[data-kind="all"]`);
+      await pastCalls("journal_list", before);
+      await page.waitForFunction(() => document.querySelectorAll(".journal-page .jr-row .jr-snapshot-note").length === 0, null, { timeout: 5000 });
+      // A photo keeps its id, so the open detail is drawn afresh.
+      await collapse(2);
+      await expand(2);
+      await page.waitForSelector(`${journalDetail(2)} .jr-photo img`, { timeout: 5000 });
+      if ((await page.locator(`${journalDetail(2)} .jr-photo-label`).count()) !== 0) throw new Error("a label on an unlabelled photo");
+      const alt = await page.locator(`${journalDetail(2)} .jr-photo img`).getAttribute("alt");
+      if (!alt.startsWith("Photo 1 of 1, added ")) throw new Error(`alt reads "${alt}"`);
+    });
+    // Back to the default list for the flows after this one.
+    const again = await countOf("journal_list");
+    await page.click(`${JR} .jr-filter[data-kind="needs_verdict"]`);
+    await pastCalls("journal_list", again);
+    await page.click(`${JR} .jr-filter[data-kind="all"]`);
+    await rowsRead(ALL_ROWS);
+  });
+
   await step(run, page, "deleting an entry asks inline, Keep cancels and Delete removes it", async () => {
     await expand(1);
     const before = await countOf("journal_delete");
@@ -3289,6 +3419,47 @@ async function driveApp(browserType, engine, baseUrl) {
       await release("clear-cache");
       await waitText(".slice-cache-status", "Cleared 12.0 MB.");
       await page.waitForSelector(".slice-clear-cache:not([disabled])", { timeout: 5000 });
+    });
+  });
+
+  await step(run, page, "Settings saves the camera switches", async () => {
+    await page.waitForSelector(".settings-camera #camera-live-view", { timeout: 15000 });
+    const title = (await page.locator(".settings-camera h2").textContent()).trim();
+    if (title !== "Camera") throw new Error(`title reads "${title}"`);
+    // Both are on unless the stored value is "false".
+    for (const id of ["#camera-live-view", "#camera-snapshots"]) {
+      if (!(await page.isChecked(id))) throw new Error(`${id} starts off`);
+    }
+    for (const [id, label, key] of [
+      ["#camera-live-view", "Live view", "camera_live_view"],
+      ["#camera-snapshots", "Journal snapshots", "camera_snapshots"],
+    ]) {
+      if ((await page.locator(`.settings-camera label[for="${id.slice(1)}"]`).textContent()).trim() !== label) throw new Error(`${id} isn't labelled "${label}"`);
+      const before = await countOf("set_preference");
+      await page.getByLabel(label, { exact: true }).uncheck();
+      await pastCalls("set_preference", before);
+      const sent = (await callsOf("set_preference")).slice(before).filter((c) => c.args?.key === key);
+      if (sent.length !== 1 || !sameArgs(sent[0].args, { key, value: "false" })) throw new Error(`sent ${JSON.stringify(sent.map((c) => c.args))}`);
+      if (await page.isChecked(id)) throw new Error(`${id} is still on`);
+      const again = await countOf("set_preference");
+      await page.getByLabel(label, { exact: true }).check();
+      await pastCalls("set_preference", again);
+      const last = (await callsOf("set_preference")).at(-1).args;
+      if (!sameArgs(last, { key, value: "true" })) throw new Error(`sent ${JSON.stringify(last)}`);
+    }
+    if ((await page.locator(".settings-camera .status-warning").count()) !== 0) throw new Error("a warning with nothing wrong");
+  });
+
+  await step(run, page, "a camera switch that can't be saved flips back and says so", async () => {
+    await withFixtures({ set_preference: { __reject: "disk full" } }, async () => {
+      const before = await countOf("set_preference");
+      // click, not uncheck: the box flips back before uncheck() could re-read it.
+      await page.click("#camera-live-view");
+      await pastCalls("set_preference", before);
+      await page.waitForSelector(".settings-camera .status-warning", { timeout: 5000 });
+      const text = (await page.locator(".settings-camera .status-warning").textContent()).trim();
+      if (text !== "Couldn't save the setting.") throw new Error(`warning reads "${text}"`);
+      await page.waitForFunction(() => document.querySelector("#camera-live-view").checked, null, { timeout: 5000 });
     });
   });
 
@@ -3878,6 +4049,11 @@ async function driveApp(browserType, engine, baseUrl) {
     if (size !== "11px") throw new Error(`Links heading is ${size}`);
   });
 
+  await step(run, page, "About credits OpenH264", async () => {
+    const credit = page.getByText("Video decoding: OpenH264 (BSD-2-Clause), from Cisco Systems.");
+    if (!(await credit.isVisible())) throw new Error("the OpenH264 credit isn't visible");
+  });
+
   // -- hubs ------------------------------------------------------------------
   await step(run, page, "old routes land on their hub tab and Back skips them", async () => {
     for (const [old, tab, selector] of [
@@ -4423,6 +4599,332 @@ async function driveApp(browserType, engine, baseUrl) {
     await page.waitForTimeout(800);
     if ((await callsOf("printer_assign_slot")).length !== before + 1) throw new Error("assign was not sent");
     if (run.errors.length !== errors) throw new Error(run.errors.slice(errors).join("; "));
+  });
+
+  // -- printer camera -----------------------------------------------------------
+  // The panel beside the status on Printer → Live. The backend's Channel is
+  // the mock's `Channel`; `cameraSend` delivers bytes the way Tauri does, as
+  // an ArrayBuffer. Each flow also checks that nothing threw or logged an
+  // error.
+  const JPEG_BYTES = [...Buffer.from(JPEG_1X1_BASE64, "base64")];
+  const cameraSend = (p, bytes) =>
+    p.evaluate((b) => window.__cameraChannels.at(-1).onmessage(new Uint8Array(b).buffer), Array.from(bytes));
+  const camText = (p, sel) => p.locator(sel).first().evaluate((el) => el.textContent.replace(/\s+/g, " ").trim());
+  const camCount = (p, cmd) => p.evaluate((c) => window.__ipc.calls.filter((x) => x.cmd === c).length, cmd);
+  const callsAbove = (p, cmd, n, timeout = 5000) =>
+    p.waitForFunction(([c, k]) => window.__ipc.calls.filter((x) => x.cmd === c).length > k, [cmd, n], { timeout });
+  const camFlow = (name, fn) =>
+    step(run, page, name, async () => {
+      const before = run.errors.length;
+      const out = await fn();
+      if (run.errors.length !== before) throw new Error(run.errors.slice(before).join("; "));
+      return out;
+    });
+  // Opens Printer → Live afresh, so the panel asks for the camera's state again.
+  const openLive = async () => {
+    await page.click('nav.sidebar a[href="/"]');
+    await page.waitForSelector(".home-page", { timeout: 15000 });
+    await page.click('nav.sidebar a[href="/printer"]');
+    await page.waitForSelector(".pr-top .cam-panel", { timeout: 15000 });
+  };
+  // A page of its own, for the flows that change what the browser offers.
+  const camPage = async (fixtures, init) => {
+    const fb = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    fb.on("pageerror", (e) => run.errors.push(`pageerror: ${e.message}`));
+    fb.on("console", (m) => {
+      if (m.type() === "error") run.errors.push(`console.error: ${m.text()}`);
+    });
+    await fb.addInitScript(installTauriMock, { ...FIXTURES, ...fixtures });
+    if (init) await fb.addInitScript(init);
+    await fb.goto(`${baseUrl}printer`, { waitUntil: "domcontentloaded" });
+    await fb.waitForSelector(".pr-top .cam-panel", { timeout: 45000 });
+    return fb;
+  };
+
+  await camFlow("the camera panel sits beside the status and says how to turn on liveview", async () => {
+    const watches = await camCount(page, "camera_watch");
+    await openLive();
+    await page.waitForFunction(() => document.querySelector(".cam-overlay")?.textContent.includes("Turn on LAN Mode Liveview"), null, {
+      timeout: 5000,
+    });
+    const title = await camText(page, ".cam-overlay .cam-title");
+    if (title !== "Turn on LAN Mode Liveview") throw new Error(`title reads "${title}"`);
+    const steps = await camText(page, ".cam-overlay p:not(.cam-title)");
+    if (steps !== "On the printer screen: Settings → General (or LAN Only) → LAN Mode Liveview.") throw new Error(`steps read "${steps}"`);
+    if (!(await page.locator(".cam-overlay").isVisible())) throw new Error("the steps aren't visible");
+    const hero = await page.locator(".pr-hero").boundingBox();
+    const cam = await page.locator(".cam-panel").boundingBox();
+    if (Math.abs(hero.y - cam.y) > 1 || cam.x < hero.x + hero.width) {
+      throw new Error(`hero ${JSON.stringify(hero)}, camera ${JSON.stringify(cam)}`);
+    }
+    // The watch keeps the backend's session checking the printer.
+    await callsAbove(page, "camera_watch", watches);
+  });
+
+  await camFlow("a P1 camera streams JPEGs into the panel", async () => {
+    await withFixtures({ camera_state: CAMERA_LIVE_JPEG }, async () => {
+      const watches = await camCount(page, "camera_watch");
+      await openLive();
+      await callsAbove(page, "camera_watch", watches);
+      const passed = await page.evaluate(() => {
+        const call = window.__ipc.calls.filter((c) => c.cmd === "camera_watch").at(-1);
+        return call.args?.onFrame === window.__cameraChannels.at(-1);
+      });
+      if (!passed) throw new Error("camera_watch wasn't given the Channel as onFrame");
+      await cameraSend(page, [3, 0, ...JPEG_BYTES]);
+      await page.waitForFunction(
+        () => {
+          const img = document.querySelector(".cam-frame img");
+          return img?.src.startsWith("blob:") && img.complete && img.naturalWidth > 0;
+        },
+        null,
+        { timeout: 5000 }
+      );
+      const caption = await camText(page, ".cam-live");
+      if (caption !== `LIVE · ${PRINTER_VIEW.printer.model.toUpperCase()}`) throw new Error(`caption reads "${caption}"`);
+      if (!/^\d\d:\d\d:\d\d$/.test(await camText(page, ".cam-time"))) throw new Error("no frame time");
+    });
+  });
+
+  await camFlow("an H2 camera decodes H.264 with WebCodecs", async () => {
+    const fb = await camPage({ camera_state: CAMERA_LIVE_RTSPS }, installDecoderStandIn);
+    try {
+      await fb.waitForSelector(".cam-frame canvas", { timeout: 5000 });
+      await callsAbove(fb, "camera_watch", 0);
+      const codec = [..."avc1.42c01e"].map((c) => c.charCodeAt(0));
+      await cameraSend(fb, [1, 0, 0, codec.length, ...codec, 1, 66, 192, 30]);
+      await fb.waitForFunction(() => window.__decoderConfig === "avc1.42c01e", null, { timeout: 5000 });
+      await cameraSend(fb, [2, 0, 0, 0, 0, 1, 0x41]);
+      await cameraSend(fb, [2, 1, 0, 0, 0, 1, 0x65]);
+      const decoded = await fb.evaluate(() => window.__decoded);
+      if (JSON.stringify(decoded) !== '["key"]') throw new Error(`decoded ${JSON.stringify(decoded)}`);
+      if ((await fb.locator(".cam-frame canvas").count()) !== 1) throw new Error("no canvas in the frame");
+    } finally {
+      await fb.close();
+    }
+  });
+
+  await camFlow("without WebCodecs an H2 camera shows refreshed stills", async () => {
+    const still = `data:image/jpeg;base64,${JPEG_1X1_BASE64}`;
+    const fb = await camPage({ camera_state: CAMERA_LIVE_RTSPS, camera_still: still }, () => {
+      delete window.VideoDecoder;
+    });
+    try {
+      await fb.waitForFunction(() => document.querySelector(".cam-frame img")?.src.startsWith("data:image/jpeg"), null, {
+        timeout: 5000,
+      });
+      const first = await camCount(fb, "camera_still");
+      await callsAbove(fb, "camera_still", first, 3000);
+      const note = await camText(fb, ".cam-still-note");
+      if (!/^STILL · \d\d:\d\d:\d\d$/.test(note)) throw new Error(`note reads "${note}"`);
+      if ((await camCount(fb, "camera_watch")) !== 0) throw new Error("a watch started without a decoder");
+    } finally {
+      await fb.close();
+    }
+  });
+
+  await camFlow("a busy camera says so and Retry asks again", async () => {
+    await withFixtures({ camera_state: CAMERA_BUSY }, async () => {
+      await openLive();
+      const want = "[ERROR: The camera is in use by another app. Close the live view in Bambu Studio or Handy, then retry.]";
+      await page.waitForFunction((w) => document.querySelector(".cam-overlay")?.textContent.includes(w), want, { timeout: 5000 });
+      const retries = await camCount(page, "camera_retry");
+      await page.click(".cam-overlay button.cam-retry");
+      await callsAbove(page, "camera_retry", retries);
+      // The answer is the fixture's liveview-off state.
+      await page.waitForFunction(() => document.querySelector(".cam-overlay")?.textContent.includes("Turn on LAN Mode Liveview"), null, {
+        timeout: 5000,
+      });
+    });
+  });
+
+  await camFlow("camera states follow the camera event", async () => {
+    await page.evaluate((s) => window.__emit("camera://state", s), cameraOff("no_camera", "This printer has no camera."));
+    await page.waitForFunction(() => document.querySelector(".cam-overlay")?.textContent === "This printer has no camera.", null, {
+      timeout: 5000,
+    });
+  });
+
+  await camFlow("the camera expands and Esc collapses it", async () => {
+    const frame = page.locator(".cam-frame");
+    if ((await frame.getAttribute("aria-expanded")) !== "false") throw new Error("starts expanded");
+    await frame.click();
+    await page.waitForFunction(() => document.querySelector(".cam-frame")?.getAttribute("aria-expanded") === "true", null, { timeout: 5000 });
+    if (await page.locator(".pr-hero").isVisible()) throw new Error("the hero still shows when expanded");
+    if ((await frame.getAttribute("aria-label")) !== "Collapse camera") throw new Error("the label doesn't say collapse");
+    const line = await camText(page, ".pr-status-line");
+    if (line !== "RUNNING · 6% · Layer 1/200") throw new Error(`status line reads "${line}"`);
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector(".cam-frame")?.getAttribute("aria-expanded") === "false", null, { timeout: 5000 });
+    await page.waitForSelector(".pr-hero", { state: "visible", timeout: 5000 });
+    if ((await page.locator(".pr-status-line").count()) !== 0) throw new Error("the status line stays after collapsing");
+    if ((await frame.getAttribute("aria-label")) !== "Expand camera") throw new Error("the label doesn't say expand");
+  });
+
+  await camFlow("leaving Printer → Live releases the camera", async () => {
+    await withFixtures({ camera_state: CAMERA_LIVE_JPEG }, async () => {
+      const watches = await camCount(page, "camera_watch");
+      await openLive();
+      await callsAbove(page, "camera_watch", watches);
+      // The watch's id is back before the page leaves.
+      await page.waitForFunction(
+        () => {
+          const n = (list) => list.filter((c) => (c.cmd ?? c) === "camera_watch").length;
+          return n(window.__ipc.settled) === n(window.__ipc.calls);
+        },
+        null,
+        { timeout: 5000 }
+      );
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 50)));
+      const unwatches = await camCount(page, "camera_unwatch");
+      await page.click('nav.sidebar a[href="/"]');
+      await callsAbove(page, "camera_unwatch", unwatches);
+      const last = (await callsOf("camera_unwatch")).at(-1);
+      if (!sameArgs(last.args, { id: 1 })) throw new Error(`camera_unwatch got ${JSON.stringify(last.args)}`);
+    });
+  });
+
+  // The flows below answer as the real backend does: it sends
+  // `camera://state` only while a session runs, a session runs only while
+  // something uses the camera, and `camera_state` re-reads the printer when
+  // no session runs. Each event below is one the backend would send.
+  const CAM_IDLE = { transport: null, status: { kind: "idle" }, last_frame_at: null };
+  const CAM_CONNECTING_JPEG = { transport: "jpeg", status: { kind: "connecting" }, last_frame_at: null };
+  const LIVEVIEW_OFF = cameraOff("liveview_off", "Turn on LAN Mode Liveview");
+  const camOverlay = (p, text) =>
+    p.waitForFunction((t) => document.querySelector(".cam-overlay")?.textContent.includes(t), text, { timeout: 5000 });
+
+  await camFlow("with liveview off the panel keeps watching and shows the picture once it is on", async () => {
+    const watches = await camCount(page, "camera_watch");
+    await openLive();
+    await camOverlay(page, "Turn on LAN Mode Liveview");
+    // Without a watch no session runs, and nothing would ever say liveview came on.
+    await callsAbove(page, "camera_watch", watches);
+    // The watched session checks the printer again and finds liveview on.
+    const again = await camCount(page, "camera_watch");
+    await page.evaluate((s) => window.__emit("camera://state", s), CAM_CONNECTING_JPEG);
+    await camOverlay(page, "[CONNECTING…]");
+    // Knowing the transport, the panel watches for its frames.
+    await callsAbove(page, "camera_watch", again);
+    await cameraSend(page, [3, 0, ...JPEG_BYTES]);
+    await page.evaluate((s) => window.__emit("camera://state", s), CAMERA_LIVE_JPEG);
+    await page.waitForFunction(
+      () => {
+        const img = document.querySelector(".cam-frame img");
+        return img?.src.startsWith("blob:") && img.complete && img.naturalWidth > 0 && !document.querySelector(".cam-overlay");
+      },
+      null,
+      { timeout: 5000 }
+    );
+  });
+
+  await camFlow("after Retry closes the session the panel asks again rather than saying connecting", async () => {
+    // No WebCodecs: an H2 shows stills and keeps no watch, so Retry finds
+    // nobody watching and closes the session.
+    const still = `data:image/jpeg;base64,${JPEG_1X1_BASE64}`;
+    const busy = { ...CAMERA_BUSY, transport: "rtsps" };
+    const fb = await camPage({ camera_state: busy, camera_retry: CAM_IDLE, camera_still: null }, () => {
+      delete window.VideoDecoder;
+    });
+    try {
+      await camOverlay(fb, "[ERROR: The camera is in use by another app.");
+      const states = await camCount(fb, "camera_state");
+      await fb.evaluate(([s, u]) => {
+        window.__fixtures.camera_state = s;
+        window.__fixtures.camera_still = u;
+      }, [CAMERA_LIVE_RTSPS, still]);
+      await fb.click(".cam-overlay button.cam-retry");
+      await callsAbove(fb, "camera_state", states);
+      await fb.waitForFunction(
+        () => document.querySelector(".cam-frame img")?.src.startsWith("data:image/jpeg") && !document.querySelector(".cam-overlay"),
+        null,
+        { timeout: 5000 }
+      );
+    } finally {
+      await fb.close();
+    }
+  });
+
+  await camFlow("a refused watch asks for the state again", async () => {
+    await withFixtures({ camera_watch: { __reject: "Live view is off in Settings." }, camera_state: LIVEVIEW_OFF }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await page.waitForSelector(".home-page", { timeout: 15000 });
+      // The panel's first answer says it can stream; the second (after the
+      // refusal) says why it can't.
+      await setFixture("camera_state", { __sequence: [CAMERA_LIVE_JPEG, cameraOff("disabled", "Live view is off in Settings.")] });
+      const watches = await camCount(page, "camera_watch");
+      await page.click('nav.sidebar a[href="/printer"]');
+      await page.waitForSelector(".pr-top .cam-panel", { timeout: 15000 });
+      await callsAbove(page, "camera_watch", watches);
+      await page.waitForFunction(() => document.querySelector(".cam-overlay")?.textContent === "Live view is off in Settings.", null, {
+        timeout: 5000,
+      });
+    });
+  });
+
+  await camFlow("a failed Retry asks for the state again", async () => {
+    await withFixtures({ camera_state: CAMERA_BUSY, camera_retry: { __reject: "camera_retry failed" } }, async () => {
+      await openLive();
+      await camOverlay(page, "[ERROR: The camera is in use by another app.");
+      await setFixture("camera_state", LIVEVIEW_OFF);
+      const states = await camCount(page, "camera_state");
+      await page.click(".cam-overlay button.cam-retry");
+      await callsAbove(page, "camera_state", states);
+      await camOverlay(page, "Turn on LAN Mode Liveview");
+    });
+  });
+
+  await camFlow("too many frames while the decoder is set up wait for the next keyframe", async () => {
+    const fb = await camPage({ camera_state: CAMERA_LIVE_RTSPS }, installGatedDecoderStandIn);
+    try {
+      await fb.waitForSelector(".cam-frame canvas", { timeout: 5000 });
+      await callsAbove(fb, "camera_watch", 0);
+      const codec = [..."avc1.42c01e"].map((c) => c.charCodeAt(0));
+      await cameraSend(fb, [1, 0, 0, codec.length, ...codec, 1, 66, 192, 30]);
+      // A keyframe and more deltas than the shim holds, before the browser answers.
+      await fb.evaluate(() => {
+        const ch = window.__cameraChannels.at(-1);
+        ch.onmessage(new Uint8Array([2, 1, 0, 0, 0, 1, 0x65]).buffer);
+        for (let i = 0; i < 130; i++) ch.onmessage(new Uint8Array([2, 0, 0, 0, 0, 1, 0x41]).buffer);
+      });
+      await fb.waitForFunction(() => window.__configAsked === 1, null, { timeout: 5000 });
+      await fb.evaluate(() => window.__openConfig());
+      await fb.waitForFunction(() => window.__decoders.length === 1, null, { timeout: 5000 });
+      // After the gap, deltas wait for a keyframe.
+      await cameraSend(fb, [2, 0, 0, 0, 0, 1, 0x41]);
+      await cameraSend(fb, [2, 1, 0, 0, 0, 1, 0x65]);
+      await fb.waitForFunction(() => window.__decoded.length >= 1, null, { timeout: 5000 });
+      const decoded = await fb.evaluate(() => window.__decoded);
+      if (JSON.stringify(decoded) !== '["key"]') throw new Error(`decoded ${decoded.length} chunks, starting ${JSON.stringify(decoded.slice(0, 3))}`);
+    } finally {
+      await fb.close();
+    }
+  });
+
+  await camFlow("the first keyframe isn't lost while the decoder is set up", async () => {
+    const fb = await camPage({ camera_state: CAMERA_LIVE_RTSPS }, installGatedDecoderStandIn);
+    try {
+      await fb.waitForSelector(".cam-frame canvas", { timeout: 5000 });
+      await callsAbove(fb, "camera_watch", 0);
+      const codec = [..."avc1.42c01e"].map((c) => c.charCodeAt(0));
+      const config = [1, 0, 0, codec.length, ...codec, 1, 66, 192, 30];
+      // A second config while the first is still being checked, then the
+      // stream's first frames, all before the browser answers.
+      await cameraSend(fb, config);
+      await cameraSend(fb, config);
+      await cameraSend(fb, [2, 0, 0, 0, 0, 1, 0x41]);
+      await cameraSend(fb, [2, 1, 0, 0, 0, 1, 0x65]);
+      await cameraSend(fb, [2, 0, 0, 0, 0, 1, 0x41]);
+      await fb.waitForFunction(() => window.__configAsked === 2, null, { timeout: 5000 });
+      await fb.evaluate(() => window.__openConfig());
+      await fb.waitForFunction(() => window.__decoded.length >= 2, null, { timeout: 5000 });
+      const decoded = await fb.evaluate(() => window.__decoded);
+      if (JSON.stringify(decoded) !== '["key","delta"]') throw new Error(`decoded ${JSON.stringify(decoded)}`);
+      const open = await fb.evaluate(() => window.__decoders.filter((d) => d.state !== "closed").length);
+      if (open !== 1) throw new Error(`${open} decoders left open`);
+    } finally {
+      await fb.close();
+    }
   });
 
   // -- calibration ------------------------------------------------------------
@@ -5023,6 +5525,49 @@ async function driveApp(browserType, engine, baseUrl) {
     if (!hero.includes("9 h 09 m left · Layer 1 / 200 · Nozzle 245 °C · Bed 70 °C")) throw new Error(hero);
     const on = await page.locator(".home-page .nd-seg-on").count();
     if (on !== 1) throw new Error(`${on} segments filled for 6%`);
+  });
+
+  // The thumbnail asks the camera for its state and a still when it mounts,
+  // so each flow opens Home afresh, from About.
+  const homeAfresh = async () => {
+    await goTo("/settings/about");
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    await page.click('nav.sidebar a[href="/"]');
+    await homeMode("printing");
+  };
+  const THUMB_STILL = `data:image/jpeg;base64,${JPEG_1X1_BASE64}`;
+
+  await step(run, page, "Home shows a camera thumbnail while printing", async () => {
+    await withFixtures({ printer_view: RUNNING_CLEAN, camera_state: CAMERA_LIVE_JPEG, camera_still: THUMB_STILL }, async () => {
+      await homeAfresh();
+      await page.waitForSelector(".home-page .cam-thumb img", { state: "visible", timeout: 5000 });
+      const href = await page.locator(".home-page a.cam-thumb").getAttribute("href");
+      if (href !== "/printer") throw new Error(`the thumbnail links to ${href}`);
+      const inHero = await page.locator(".home-page .hm-hero .cam-thumb").count();
+      if (inHero !== 1) throw new Error("the thumbnail isn't in the hero");
+      if ((await page.locator(".home-page .nd-hero").count()) !== 1) throw new Error("a second hero");
+    });
+  });
+
+  await step(run, page, "Home hides the thumbnail when there is no picture", async () => {
+    await withFixtures({ printer_view: RUNNING_CLEAN, camera_state: CAMERA_LIVE_JPEG, camera_still: null }, async () => {
+      const stills = await countOf("camera_still");
+      await homeAfresh();
+      await pastCalls("camera_still", stills);
+      await page.waitForTimeout(300);
+      if ((await page.locator(".home-page .cam-thumb").count()) !== 0) throw new Error("a thumbnail with no picture");
+    });
+  });
+
+  await step(run, page, "Home hides the thumbnail when the camera is off", async () => {
+    // The state is read on arrival: no event is needed to learn it is off.
+    await withFixtures({ printer_view: RUNNING_CLEAN, camera_state: cameraOff("liveview_off", "Turn on LAN Mode Liveview"), camera_still: THUMB_STILL }, async () => {
+      const states = await countOf("camera_state");
+      await homeAfresh();
+      await pastCalls("camera_state", states);
+      await page.waitForTimeout(300);
+      if ((await page.locator(".home-page .cam-thumb").count()) !== 0) throw new Error("a thumbnail with the camera off");
+    });
   });
 
   await step(run, page, "an HMS code during a print keeps the print and names the code", async () => {

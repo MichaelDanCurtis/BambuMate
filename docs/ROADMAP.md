@@ -38,7 +38,7 @@ Codex and Claude Agent became AI sources, and the agent drawer was added, using 
 | Print journal | Merged | [#35](https://github.com/MichaelDanCurtis/BambuMate/pull/35) | [spec](superpowers/specs/2026-10-24-print-journal-design.md) · [plan](superpowers/plans/2026-10-24-print-journal.md) |
 | AMS filament detection | Merged | [#36](https://github.com/MichaelDanCurtis/BambuMate/pull/36) | [spec](superpowers/specs/2026-10-25-ams-detection-design.md) · [plan](superpowers/plans/2026-10-25-ams-detection.md) |
 | Calibration mode | Merged | [#37](https://github.com/MichaelDanCurtis/BambuMate/pull/37) | [spec](superpowers/specs/2026-10-25-calibration-mode-design.md) · [plan](superpowers/plans/2026-10-25-calibration-mode.md) |
-| LAN camera | Not started | — | — |
+| LAN camera | In review | [#39](https://github.com/MichaelDanCurtis/BambuMate/pull/39) | [spec](superpowers/specs/2026-10-27-lan-camera-design.md) · [plan](superpowers/plans/2026-10-27-lan-camera.md) |
 
 ## Hardware checks still to do
 
@@ -48,7 +48,8 @@ These need a real printer (an H2) and a Bambu account:
 - slicing a real Bambu 3MF and a large STL;
 - a real journal print, including a reconnect and a restart mid-print;
 - AMS detection with RFID spools, and the Slice and Home "loaded" lines against live trays;
-- a real temperature and flow calibration, saved to a user preset and to a calibrated copy, and undone.
+- a real temperature and flow calibration, saved to a user preset and to a calibrated copy, and undone;
+- the LAN camera: RTSPS live view past 30 s (retina sends no RTCP), live view alongside Bambu Studio and Handy, journal snapshots during a real print, a wrong access code, and liveview turned on while the panel is open.
 
 ## Follow-ups
 
@@ -57,6 +58,7 @@ Each PR body lists small follow-ups that don't block anything. The larger ones a
 - **AMS detection:**
   - On an H2D with two nozzle sizes, detection should use each AMS unit's own nozzle, so it stops rebuilding the index on every extruder switch.
   - Building the index should cost less.
+- **Camera:** drop viewers on a webview reload (an `on_page_load` hook), sharper RTSPS error messages after the H2 check, and the small webview callback leaks.
 - **Presets:** the older `resolve_inheritance` resolver should adopt Bambu Studio's per-variant "nil" rule, which the slicer's resolver now follows.
 
 ## Ground rules

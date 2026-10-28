@@ -82,6 +82,9 @@ pub struct Photo {
     pub id: i64,
     pub file_name: String,
     pub added_at: i64,
+    /// The moment a camera snapshot was taken at (`FIRST LAYER`, `50 %`, …);
+    /// `None` for a photo the user added.
+    pub label: Option<String>,
 }
 
 /// What a print was for: the calibration result it was printed for. `test`
@@ -120,6 +123,8 @@ pub struct PrintEntry {
     #[serde(default)]
     pub purpose: Option<PrintPurpose>,
     pub updated_at: i64,
+    /// Why the camera took no snapshot, when it couldn't.
+    pub snapshot_note: Option<String>,
     /// Page-only: the [`next_revision`](crate::journal::next_revision) of
     /// the request this copy came from. Not sent by the backend.
     #[serde(skip)]
