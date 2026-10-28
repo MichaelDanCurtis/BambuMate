@@ -6,7 +6,18 @@ use std::sync::Arc;
 use rustls::ClientConfig;
 use sha2::{Digest, Sha256};
 
-use super::transport::Transport;
+use super::transport::{OffReason, Transport};
+
+/// Where the hub gets its camera from: the saved printer, its live state
+/// and the keychain in the app, a fixed answer in tests.
+pub trait TargetSource: Send + Sync + 'static {
+    /// Where the camera is now, or why there is none. May block (keychain).
+    fn resolve(&self) -> Result<CameraTarget, OffReason>;
+    /// Whether a running session for `target` still fits the printer: same
+    /// printer and code, connected, and the same transport chosen. Cheap,
+    /// no keychain.
+    fn still_valid(&self, target: &CameraTarget) -> Result<(), OffReason>;
+}
 
 /// One printer's camera. Written by hand so the code never reaches a log.
 #[derive(Clone)]

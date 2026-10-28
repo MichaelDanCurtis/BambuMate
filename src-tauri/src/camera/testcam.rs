@@ -137,6 +137,23 @@ pub fn test_target(cam: &FakeCamera, transport: Transport) -> CameraTarget {
     }
 }
 
+/// A target nothing listens at: for tests whose connector is fake.
+pub fn offline_target(transport: Transport) -> CameraTarget {
+    let ca = TestCa::new("Offline CA");
+    let verifier =
+        PrinterCertVerifier::with_trust(&ca.pem, &[], SERIAL, None, RejectionSlot::default())
+            .unwrap();
+    CameraTarget {
+        host: "127.0.0.1".into(),
+        port: 9,
+        serial: SERIAL.into(),
+        access_code: CODE.into(),
+        tls: client_config(Arc::new(verifier)).unwrap(),
+        transport,
+        model: "P1S".into(),
+    }
+}
+
 /// A tiny real JPEG for tests (8×8 grey).
 pub fn tiny_jpeg() -> Vec<u8> {
     let img = image::RgbImage::from_pixel(8, 8, image::Rgb([128, 128, 128]));

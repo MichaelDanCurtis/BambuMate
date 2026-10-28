@@ -13,11 +13,14 @@ use serde::Serialize;
 pub mod h264;
 pub mod jpeg6000;
 pub mod rtsps;
+pub mod session;
 pub mod target;
 #[cfg(test)]
 pub(crate) mod testcam;
 pub mod transport;
 pub mod wire;
+
+pub use session::{CameraHub, CameraState, CameraStatus};
 
 /// The event carrying `CameraState`.
 pub const STATE_EVENT: &str = "camera://state";
