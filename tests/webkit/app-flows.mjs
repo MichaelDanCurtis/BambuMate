@@ -239,6 +239,44 @@ function installDecoderStandIn() {
   };
 }
 
+// The same, but `isConfigSupported` waits until a step calls
+// __openConfig(), as a slow browser would; it counts the decoders made.
+function installGatedDecoderStandIn() {
+  window.__decoded = [];
+  window.__decoders = [];
+  window.__configAsked = 0;
+  let open;
+  const gate = new Promise((r) => (open = r));
+  window.__openConfig = () => open();
+  window.EncodedVideoChunk = class {
+    constructor(i) {
+      Object.assign(this, i);
+    }
+  };
+  window.VideoDecoder = class {
+    static async isConfigSupported() {
+      window.__configAsked += 1;
+      await gate;
+      return { supported: true };
+    }
+    constructor(cb) {
+      this.cb = cb;
+      this.state = "unconfigured";
+      this.decodeQueueSize = 0;
+      window.__decoders.push(this);
+    }
+    configure() {
+      this.state = "configured";
+    }
+    decode(chunk) {
+      window.__decoded.push(chunk.type);
+    }
+    close() {
+      this.state = "closed";
+    }
+  };
+}
+
 const png = makePng(320, 240, deflateSync);
 
 /** The view once the printer reports the preset assigned to A3. */
@@ -4619,7 +4657,8 @@ async function driveApp(browserType, engine, baseUrl) {
     if (Math.abs(hero.y - cam.y) > 1 || cam.x < hero.x + hero.width) {
       throw new Error(`hero ${JSON.stringify(hero)}, camera ${JSON.stringify(cam)}`);
     }
-    if ((await camCount(page, "camera_watch")) !== watches) throw new Error("a watch started with liveview off");
+    // The watch keeps the backend's session checking the printer.
+    await callsAbove(page, "camera_watch", watches);
   });
 
   await camFlow("a P1 camera streams JPEGs into the panel", async () => {
@@ -4743,6 +4782,122 @@ async function driveApp(browserType, engine, baseUrl) {
       const last = (await callsOf("camera_unwatch")).at(-1);
       if (!sameArgs(last.args, { id: 1 })) throw new Error(`camera_unwatch got ${JSON.stringify(last.args)}`);
     });
+  });
+
+  // The flows below answer as the real backend does: it sends
+  // `camera://state` only while a session runs, a session runs only while
+  // something uses the camera, and `camera_state` re-reads the printer when
+  // no session runs. Each event below is one the backend would send.
+  const CAM_IDLE = { transport: null, status: { kind: "idle" }, last_frame_at: null };
+  const CAM_CONNECTING_JPEG = { transport: "jpeg", status: { kind: "connecting" }, last_frame_at: null };
+  const LIVEVIEW_OFF = cameraOff("liveview_off", "Turn on LAN Mode Liveview");
+  const camOverlay = (p, text) =>
+    p.waitForFunction((t) => document.querySelector(".cam-overlay")?.textContent.includes(t), text, { timeout: 5000 });
+
+  await camFlow("with liveview off the panel keeps watching and shows the picture once it is on", async () => {
+    const watches = await camCount(page, "camera_watch");
+    await openLive();
+    await camOverlay(page, "Turn on LAN Mode Liveview");
+    // Without a watch no session runs, and nothing would ever say liveview came on.
+    await callsAbove(page, "camera_watch", watches);
+    // The watched session checks the printer again and finds liveview on.
+    const again = await camCount(page, "camera_watch");
+    await page.evaluate((s) => window.__emit("camera://state", s), CAM_CONNECTING_JPEG);
+    await camOverlay(page, "[CONNECTING…]");
+    // Knowing the transport, the panel watches for its frames.
+    await callsAbove(page, "camera_watch", again);
+    await cameraSend(page, [3, 0, ...JPEG_BYTES]);
+    await page.evaluate((s) => window.__emit("camera://state", s), CAMERA_LIVE_JPEG);
+    await page.waitForFunction(
+      () => {
+        const img = document.querySelector(".cam-frame img");
+        return img?.src.startsWith("blob:") && img.complete && img.naturalWidth > 0 && !document.querySelector(".cam-overlay");
+      },
+      null,
+      { timeout: 5000 }
+    );
+  });
+
+  await camFlow("after Retry closes the session the panel asks again rather than saying connecting", async () => {
+    // No WebCodecs: an H2 shows stills and keeps no watch, so Retry finds
+    // nobody watching and closes the session.
+    const still = `data:image/jpeg;base64,${JPEG_1X1_BASE64}`;
+    const busy = { ...CAMERA_BUSY, transport: "rtsps" };
+    const fb = await camPage({ camera_state: busy, camera_retry: CAM_IDLE, camera_still: null }, () => {
+      delete window.VideoDecoder;
+    });
+    try {
+      await camOverlay(fb, "[ERROR: The camera is in use by another app.");
+      const states = await camCount(fb, "camera_state");
+      await fb.evaluate(([s, u]) => {
+        window.__fixtures.camera_state = s;
+        window.__fixtures.camera_still = u;
+      }, [CAMERA_LIVE_RTSPS, still]);
+      await fb.click(".cam-overlay button.cam-retry");
+      await callsAbove(fb, "camera_state", states);
+      await fb.waitForFunction(
+        () => document.querySelector(".cam-frame img")?.src.startsWith("data:image/jpeg") && !document.querySelector(".cam-overlay"),
+        null,
+        { timeout: 5000 }
+      );
+    } finally {
+      await fb.close();
+    }
+  });
+
+  await camFlow("a refused watch asks for the state again", async () => {
+    await withFixtures({ camera_watch: { __reject: "Live view is off in Settings." }, camera_state: LIVEVIEW_OFF }, async () => {
+      await page.click('nav.sidebar a[href="/"]');
+      await page.waitForSelector(".home-page", { timeout: 15000 });
+      // The panel's first answer says it can stream; the second (after the
+      // refusal) says why it can't.
+      await setFixture("camera_state", { __sequence: [CAMERA_LIVE_JPEG, cameraOff("disabled", "Live view is off in Settings.")] });
+      const watches = await camCount(page, "camera_watch");
+      await page.click('nav.sidebar a[href="/printer"]');
+      await page.waitForSelector(".pr-top .cam-panel", { timeout: 15000 });
+      await callsAbove(page, "camera_watch", watches);
+      await page.waitForFunction(() => document.querySelector(".cam-overlay")?.textContent === "Live view is off in Settings.", null, {
+        timeout: 5000,
+      });
+    });
+  });
+
+  await camFlow("a failed Retry asks for the state again", async () => {
+    await withFixtures({ camera_state: CAMERA_BUSY, camera_retry: { __reject: "camera_retry failed" } }, async () => {
+      await openLive();
+      await camOverlay(page, "[ERROR: The camera is in use by another app.");
+      await setFixture("camera_state", LIVEVIEW_OFF);
+      const states = await camCount(page, "camera_state");
+      await page.click(".cam-overlay button.cam-retry");
+      await callsAbove(page, "camera_state", states);
+      await camOverlay(page, "Turn on LAN Mode Liveview");
+    });
+  });
+
+  await camFlow("the first keyframe isn't lost while the decoder is set up", async () => {
+    const fb = await camPage({ camera_state: CAMERA_LIVE_RTSPS }, installGatedDecoderStandIn);
+    try {
+      await fb.waitForSelector(".cam-frame canvas", { timeout: 5000 });
+      await callsAbove(fb, "camera_watch", 0);
+      const codec = [..."avc1.42c01e"].map((c) => c.charCodeAt(0));
+      const config = [1, 0, 0, codec.length, ...codec, 1, 66, 192, 30];
+      // A second config while the first is still being checked, then the
+      // stream's first frames, all before the browser answers.
+      await cameraSend(fb, config);
+      await cameraSend(fb, config);
+      await cameraSend(fb, [2, 0, 0, 0, 0, 1, 0x41]);
+      await cameraSend(fb, [2, 1, 0, 0, 0, 1, 0x65]);
+      await cameraSend(fb, [2, 0, 0, 0, 0, 1, 0x41]);
+      await fb.waitForFunction(() => window.__configAsked === 2, null, { timeout: 5000 });
+      await fb.evaluate(() => window.__openConfig());
+      await fb.waitForFunction(() => window.__decoded.length >= 2, null, { timeout: 5000 });
+      const decoded = await fb.evaluate(() => window.__decoded);
+      if (JSON.stringify(decoded) !== '["key","delta"]') throw new Error(`decoded ${JSON.stringify(decoded)}`);
+      const open = await fb.evaluate(() => window.__decoders.filter((d) => d.state !== "closed").length);
+      if (open !== 1) throw new Error(`${open} decoders left open`);
+    } finally {
+      await fb.close();
+    }
   });
 
   // -- calibration ------------------------------------------------------------

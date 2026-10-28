@@ -29,6 +29,21 @@ pub enum OffReason {
     Unknown,
 }
 
+impl OffReason {
+    /// The printer can end it by itself (liveview turned on, the printer
+    /// connecting or reporting its camera, a printer set up). A watched
+    /// session checks again and says when it does; nothing else does.
+    pub fn may_change(self) -> bool {
+        matches!(
+            self,
+            OffReason::LiveviewOff
+                | OffReason::NotConnected
+                | OffReason::Waiting
+                | OffReason::NotConfigured
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CameraErrorKind {
@@ -106,7 +121,7 @@ pub fn shown(s: &CameraState) -> Shown {
 
 impl CameraState {
     /// No picture can come until something changes on the printer or in
-    /// Settings: the panel stops watching.
+    /// Settings: the caption and the Home thumbnail hide.
     pub fn is_off(&self) -> bool {
         matches!(self.status, CameraStatus::Off { .. })
     }
@@ -219,6 +234,23 @@ mod tests {
         assert_eq!(shown(&idle), Shown::Connecting);
         let live: CameraState = serde_json::from_value(f["streaming_jpeg"].clone()).unwrap();
         assert_eq!(shown(&live), Shown::Live);
+    }
+
+    #[test]
+    fn only_the_printer_side_reasons_may_change() {
+        let f = fixture();
+        let offs: Vec<CameraState> = serde_json::from_value(f["off"].clone()).unwrap();
+        let may: Vec<bool> = offs
+            .iter()
+            .map(|s| match s.status {
+                CameraStatus::Off { reason, .. } => reason.may_change(),
+                _ => unreachable!(),
+            })
+            .collect();
+        // NotConfigured, NotConnected, Waiting, NoCamera, LiveviewOff,
+        // Unsupported, Disabled.
+        assert_eq!(may, [true, true, true, false, true, false, false]);
+        assert!(!OffReason::Unknown.may_change());
     }
 
     #[test]

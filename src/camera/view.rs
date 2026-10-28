@@ -6,6 +6,10 @@
 //! live watch (JPEGs, or H.264 decoded onto a canvas), or a still fetched
 //! every 2 s. Leaving a mode stops everything it started.
 //!
+//! The backend only sends `camera://state` while a session runs, so the
+//! panel keeps a watch open while the camera is off for a reason the
+//! printer can end, and asks for the state again when no session runs.
+//!
 //! The Channel, the decoder and the timers call back after awaits or from
 //! JS, possibly once the panel is gone, so they touch signals only through
 //! `try_*`, and a stopped [`Session`] ignores whatever still arrives.
@@ -24,7 +28,8 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use super::bridge::{self, Watch};
 use super::shim::{self, CameraDecoder};
 use super::types::{
-    parse, shown, CameraState, Kind, Shown, Transport, HEADER_COPY, LIVEVIEW_STEPS, MAX_MESSAGE,
+    parse, shown, CameraState, CameraStatus, Kind, Shown, Transport, HEADER_COPY, LIVEVIEW_STEPS,
+    MAX_MESSAGE,
 };
 use crate::agent::bridge::listen_scoped;
 use crate::printer::types::untrusted_text;
@@ -36,6 +41,11 @@ const STILL_EVERY: Duration = Duration::from_secs(2);
 /// How often the thumbnail asks for a still.
 const THUMB_EVERY: Duration = Duration::from_secs(8);
 
+/// How long after a failed watch the panel tries again, at first and at
+/// most.
+const WATCH_AGAIN_FIRST: Duration = Duration::from_secs(2);
+const WATCH_AGAIN_MAX: Duration = Duration::from_secs(30);
+
 /// Most characters shown of the model the printer reports.
 const MODEL_MAX: usize = 32;
 
@@ -45,24 +55,36 @@ const LIVEVIEW_TITLE: &str = "Turn on LAN Mode Liveview";
 /// What the panel runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// Off screen, the camera is off, or its transport isn't known yet.
+    /// Off screen, the camera is off for good, or no session runs (the
+    /// panel asks for the state instead).
     Nothing,
-    /// A watch on the backend's Channel.
-    Live,
+    /// A watch on the backend's Channel, for this transport. With none
+    /// (the camera is off for now) it only keeps the session open, so the
+    /// session checks the printer again and says when that changes; a
+    /// transport arriving starts a new watch.
+    Live(Option<Transport>),
     /// A still fetched every [`STILL_EVERY`].
     Stills,
 }
 
 /// `fallback` is set once the browser couldn't decode the H.264 stream.
 fn mode_for(visible: bool, state: &CameraState, has_decoder: bool, fallback: bool) -> Mode {
-    if !visible || state.is_off() {
+    if !visible {
         return Mode::Nothing;
     }
+    if let CameraStatus::Off { reason, .. } = state.status {
+        return if reason.may_change() {
+            Mode::Live(None)
+        } else {
+            Mode::Nothing
+        };
+    }
     match state.transport {
-        Some(Transport::Jpeg) => Mode::Live,
-        Some(Transport::Rtsps) if has_decoder && !fallback => Mode::Live,
+        Some(Transport::Jpeg) => Mode::Live(Some(Transport::Jpeg)),
+        Some(Transport::Rtsps) if has_decoder && !fallback => Mode::Live(Some(Transport::Rtsps)),
         Some(Transport::Rtsps) => Mode::Stills,
-        None => Mode::Nothing,
+        None if state.status == CameraStatus::Idle => Mode::Nothing,
+        None => Mode::Live(None),
     }
 }
 
@@ -130,7 +152,11 @@ struct Outputs {
     canvas: NodeRef<html::Canvas>,
 }
 
-fn start_live(session: Session, out: Outputs) {
+/// Watches the backend's Channel. A watch is how the panel hears about
+/// changes, so a failed one asks for the state (which may say why, and
+/// change the mode) and tries again after `wait`, doubling, while the mode
+/// holds.
+fn start_live(session: Session, out: Outputs, asker: Asker, wait: Duration) {
     let receiving = session.clone();
     let on_bytes = move |b: Uint8Array| on_message(&receiving, &b, out);
     spawn_local(async move {
@@ -152,7 +178,21 @@ fn start_live(session: Session, out: Outputs) {
                     bridge::unwatch(id).await;
                 }
             }
-            Err(e) => web_sys::console::warn_1(&format!("camera: {e}").into()),
+            Err(e) => {
+                web_sys::console::warn_1(&format!("camera: {e}").into());
+                if session.borrow().stopped {
+                    return;
+                }
+                asker.ask();
+                set_timeout(
+                    move || {
+                        if !session.borrow().stopped {
+                            start_live(session, out, asker, (wait * 2).min(WATCH_AGAIN_MAX));
+                        }
+                    },
+                    wait,
+                );
+            }
         }
     });
 }
@@ -254,24 +294,50 @@ fn start_stills(session: Session, out: Outputs) {
     }
 }
 
-/// Keeps `state` current: the backend's answer on mount, then each
-/// `camera://state` event. An answer that comes after an event is older
-/// than it, and is dropped.
-fn follow_state(state: RwSignal<CameraState>) {
-    let events = StoredValue::new(0u64);
-    listen_scoped("camera://state", move |s: CameraState| {
-        events.try_update_value(|n| *n += 1);
-        state.try_set(s);
-    });
-    spawn_local(async move {
-        match bridge::state().await {
-            Ok(s) if events.try_get_value() == Some(0) => {
-                state.try_set(s);
+/// Asks the backend for the camera's state. An answer that comes after an
+/// event is older than it, and is dropped.
+#[derive(Clone, Copy)]
+struct Asker {
+    state: RwSignal<CameraState>,
+    /// `camera://state` events seen.
+    events: StoredValue<u64>,
+    /// An answer or an event has set `state`.
+    known: RwSignal<bool>,
+}
+
+impl Asker {
+    fn ask(self) {
+        let Some(seen) = self.events.try_get_value() else {
+            return;
+        };
+        spawn_local(async move {
+            match bridge::state().await {
+                Ok(s) if self.events.try_get_value() == Some(seen) => {
+                    self.state.try_set(s);
+                    self.known.try_set(true);
+                }
+                Ok(_) => {}
+                Err(e) => web_sys::console::warn_1(&format!("camera: {e}").into()),
             }
-            Ok(_) => {}
-            Err(e) => web_sys::console::warn_1(&format!("camera: {e}").into()),
-        }
+        });
+    }
+}
+
+/// Keeps `state` current: the backend's answer on mount, then each
+/// `camera://state` event. The returned [`Asker`] asks again.
+fn follow_state(state: RwSignal<CameraState>) -> Asker {
+    let asker = Asker {
+        state,
+        events: StoredValue::new(0),
+        known: RwSignal::new(false),
+    };
+    listen_scoped("camera://state", move |s: CameraState| {
+        asker.events.try_update_value(|n| *n += 1);
+        asker.state.try_set(s);
+        asker.known.try_set(true);
     });
+    asker.ask();
+    asker
 }
 
 /// Printer → Live's camera. `expanded` widens it over the status, which
@@ -280,7 +346,7 @@ fn follow_state(state: RwSignal<CameraState>) {
 pub fn CameraPanel(expanded: RwSignal<bool>) -> impl IntoView {
     let printer = expect_context::<PrinterShared>().view;
     let state = RwSignal::new(CameraState::default());
-    follow_state(state);
+    let asker = follow_state(state);
 
     let visible = RwSignal::new(false);
     let fallback = RwSignal::new(false);
@@ -314,8 +380,20 @@ pub fn CameraPanel(expanded: RwSignal<bool>) -> impl IntoView {
     let has_decoder = shim::has_decoder();
     let mode =
         Memo::new(move |_| state.with(|s| mode_for(visible.get(), s, has_decoder, fallback.get())));
-    let uses_canvas = Memo::new(move |_| {
-        mode.get() == Mode::Live && state.with(|s| s.transport == Some(Transport::Rtsps))
+    let uses_canvas = Memo::new(move |_| mode.get() == Mode::Live(Some(Transport::Rtsps)));
+
+    // No session runs (the hub closed it), so no event will come: ask.
+    let no_session = Memo::new(move |_| {
+        visible.get()
+            && asker.known.get()
+            && state.with(|s| s.status == CameraStatus::Idle && s.transport.is_none())
+    });
+    Effect::new(move |was: Option<bool>| {
+        let now = no_session.get();
+        if now && was == Some(false) {
+            asker.ask();
+        }
+        now
     });
 
     let current = StoredValue::new_local(None::<Session>);
@@ -329,7 +407,7 @@ pub fn CameraPanel(expanded: RwSignal<bool>) -> impl IntoView {
         let session = Session::default();
         match m {
             Mode::Nothing => return,
-            Mode::Live => start_live(session.clone(), out),
+            Mode::Live(_) => start_live(session.clone(), out, asker, WATCH_AGAIN_FIRST),
             Mode::Stills => start_stills(session.clone(), out),
         }
         current.set_value(Some(session));
@@ -370,7 +448,11 @@ pub fn CameraPanel(expanded: RwSignal<bool>) -> impl IntoView {
                 Ok(s) => {
                     state.try_set(s);
                 }
-                Err(e) => web_sys::console::warn_1(&format!("camera: {e}").into()),
+                Err(e) => {
+                    web_sys::console::warn_1(&format!("camera: {e}").into());
+                    // Don't leave the old error up with nothing behind it.
+                    asker.ask();
+                }
             }
             retrying.try_set(false);
         });
@@ -497,26 +579,65 @@ mod tests {
         }
     }
 
+    fn off(reason: OffReason) -> CameraState {
+        with(
+            None,
+            CameraStatus::Off {
+                reason,
+                message: String::new(),
+            },
+        )
+    }
+
     #[test]
     fn the_mode_follows_visibility_state_and_decoder() {
         let jpeg = with(Some(Transport::Jpeg), CameraStatus::Streaming);
         let rtsps = with(Some(Transport::Rtsps), CameraStatus::Connecting);
-        let off = with(
-            None,
-            CameraStatus::Off {
-                reason: OffReason::NoCamera,
+        let live_jpeg = Mode::Live(Some(Transport::Jpeg));
+        let live_rtsps = Mode::Live(Some(Transport::Rtsps));
+        assert_eq!(mode_for(true, &jpeg, false, false), live_jpeg);
+        assert_eq!(mode_for(false, &jpeg, true, false), Mode::Nothing);
+        assert_eq!(mode_for(true, &rtsps, true, false), live_rtsps);
+        assert_eq!(mode_for(true, &rtsps, false, false), Mode::Stills);
+        assert_eq!(mode_for(true, &rtsps, true, true), Mode::Stills);
+        let busy = with(
+            Some(Transport::Jpeg),
+            CameraStatus::Error {
+                error: crate::camera::types::CameraErrorKind::Busy,
                 message: String::new(),
             },
         );
-        assert_eq!(mode_for(true, &jpeg, false, false), Mode::Live);
-        assert_eq!(mode_for(false, &jpeg, true, false), Mode::Nothing);
-        assert_eq!(mode_for(true, &rtsps, true, false), Mode::Live);
-        assert_eq!(mode_for(true, &rtsps, false, false), Mode::Stills);
-        assert_eq!(mode_for(true, &rtsps, true, true), Mode::Stills);
-        assert_eq!(mode_for(true, &off, true, false), Mode::Nothing);
+        assert_eq!(mode_for(true, &busy, true, false), live_jpeg);
+    }
+
+    // The backend only sends events while a session runs: an off camera
+    // keeps one open, unless nothing on the printer can change it.
+    #[test]
+    fn an_off_camera_keeps_a_watch_while_the_printer_can_change_it() {
+        for reason in [
+            OffReason::LiveviewOff,
+            OffReason::NotConnected,
+            OffReason::Waiting,
+            OffReason::NotConfigured,
+        ] {
+            assert_eq!(mode_for(true, &off(reason), true, false), Mode::Live(None));
+            assert_eq!(mode_for(false, &off(reason), true, false), Mode::Nothing);
+        }
+        for reason in [
+            OffReason::NoCamera,
+            OffReason::Unsupported,
+            OffReason::Disabled,
+        ] {
+            assert_eq!(mode_for(true, &off(reason), true, false), Mode::Nothing);
+        }
+        // No session: the panel asks for the state rather than watching.
         assert_eq!(
             mode_for(true, &with(None, CameraStatus::Idle), true, false),
             Mode::Nothing
+        );
+        assert_eq!(
+            mode_for(true, &with(None, CameraStatus::Connecting), true, false),
+            Mode::Live(None)
         );
     }
 
