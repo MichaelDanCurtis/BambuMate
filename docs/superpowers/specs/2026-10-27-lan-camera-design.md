@@ -50,15 +50,15 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
 ### 1. Backend (`src-tauri/src/camera/`)
 
 **`transport.rs`**
-- `choose(model, ipcam) -> Transport` returns one of:
-  - `Rtsps` for the H2, X1 and P2S families when `rtsp_url` starts with `rtsp`;
-  - `Jpeg6000` for P1 and A1;
-  - `Off(reason)`.
-- An `Off` reason is one of:
-  - `NoCamera` (`ipcam_dev == "0"`);
-  - `LiveviewOff` (`rtsp_url == "disable"`);
-  - `NotConnected`;
-  - `Unknown` (an RTSPS model with no `ipcam` yet).
+- `choose(model, ipcam) -> Result<Transport, OffReason>` decides in this order:
+  1. `ipcam_dev == "0"` → `NoCamera`;
+  2. `rtsp_url == "disable"` → `LiveviewOff`;
+  3. `rtsp_url` starts with `rtsp` → `Rtsps`;
+  4. a P1 or A1 model → `Jpeg`;
+  5. an X1, H2 or P2S model → `Rtsps`;
+  6. no `ipcam` yet → `Waiting`; otherwise `Unsupported`.
+- The service adds `NotConfigured` and `NotConnected`, and the commands add `Disabled` (live view switched off).
+- The printer state keeps only a classification of `rtsp_url` (off, RTSP, or unset), never the URL itself.
 - A pure function with table tests.
 
 **`jpeg6000.rs`**
@@ -86,10 +86,12 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
   - each snapshot job.
 - The session closes 10 s after the last consumer leaves.
 - Errors map to the UI states in section 2:
-  - auth failure;
-  - TLS failure;
-  - connection refused or closed straight away, or the session cap: "in use by another app";
-  - liveview off.
+  - **Auth:** port 6000 closed before any frame.
+  - **Tls:** the certificate check failed.
+  - **Refused:** port 322 refused or closed at once. This is liveview off, or another viewer holding the camera.
+  - **Busy:** connected, but no frame within 10 s.
+  - Any other error retries with backoff.
+- Auth, Tls, Refused and Busy stop the session until Retry. A journal snapshot always makes one fresh attempt.
 - The latest JPEG (from 6000, or a decoded keyframe from RTSPS) is cached for the Home thumbnail and for the still fallback.
 
 **`snapshot.rs`**
@@ -99,12 +101,14 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
 - The YUV-to-JPEG step is a pure function.
 
 **Commands (`commands/camera.rs`)**
-- `camera_state(printer_id) -> CameraState`: the transport, the current state, and the time of the last frame.
-- `camera_watch(printer_id, channel: Channel)` sends frames as raw bytes.
+- BambuMate has one printer, so the commands take no printer id.
+- `camera_state() -> CameraState`: the transport, the current state, and the time of the last frame.
+- `camera_watch(on_frame: Channel) -> id` sends frames as raw bytes.
   - Each message starts with a one-byte tag: `1` config, `2` access unit, `3` JPEG.
   - For config and access units the tag is followed by a u8 keyframe flag, then the payload.
-  - `camera_unwatch(printer_id)`, and dropping the channel, both release the consumer.
-- `camera_still(printer_id) -> Option<bytes>` returns the cached latest JPEG, for Home and for the fallback.
+  - `camera_unwatch(id)`, and a channel the webview has dropped, both release the consumer.
+- `camera_still() -> Option<data URL>` returns the latest JPEG if it is at most 5 s old. Otherwise it waits up to 15 s for the next one. It serves Home and the fallback.
+- `camera_retry() -> CameraState`.
 - State changes go out as `camera://state` events.
 
 **Settings**
@@ -150,7 +154,7 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
   - any decoder error falls back to the still view.
 
 **Home**
-- While printing and liveview is available, the printing hero shows a small thumbnail of the latest still, refreshed about every 10 s.
+- While printing and liveview is available, the printing hero shows a small thumbnail of the latest still. It refreshes every 8 s, inside the session's 10 s linger, so the session stays open.
 - It links to Printer → Live.
 - It is hidden when not printing, when the transport is `Off`, or when live view is turned off in Settings.
 
@@ -166,11 +170,12 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
 
 **Journal snapshots**
 - The recorder already sees layer, progress and state. A pure rule, `snapshot_moments(prev, now, report) -> Vec<Moment>`, fires:
-  - `FirstLayer` when `layer_num` first reaches 2;
-  - `Half` when progress first reaches 50;
+  - `FirstLayer` when the job's layer is 2 or 3;
+  - `Half` when its progress is 50–55 %;
   - `Finished` on FINISH;
   - `Failed` on FAILED;
   - `Paused` on PAUSE while `print_error` is non-zero or HMS has an error.
+- A moment whose window was missed (for example, the app joined at 70 %) is skipped, not taken late.
 - Each moment is taken at most once per entry.
   - Moments taken are stored with the entry, so a restart mid-print doesn't repeat them.
   - Calibration prints are skipped when the entry has a calibration purpose.
@@ -182,7 +187,8 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
   - The migration `migrate_to_v3` follows the v2 pattern: in a transaction, with a column check.
 
 **Errors**
-- **Snapshot failures** (timeout, no camera, liveview off, in use, snapshots off) never affect the print or the journal entry. Only the reason is recorded.
+- **Snapshot failures** (timeout, no camera, liveview off, in use) never affect the print or the journal entry. Only the reason is recorded.
+- With snapshots switched off, nothing is taken and nothing is noted.
 - **Live view errors** show as the states above. Retry rebuilds the session.
 - **Logs** never contain the access code. URLs are logged with the password removed.
 
