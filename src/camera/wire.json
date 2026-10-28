@@ -1,0 +1,153 @@
+{
+  "idle": {
+    "transport": null,
+    "status": {
+      "kind": "idle"
+    },
+    "last_frame_at": 1761600000
+  },
+  "connecting": {
+    "transport": "rtsps",
+    "status": {
+      "kind": "connecting"
+    },
+    "last_frame_at": 1761600000
+  },
+  "streaming_rtsps": {
+    "transport": "rtsps",
+    "status": {
+      "kind": "streaming"
+    },
+    "last_frame_at": 1761600000
+  },
+  "streaming_jpeg": {
+    "transport": "jpeg",
+    "status": {
+      "kind": "streaming"
+    },
+    "last_frame_at": 1761600000
+  },
+  "off": [
+    {
+      "transport": null,
+      "status": {
+        "kind": "off",
+        "reason": "not_configured",
+        "message": "No printer is set up."
+      },
+      "last_frame_at": null
+    },
+    {
+      "transport": null,
+      "status": {
+        "kind": "off",
+        "reason": "not_connected",
+        "message": "The printer isn't connected."
+      },
+      "last_frame_at": null
+    },
+    {
+      "transport": null,
+      "status": {
+        "kind": "off",
+        "reason": "waiting",
+        "message": "Waiting for the printer's camera details…"
+      },
+      "last_frame_at": null
+    },
+    {
+      "transport": null,
+      "status": {
+        "kind": "off",
+        "reason": "no_camera",
+        "message": "This printer has no camera."
+      },
+      "last_frame_at": null
+    },
+    {
+      "transport": null,
+      "status": {
+        "kind": "off",
+        "reason": "liveview_off",
+        "message": "Turn on LAN Mode Liveview"
+      },
+      "last_frame_at": null
+    },
+    {
+      "transport": null,
+      "status": {
+        "kind": "off",
+        "reason": "unsupported",
+        "message": "BambuMate can't show this printer's camera yet."
+      },
+      "last_frame_at": null
+    },
+    {
+      "transport": null,
+      "status": {
+        "kind": "off",
+        "reason": "disabled",
+        "message": "Live view is off in Settings."
+      },
+      "last_frame_at": null
+    }
+  ],
+  "error": [
+    {
+      "transport": "jpeg",
+      "status": {
+        "kind": "error",
+        "error": {
+          "kind": "auth"
+        },
+        "message": "The printer refused the camera login. Check the access code in Settings."
+      },
+      "last_frame_at": 1761600000
+    },
+    {
+      "transport": "jpeg",
+      "status": {
+        "kind": "error",
+        "error": {
+          "kind": "tls"
+        },
+        "message": "Couldn't verify the printer's camera."
+      },
+      "last_frame_at": 1761600000
+    },
+    {
+      "transport": "jpeg",
+      "status": {
+        "kind": "error",
+        "error": {
+          "kind": "refused"
+        },
+        "message": "The printer didn't open its camera. Turn on LAN Mode Liveview on the printer, or close the live view in another app."
+      },
+      "last_frame_at": 1761600000
+    },
+    {
+      "transport": "jpeg",
+      "status": {
+        "kind": "error",
+        "error": {
+          "kind": "busy"
+        },
+        "message": "The camera is in use by another app. Close the live view in Bambu Studio or Handy, then retry."
+      },
+      "last_frame_at": 1761600000
+    },
+    {
+      "transport": "jpeg",
+      "status": {
+        "kind": "error",
+        "error": {
+          "kind": "other",
+          "message": "The camera stream ended."
+        },
+        "message": "The camera stream ended."
+      },
+      "last_frame_at": 1761600000
+    }
+  ]
+}

@@ -3,6 +3,7 @@ pub mod agent;
 pub mod analyzer;
 pub mod batch;
 pub mod calibration;
+pub mod camera;
 pub mod config;
 pub mod diagnostics;
 pub mod health;

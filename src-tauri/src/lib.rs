@@ -149,6 +149,11 @@ pub fn run() {
             commands::journal::journal_month_summary,
             commands::journal::journal_last,
             commands::journal::journal_image,
+            commands::camera::camera_state,
+            commands::camera::camera_watch,
+            commands::camera::camera_unwatch,
+            commands::camera::camera_still,
+            commands::camera::camera_retry,
             commands::calibration::calibration_runs,
             commands::calibration::calibration_start,
             commands::calibration::calibration_set_variant,
@@ -270,6 +275,14 @@ pub fn run() {
                     printer::hms::HMS_URL,
                     printer::client::Timing::default(),
                 );
+                // The printer's camera: one shared session, opened on demand.
+                let camera = camera::CameraHub::new(
+                    Arc::new(camera::target::ServiceTargets::new(service.clone())),
+                    Arc::new(camera::session::LanConnector),
+                    Arc::new(camera::session::TauriCameraEvents(app.handle().clone())),
+                    camera::session::Timing::default(),
+                );
+                app.manage(camera.clone());
                 // The filament ID index reads the slicer's cached presets,
                 // so they are loaded once and reloaded only when they change.
                 if let Some(slicer) = app.try_state::<slicer::jobs::SlicerService>() {
