@@ -376,6 +376,8 @@ impl CameraHub {
     /// capture does that): the answer is `None` at once, though asking
     /// still counts as using the session, so it stays open and stopped.
     pub async fn still(&self) -> Option<Vec<u8>> {
+        // Even a still from the cache is use: it keeps the session open.
+        let _waiter = Waiter::new(&self.inner);
         let fresh = self
             .inner
             .still_tx
@@ -1300,6 +1302,24 @@ mod tests {
         }
         assert_eq!(conn.calls.load(Ordering::SeqCst), 1);
         assert!(matches!(hub.state().status, CameraStatus::Error { .. }));
+    }
+
+    // The Home thumbnail polls every 8 s and is served from the cache.
+    #[tokio::test]
+    async fn polling_fresh_stills_keeps_one_connection_open() {
+        let conn = FakeConnector::with(vec![Script::Frames(
+            jpeg_frames(200),
+            Duration::from_millis(20),
+        )]);
+        let hub = hub_with(FakeSource::ok(target()), conn.clone());
+        assert_eq!(hub.still().await, Some(tiny_jpeg()));
+        // Polls well inside the cache age, for four lingers.
+        for _ in 0..12 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(hub.still().await, Some(tiny_jpeg()));
+        }
+        assert_eq!(conn.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(conn.alive.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
