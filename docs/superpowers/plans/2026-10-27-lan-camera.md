@@ -88,7 +88,7 @@
   - Stage files by name. Never commit `.omc/`, `.claude/`, `.superpowers/`, `dist/` or PNGs, and never run `git stash`.
   - No attribution lines in commits.
 - **Test commands (from the repo root):**
-  - Backend: `cargo test --manifest-path src-tauri/Cargo.toml <filter>` and `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`.
+  - Backend: `cargo test --manifest-path src-tauri/Cargo.toml <filter>` and `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` (as CI runs it). `main` already has clippy warnings under Rust 1.98, so `-D warnings` isn't usable. The rule is: **no clippy warning in a file this task creates or changes.** Check with `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets 2>&1 | grep -E "src/(camera|commands/camera)"`, plus each changed file's path.
   - Frontend native unit tests: `cargo test --bin bambumate <filter>`, and `cargo check --target wasm32-unknown-unknown`.
   - Browser flows: `trunk build`, then `cd tests/webkit && node app-flows.mjs ../..`, plus `node layout.mjs ../..` and `node contrast.mjs ../..` for UI tasks.
 
@@ -517,8 +517,8 @@ pub fn choose(model: &str, ipcam: Option<&IpCam>) -> Result<Transport, OffReason
 
 - [ ] **Step 8: Run the tests and clippy**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml camera::transport printer::state`, then `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
-Expected: PASS and no warnings. If `Frame`, `CameraError` or `MAX_MESSAGE` are reported as dead code, add `#[allow(dead_code)]` on that item with the comment `// Used from Task 2 on.`. Task 5 removes these.
+Run: `cargo test --manifest-path src-tauri/Cargo.toml camera::transport printer::state`, then the clippy check from the Global Constraints
+Expected: PASS, and no clippy warning in the files this task touched. If `Frame`, `CameraError` or `MAX_MESSAGE` are reported as dead code, add `#[allow(dead_code)]` on that item with the comment `// Used from Task 2 on.`. Task 5 removes these.
 
 - [ ] **Step 9: Format and commit**
 
@@ -3366,7 +3366,7 @@ Run `trunk build`, then `cd tests/webkit && node app-flows.mjs ../.. && node lay
 
 - [ ] **Step 8: Run the Rust checks**
 
-Run: `cargo test --bin bambumate`, `cargo check --target wasm32-unknown-unknown`, and `cargo clippy --target wasm32-unknown-unknown -- -D warnings`, if the repo runs clippy on the frontend (check `.github/workflows/test.yml`; otherwise skip it).
+Run: `cargo test --bin bambumate` and `cargo check --target wasm32-unknown-unknown` (CI runs no clippy on the frontend).
 
 - [ ] **Step 9: Format and commit**
 
