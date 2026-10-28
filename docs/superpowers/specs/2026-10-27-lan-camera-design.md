@@ -174,11 +174,11 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
   - `Half` when its progress is 50–55 %;
   - `Finished` on FINISH;
   - `Failed` on FAILED;
-  - `Paused` on PAUSE while `print_error` is non-zero or HMS has an error.
+  - `Paused` on PAUSE while `print_error` is non-zero. HMS codes alone don't count: many are warnings.
 - A moment whose window was missed (for example, the app joined at 70 %) is skipped, not taken late.
 - Each moment is taken at most once per entry.
   - Moments taken are stored with the entry, so a restart mid-print doesn't repeat them.
-  - Calibration prints are skipped when the entry has a calibration purpose.
+  - Calibration prints are photographed like any other print (user ruling, 2026-10-27). They are linked to a step only after they end, and the finished photo shows the test pattern.
 - Captures run off the recorder's writer thread, so a slow camera never delays journal writes.
 - The JPEG goes through the existing `JournalStore::add_photo` path with its label.
 - **Schema v3:**
@@ -197,7 +197,7 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
   - **Port-6000 framing:** the auth packet layout; header parsing; split reads; oversize frames; wrong constant words; truncated frames; bad JPEG markers.
   - **Transport choice:** model × `ipcam` cases.
   - **Session hub:** consumer counting and the close timer, using `tokio::time::pause`.
-  - **Snapshot rules:** each moment once; restart resume; calibration skip; pause with and without an error.
+  - **Snapshot rules:** each moment once; restart resume; pause with and without an error.
   - **openh264 keyframe to JPEG:** on a small recorded H.264 keyframe fixture, generated once by a test helper and checked in under `testdata/`.
   - **Journal v3 migration** from v2 and v0 files.
   - **Channel message encoding.**

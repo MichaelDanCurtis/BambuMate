@@ -52,7 +52,7 @@
   | `FAILED` | Ended Failed |
   | `PAUSED` | PAUSE while `print_error` is set |
 
-  - Each moment is taken at most once per entry, and never for an entry with a calibration purpose.
+  - Each moment is taken at most once per entry. Calibration prints are photographed too (user ruling, 2026-10-27).
   - Nothing is taken or noted while `camera_snapshots` is off.
   - Journal schema version 3: `print_photos.label TEXT` and `prints.snapshots_json TEXT`.
 - **UI strings (exact):**
