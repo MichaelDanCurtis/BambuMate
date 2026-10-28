@@ -7,7 +7,7 @@ use std::io::Cursor;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, RgbImage};
-use openh264::decoder::Decoder;
+use openh264::decoder::{DecodedYUV, Decoder};
 use openh264::formats::YUVSource;
 
 pub const JPEG_QUALITY: u8 = 85;
@@ -95,14 +95,30 @@ pub fn keyframe_jpeg(avcc: &[u8], sample: &[u8]) -> Result<Vec<u8>, String> {
     let annexb = to_annexb(&cfg, sample)?;
     let failed = || "The camera's picture couldn't be decoded.".to_string();
     let mut decoder = Decoder::new().map_err(|_| failed())?;
-    let yuv = decoder
+    let decoded = decoder
         .decode(&annexb)
         .map_err(|_| failed())?
-        .ok_or_else(failed)?;
+        .map(|yuv| rgb_of(&yuv));
+    // A stream with a reorder delay can hold the picture back: ask the
+    // decoder for what it holds before giving up.
+    let (rgb, w, h) = match decoded {
+        Some(picture) => picture,
+        None => decoder
+            .flush_remaining()
+            .map_err(|_| failed())?
+            .last()
+            .map(rgb_of)
+            .ok_or_else(failed)?,
+    };
+    encode_jpeg(&rgb, w as u32, h as u32)
+}
+
+/// A decoded picture as RGB8, with its width and height.
+fn rgb_of(yuv: &DecodedYUV<'_>) -> (Vec<u8>, usize, usize) {
     let (w, h) = yuv.dimensions();
     let mut rgb = vec![0u8; w * h * 3];
     yuv.write_rgb8(&mut rgb);
-    encode_jpeg(&rgb, w as u32, h as u32)
+    (rgb, w, h)
 }
 
 /// RGB8 to a JPEG at [`JPEG_QUALITY`], scaled so neither side is over
