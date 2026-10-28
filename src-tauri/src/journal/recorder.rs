@@ -489,17 +489,25 @@ impl Writer {
             if self.claimed.contains(&(id, moment)) || !snapshots.enabled() {
                 continue;
             }
-            self.claimed.insert((id, moment));
+            // Remembered once the store has answered: a claim that failed
+            // is tried again by the next report in the moment's window.
             match store.claim_snapshot(id, moment.key()) {
-                Ok(true) => capture(
-                    snapshots.clone(),
-                    self.paths.clone(),
-                    self.notify.clone(),
-                    id,
-                    moment,
-                ),
-                Ok(false) => {}
-                Err(e) if e == GONE => {}
+                Ok(true) => {
+                    self.claimed.insert((id, moment));
+                    capture(
+                        snapshots.clone(),
+                        self.paths.clone(),
+                        self.notify.clone(),
+                        id,
+                        moment,
+                    );
+                }
+                Ok(false) => {
+                    self.claimed.insert((id, moment));
+                }
+                Err(e) if e == GONE => {
+                    self.claimed.insert((id, moment));
+                }
                 Err(e) => tracing::warn!("print journal: snapshot not claimed: {e}"),
             }
         }
@@ -1919,6 +1927,33 @@ mod tests {
         let refused = crate::journal::photos::prepare_photo(b"not a jpeg").unwrap_err();
         assert_eq!(e.snapshot_note.as_deref(), Some(refused));
         assert!(e.photos.is_empty());
+        drain(recorder);
+    }
+
+    #[test]
+    fn a_claim_that_fails_is_tried_again_by_a_later_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let shots = FakeShots::new(true, Ok(jpeg()));
+        let (recorder, paths) = with_shots(&dir, &shots);
+        recorder.record(vec![started("k", "Benchy")]);
+        let raw = rusqlite::Connection::open(&paths.db).unwrap();
+        raw.execute_batch(
+            "CREATE TRIGGER refuse_claims BEFORE UPDATE OF snapshots_json ON prints \
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+        recorder.record(vec![progress("k", 50, Some(80))]);
+        entry_when(&paths, 1, |_| true);
+        let s = JournalStore::open(&paths).unwrap();
+        wait_until(|| s.open_entries().unwrap()[0].last_percent == Some(50));
+        // That batch is being written: this one comes after its claim.
+        recorder.record(vec![started("other", "Other")]);
+        wait_until(|| s.open_entries().unwrap().len() == 2);
+        assert_eq!(shots.calls(), 0, "the claim failed");
+        raw.execute_batch("DROP TRIGGER refuse_claims;").unwrap();
+        recorder.record(vec![progress("k", 51, Some(81))]);
+        let e = entry_when(&paths, 1, |e| !e.photos.is_empty());
+        assert_eq!(labels(&e), [Some("50 %")]);
         drain(recorder);
     }
 }

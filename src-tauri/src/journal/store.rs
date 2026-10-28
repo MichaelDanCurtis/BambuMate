@@ -868,8 +868,8 @@ impl JournalStore {
     }
 
     /// Records that `moment` (a `Moment::key`) is being taken for entry
-    /// `id`: false if it was already, or the entry has a calibration
-    /// purpose. [`GONE`] if the entry is gone. Not a user edit:
+    /// `id`: false if it was already. A calibration print is photographed
+    /// like any other. [`GONE`] if the entry is gone. Not a user edit:
     /// `updated_at` is untouched.
     pub fn claim_snapshot(&self, id: i64, moment: &str) -> Result<bool, String> {
         let tx = rusqlite::Transaction::new_unchecked(
@@ -877,21 +877,18 @@ impl JournalStore {
             rusqlite::TransactionBehavior::Immediate,
         )
         .map_err(save_err)?;
-        let row: Option<(Option<String>, Option<String>)> = self
+        let log: Option<Option<String>> = self
             .conn
             .query_row(
-                "SELECT purpose_json, snapshots_json FROM prints WHERE id = ?1",
+                "SELECT snapshots_json FROM prints WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .optional()
             .map_err(read_err)?;
-        let Some((purpose, log)) = row else {
+        let Some(log) = log else {
             return Err(GONE.to_string());
         };
-        if purpose.is_some() {
-            return Ok(false);
-        }
         let mut log = SnapshotLog::parse(log.as_deref());
         if log.taken.iter().any(|k| k == moment) {
             return Ok(false);
@@ -2342,7 +2339,7 @@ mod tests {
     }
 
     #[test]
-    fn a_calibration_print_is_never_photographed() {
+    fn a_calibration_print_is_photographed_like_any_other() {
         let dir = tempfile::tempdir().unwrap();
         let s = open(&dir);
         let id = s.start(&new_print("p", "Tower", 1), 1).unwrap();
@@ -2351,8 +2348,7 @@ mod tests {
             test: crate::calibration::tests::TestKind::Temperature,
         };
         assert!(s.set_purpose(id, Some(&purpose), 2).unwrap());
-        assert!(!s.claim_snapshot(id, "half").unwrap());
-        assert!(!s.claim_snapshot(id, "finished").unwrap());
+        assert!(s.claim_snapshot(id, "finished").unwrap());
     }
 
     #[test]
@@ -2456,5 +2452,36 @@ mod tests {
         let mut raw = Connection::open(&paths.db).unwrap();
         migrate_to_v3(&mut raw).unwrap();
         assert_eq!(again.get(1).unwrap().unwrap(), old);
+    }
+
+    /// A journal whose version 3 columns are there while the version still
+    /// reads 2 (a lost race) opens at version 3 without altering again.
+    #[test]
+    fn a_version_2_journal_that_already_has_the_columns_opens_at_the_current_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        {
+            let mut raw = Connection::open(&paths.db).unwrap();
+            migrate_to_v1(&mut raw).unwrap();
+            migrate_to_v2(&mut raw).unwrap();
+            raw.execute_batch(
+                "ALTER TABLE print_photos ADD COLUMN label TEXT; \
+                 ALTER TABLE prints ADD COLUMN snapshots_json TEXT;",
+            )
+            .unwrap();
+            raw.execute(
+                "INSERT INTO prints (job_key, name, started_at, updated_at) VALUES ('k', 'Old', 10, 10)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = JournalStore::open(&paths).unwrap();
+        let version: i64 = s
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(s.list(&JournalFilter::default()).unwrap().len(), 1);
+        assert!(s.claim_snapshot(1, "half").unwrap());
     }
 }
