@@ -66,7 +66,10 @@ export class CameraDecoder {
   decode(data, key) {
     if (this.held) {
       if (key) this.held = [];
-      if ((key || this.held.length) && this.held.length < HOLD_MAX) this.held.push([data, key]);
+      // Too many to hold: a gap would break the deltas after it, so drop
+      // them all and wait for the next keyframe (configure sets needKey).
+      if (this.held.length >= HOLD_MAX) this.held = [];
+      else if (key || this.held.length) this.held.push([data, key]);
       return;
     }
     const dec = this.dec;

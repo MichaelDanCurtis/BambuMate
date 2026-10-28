@@ -4874,6 +4874,33 @@ async function driveApp(browserType, engine, baseUrl) {
     });
   });
 
+  await camFlow("too many frames while the decoder is set up wait for the next keyframe", async () => {
+    const fb = await camPage({ camera_state: CAMERA_LIVE_RTSPS }, installGatedDecoderStandIn);
+    try {
+      await fb.waitForSelector(".cam-frame canvas", { timeout: 5000 });
+      await callsAbove(fb, "camera_watch", 0);
+      const codec = [..."avc1.42c01e"].map((c) => c.charCodeAt(0));
+      await cameraSend(fb, [1, 0, 0, codec.length, ...codec, 1, 66, 192, 30]);
+      // A keyframe and more deltas than the shim holds, before the browser answers.
+      await fb.evaluate(() => {
+        const ch = window.__cameraChannels.at(-1);
+        ch.onmessage(new Uint8Array([2, 1, 0, 0, 0, 1, 0x65]).buffer);
+        for (let i = 0; i < 130; i++) ch.onmessage(new Uint8Array([2, 0, 0, 0, 0, 1, 0x41]).buffer);
+      });
+      await fb.waitForFunction(() => window.__configAsked === 1, null, { timeout: 5000 });
+      await fb.evaluate(() => window.__openConfig());
+      await fb.waitForFunction(() => window.__decoders.length === 1, null, { timeout: 5000 });
+      // After the gap, deltas wait for a keyframe.
+      await cameraSend(fb, [2, 0, 0, 0, 0, 1, 0x41]);
+      await cameraSend(fb, [2, 1, 0, 0, 0, 1, 0x65]);
+      await fb.waitForFunction(() => window.__decoded.length >= 1, null, { timeout: 5000 });
+      const decoded = await fb.evaluate(() => window.__decoded);
+      if (JSON.stringify(decoded) !== '["key"]') throw new Error(`decoded ${decoded.length} chunks, starting ${JSON.stringify(decoded.slice(0, 3))}`);
+    } finally {
+      await fb.close();
+    }
+  });
+
   await camFlow("the first keyframe isn't lost while the decoder is set up", async () => {
     const fb = await camPage({ camera_state: CAMERA_LIVE_RTSPS }, installGatedDecoderStandIn);
     try {
