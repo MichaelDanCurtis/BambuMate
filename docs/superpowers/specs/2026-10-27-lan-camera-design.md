@@ -91,11 +91,13 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
   - **Refused:** port 322 refused or closed at once. This is liveview off, or another viewer holding the camera.
   - **Busy:** connected, but no frame within 10 s.
   - Any other error retries with backoff.
-- Auth, Tls, Refused and Busy stop the session until Retry. A journal snapshot always makes one fresh attempt.
+- Auth, Tls, Refused and Busy stop the session until Retry. A journal snapshot always makes one fresh attempt; a still never does.
+- A panic in the session's driver stops it with an error until Retry.
+- State changes are only sent while a session runs, so the live panel keeps a watch open while the camera is off for a reason the printer can end (liveview off, not connected, waiting, not configured).
 - The latest JPEG (from 6000, or a decoded keyframe from RTSPS) is cached for the Home thumbnail and for the still fallback.
 
-**`snapshot.rs`**
-- `capture(printer) -> Result<Jpeg, SnapshotError>` joins the session as a consumer, with a 15 s timeout.
+**Snapshots (`CameraHub::capture` in `session.rs`)**
+- `capture() -> Result<Jpeg, String>` joins the session as a consumer, with a 15 s timeout.
 - On port 6000 it takes the next frame.
 - On RTSPS it takes the next keyframe and decodes it with `openh264`: AVC to Annex B with SPS/PPS prepended, then YUV to RGB, then a JPEG at quality 85 with the longest side capped at 1920 px.
 - The YUV-to-JPEG step is a pure function.
@@ -106,10 +108,10 @@ These facts come from public protocol notes (OpenBambuAPI, ha-bambulab) and from
 - `camera_watch(on_frame: Channel) -> id` sends frames as raw bytes.
   - Each message starts with a one-byte tag: `1` config, `2` access unit, `3` JPEG.
   - For config and access units the tag is followed by a u8 keyframe flag, then the payload.
-  - `camera_unwatch(id)`, and a channel the webview has dropped, both release the consumer.
-- `camera_still() -> Option<data URL>` returns the latest JPEG if it is at most 5 s old. Otherwise it waits up to 15 s for the next one. It serves Home and the fallback.
+  - `camera_unwatch(id)` releases the consumer. A channel the page has let go of does not: in Tauri 2.10 `Channel::send` succeeds while the webview exists, so only a webview that is gone ends a watch by itself.
+- `camera_still() -> Option<data URL>` returns the latest JPEG if it is at most 5 s old. Otherwise it waits up to 15 s for the next one. It serves Home and the fallback. On a session stopped by an error it returns nothing at once, without connecting again.
 - `camera_retry() -> CameraState`.
-- State changes go out as `camera://state` events.
+- State changes go out as `camera://state` events. With live view off in Settings, they always say `Disabled`.
 
 **Settings**
 - `camera_live_view` and `camera_snapshots` are stored as preferences through the existing `get_preference`/`set_preference`. Both are on by default.
