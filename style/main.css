@@ -1437,6 +1437,12 @@ select.input option {
     min-width: 140px;
 }
 
+.about-credit {
+    margin: var(--nd-space-xl) 0 0;
+    font-size: 13px;
+    color: var(--nd-text-secondary);
+}
+
 .about-links {
     margin-top: var(--nd-space-xl);
 }

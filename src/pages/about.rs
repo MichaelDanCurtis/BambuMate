@@ -133,6 +133,8 @@ pub fn AboutPage() -> impl IntoView {
                 </div>
             </div>
 
+            <p class="about-credit">"Video decoding: OpenH264 (BSD-2-Clause), from Cisco Systems."</p>
+
             <div class="about-links">
                 <h2 class="nd-label">"Links"</h2>
                 <ul class="about-link-list">

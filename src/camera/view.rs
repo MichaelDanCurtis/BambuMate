@@ -440,18 +440,30 @@ pub fn CameraPanel(expanded: RwSignal<bool>) -> impl IntoView {
 
 /// A small still that opens Printer → Live. Shows nothing while there is
 /// no picture or the camera is off.
-#[allow(dead_code)] // placed on Home in Task 9
 #[component]
 pub fn CameraThumb() -> impl IntoView {
     let src = RwSignal::new(Option::<String>::None);
     let off = RwSignal::new(false);
+    // A still request is out: the next tick doesn't send another.
+    let asking = RwSignal::new(false);
     listen_scoped("camera://state", move |s: CameraState| {
         off.try_set(s.is_off());
     });
+    // The state as it stands now; later changes arrive as events.
+    spawn_local(async move {
+        if let Ok(state) = bridge::state().await {
+            off.try_set(state.is_off());
+        }
+    });
     let ask = move || {
+        if asking.get_untracked() {
+            return;
+        }
+        asking.set(true);
         spawn_local(async move {
             let url = bridge::still().await.ok().flatten();
             src.try_set(url);
+            asking.try_set(false);
         });
     };
     ask();

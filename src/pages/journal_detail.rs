@@ -27,6 +27,7 @@ use crate::journal::types::{EntryUpdate, PrintEntry, Verdict, VerdictChoice};
 use crate::journal::{bridge, next_revision};
 use crate::pages::journal::{find_entry, remove_entry, replace_entry, row_ids, Entries};
 use crate::pages::print_analysis::read_file_as_base64;
+use crate::printer::types::untrusted_text;
 
 /// The backend's fixed sentences (`journal::store`). Anything else the
 /// bridge reports (a malformed answer, say) is shown as the fallback.
@@ -41,6 +42,8 @@ const ADDING: &str = "Adding the photo";
 const DELETING: &str = "Deleting the entry";
 /// The backend keeps this many characters of notes (`NOTES_MAX`).
 const NOTES_MAX: &str = "10000";
+/// The longest miss note shown, in characters.
+const NOTE_MAX: usize = 200;
 
 /// The error to show: one of the fixed sentences, else `fallback`. Raw text
 /// never reaches the page.
@@ -107,10 +110,20 @@ fn neighbour(ids: &[i64], id: i64) -> Option<i64> {
 }
 
 /// `Photo 2 of 3, added 21 Oct 2026`: each photo named apart from the rest.
-fn photo_alt(n: usize, total: usize, added_at: i64, offset_minutes: i32) -> String {
+/// A camera snapshot leads with its moment: `50 % snapshot, photo 2 of 3, …`.
+fn photo_alt(
+    n: usize,
+    total: usize,
+    label: Option<&str>,
+    added_at: i64,
+    offset_minutes: i32,
+) -> String {
     let at = local_time_text(added_at, offset_minutes);
     let day = at.rsplit_once(' ').map_or(at.as_str(), |(day, _)| day);
-    format!("Photo {n} of {total}, added {day}")
+    match label {
+        Some(label) => format!("{label} snapshot, photo {n} of {total}, added {day}"),
+        None => format!("Photo {n} of {total}, added {day}"),
+    }
 }
 
 /// The local UTC offset, in minutes east, at Unix time `unix_secs`: each
@@ -932,14 +945,14 @@ fn Photos(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl In
                 .map(|e| {
                     e.photos
                         .iter()
-                        .map(|p| (p.id, p.added_at))
+                        .map(|p| (p.id, p.added_at, p.label.clone()))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
         })
     });
     let photo_ids =
-        Memo::new(move |_| photos.with(|p| p.iter().map(|(id, _)| *id).collect::<Vec<_>>()));
+        Memo::new(move |_| photos.with(|p| p.iter().map(|(id, _, _)| *id).collect::<Vec<_>>()));
 
     view! {
         <section class="jr-section jr-photos" aria-labelledby=labelled_by
@@ -959,9 +972,9 @@ fn Photos(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl In
             <div class="jr-photo-strip">
                 <For
                     each=move || photos.get()
-                    key=|(photo_id, _)| *photo_id
-                    children=move |(photo_id, added_at)| view! {
-                        <PhotoThumb id=id photo_id=photo_id added_at=added_at photos=photo_ids
+                    key=|(photo_id, _, _)| *photo_id
+                    children=move |(photo_id, added_at, label)| view! {
+                        <PhotoThumb id=id photo_id=photo_id added_at=added_at label=label photos=photo_ids
                             entries=entries status=status />
                     }
                 />
@@ -975,9 +988,23 @@ fn Photos(id: i64, entry: Memo<Option<PrintEntry>>, entries: Entries) -> impl In
                     on:change=on_change />
                 <span class="jr-photo-hint">"or drop one here"</span>
             </div>
+            {move || snapshot_note(entry).map(|reason| view! {
+                <p class="jr-snapshot-note">{format!("No camera snapshot: {reason}")}</p>
+            })}
             <StatusLine status=status />
         </section>
     }
+}
+
+/// Why the camera took no snapshot, as plain text: cut to [`NOTE_MAX`]
+/// characters, with control characters replaced.
+fn snapshot_note(entry: Memo<Option<PrintEntry>>) -> Option<String> {
+    entry.with(|e| {
+        e.as_ref()
+            .and_then(|e| e.snapshot_note.as_deref())
+            .map(|note| untrusted_text(note, NOTE_MAX))
+            .filter(|note| !note.is_empty())
+    })
 }
 
 /// One photo. A file the backend can't load, or the browser can't decode,
@@ -988,6 +1015,7 @@ fn PhotoThumb(
     id: i64,
     photo_id: i64,
     added_at: i64,
+    label: Option<String>,
     photos: Memo<Vec<i64>>,
     entries: Entries,
     status: RwSignal<Status>,
@@ -1003,10 +1031,12 @@ fn PhotoThumb(
         })
     });
     let offset = local_offset_minutes(added_at);
-    let alt = move || {
+    let alt_label = label.clone();
+    let alt_text = Memo::new(move |_| {
         let (n, total) = place.get();
-        photo_alt(n, total, added_at, offset)
-    };
+        photo_alt(n, total, alt_label.as_deref(), added_at, offset)
+    });
+    let alt = move || alt_text.get();
     spawn_local(async move {
         let url = bridge::image(id, Some(photo_id)).await.map_err(|_| ());
         src.try_set(Some(url));
@@ -1044,17 +1074,22 @@ fn PhotoThumb(
     };
     view! {
         <figure class="jr-photo" data-photo=photo_id.to_string()>
-            {move || match (src.get(), broken.get()) {
-                (Some(Ok(url)), false) => view! {
-                    <img src=url alt=alt on:error=move |_| broken.set(true) />
-                }
-                .into_any(),
-                (None, _) => view! { <span class="jr-photo-missing" aria-hidden="true"></span> }.into_any(),
-                _ => view! {
-                    <span class="jr-photo-missing" role="img" aria-label=alt>{PHOTO_UNAVAILABLE}</span>
-                }
-                .into_any(),
-            }}
+            <span class="jr-photo-frame">
+                {move || match (src.get(), broken.get()) {
+                    (Some(Ok(url)), false) => view! {
+                        <img src=url alt=alt on:error=move |_| broken.set(true) />
+                    }
+                    .into_any(),
+                    (None, _) => view! { <span class="jr-photo-missing" aria-hidden="true"></span> }.into_any(),
+                    _ => view! {
+                        <span class="jr-photo-missing" role="img" aria-label=alt>{PHOTO_UNAVAILABLE}</span>
+                    }
+                    .into_any(),
+                }}
+                {label.map(|label| view! {
+                    <span class="jr-photo-label nd-mono" aria-hidden="true">{label}</span>
+                })}
+            </span>
             <button type="button" class="btn btn-ghost jr-photo-remove"
                 aria-label=move || format!("Remove photo {}", place.get().0)
                 disabled=move || removing.get() on:click=remove>
@@ -1246,12 +1281,25 @@ mod tests {
     fn each_photo_is_named_by_its_place_and_day() {
         // 2026-10-21 09:00 UTC.
         assert_eq!(
-            photo_alt(2, 3, 1_792_573_200, 0),
+            photo_alt(2, 3, None, 1_792_573_200, 0),
             "Photo 2 of 3, added 21 Oct 2026"
         );
         assert_eq!(
-            photo_alt(1, 1, 1_792_573_200, -600),
+            photo_alt(1, 1, None, 1_792_573_200, -600),
             "Photo 1 of 1, added 20 Oct 2026"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_is_named_by_its_moment() {
+        // 2026-10-21 09:00 UTC.
+        assert_eq!(
+            photo_alt(2, 3, Some("50 %"), 1_792_573_200, 0),
+            "50 % snapshot, photo 2 of 3, added 21 Oct 2026"
+        );
+        assert_eq!(
+            photo_alt(2, 3, None, 1_792_573_200, 0),
+            "Photo 2 of 3, added 21 Oct 2026"
         );
     }
 

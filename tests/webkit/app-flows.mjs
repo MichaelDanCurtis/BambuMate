@@ -2973,6 +2973,51 @@ async function driveApp(browserType, engine, baseUrl) {
     if ((await link.innerText()).trim().toLowerCase() !== "analyze a photo") throw new Error(`reads "${await link.innerText()}"`);
   });
 
+  await step(run, page, "journal snapshots carry their moment", async () => {
+    const snap = {
+      ...JOURNAL_FINISHED,
+      photos: [{ id: 7, file_name: "5f0c.jpg", added_at: JOURNAL_FINISHED.photos[0].added_at, label: "50 %" }],
+      snapshot_note: "This printer has no camera.",
+    };
+    await withFixtures({ journal_list: [snap] }, async () => {
+      const before = await countOf("journal_list");
+      await page.click(`${JR} .jr-filter[data-kind="needs_verdict"]`);
+      await pastCalls("journal_list", before);
+      await rowsRead([JOURNAL_FINISHED.name]);
+      await expand(2);
+      await page.waitForSelector(`${journalDetail(2)} .jr-photo img`, { timeout: 5000 });
+      const label = (await page.locator(`${journalDetail(2)} .jr-photo-label`).textContent()).trim();
+      if (label !== "50 %") throw new Error(`label reads "${label}"`);
+      if ((await page.locator(`${journalDetail(2)} .jr-photo-label`).getAttribute("aria-hidden")) !== "true") throw new Error("the label isn't hidden from screen readers");
+      const alt = await page.locator(`${journalDetail(2)} .jr-photo img`).getAttribute("alt");
+      if (!alt.startsWith("50 % snapshot, photo 1 of 1, added ")) throw new Error(`alt reads "${alt}"`);
+      const note = page.locator(`${journalDetail(2)} .jr-snapshot-note`);
+      if (!(await note.isVisible())) throw new Error("the miss note isn't visible");
+      if ((await note.textContent()) !== "No camera snapshot: This printer has no camera.") throw new Error(`note reads "${await note.textContent()}"`);
+    });
+    // A photo the user added has no label, and an entry with no miss has no note.
+    const plain = { ...JOURNAL_FINISHED, photos: [{ id: 7, file_name: "5f0c.jpg", added_at: JOURNAL_FINISHED.photos[0].added_at }] };
+    await withFixtures({ journal_list: [plain] }, async () => {
+      const before = await countOf("journal_list");
+      await page.click(`${JR} .jr-filter[data-kind="all"]`);
+      await pastCalls("journal_list", before);
+      await page.waitForFunction(() => document.querySelectorAll(".journal-page .jr-row .jr-snapshot-note").length === 0, null, { timeout: 5000 });
+      // A photo keeps its id, so the open detail is drawn afresh.
+      await collapse(2);
+      await expand(2);
+      await page.waitForSelector(`${journalDetail(2)} .jr-photo img`, { timeout: 5000 });
+      if ((await page.locator(`${journalDetail(2)} .jr-photo-label`).count()) !== 0) throw new Error("a label on an unlabelled photo");
+      const alt = await page.locator(`${journalDetail(2)} .jr-photo img`).getAttribute("alt");
+      if (!alt.startsWith("Photo 1 of 1, added ")) throw new Error(`alt reads "${alt}"`);
+    });
+    // Back to the default list for the flows after this one.
+    const again = await countOf("journal_list");
+    await page.click(`${JR} .jr-filter[data-kind="needs_verdict"]`);
+    await pastCalls("journal_list", again);
+    await page.click(`${JR} .jr-filter[data-kind="all"]`);
+    await rowsRead(ALL_ROWS);
+  });
+
   await step(run, page, "deleting an entry asks inline, Keep cancels and Delete removes it", async () => {
     await expand(1);
     const before = await countOf("journal_delete");
@@ -3336,6 +3381,47 @@ async function driveApp(browserType, engine, baseUrl) {
       await release("clear-cache");
       await waitText(".slice-cache-status", "Cleared 12.0 MB.");
       await page.waitForSelector(".slice-clear-cache:not([disabled])", { timeout: 5000 });
+    });
+  });
+
+  await step(run, page, "Settings saves the camera switches", async () => {
+    await page.waitForSelector(".settings-camera #camera-live-view", { timeout: 15000 });
+    const title = (await page.locator(".settings-camera h2").textContent()).trim();
+    if (title !== "Camera") throw new Error(`title reads "${title}"`);
+    // Both are on unless the stored value is "false".
+    for (const id of ["#camera-live-view", "#camera-snapshots"]) {
+      if (!(await page.isChecked(id))) throw new Error(`${id} starts off`);
+    }
+    for (const [id, label, key] of [
+      ["#camera-live-view", "Live view", "camera_live_view"],
+      ["#camera-snapshots", "Journal snapshots", "camera_snapshots"],
+    ]) {
+      if ((await page.locator(`.settings-camera label[for="${id.slice(1)}"]`).textContent()).trim() !== label) throw new Error(`${id} isn't labelled "${label}"`);
+      const before = await countOf("set_preference");
+      await page.getByLabel(label, { exact: true }).uncheck();
+      await pastCalls("set_preference", before);
+      const sent = (await callsOf("set_preference")).slice(before).filter((c) => c.args?.key === key);
+      if (sent.length !== 1 || !sameArgs(sent[0].args, { key, value: "false" })) throw new Error(`sent ${JSON.stringify(sent.map((c) => c.args))}`);
+      if (await page.isChecked(id)) throw new Error(`${id} is still on`);
+      const again = await countOf("set_preference");
+      await page.getByLabel(label, { exact: true }).check();
+      await pastCalls("set_preference", again);
+      const last = (await callsOf("set_preference")).at(-1).args;
+      if (!sameArgs(last, { key, value: "true" })) throw new Error(`sent ${JSON.stringify(last)}`);
+    }
+    if ((await page.locator(".settings-camera .status-warning").count()) !== 0) throw new Error("a warning with nothing wrong");
+  });
+
+  await step(run, page, "a camera switch that can't be saved flips back and says so", async () => {
+    await withFixtures({ set_preference: { __reject: "disk full" } }, async () => {
+      const before = await countOf("set_preference");
+      // click, not uncheck: the box flips back before uncheck() could re-read it.
+      await page.click("#camera-live-view");
+      await pastCalls("set_preference", before);
+      await page.waitForSelector(".settings-camera .status-warning", { timeout: 5000 });
+      const text = (await page.locator(".settings-camera .status-warning").textContent()).trim();
+      if (text !== "Couldn't save the setting.") throw new Error(`warning reads "${text}"`);
+      await page.waitForFunction(() => document.querySelector("#camera-live-view").checked, null, { timeout: 5000 });
     });
   });
 
@@ -3923,6 +4009,11 @@ async function driveApp(browserType, engine, baseUrl) {
   await step(run, page, "About's Links heading keeps the 11px mono label look", async () => {
     const size = await page.locator(".about-links h2.nd-label").evaluate((el) => getComputedStyle(el).fontSize);
     if (size !== "11px") throw new Error(`Links heading is ${size}`);
+  });
+
+  await step(run, page, "About credits OpenH264", async () => {
+    const credit = page.getByText("Video decoding: OpenH264 (BSD-2-Clause), from Cisco Systems.");
+    if (!(await credit.isVisible())) throw new Error("the OpenH264 credit isn't visible");
   });
 
   // -- hubs ------------------------------------------------------------------
@@ -5252,6 +5343,49 @@ async function driveApp(browserType, engine, baseUrl) {
     if (!hero.includes("9 h 09 m left · Layer 1 / 200 · Nozzle 245 °C · Bed 70 °C")) throw new Error(hero);
     const on = await page.locator(".home-page .nd-seg-on").count();
     if (on !== 1) throw new Error(`${on} segments filled for 6%`);
+  });
+
+  // The thumbnail asks the camera for its state and a still when it mounts,
+  // so each flow opens Home afresh, from About.
+  const homeAfresh = async () => {
+    await goTo("/settings/about");
+    await page.waitForSelector(".about-page", { timeout: 15000 });
+    await page.click('nav.sidebar a[href="/"]');
+    await homeMode("printing");
+  };
+  const THUMB_STILL = `data:image/jpeg;base64,${JPEG_1X1_BASE64}`;
+
+  await step(run, page, "Home shows a camera thumbnail while printing", async () => {
+    await withFixtures({ printer_view: RUNNING_CLEAN, camera_state: CAMERA_LIVE_JPEG, camera_still: THUMB_STILL }, async () => {
+      await homeAfresh();
+      await page.waitForSelector(".home-page .cam-thumb img", { state: "visible", timeout: 5000 });
+      const href = await page.locator(".home-page a.cam-thumb").getAttribute("href");
+      if (href !== "/printer") throw new Error(`the thumbnail links to ${href}`);
+      const inHero = await page.locator(".home-page .hm-hero .cam-thumb").count();
+      if (inHero !== 1) throw new Error("the thumbnail isn't in the hero");
+      if ((await page.locator(".home-page .nd-hero").count()) !== 1) throw new Error("a second hero");
+    });
+  });
+
+  await step(run, page, "Home hides the thumbnail when there is no picture", async () => {
+    await withFixtures({ printer_view: RUNNING_CLEAN, camera_state: CAMERA_LIVE_JPEG, camera_still: null }, async () => {
+      const stills = await countOf("camera_still");
+      await homeAfresh();
+      await pastCalls("camera_still", stills);
+      await page.waitForTimeout(300);
+      if ((await page.locator(".home-page .cam-thumb").count()) !== 0) throw new Error("a thumbnail with no picture");
+    });
+  });
+
+  await step(run, page, "Home hides the thumbnail when the camera is off", async () => {
+    // The state is read on arrival: no event is needed to learn it is off.
+    await withFixtures({ printer_view: RUNNING_CLEAN, camera_state: cameraOff("liveview_off", "Turn on LAN Mode Liveview"), camera_still: THUMB_STILL }, async () => {
+      const states = await countOf("camera_state");
+      await homeAfresh();
+      await pastCalls("camera_state", states);
+      await page.waitForTimeout(300);
+      if ((await page.locator(".home-page .cam-thumb").count()) !== 0) throw new Error("a thumbnail with the camera off");
+    });
   });
 
   await step(run, page, "an HMS code during a print keeps the print and names the code", async () => {

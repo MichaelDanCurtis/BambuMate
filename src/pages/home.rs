@@ -10,6 +10,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::agent::drawer::{AgentRefresh, AgentShared};
 use crate::app::FeatureFlagsContext;
+use crate::camera::view::CameraThumb;
 use crate::commands::{self, GeneratedPreset};
 use crate::components::patterns::{Hero, SegmentedBar, StateKind, StateText, Tone};
 use crate::journal::format::{rate_href, RATE_LAST};
@@ -157,6 +158,7 @@ pub fn HomePage() -> impl IntoView {
                 })
                 total=HOME_SEGMENTS
             />
+            <CameraThumb />
             <div class="hm-actions">
                 <a href="/printer" class="btn btn-secondary">"Printer →"</a>
             </div>
