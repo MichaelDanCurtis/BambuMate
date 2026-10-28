@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use url::Url;
 
-use super::jpeg6000::connect_tls;
+use super::jpeg6000::{connect_tls, FIRST_FRAME_WAIT};
 use super::target::CameraTarget;
 use super::transport::RTSPS_PATH;
 use super::{CameraError, Frame, MAX_MESSAGE};
@@ -58,6 +58,7 @@ pub async fn relay(target: &CameraTarget) -> Result<Relay, CameraError> {
             return;
         };
         drop(listener);
+        // Defence in depth: the bind is 127.0.0.1, so this can't fail.
         if !peer.ip().is_loopback() {
             return;
         }
@@ -72,10 +73,10 @@ fn local_url(port: u16) -> Url {
     Url::parse(&format!("rtsp://127.0.0.1:{port}{RTSPS_PATH}")).expect("a valid URL")
 }
 
-/// A retina error as a camera error. Its text may echo the URL, never the
-/// code, since the code isn't in the URL.
-fn map_error(text: &str) -> CameraError {
-    if text.contains("401") {
+/// An RTSP status as a camera error: a 401 is a wrong access code. Retina's
+/// error text carries addresses and ports, so it is never matched on.
+fn map_status(code: Option<u16>) -> CameraError {
+    if code == Some(401) {
         CameraError::Auth
     } else {
         CameraError::Other {
@@ -84,14 +85,16 @@ fn map_error(text: &str) -> CameraError {
     }
 }
 
-/// Streams the printer's H.264 to `tx`: `Frame::Config` first and whenever
-/// the parameters change, then every access unit. Frames before the first
-/// keyframe are dropped. Returns why it ended.
-pub async fn run(target: &CameraTarget, tx: mpsc::Sender<Frame>) -> CameraError {
-    let relay = match relay(target).await {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
+fn map_error(e: &retina::Error) -> CameraError {
+    map_status(e.status_code())
+}
+
+/// DESCRIBE, SETUP and PLAY over the relay; the demuxed stream and the
+/// index of the video stream.
+async fn handshake(
+    target: &CameraTarget,
+    relay: &Relay,
+) -> Result<(retina::client::Demuxed, usize), CameraError> {
     let creds = Credentials {
         username: USER.into(),
         password: target.access_code.clone(),
@@ -99,41 +102,70 @@ pub async fn run(target: &CameraTarget, tx: mpsc::Sender<Frame>) -> CameraError 
     let options = SessionOptions::default()
         .creds(Some(creds))
         .user_agent("BambuMate".into());
-    let mut session =
-        match retina::client::Session::describe(local_url(relay.addr.port()), options).await {
-            Ok(s) => s,
-            Err(e) => return map_error(&e.to_string()),
-        };
+    let mut session = retina::client::Session::describe(local_url(relay.addr.port()), options)
+        .await
+        .map_err(|e| map_error(&e))?;
     let Some(video) = session
         .streams()
         .iter()
         .position(|s| s.media() == "video" && s.encoding_name().eq_ignore_ascii_case("h264"))
     else {
-        return CameraError::Other {
+        return Err(CameraError::Other {
             message: "The printer's camera doesn't offer H.264 video.".into(),
-        };
+        });
     };
-    if let Err(e) = session
+    session
         .setup(
             video,
             SetupOptions::default().transport(Transport::Tcp(TcpTransportOptions::default())),
         )
         .await
-    {
-        return map_error(&e.to_string());
-    }
-    let playing = match session.play(PlayOptions::default()).await {
-        Ok(p) => p,
-        Err(e) => return map_error(&e.to_string()),
+        .map_err(|e| map_error(&e))?;
+    let playing = session
+        .play(PlayOptions::default())
+        .await
+        .map_err(|e| map_error(&e))?;
+    let demuxed = playing.demuxed().map_err(|e| map_error(&e))?;
+    Ok((demuxed, video))
+}
+
+/// Streams the printer's H.264 to `tx`: `Frame::Config` first and whenever
+/// the parameters change, then every access unit. Frames before the first
+/// keyframe are dropped. Returns why it ended.
+pub async fn run(target: &CameraTarget, tx: mpsc::Sender<Frame>) -> CameraError {
+    run_with(target, tx, FIRST_FRAME_WAIT).await
+}
+
+/// `run` with the wait for the first video frame (RTSP handshake included)
+/// given. Past it, the printer being silent is `Busy`: connected, but no
+/// picture in time.
+async fn run_with(
+    target: &CameraTarget,
+    tx: mpsc::Sender<Frame>,
+    first_wait: Duration,
+) -> CameraError {
+    let deadline = tokio::time::Instant::now() + first_wait;
+    let relay = match relay(target).await {
+        Ok(r) => r,
+        Err(e) => return e,
     };
-    let mut demuxed = match playing.demuxed() {
-        Ok(d) => d,
-        Err(e) => return map_error(&e.to_string()),
-    };
+    let (mut demuxed, video) =
+        match tokio::time::timeout_at(deadline, handshake(target, &relay)).await {
+            Err(_) => return CameraError::Busy,
+            Ok(Err(e)) => return e,
+            Ok(Ok(started)) => started,
+        };
     let mut sent_config = false;
     let mut seen_key = false;
+    let mut got_frame = false;
     loop {
-        let item = match tokio::time::timeout(STALL, demuxed.next()).await {
+        let wait = if got_frame {
+            tokio::time::Instant::now() + STALL
+        } else {
+            deadline
+        };
+        let item = match tokio::time::timeout_at(wait, demuxed.next()).await {
+            Err(_) if !got_frame => return CameraError::Busy,
             Err(_) => {
                 return CameraError::Other {
                     message: "The camera stopped sending video.".into(),
@@ -144,12 +176,13 @@ pub async fn run(target: &CameraTarget, tx: mpsc::Sender<Frame>) -> CameraError 
                     message: "The camera stream ended.".into(),
                 }
             }
-            Ok(Some(Err(e))) => return map_error(&e.to_string()),
+            Ok(Some(Err(e))) => return map_error(&e),
             Ok(Some(Ok(item))) => item,
         };
         let CodecItem::VideoFrame(frame) = item else {
             continue;
         };
+        got_frame = true;
         if !sent_config || frame.has_new_parameters() {
             let params = demuxed.streams()[video].parameters();
             let Some(ParametersRef::Video(v)) = params else {
@@ -247,12 +280,22 @@ mod tests {
     }
 
     #[test]
-    fn retina_errors_map_to_camera_errors() {
-        assert_eq!(map_error("401 Unauthorized"), CameraError::Auth);
-        assert_eq!(map_error("RTSP/1.0 401"), CameraError::Auth);
-        assert!(matches!(
-            map_error("connection reset"),
-            CameraError::Other { .. }
-        ));
+    fn only_a_401_is_a_wrong_access_code() {
+        assert_eq!(map_status(Some(401)), CameraError::Auth);
+        assert!(matches!(map_status(Some(404)), CameraError::Other { .. }));
+        assert!(matches!(map_status(None), CameraError::Other { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_camera_that_never_answers_rtsp_is_busy() {
+        let cam = FakeCamera::start(Mode::Silent).await;
+        let (tx, _rx) = mpsc::channel(4);
+        let err = run_with(
+            &test_target(&cam, Transport::Rtsps),
+            tx,
+            std::time::Duration::from_millis(200),
+        )
+        .await;
+        assert_eq!(err, CameraError::Busy);
     }
 }
