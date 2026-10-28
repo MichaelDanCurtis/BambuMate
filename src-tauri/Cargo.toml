@@ -34,6 +34,8 @@ urlencoding = "2.1"
 regex = "1"
 toml = "0.8"
 image = "0.25"
+# Decodes one H.264 keyframe for journal snapshots and stills (BSD-2-Clause).
+openh264 = "0.9.9"
 base64 = "0.22"
 notify = "7"
 async-trait = "0.1"
