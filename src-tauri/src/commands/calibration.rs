@@ -3415,12 +3415,14 @@ mod tests {
                 id: 7,
                 file_name: "a.jpg".into(),
                 added_at: 1_500,
+                label: Some("50 %".into()),
             }],
             analyses: vec![3],
             purpose: Some(PrintPurpose {
                 calibration_result_id: 11,
                 test: TestKind::Retraction,
             }),
+            snapshot_note: Some("This printer has no camera.".into()),
             updated_at: 2_000,
         };
         let fixture = json!({

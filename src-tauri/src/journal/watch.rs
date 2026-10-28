@@ -151,6 +151,12 @@ pub enum JournalEvent {
         key: String,
         tray: TrayUse,
     },
+    /// The confirmed job is paused with `print_error` set: a moment the
+    /// journal may photograph. Sent with every such report; the recorder
+    /// takes it once.
+    Paused {
+        key: String,
+    },
     /// `FINISH` or `FAILED`, watched. `hms` is every code active when the
     /// failure was reported ("HMS at the time"); some may be unrelated
     /// warnings.
@@ -616,8 +622,14 @@ fn active(
         if same && !restarted(&job, own, state) {
             rekey(&mut job, key, report, events);
             job.confirmed = true;
+            let job = follow(job, report, state, events);
+            if state == "PAUSE" && report.print_error.is_some() {
+                events.push(JournalEvent::Paused {
+                    key: job.key.clone(),
+                });
+            }
             return WatchState {
-                job: Some(follow(job, report, state, events)),
+                job: Some(job),
                 system_key: prev.system_key.clone(),
             };
         }
@@ -819,6 +831,7 @@ mod tests {
                 JournalEvent::TrayUsed { .. } => "tray",
                 JournalEvent::Ended { .. } => "ended",
                 JournalEvent::Lost { .. } => "lost",
+                JournalEvent::Paused { .. } => "paused",
             })
             .collect()
     }
@@ -1242,7 +1255,7 @@ mod tests {
                             row.1 = false;
                         }
                     }
-                    JournalEvent::TrayUsed { .. } => {}
+                    JournalEvent::TrayUsed { .. } | JournalEvent::Paused { .. } => {}
                 }
             }
             rows.into_iter()
@@ -1385,7 +1398,32 @@ mod tests {
             20,
         );
         s.diff(json!({"gcode_state": "FINISH"}), 30);
-        assert_eq!(s.kinds(), ["started", "tray", "ended"]);
+        // The runout pause is a moment for the camera, not a new print.
+        assert_eq!(s.kinds(), ["started", "tray", "paused", "ended"]);
+    }
+
+    #[test]
+    fn a_pause_with_an_error_is_reported_and_a_plain_pause_is_not() {
+        let (watch, events) = obs(&WatchState::default(), &report("RUNNING", 10), T0);
+        assert_eq!(kinds(&events), ["started", "tray"]);
+        assert!(watch.job.as_ref().is_some_and(|j| j.confirmed));
+        let key = benchy_key();
+
+        let (watch, events) = obs(&watch, &report("PAUSE", 10), T0 + 60);
+        assert_eq!(events, vec![], "a pause without an error is no moment");
+
+        let mut errored = report("PAUSE", 10);
+        errored.print_error = Some(0x0300_8001);
+        let (watch, events) = obs(&watch, &errored, T0 + 120);
+        assert_eq!(events, vec![JournalEvent::Paused { key: key.clone() }]);
+
+        let (watch, events) = obs(&watch, &errored, T0 + 180);
+        assert_eq!(
+            events,
+            vec![JournalEvent::Paused { key: key.clone() }],
+            "sent with every such report; the recorder takes it once"
+        );
+        assert_eq!(watch.job.map(|j| j.key), Some(key), "still the same job");
     }
 
     #[test]

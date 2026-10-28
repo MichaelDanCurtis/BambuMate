@@ -427,7 +427,8 @@
           {
             "id": 7,
             "file_name": "a.jpg",
-            "added_at": 1500
+            "added_at": 1500,
+            "label": "50 %"
           }
         ],
         "analyses": [
@@ -437,6 +438,7 @@
           "calibration_result_id": 11,
           "test": "retraction"
         },
+        "snapshot_note": "This printer has no camera.",
         "updated_at": 2000
       }
     ]

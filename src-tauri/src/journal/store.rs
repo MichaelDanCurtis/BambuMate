@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Datelike, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use serde::{Deserialize, Serialize};
 
 use super::photos::MAX_THUMBNAIL_BYTES;
 use super::types::{
@@ -20,7 +21,7 @@ use super::types::{
 use super::JournalPaths;
 
 /// `PRAGMA user_version` of the schema below.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub const READ_FAILED: &str = "The print journal couldn't be read.";
 pub const SAVE_FAILED: &str = "The print journal couldn't be saved.";
@@ -130,9 +131,60 @@ fn migrate_to_v2(conn: &mut Connection) -> Result<(), String> {
     tx.commit().map_err(save_err)
 }
 
+/// Version 3 adds `print_photos.label` (the moment a camera snapshot was
+/// taken at) and `prints.snapshots_json` (a [`SnapshotLog`]). Like
+/// `migrate_to_v2`, it reads the version again inside an immediate
+/// transaction and adds only the columns that aren't there.
+fn migrate_to_v3(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(save_err)?;
+    let version: i64 = tx
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(read_err)?;
+    if version < 3 {
+        for (table, column) in [("print_photos", "label"), ("prints", "snapshots_json")] {
+            let has_column: bool = tx
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') \
+                         WHERE name = '{column}')"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(read_err)?;
+            if !has_column {
+                tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT;"))
+                    .map_err(save_err)?;
+            }
+        }
+        tx.execute_batch("PRAGMA user_version = 3;")
+            .map_err(save_err)?;
+    }
+    tx.commit().map_err(save_err)
+}
+
+/// `snapshots_json`: the moments already taken (or being taken) for the
+/// entry, by `Moment::key`, and why the last one wasn't.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct SnapshotLog {
+    taken: Vec<String>,
+    missed: Option<String>,
+}
+
+impl SnapshotLog {
+    /// Unreadable JSON reads as an empty log.
+    fn parse(json: Option<&str>) -> Self {
+        json.and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default()
+    }
+}
+
 const COLUMNS: &str = "id, job_key, name, gcode_file, plate, printer_model, started_at, \
      start_approx, ended_at, outcome, error_code, hms_json, verdict, tags_json, notes, \
-     slice_json, updated_at, purpose_json";
+     slice_json, updated_at, purpose_json, snapshots_json";
 
 /// `?1` is a lower-cased `%…%` pattern with `\` escapes.
 const SEARCH: &str = " AND (lower(p.name) LIKE ?1 ESCAPE '\\' \
@@ -196,6 +248,7 @@ fn entry_row(r: &Row) -> rusqlite::Result<PrintEntry> {
         purpose: r
             .get::<_, Option<String>>(17)?
             .and_then(|s| serde_json::from_str(&s).ok()),
+        snapshot_note: SnapshotLog::parse(r.get::<_, Option<String>>(18)?.as_deref()).missed,
     })
 }
 
@@ -282,8 +335,13 @@ impl JournalStore {
             0 => {
                 migrate_to_v1(&mut conn)?;
                 migrate_to_v2(&mut conn)?;
+                migrate_to_v3(&mut conn)?;
             }
-            1 => migrate_to_v2(&mut conn)?,
+            1 => {
+                migrate_to_v2(&mut conn)?;
+                migrate_to_v3(&mut conn)?;
+            }
+            2 => migrate_to_v3(&mut conn)?,
             SCHEMA_VERSION => {}
             v if v > SCHEMA_VERSION => {
                 tracing::warn!("print journal schema {v} is newer than {SCHEMA_VERSION}");
@@ -605,8 +663,8 @@ impl JournalStore {
             let mut stmt = self
                 .conn
                 .prepare(
-                    "SELECT id, file_name, added_at FROM print_photos WHERE print_id = ?1 \
-                     ORDER BY id",
+                    "SELECT id, file_name, added_at, label FROM print_photos \
+                     WHERE print_id = ?1 ORDER BY id",
                 )
                 .map_err(read_err)?;
             let rows = stmt
@@ -615,6 +673,7 @@ impl JournalStore {
                         id: r.get(0)?,
                         file_name: r.get(1)?,
                         added_at: r.get(2)?,
+                        label: r.get(3)?,
                     })
                 })
                 .map_err(read_err)?;
@@ -794,6 +853,99 @@ impl JournalStore {
 
     /// Saves an already re-encoded JPEG as a new photo of the entry.
     pub fn add_photo(&self, id: i64, jpeg: &[u8], now: i64) -> Result<Photo, String> {
+        self.insert_photo(id, jpeg, None, now)
+    }
+
+    /// `add_photo` with a label: a camera snapshot taken at that moment.
+    pub fn add_snapshot(
+        &self,
+        id: i64,
+        jpeg: &[u8],
+        label: &str,
+        now: i64,
+    ) -> Result<Photo, String> {
+        self.insert_photo(id, jpeg, Some(label), now)
+    }
+
+    /// Records that `moment` (a `Moment::key`) is being taken for entry
+    /// `id`: false if it was already, or the entry has a calibration
+    /// purpose. [`GONE`] if the entry is gone. Not a user edit:
+    /// `updated_at` is untouched.
+    pub fn claim_snapshot(&self, id: i64, moment: &str) -> Result<bool, String> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(save_err)?;
+        let row: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT purpose_json, snapshots_json FROM prints WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(read_err)?;
+        let Some((purpose, log)) = row else {
+            return Err(GONE.to_string());
+        };
+        if purpose.is_some() {
+            return Ok(false);
+        }
+        let mut log = SnapshotLog::parse(log.as_deref());
+        if log.taken.iter().any(|k| k == moment) {
+            return Ok(false);
+        }
+        log.taken.push(moment.to_string());
+        self.write_snapshot_log(id, &log)?;
+        tx.commit().map_err(save_err)?;
+        Ok(true)
+    }
+
+    /// The reason the entry's last snapshot wasn't taken.
+    pub fn note_snapshot_miss(&self, id: i64, reason: &str, now: i64) -> Result<(), String> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(save_err)?;
+        let log: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT snapshots_json FROM prints WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(read_err)?;
+        let Some(log) = log else {
+            return Err(GONE.to_string());
+        };
+        let mut log = SnapshotLog::parse(log.as_deref());
+        log.missed = Some(reason.to_string());
+        self.write_snapshot_log(id, &log)?;
+        self.touch(id, now)?;
+        tx.commit().map_err(save_err)
+    }
+
+    fn write_snapshot_log(&self, id: i64, log: &SnapshotLog) -> Result<(), String> {
+        let json = serde_json::to_string(log).map_err(save_err)?;
+        self.conn
+            .execute(
+                "UPDATE prints SET snapshots_json = ?2 WHERE id = ?1",
+                params![id, json],
+            )
+            .map_err(save_err)?;
+        Ok(())
+    }
+
+    fn insert_photo(
+        &self,
+        id: i64,
+        jpeg: &[u8],
+        label: Option<&str>,
+        now: i64,
+    ) -> Result<Photo, String> {
         if !self.exists(id)? {
             return Err(GONE.to_string());
         }
@@ -809,8 +961,9 @@ impl JournalStore {
         let saved = (|| {
             let tx = self.conn.unchecked_transaction().map_err(save_err)?;
             tx.execute(
-                "INSERT INTO print_photos (print_id, file_name, added_at) VALUES (?1, ?2, ?3)",
-                params![id, file_name, now],
+                "INSERT INTO print_photos (print_id, file_name, added_at, label) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![id, file_name, now, label],
             )
             .map_err(save_err)?;
             let photo_id = tx.last_insert_rowid();
@@ -823,6 +976,7 @@ impl JournalStore {
                 id: photo_id,
                 file_name,
                 added_at: now,
+                label: label.map(str::to_string),
             }),
             Err(e) => {
                 remove_file_quietly(&path);
@@ -1838,12 +1992,15 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
         let old = s.list(&JournalFilter::default()).unwrap();
         assert_eq!(old.len(), 1);
         assert_eq!(old[0].purpose, None);
         drop(s);
-        assert!(JournalStore::open(&paths).is_ok(), "version 2 reopens");
+        assert!(
+            JournalStore::open(&paths).is_ok(),
+            "the new version reopens"
+        );
     }
 
     #[test]
@@ -1955,7 +2112,7 @@ mod tests {
     /// A journal as the build before the fix could leave it: the column is
     /// there, but a lost race reset the version to 1.
     #[test]
-    fn a_version_1_journal_that_already_has_the_column_opens_at_version_2() {
+    fn a_version_1_journal_that_already_has_the_column_opens_at_the_current_version() {
         let dir = tempfile::tempdir().unwrap();
         let paths = JournalPaths::in_dir(dir.path());
         {
@@ -1974,7 +2131,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(s.list(&JournalFilter::default()).unwrap().len(), 1);
         assert!(s.set_purpose(1, None, 11).unwrap());
     }
@@ -2167,5 +2324,137 @@ mod tests {
             linked(None)
         );
         assert_eq!(s.get(b).unwrap().unwrap().purpose, Some(purpose(12)));
+    }
+
+    #[test]
+    fn snapshots_are_claimed_once_per_moment() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        assert!(s.claim_snapshot(id, "half").unwrap());
+        assert!(!s.claim_snapshot(id, "half").unwrap(), "taken once");
+        assert!(s.claim_snapshot(id, "finished").unwrap());
+        assert_eq!(
+            s.get(id).unwrap().unwrap().updated_at,
+            1,
+            "a claim is not an edit"
+        );
+    }
+
+    #[test]
+    fn a_calibration_print_is_never_photographed() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("p", "Tower", 1), 1).unwrap();
+        let purpose = PrintPurpose {
+            calibration_result_id: 11,
+            test: crate::calibration::tests::TestKind::Temperature,
+        };
+        assert!(s.set_purpose(id, Some(&purpose), 2).unwrap());
+        assert!(!s.claim_snapshot(id, "half").unwrap());
+        assert!(!s.claim_snapshot(id, "finished").unwrap());
+    }
+
+    #[test]
+    fn a_snapshot_keeps_its_label_and_a_miss_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        let shot = s.add_snapshot(id, b"\xFF\xD8\xFFhalf", "50 %", 10).unwrap();
+        assert_eq!(shot.label.as_deref(), Some("50 %"));
+        s.note_snapshot_miss(id, "This printer has no camera.", 11)
+            .unwrap();
+        let plain = s.add_photo(id, b"\xFF\xD8\xFFmine", 12).unwrap();
+        let e = s.get(id).unwrap().unwrap();
+        assert_eq!(e.photos, vec![shot, plain]);
+        assert_eq!(e.photos[0].label.as_deref(), Some("50 %"));
+        assert_eq!(e.photos[1].label, None, "a photo the user added");
+        assert_eq!(
+            e.snapshot_note.as_deref(),
+            Some("This printer has no camera.")
+        );
+        assert_eq!(e.updated_at, 12);
+        assert_eq!(
+            s.note_snapshot_miss(999, "x", 1).err().as_deref(),
+            Some(GONE)
+        );
+        assert_eq!(
+            s.add_snapshot(999, b"x", "50 %", 1).err().as_deref(),
+            Some(GONE)
+        );
+    }
+
+    #[test]
+    fn a_snapshot_of_a_deleted_entry_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = open(&dir);
+        let id = s.start(&new_print("a", "cube", 1), 1).unwrap();
+        assert!(s.delete(id).unwrap());
+        assert_eq!(s.claim_snapshot(id, "half").err().as_deref(), Some(GONE));
+    }
+
+    fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1)"),
+            [column],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_v2_journal_moves_to_v3_with_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = JournalPaths::in_dir(dir.path());
+        {
+            let mut raw = Connection::open(&paths.db).unwrap();
+            migrate_to_v1(&mut raw).unwrap();
+            migrate_to_v2(&mut raw).unwrap();
+            raw.execute(
+                "INSERT INTO prints (job_key, name, started_at, updated_at) VALUES ('k', 'Old', 10, 10)",
+                [],
+            )
+            .unwrap();
+            raw.execute(
+                "INSERT INTO print_photos (print_id, file_name, added_at) VALUES (1, 'a.jpg', 20)",
+                [],
+            )
+            .unwrap();
+            assert!(!has_column(&raw, "print_photos", "label"));
+            assert!(!has_column(&raw, "prints", "snapshots_json"));
+        }
+        let s = JournalStore::open(&paths).unwrap();
+        let version: i64 = s
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        assert!(has_column(&s.conn, "print_photos", "label"));
+        assert!(has_column(&s.conn, "prints", "snapshots_json"));
+        let old = s.get(1).unwrap().unwrap();
+        assert_eq!(old.name, "Old");
+        assert_eq!(old.snapshot_note, None);
+        assert_eq!(
+            old.photos,
+            vec![Photo {
+                id: 1,
+                file_name: "a.jpg".into(),
+                added_at: 20,
+                label: None,
+            }]
+        );
+        assert!(s.claim_snapshot(1, "finished").unwrap());
+        drop(s);
+        let again = JournalStore::open(&paths).unwrap();
+        let version: i64 = again
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3, "version 3 reopens as it is");
+        assert!(!again.claim_snapshot(1, "finished").unwrap());
+        // A second connection that read version 2 changes nothing.
+        let mut raw = Connection::open(&paths.db).unwrap();
+        migrate_to_v3(&mut raw).unwrap();
+        assert_eq!(again.get(1).unwrap().unwrap(), old);
     }
 }

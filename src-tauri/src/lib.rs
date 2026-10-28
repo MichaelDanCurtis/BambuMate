@@ -303,6 +303,10 @@ pub fn run() {
                         slices,
                         Arc::new(journal::recorder::TauriNotify(app.handle().clone())),
                     );
+                    recorder.use_snapshots(Arc::new(camera::target::HubSnapshots::new(
+                        camera.clone(),
+                        app.handle().clone(),
+                    )));
                     service.attach_journal(recorder, watch);
                 }
                 if let Some(config) = printer::settings::load_config(app.handle()) {

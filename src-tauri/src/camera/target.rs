@@ -140,6 +140,30 @@ pub fn camera_pref(app: &tauri::AppHandle, key: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// The journal's snapshots from the shared camera session, while
+/// `camera_snapshots` is on.
+pub struct HubSnapshots {
+    hub: super::CameraHub,
+    app: tauri::AppHandle,
+}
+
+impl HubSnapshots {
+    pub fn new(hub: super::CameraHub, app: tauri::AppHandle) -> Self {
+        Self { hub, app }
+    }
+}
+
+impl crate::journal::recorder::Snapshots for HubSnapshots {
+    fn enabled(&self) -> bool {
+        camera_pref(&self.app, super::SNAPSHOTS_PREF)
+    }
+
+    /// Called on the journal's capture thread, never on the runtime.
+    fn capture(&self) -> Result<Vec<u8>, String> {
+        tauri::async_runtime::block_on(self.hub.capture())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

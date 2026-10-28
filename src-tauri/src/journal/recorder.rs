@@ -7,15 +7,20 @@
 //! that can't be opened is logged once; its events are dropped (the open is
 //! retried now and then) and the printer carries on. After every batch that
 //! changed what the page shows, `journal://changed` goes out.
+//!
+//! With [`Recorder::use_snapshots`], the printer's camera is asked for a
+//! picture at each of the print's moments (`moments`). The capture runs on
+//! a thread of its own, never the writer's.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::photos::MAX_THUMBNAIL_BYTES;
+use super::moments::{due, Moment};
+use super::photos::{prepare_photo, MAX_THUMBNAIL_BYTES};
 use super::slice::{match_slice, snapshot};
 use super::store::{JournalStore, GONE};
 use super::types::{NewPrint, PrintEnd, SliceSnapshot};
@@ -71,6 +76,18 @@ impl SliceJobs for NoSlices {
     }
 }
 
+/// The printer's camera, for the journal's snapshots.
+pub trait Snapshots: Send + Sync + 'static {
+    /// Whether the user wants journal snapshots now.
+    fn enabled(&self) -> bool;
+    /// One JPEG from the printer's camera; may block up to ~15 s. `Err` is
+    /// a sentence for the entry's note.
+    fn capture(&self) -> Result<Vec<u8>, String>;
+}
+
+/// Where the writer finds the camera; empty until `use_snapshots`.
+type SnapshotSlot = Arc<Mutex<Option<Arc<dyn Snapshots>>>>;
+
 /// Hands event batches to the writer thread.
 pub struct Recorder {
     tx: mpsc::Sender<Vec<JournalEvent>>,
@@ -79,6 +96,8 @@ pub struct Recorder {
     /// Disconnects when the writer thread ends.
     done: mpsc::Receiver<()>,
     thread: Option<JoinHandle<()>>,
+    /// Shared with the writer.
+    snapshots: SnapshotSlot,
 }
 
 impl Recorder {
@@ -127,11 +146,14 @@ impl Recorder {
         let (tx, rx) = mpsc::channel::<Vec<JournalEvent>>();
         let (done_tx, done) = mpsc::channel::<()>();
         let unavailable = store.is_none();
+        let snapshots = SnapshotSlot::default();
         let writer = Writer {
             paths,
             slices,
             notify,
             keys,
+            snapshots: snapshots.clone(),
+            claimed: HashSet::new(),
             store,
             retry_at: unavailable.then(|| Instant::now() + reopen_after),
             reopen_after,
@@ -161,9 +183,16 @@ impl Recorder {
                 stopped,
                 done,
                 thread,
+                snapshots,
             },
             watch,
         )
+    }
+
+    /// Photographs each print at its moments from now on, while
+    /// `snapshots` is enabled.
+    pub fn use_snapshots(&self, snapshots: Arc<dyn Snapshots>) {
+        *self.snapshots.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshots);
     }
 
     /// Queues `events` for the writer. Never blocks.
@@ -208,6 +237,10 @@ struct Writer {
     notify: Arc<dyn JournalNotify>,
     /// Job key → id of the open entry for it.
     keys: HashMap<String, i64>,
+    snapshots: SnapshotSlot,
+    /// Moments already asked of the store this session, so the repeats of
+    /// a window (50 %, 51 %, …) don't each go to the database.
+    claimed: HashSet<(i64, Moment)>,
     store: Option<JournalStore>,
     /// When a journal that couldn't be opened is tried again.
     retry_at: Option<Instant>,
@@ -405,7 +438,15 @@ impl Writer {
         let Some(store) = self.store.as_ref() else {
             return;
         };
+        let mut moments = Vec::new();
         for event in batch {
+            // The entry the event is for, read before `apply`: an end
+            // lets go of its key.
+            moments.extend(
+                due(event)
+                    .into_iter()
+                    .filter_map(|(key, moment)| self.keys.get(key).map(|&id| (id, moment))),
+            );
             match apply(store, &mut self.keys, self.slices.as_ref(), event, now()) {
                 Ok(w) => wrote |= w,
                 Err(Failed { message, end: None }) if message == GONE => {
@@ -424,6 +465,84 @@ impl Writer {
         if wrote {
             self.notify.changed();
         }
+        self.take_snapshots(moments);
+    }
+
+    /// Claims each moment once and photographs it on a thread of its own.
+    /// Nothing is taken or noted while snapshots are off.
+    fn take_snapshots(&mut self, moments: Vec<(i64, Moment)>) {
+        if moments.is_empty() {
+            return;
+        }
+        let Some(snapshots) = self
+            .snapshots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        for (id, moment) in moments {
+            if self.claimed.contains(&(id, moment)) || !snapshots.enabled() {
+                continue;
+            }
+            self.claimed.insert((id, moment));
+            match store.claim_snapshot(id, moment.key()) {
+                Ok(true) => capture(
+                    snapshots.clone(),
+                    self.paths.clone(),
+                    self.notify.clone(),
+                    id,
+                    moment,
+                ),
+                Ok(false) => {}
+                Err(e) if e == GONE => {}
+                Err(e) => tracing::warn!("print journal: snapshot not claimed: {e}"),
+            }
+        }
+    }
+}
+
+/// Takes `moment`'s picture for entry `id` and saves it, or the reason it
+/// couldn't be taken, through a connection of its own. The camera's bytes
+/// are untrusted: they are decoded and re-encoded first.
+fn capture(
+    snapshots: Arc<dyn Snapshots>,
+    paths: JournalPaths,
+    notify: Arc<dyn JournalNotify>,
+    id: i64,
+    moment: Moment,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("journal-snapshot".into())
+        .spawn(move || {
+            let shot = snapshots
+                .capture()
+                .and_then(|jpeg| prepare_photo(&jpeg).map_err(str::to_string));
+            let store = match JournalStore::open(&paths) {
+                Ok(store) => store,
+                Err(e) => {
+                    tracing::warn!("print journal: snapshot not saved: {e}");
+                    return;
+                }
+            };
+            let saved = match shot {
+                Ok(jpeg) => store
+                    .add_snapshot(id, &jpeg, moment.label(), now())
+                    .map(|_| ()),
+                Err(reason) => store.note_snapshot_miss(id, &reason, now()),
+            };
+            match saved {
+                Ok(()) => notify.changed(),
+                Err(e) if e == GONE => {}
+                Err(e) => tracing::warn!("print journal: snapshot not saved: {e}"),
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("print journal: snapshot thread did not start: {e}");
     }
 }
 
@@ -445,7 +564,8 @@ pub(crate) fn forget(keys: &mut HashMap<String, i64>, event: &JournalEvent) {
         }
         JournalEvent::Started(_)
         | JournalEvent::Progress { .. }
-        | JournalEvent::TrayUsed { .. } => {}
+        | JournalEvent::TrayUsed { .. }
+        | JournalEvent::Paused { .. } => {}
     }
 }
 
@@ -620,6 +740,8 @@ pub(crate) fn apply(
             Some(id) => end_entry(store, id, PrintEnd::unknown(), now),
             None => Ok(false),
         },
+        // A moment for the camera, not a write: see `Writer::take_snapshots`.
+        JournalEvent::Paused { .. } => Ok(false),
     }
 }
 
@@ -1322,6 +1444,8 @@ mod tests {
             slices: Arc::new(NoSlices),
             notify: changes.clone(),
             keys,
+            snapshots: SnapshotSlot::default(),
+            claimed: HashSet::new(),
             store: Some(JournalStore::open(paths).unwrap()),
             retry_at: None,
             reopen_after: REOPEN_AFTER,
@@ -1529,6 +1653,8 @@ mod tests {
             slices: Arc::new(NoSlices),
             notify: changes.clone(),
             keys: HashMap::new(),
+            snapshots: SnapshotSlot::default(),
+            claimed: HashSet::new(),
             store: None,
             retry_at: None,
             reopen_after: Duration::ZERO,
@@ -1627,5 +1753,172 @@ mod tests {
         let e = s.last().unwrap().unwrap();
         assert_eq!((e.job_key.as_str(), e.outcome), ("k", Outcome::Finished));
         assert_eq!(e.ended_at, Some(99));
+    }
+
+    struct FakeShots {
+        on: bool,
+        answer: Result<Vec<u8>, String>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeShots {
+        fn new(on: bool, answer: Result<Vec<u8>, String>) -> Arc<Self> {
+            Arc::new(Self {
+                on,
+                answer,
+                calls: Default::default(),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Snapshots for FakeShots {
+        fn enabled(&self) -> bool {
+            self.on
+        }
+        fn capture(&self) -> Result<Vec<u8>, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.answer.clone()
+        }
+    }
+
+    fn jpeg() -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(8, 8)
+            .write_to(&mut out, image::ImageFormat::Jpeg)
+            .unwrap();
+        out.into_inner()
+    }
+
+    /// A recorder taking snapshots from `shots`, and its journal's paths.
+    fn with_shots(dir: &tempfile::TempDir, shots: &Arc<FakeShots>) -> (Recorder, JournalPaths) {
+        let paths = JournalPaths::in_dir(dir.path());
+        let (recorder, _) = Recorder::start_with(
+            paths.clone(),
+            Arc::new(NoSlices),
+            Arc::new(CountChanges::default()),
+            REOPEN_AFTER,
+        );
+        recorder.use_snapshots(shots.clone());
+        (recorder, paths)
+    }
+
+    /// Polls entry `id` every 10 ms, for up to 2 s, until `done` holds.
+    fn entry_when(
+        paths: &JournalPaths,
+        id: i64,
+        done: impl Fn(&crate::journal::types::PrintEntry) -> bool,
+    ) -> crate::journal::types::PrintEntry {
+        let s = JournalStore::open(paths).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(e) = s.get(id).unwrap() {
+                if done(&e) {
+                    return e;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "entry {id} not as expected in 2 s"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The entry once the writer has finished and any capture has had time
+    /// to land, for checking that nothing more happened.
+    fn settled(
+        recorder: Recorder,
+        paths: &JournalPaths,
+        id: i64,
+    ) -> crate::journal::types::PrintEntry {
+        drain(recorder);
+        std::thread::sleep(Duration::from_millis(200));
+        JournalStore::open(paths).unwrap().get(id).unwrap().unwrap()
+    }
+
+    fn labels(e: &crate::journal::types::PrintEntry) -> Vec<Option<&str>> {
+        e.photos.iter().map(|p| p.label.as_deref()).collect()
+    }
+
+    #[test]
+    fn half_way_is_photographed_once_with_its_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let shots = FakeShots::new(true, Ok(jpeg()));
+        let (recorder, paths) = with_shots(&dir, &shots);
+        recorder.record(vec![started("k", "Benchy")]);
+        recorder.record(vec![progress("k", 50, Some(80))]);
+        recorder.record(vec![progress("k", 50, Some(80))]);
+        recorder.record(vec![progress("k", 51, Some(81))]);
+        let e = entry_when(&paths, 1, |e| !e.photos.is_empty());
+        assert_eq!(labels(&e), [Some("50 %")]);
+        let e = settled(recorder, &paths, 1);
+        assert_eq!(labels(&e), [Some("50 %")], "taken once");
+        assert_eq!(shots.calls(), 1);
+        assert_eq!(e.snapshot_note, None);
+    }
+
+    #[test]
+    fn the_end_is_photographed_after_the_entry_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let shots = FakeShots::new(true, Ok(jpeg()));
+        let (recorder, paths) = with_shots(&dir, &shots);
+        // One batch: the entry opens and closes before the capture lands.
+        recorder.record(vec![started("k", "Benchy"), ended("k", 2_000)]);
+        let e = entry_when(&paths, 1, |e| !e.photos.is_empty());
+        assert_eq!(e.outcome, Outcome::Finished);
+        assert_eq!(labels(&e), [Some("FINISHED")]);
+        assert!(crate::journal::store::JournalStore::open(&paths)
+            .unwrap()
+            .photo_path(1, e.photos[0].id)
+            .unwrap()
+            .is_some_and(|p| p.exists()));
+        drain(recorder);
+    }
+
+    #[test]
+    fn a_failed_capture_leaves_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let shots = FakeShots::new(true, Err("This printer has no camera.".into()));
+        let (recorder, paths) = with_shots(&dir, &shots);
+        recorder.record(vec![started("k", "Benchy"), progress("k", 50, Some(80))]);
+        let e = entry_when(&paths, 1, |e| e.snapshot_note.is_some());
+        assert_eq!(
+            e.snapshot_note.as_deref(),
+            Some("This printer has no camera.")
+        );
+        assert!(e.photos.is_empty());
+        drain(recorder);
+    }
+
+    #[test]
+    fn snapshots_off_take_and_note_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let shots = FakeShots::new(false, Ok(jpeg()));
+        let (recorder, paths) = with_shots(&dir, &shots);
+        recorder.record(vec![started("k", "Benchy")]);
+        recorder.record(vec![progress("k", 2, Some(2)), progress("k", 50, Some(80))]);
+        recorder.record(vec![ended("k", 2_000)]);
+        let e = settled(recorder, &paths, 1);
+        assert_eq!(e.outcome, Outcome::Finished);
+        assert_eq!(shots.calls(), 0);
+        assert!(e.photos.is_empty());
+        assert_eq!(e.snapshot_note, None);
+    }
+
+    #[test]
+    fn an_unreadable_picture_is_a_miss_not_a_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let shots = FakeShots::new(true, Ok(b"not a jpeg".to_vec()));
+        let (recorder, paths) = with_shots(&dir, &shots);
+        recorder.record(vec![started("k", "Benchy"), progress("k", 50, Some(80))]);
+        let e = entry_when(&paths, 1, |e| e.snapshot_note.is_some());
+        let refused = crate::journal::photos::prepare_photo(b"not a jpeg").unwrap_err();
+        assert_eq!(e.snapshot_note.as_deref(), Some(refused));
+        assert!(e.photos.is_empty());
+        drain(recorder);
     }
 }

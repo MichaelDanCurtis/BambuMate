@@ -6,9 +6,11 @@
 //! - `store`: `print_journal.db` and the journal's files.
 //! - `slice`: links a print to the slice job it came from.
 //! - `photos`: re-encodes the photos the user adds.
+//! - `moments`: when a print is photographed by the printer's camera.
 
 use std::path::{Path, PathBuf};
 
+pub mod moments;
 pub mod photos;
 pub mod recorder;
 pub mod slice;
