@@ -54,6 +54,9 @@ socket2 = { version = "0.6", features = ["all"] }
 # Slicing with Bambu Studio: read the output .gcode.3mf (a ZIP) and its XML metadata.
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 quick-xml = "0.42"
+# RTSP client for the H2/X1/P2S camera (MIT OR Apache-2.0). It has no RTSPS, so it runs behind a loopback TLS relay.
+retina = "0.4.21"
+futures = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 # killpg: stop the slicer's whole process group on cancel or timeout.

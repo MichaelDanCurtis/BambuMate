@@ -12,6 +12,7 @@ use serde::Serialize;
 
 pub mod h264;
 pub mod jpeg6000;
+pub mod rtsps;
 pub mod target;
 #[cfg(test)]
 pub(crate) mod testcam;

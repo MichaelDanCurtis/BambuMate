@@ -31,7 +31,6 @@ pub enum Mode {
     /// Reads the login and never sends anything (busy).
     Silent,
     /// Echoes whatever it reads (relay tests).
-    #[allow(dead_code)] // first used by the RTSPS relay test
     Echo,
 }
 
