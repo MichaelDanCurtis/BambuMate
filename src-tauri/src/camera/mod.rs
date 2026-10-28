@@ -10,6 +10,10 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+pub mod jpeg6000;
+pub mod target;
+#[cfg(test)]
+pub(crate) mod testcam;
 pub mod transport;
 
 /// The event carrying `CameraState`.
