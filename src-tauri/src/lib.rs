@@ -4,6 +4,7 @@ pub mod advisor;
 pub mod agent;
 pub mod analyzer;
 pub mod calibration;
+pub mod camera;
 mod commands;
 pub mod diagnostics;
 pub mod history;

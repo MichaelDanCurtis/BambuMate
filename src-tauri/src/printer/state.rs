@@ -290,6 +290,8 @@ pub struct PrinterState {
     pub hms: Vec<HmsCode>,
     /// `print_error`, when non-zero.
     pub print_error: Option<u32>,
+    /// `print.ipcam`, when the printer has sent it.
+    pub ipcam: Option<IpCam>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -356,6 +358,50 @@ fn is_set_id(s: &str) -> bool {
 pub struct HmsCode {
     pub attr: u32,
     pub code: u32,
+}
+
+/// What `print.ipcam` says about the camera. Only a classification of
+/// `rtsp_url` is kept: the URL itself carries a host (sometimes a wrong
+/// one) and is never needed, as the camera is always dialled at the
+/// printer's configured IP.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IpCam {
+    /// `ipcam_dev`: `Some(false)` when the printer says it has no camera.
+    pub present: Option<bool>,
+    pub liveview: LanLiveview,
+}
+
+/// `ipcam.rtsp_url`: `"disable"` while LAN Mode Liveview is off, an
+/// `rtsp://` or `rtsps://` URL while it is on, else unset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanLiveview {
+    Off,
+    Rtsp,
+    #[default]
+    Unset,
+}
+
+impl IpCam {
+    fn from_value(v: &Value) -> Option<Self> {
+        let o = v.as_object()?;
+        let present = match o.get("ipcam_dev") {
+            Some(Value::String(s)) => match s.trim() {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            },
+            Some(Value::Number(n)) => n.as_u64().map(|n| n != 0),
+            _ => None,
+        };
+        let liveview = match o.get("rtsp_url").and_then(Value::as_str).map(str::trim) {
+            Some("disable") => LanLiveview::Off,
+            Some(u) if u.to_ascii_lowercase().starts_with("rtsp") => LanLiveview::Rtsp,
+            _ => LanLiveview::Unset,
+        };
+        Some(IpCam { present, liveview })
+    }
 }
 
 impl HmsCode {
@@ -556,6 +602,7 @@ impl PrinterState {
                 })
                 .unwrap_or_default(),
             print_error: p.get("print_error").and_then(num_u32).filter(|c| *c != 0),
+            ipcam: p.get("ipcam").and_then(IpCam::from_value),
         }
     }
 }
@@ -1472,5 +1519,56 @@ mod tests {
             }
         );
         assert_eq!(s.tray_at(at).map(|t| t.tray_type.as_str()), Some("TPU"));
+    }
+
+    #[test]
+    fn ipcam_is_classified_without_keeping_the_url() {
+        let cases = [
+            (
+                r#"{"ipcam":{"ipcam_dev":"1","rtsp_url":"disable"}}"#,
+                Some(true),
+                LanLiveview::Off,
+            ),
+            (
+                r#"{"ipcam":{"ipcam_dev":"1","rtsp_url":"rtsps://192.168.1.9/streaming/live/1"}}"#,
+                Some(true),
+                LanLiveview::Rtsp,
+            ),
+            (
+                r#"{"ipcam":{"ipcam_dev":"0","rtsp_url":""}}"#,
+                Some(false),
+                LanLiveview::Unset,
+            ),
+            (
+                r#"{"ipcam":{"ipcam_dev":1}}"#,
+                Some(true),
+                LanLiveview::Unset,
+            ),
+            (r#"{"ipcam":{}}"#, None, LanLiveview::Unset),
+        ];
+        for (json, present, liveview) in cases {
+            let p: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).unwrap();
+            let s = PrinterState::from_print(&p);
+            assert_eq!(s.ipcam, Some(IpCam { present, liveview }), "{json}");
+            let text = serde_json::to_string(&s).unwrap();
+            assert!(
+                !text.contains("192.168"),
+                "the URL must not be kept: {text}"
+            );
+        }
+        let p: serde_json::Map<String, serde_json::Value> = serde_json::from_str("{}").unwrap();
+        assert_eq!(PrinterState::from_print(&p).ipcam, None);
+    }
+
+    #[test]
+    fn the_h2d_fixture_reports_its_camera() {
+        let s = state_after(&[H2D_FULL]);
+        assert_eq!(
+            s.ipcam,
+            Some(IpCam {
+                present: Some(true),
+                liveview: LanLiveview::Unset
+            })
+        );
     }
 }
