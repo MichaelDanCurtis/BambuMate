@@ -7,7 +7,7 @@ BambuMate is being built in three phases, in an order agreed with the project ow
 
 Each feature has its own design spec and implementation plan under `docs/superpowers/`.
 
-Status as of 2026-10-27.
+Status as of 2026-10-28. All three phases are merged; what remains is the hardware checks below.
 
 ## Phase 1: Agent backends (done)
 
@@ -30,7 +30,7 @@ Codex and Claude Agent became AI sources, and the agent drawer was added, using 
 | Page redesign, wave 3: Analyze, Settings, wizard | [#32](https://github.com/MichaelDanCurtis/BambuMate/pull/32) | [plan](superpowers/plans/2026-10-22-page-redesign-wave-3.md) |
 | 3D model viewport | [#33](https://github.com/MichaelDanCurtis/BambuMate/pull/33) | [spec](superpowers/specs/2026-10-22-model-viewport-design.md) · [plan](superpowers/plans/2026-10-22-model-viewport.md) |
 
-## Phase 3: Print intelligence (in progress)
+## Phase 3: Print intelligence (done)
 
 | Item | Status | PR | Spec · Plan |
 |---|---|---|---|
@@ -38,7 +38,7 @@ Codex and Claude Agent became AI sources, and the agent drawer was added, using 
 | Print journal | Merged | [#35](https://github.com/MichaelDanCurtis/BambuMate/pull/35) | [spec](superpowers/specs/2026-10-24-print-journal-design.md) · [plan](superpowers/plans/2026-10-24-print-journal.md) |
 | AMS filament detection | Merged | [#36](https://github.com/MichaelDanCurtis/BambuMate/pull/36) | [spec](superpowers/specs/2026-10-25-ams-detection-design.md) · [plan](superpowers/plans/2026-10-25-ams-detection.md) |
 | Calibration mode | Merged | [#37](https://github.com/MichaelDanCurtis/BambuMate/pull/37) | [spec](superpowers/specs/2026-10-25-calibration-mode-design.md) · [plan](superpowers/plans/2026-10-25-calibration-mode.md) |
-| LAN camera | In review | [#39](https://github.com/MichaelDanCurtis/BambuMate/pull/39) | [spec](superpowers/specs/2026-10-27-lan-camera-design.md) · [plan](superpowers/plans/2026-10-27-lan-camera.md) |
+| LAN camera | Merged | [#39](https://github.com/MichaelDanCurtis/BambuMate/pull/39) | [spec](superpowers/specs/2026-10-27-lan-camera-design.md) · [plan](superpowers/plans/2026-10-27-lan-camera.md) |
 
 ## Hardware checks still to do
 
