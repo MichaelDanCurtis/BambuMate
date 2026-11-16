@@ -154,6 +154,7 @@ impl SlicerEnv for BambuStudioEnv {
             args,
             env: Vec::new(),
             timeout,
+            cwd: Some(cmd.out_dir.clone()),
         };
         super::run::run(spec, cancel, progress).await
     }
