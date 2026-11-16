@@ -65,19 +65,23 @@ impl BambuPaths {
     /// resolution logic can be tested and diagnosed without touching global
     /// state.
     ///
-    /// An override that does not point at an existing directory is ignored
-    /// with a warning rather than being a hard failure — an external volume
-    /// may simply be unmounted, and falling back to the platform default is
-    /// more useful than refusing to work at all.
+    /// An override that is not a Bambu Studio config folder is ignored with a
+    /// warning rather than being a hard failure. An external volume may simply
+    /// be unmounted, or the user may have picked the application install
+    /// folder (e.g. `C:\Program Files\Bambu Studio`) instead of the config
+    /// folder (`%APPDATA%\BambuStudio`). Honouring the install folder would
+    /// send every profile read/write to a `user\` and `system\` tree that
+    /// does not exist there, so the platform default is used instead.
     pub fn detect_with_override(override_root: Option<&Path>) -> Result<Self> {
         let config_root = match override_root {
-            Some(p) if p.is_dir() => {
+            Some(p) if looks_like_config_root(p) => {
                 debug!("Using configured Bambu Studio config root: {:?}", p);
                 p.to_path_buf()
             }
             Some(p) => {
                 warn!(
-                    "Configured Bambu Studio config root {:?} is not a directory; \
+                    "Configured Bambu Studio config root {:?} is not a Bambu Studio \
+                     config folder (no BambuStudio.conf, system/ or user/); \
                      falling back to platform detection",
                     p
                 );
@@ -274,6 +278,32 @@ impl BambuPaths {
     }
 }
 
+/// Whether `dir` looks like a Bambu Studio *config* folder (where presets
+/// live), as opposed to the application install folder or an unrelated
+/// directory. Bambu Studio creates `BambuStudio.conf`, `system/` and `user/`
+/// here on first run; any one of them is enough.
+pub fn looks_like_config_root(dir: &Path) -> bool {
+    dir.is_dir()
+        && (dir.join("BambuStudio.conf").is_file()
+            || dir.join("system").is_dir()
+            || dir.join("user").is_dir())
+}
+
+/// Whether `dir` looks like the Bambu Studio application install folder
+/// (Windows `C:\Program Files\Bambu Studio`, macOS `BambuStudio.app`).
+/// Used to explain why such a folder is rejected as the config folder.
+pub fn looks_like_install_dir(dir: &Path) -> bool {
+    let is_macos_bundle = dir
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+        || dir.join("Contents").join("MacOS").is_dir();
+    dir.is_dir()
+        && (dir.join("bambu-studio.exe").is_file()
+            || dir.join("BambuStudio.exe").is_file()
+            || dir.join("resources").join("profiles").is_dir()
+            || is_macos_bundle)
+}
+
 /// Strip leading zeros from each dotted component of a version string.
 ///
 /// `"02.07.00.07"` → `"2.7.0.7"`. Empty components collapse to `"0"` so
@@ -334,7 +364,10 @@ pub fn ensure_within(dir: &Path, file_path: &Path, must_exist: bool) -> Result<P
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_within, normalize_version, BambuPaths};
+    use super::{
+        ensure_within, looks_like_config_root, looks_like_install_dir, normalize_version,
+        BambuPaths,
+    };
 
     #[test]
     fn strips_leading_zeros_from_each_component() {
@@ -435,6 +468,48 @@ mod tests {
         if let Ok(paths) = BambuPaths::detect_with_override(Some(&missing)) {
             assert_ne!(paths.config_root, missing);
         }
+    }
+
+    /// Build a fake Windows install folder (`C:\Program Files\Bambu Studio`).
+    fn fake_install_dir(dir: &std::path::Path) -> std::path::PathBuf {
+        let root = dir.join("Bambu Studio");
+        std::fs::create_dir_all(root.join("resources").join("profiles").join("BBL")).unwrap();
+        std::fs::write(root.join("bambu-studio.exe"), b"").unwrap();
+        root
+    }
+
+    /// Regression: the setup wizard saved the install folder as the config
+    /// root. It exists, so it used to be honoured, and every profile install
+    /// failed with "User filament directory not found" because presets live
+    /// under `%APPDATA%\BambuStudio\user\<id>\filament\base`, not there.
+    #[test]
+    fn install_folder_override_is_ignored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let install = fake_install_dir(tmp.path());
+
+        assert!(looks_like_install_dir(&install));
+        assert!(!looks_like_config_root(&install));
+        if let Ok(paths) = BambuPaths::detect_with_override(Some(&install)) {
+            assert_ne!(paths.config_root, install);
+        }
+    }
+
+    #[test]
+    fn config_root_detection_accepts_real_layouts_and_rejects_others() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fake_config_root(tmp.path(), true);
+        assert!(looks_like_config_root(&root));
+        assert!(!looks_like_install_dir(&root));
+
+        // A config folder with only `user/` (no conf yet) is still accepted.
+        let user_only = tmp.path().join("user-only");
+        std::fs::create_dir_all(user_only.join("user")).unwrap();
+        assert!(looks_like_config_root(&user_only));
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(!looks_like_config_root(&empty));
+        assert!(!looks_like_config_root(&tmp.path().join("missing")));
     }
 
     #[test]

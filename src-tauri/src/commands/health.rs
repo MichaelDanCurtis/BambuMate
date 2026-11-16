@@ -139,6 +139,16 @@ pub fn validate_bambu_studio_path(path: String) -> Result<PathValidation, String
     let valid = has_system_profiles || has_config_file;
     let message = if valid {
         "Valid Bambu Studio configuration directory".to_string()
+    } else if crate::profile::paths::looks_like_install_dir(&p) {
+        let hint = BambuPaths::detect_with_override(None)
+            .map(|d| format!(" Use {} instead.", d.config_root.display()))
+            .unwrap_or_default();
+        format!(
+            "This is the Bambu Studio application folder, not its configuration folder. \
+             Filament profiles are stored in the configuration folder \
+             (Windows: %APPDATA%\\BambuStudio, macOS: ~/Library/Application Support/BambuStudio).{}",
+            hint
+        )
     } else if p.join("user").exists() {
         "Directory has a user folder but may be incomplete. You can try using it.".to_string()
     } else {
@@ -312,4 +322,27 @@ fn detect_bambu_studio_install() -> (bool, Option<String>) {
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn detect_bambu_studio_install() -> (bool, Option<String>) {
     (false, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_bambu_studio_path;
+
+    #[test]
+    fn install_folder_is_rejected_with_a_specific_message() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let install = tmp.path().join("Bambu Studio");
+        std::fs::create_dir_all(install.join("resources").join("profiles")).unwrap();
+        std::fs::write(install.join("bambu-studio.exe"), b"").unwrap();
+
+        let v = validate_bambu_studio_path(install.to_string_lossy().to_string()).unwrap();
+
+        assert!(!v.valid);
+        assert!(
+            v.message
+                .contains("application folder, not its configuration folder"),
+            "{}",
+            v.message
+        );
+    }
 }
