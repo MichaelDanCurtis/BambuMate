@@ -18,6 +18,9 @@ pub struct RunSpec {
     pub args: Vec<OsString>,
     pub env: Vec<(OsString, OsString)>,
     pub timeout: Duration,
+    /// The child's working directory. Bambu Studio's CLI writes a second
+    /// copy of `result.json` into it, so it must not be left as ours.
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +190,9 @@ pub async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(cwd) = &spec.cwd {
+        cmd.current_dir(cwd);
+    }
     #[cfg(unix)]
     cmd.process_group(0);
     #[cfg(windows)]
@@ -324,6 +330,10 @@ pub(crate) mod tests {
                 std::thread::sleep(Duration::from_secs(120));
                 std::process::exit(0);
             }
+            "write_cwd_result" => {
+                std::fs::write("result.json", "{}").unwrap();
+                std::process::exit(0);
+            }
             other => panic!("unknown fake mode {other}"),
         }
     }
@@ -346,6 +356,7 @@ pub(crate) mod tests {
             args: fake_args(),
             env,
             timeout,
+            cwd: None,
         }
     }
 
@@ -425,12 +436,23 @@ pub(crate) mod tests {
                 args: vec![],
                 env: vec![],
                 timeout: Duration::from_secs(5),
+                cwd: None,
             },
             never_cancelled(),
             |_| {},
         )
         .await;
         assert!(matches!(r, Err(RunError::Spawn(_))), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn the_child_runs_in_the_given_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = fake_spec("write_cwd_result", Duration::from_secs(60), &[]);
+        spec.cwd = Some(dir.path().to_path_buf());
+        let out = run(spec, never_cancelled(), |_| {}).await.unwrap();
+        assert_eq!(out.exit_code, Some(0));
+        assert!(dir.path().join("result.json").is_file());
     }
 
     #[tokio::test]

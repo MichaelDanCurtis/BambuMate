@@ -302,6 +302,11 @@ async fn version_from_help(exe: &Path, timeout: Duration) -> Result<BsVersion, S
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Even `--help` leaves a `result.json` in the working directory.
+    let scratch = tempfile::tempdir().ok();
+    if let Some(dir) = &scratch {
+        cmd.current_dir(dir.path());
+    }
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
     let out = match tokio::time::timeout(timeout, cmd.output()).await {
